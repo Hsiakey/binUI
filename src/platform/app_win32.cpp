@@ -696,6 +696,20 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         int y = static_cast<int>(node.y) - static_cast<int>(offY[i]);
         int nw = static_cast<int>(node.width);
         int nh = static_cast<int>(node.height);
+        // 动画的位移/缩放：以前 GDI 画布只取颜色，hover 放大在 GDI 后端根本不发生，
+        // 与 GL/D3D 表现不一致。绕中心缩放 + 平移，算法与两个 GPU 后端一致。
+        {
+            const float sc = renderer.drawScale(node.id);
+            if (sc != 1.0f && sc > 0.0f) {
+                const float cx = x + nw / 2.0f, cy = y + nh / 2.0f;
+                nw = static_cast<int>(nw * sc);
+                nh = static_cast<int>(nh * sc);
+                x = static_cast<int>(cx - nw / 2.0f);
+                y = static_cast<int>(cy - nh / 2.0f);
+            }
+            x += static_cast<int>(renderer.drawOffsetX(node.id));
+            y += static_cast<int>(renderer.drawOffsetY(node.id));
+        }
         // 节点当前生效颜色直接问渲染器：CSS 状态样式（:hover/:active/:focus/:checked）、
         // transition 过渡与 @keyframes 动画都在渲染器里算好（与 GL/D3D11 后端一致）。
         // 以前这里自己按 hover/按下做 tint —— 作者写的颜色被无视，动画也不生效。
