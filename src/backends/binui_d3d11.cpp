@@ -2031,10 +2031,18 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                 // 焦点环必须跟随节点自己的圆角：以前写死半径 10、内缩 2，
                 // 圆角 8 的按钮上就会套出一个半径不同的环，看着像"双线框"。
                 const float fr = effRadius > 2 ? static_cast<float>(effRadius) - 1.0f : 0.0f;
-                const float th = nh >= 24 ? 2.0f : 1.0f;
-                gfx.strokeRounded(static_cast<float>(x) + 1.0f, static_cast<float>(y) + 1.0f,
-                                  static_cast<float>(nw) - 2.0f, static_cast<float>(nh) - 2.0f,
-                                  fr, th, textCol);
+                const float fx = static_cast<float>(x) + 1.0f, fy = static_cast<float>(y) + 1.0f;
+                const float fw = static_cast<float>(nw) - 2.0f, fh = static_cast<float>(nh) - 2.0f;
+                if (fr >= 1.0f) {
+                    gfx.strokeRounded(fx, fy, fw, fh, fr, 1.0f, textCol);
+                } else {
+                    // 直角节点不能用 strokeRounded：它 r<=0 时会退化成整块填充，
+                    // 焦点框会把节点涂白。这里直接画四条 1px 线。
+                    gfx.fillRect(fx, fy, fw, 1.0f, textCol);
+                    gfx.fillRect(fx, fy + fh - 1.0f, fw, 1.0f, textCol);
+                    gfx.fillRect(fx, fy, 1.0f, fh, textCol);
+                    gfx.fillRect(fx + fw - 1.0f, fy, 1.0f, fh, textCol);
+                }
             }
         }
 
