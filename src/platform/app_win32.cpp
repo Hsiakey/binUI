@@ -741,8 +741,8 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         };
         auto drawNodeBorder = [&]() {
             if (!hasBorder) return;
-            binui::PaintBand bb[4];
-            const int bn = binui::BuildBorderBands(pt, nfx, nfy, nfw, nfh, bb);
+            binui::PaintBand bb[binui::kMaxPaintBands];
+            const int bn = binui::BuildBorderBands(pt, nfx, nfy, nfw, nfh, (float)node.radius, bb);
             FillPaintBands(hdc, bb, bn, dc | 0xFF000000u);
         };
 
@@ -1107,12 +1107,15 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         // 边框（v13）：画在节点内侧，四边可不同宽，压在底色之上
         drawNodeBorder();
 
-        // 键盘焦点高亮边框（内缩绘制，避免超出裁剪区）
+        // 键盘焦点高亮边框（内缩绘制，避免超出裁剪区）。
+        // 圆角要跟着节点走：以前写死 10，圆角 8 的按钮上会凸出一个半径不同的环。
         if (draw && renderer.isKeyboardFocused(node.id)) {
-            HPEN fp = CreatePen(PS_SOLID, 2, RGB(0xFF, 0xFF, 0xFF));
+            const int fr = node.radius > 2 ? (int)node.radius - 1 : 0;
+            const int th = nh >= 24 ? 2 : 1;
+            HPEN fp = CreatePen(PS_SOLID, th, RGB(0xFF, 0xFF, 0xFF));
             HGDIOBJ oldFp = SelectObject(hdc, fp);
             HGDIOBJ oldFb = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            RoundRect(hdc, x + 2, y + 2, x + nw - 2, y + nh - 2, 10, 10);
+            RoundRect(hdc, x + 1, y + 1, x + nw - 1, y + nh - 1, fr * 2, fr * 2);
             SelectObject(hdc, oldFb);
             SelectObject(hdc, oldFp);
             DeleteObject(fp);

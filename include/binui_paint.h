@@ -149,32 +149,73 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
     return count;
 }
 
-// 边框：最多 4 条矩形（上右下左），全在节点内侧；四边颜色各自生效
+// 边框：直角 → 4 条矩形；圆角 → 沿圆弧逐行铺薄条的"环形边框"。
+//
+// 为什么不能拿 4 条轴对齐矩形凑圆角：矩形是方的，圆角按钮上会露出方框的角
+// （截图里那种"白框套圆角"的脏边就是这么来的）。环形边框的做法：
+//   · 圆心角区逐行（1px 一行）算外轮廓内缩 O 与内轮廓内缩 I，
+//     左右各铺一条 [O, I] 的薄条 —— 切片的水平宽度天然随切线方向变宽，几何是对的
+//   · 直边区 O、I 恒定，相邻行自动合并成一条高条（省 draw call）
+//   · 上/下横条区整行铺（含圆角弧），四边颜色各自生效
+// 只用到 fillRect，三个后端共用；合并后条数通常是个位数。
 inline int BuildBorderBands(const BinUIPaintNode* p, float x, float y, float w, float h,
-                            PaintBand* out, int cap = 4) {
+                            float radius, PaintBand* out, int cap = kMaxPaintBands) {
     if (!p || !(p->flags & PAINT_BORDER) || cap <= 0) return 0;
     if (w <= 0.0f || h <= 0.0f) return 0;
-    const float wt = (float)p->borderW[0], wr = (float)p->borderW[1];
-    const float wb = (float)p->borderW[2], wl = (float)p->borderW[3];
-    const float half = std::min(w, h) * 0.5f;
+    const float lim = std::min(w, h) * 0.5f;
+    const float bt = std::min((float)p->borderW[0], lim);
+    const float br = std::min((float)p->borderW[1], lim);
+    const float bb = std::min((float)p->borderW[2], lim);
+    const float bl = std::min((float)p->borderW[3], lim);
+    if (bt <= 0.0f && br <= 0.0f && bb <= 0.0f && bl <= 0.0f) return 0;
+
     int n = 0;
-    // 上/下横条：宽度受左右条带影响，避免四角叠画两次（半透明时会变深）
-    if (wt > 0.0f && n < cap) {
-        const float l = std::min(wl, half), r = std::min(wr, half);
-        out[n++] = { x + l, y, std::max(0.0f, w - l - r), std::min(wt, half),
-                     p->borderColor[0], 0, false };
+    const float r = (radius > 0.5f) ? std::min(radius, lim) : 0.0f;
+    if (r <= 0.5f) {   // 直角：四条，角上不叠画（半透明时叠画会变深）
+        if (bt > 0 && n < cap) out[n++] = { x + bl, y, std::max(0.0f, w - bl - br), bt,
+                                            p->borderColor[0], 0, false };
+        if (bb > 0 && n < cap) out[n++] = { x + bl, y + h - bb, std::max(0.0f, w - bl - br), bb,
+                                            p->borderColor[2], 0, false };
+        if (bl > 0 && n < cap) out[n++] = { x, y, bl, h, p->borderColor[3], 0, false };
+        if (br > 0 && n < cap) out[n++] = { x + w - br, y, br, h, p->borderColor[1], 0, false };
+        return n;
     }
-    if (wb > 0.0f && n < cap) {
-        const float l = std::min(wl, half), r = std::min(wr, half);
-        out[n++] = { x + l, y + h - std::min(wb, half), std::max(0.0f, w - l - r),
-                     std::min(wb, half), p->borderColor[2], 0, false };
-    }
-    if (wl > 0.0f && n < cap) {
-        out[n++] = { x, y, std::min(wl, half), h, p->borderColor[3], 0, false };
-    }
-    if (wr > 0.0f && n < cap) {
-        out[n++] = { x + w - std::min(wr, half), y, std::min(wr, half), h,
-                     p->borderColor[1], 0, false };
+
+    const float iy = y + bt;                                     // 内容盒（内轮廓）
+    const float ih = std::max(0.0f, h - bt - bb);
+    const float bwMax = std::max(std::max(bt, br), std::max(bb, bl));
+    const float ir = std::max(0.0f, r - bwMax);                  // 内轮廓圆角
+
+    auto push = [&](float bx, float by, float bwid, float bh, uint32_t color) {
+        if (bwid <= 0.01f || bh <= 0.01f || n >= cap) return;
+        if (n > 0) {                                             // 与上一段紧邻且同色同宽 → 合并
+            PaintBand& pv = out[n - 1];
+            if (!pv.round && pv.color == color &&
+                std::fabs(pv.x - bx) < 0.02f && std::fabs(pv.w - bwid) < 0.02f &&
+                std::fabs((pv.y + pv.h) - by) < 0.51f) {
+                pv.h = by + bh - pv.y;
+                return;
+            }
+        }
+        out[n++] = { bx, by, bwid, bh, color, 0, false };
+    };
+
+    const int rows = (int)std::ceil(h);
+    for (int i = 0; i < rows && n < cap; i++) {
+        const float rt = y + (float)i;
+        const float rb = std::min(rt + 1.0f, y + h);
+        const float O = std::max(PaintRoundInset(rt - y, r), PaintRoundInset((y + h) - rb, r));
+        if (rt < iy - 0.01f) {                                   // 上横条（含上圆角弧）
+            push(x + O, rt, w - 2.0f * O, rb - rt, p->borderColor[0]);
+        } else if (rt >= iy + ih - 0.01f) {                      // 下横条
+            push(x + O, rt, w - 2.0f * O, rb - rt, p->borderColor[2]);
+        } else {                                                 // 左右竖条（含左右圆角弧）
+            const float k = std::max(PaintRoundInset(std::max(0.0f, rt - iy), ir),
+                                     PaintRoundInset(std::max(0.0f, (iy + ih) - rb), ir));
+            const float li = bl + k, ri = br + k;
+            push(x + O, rt, li - O, rb - rt, p->borderColor[3]);
+            push(x + w - ri, rt, ri - O, rb - rt, p->borderColor[1]);
+        }
     }
     return n;
 }

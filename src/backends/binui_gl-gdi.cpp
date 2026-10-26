@@ -1834,9 +1834,10 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
             };
             auto drawNodeBorder = [&]() {
                 if (!hasBorder) return;
-                binui::PaintBand bb[4];
+                binui::PaintBand bb[binui::kMaxPaintBands];
                 const int bn = binui::BuildBorderBands(pt, static_cast<float>(x), static_cast<float>(y),
-                                                       static_cast<float>(nw), static_cast<float>(nh), bb);
+                                                       static_cast<float>(nw), static_cast<float>(nh),
+                                                       static_cast<float>(effRadius), bb);
                 for (int k = 0; k < bn; k++)
                     if (bb[k].w > 0.0f && bb[k].h > 0.0f)
                         gfx.fillRect(bb[k].x, bb[k].y, bb[k].w, bb[k].h, bb[k].color);
@@ -2069,9 +2070,13 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
             drawNodeBorder();
 
             if (renderer.isKeyboardFocused(node.id)) {
-                gfx.strokeRounded(static_cast<float>(x + 2), static_cast<float>(y + 2),
-                                  static_cast<float>(nw - 4), static_cast<float>(nh - 4),
-                                  10.0f, 2.0f, textCol);
+                // 焦点环必须跟随节点自己的圆角：以前写死半径 10、内缩 2，
+                // 圆角 8 的按钮上就会套出一个半径不同的环，看着像"双线框"。
+                const float fr = effRadius > 2 ? static_cast<float>(effRadius) - 1.0f : 0.0f;
+                const float th = nh >= 24 ? 2.0f : 1.0f;
+                gfx.strokeRounded(static_cast<float>(x) + 1.0f, static_cast<float>(y) + 1.0f,
+                                  static_cast<float>(nw) - 2.0f, static_cast<float>(nh) - 2.0f,
+                                  fr, th, textCol);
             }
         }
 

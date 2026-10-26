@@ -17,6 +17,8 @@
   **并且沿元素树继承**（`body{color:#333}` 对整棵树生效）—— 浅色主题终于能写。
 - **边框**：`border` / `border-width` / `border-color`（1~4 值展开）与
   `border-top/right/bottom/left`，四边各自宽度与颜色，画在节点内侧不参与布局。
+  圆角元素走"环形边框"：按圆弧逐行铺薄条（直边区自动合并成一条），
+  不再用 4 条轴对齐矩形去凑 —— 那样圆角按钮上会露出方框的角。
 - **渐变底色**：`linear-gradient(...)`（`to <side>` / `135deg`，取首尾两色）。条带按
   "圆角区 1px 一条 + 直边区 ~32px 一条"切分，圆角渐变不会出现阶梯。
 - **排版**：`font-weight`（FreeType `FT_GlyphSlot_Embolden` 合成加粗，GDI/GL/D3D 三端一致，
@@ -41,6 +43,8 @@
 - `binui_compile` 把每条编译警告打印两遍（编译器自己写 stderr + 工具再打 warnings）。
 - `offscreen_render` 保存 PNG 后以 `0xC0000005` 退出：GDI+ 的 `Bitmap(HBITMAP,…)` 不拷贝像素，
   却让 `Bitmap` 活过了 `DeleteObject(dib)`；现在先析构再删。
+- **键盘焦点环的圆角写死成 10**（三个后端都是），圆角 8 的按钮上会套出一个半径不同的环，
+  看着像"双线框"；现在跟随节点自身圆角与内缩。
 - Makefile 的头文件依赖只覆盖了部分输出目录，`backends/`、`platform/`、`common/`、`bin/`
   改了头文件不会重编；补齐后 `make` 的结果才可信。
 

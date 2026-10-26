@@ -88,6 +88,35 @@ int main(int argc, char** argv) {
                 r.setText((uint16_t)atoi(spec.substr(0, eq).c_str()), spec.substr(eq + 1));
             }
             i += 1;
+        } else if (arg == "--dump") {
+            // 列出节点（排查坐标/焦点用）：id 类型 矩形 文本
+            for (const auto& nd : r.getNodes())
+                std::printf("node %-3u type=%u rect=(%.0f,%.0f %.0fx%.0f) radius=%u text=\"%s\"\n",
+                            (unsigned)nd.id, (unsigned)nd.type, nd.x, nd.y, nd.width, nd.height,
+                            (unsigned)nd.radius, nd.text.c_str());
+        } else if (arg == "--focus" && i + 1 < argc) {
+            // 让某个节点处于键盘焦点（验证焦点环/状态样式；按名字或 id 都行）
+            const std::string want = argv[i + 1];
+            bool found = false;
+            uint16_t nid = 0xFFFF;
+            if (!want.empty() && want.find_first_not_of("0123456789") == std::string::npos) {
+                nid = (uint16_t)atoi(want.c_str());   // 纯数字 = 节点 id
+                for (const auto& nd : r.getNodes()) if (nd.id == nid) { found = true; break; }
+            } else {
+                nid = r.findNodeByName(want);
+                for (const auto& nd : r.getNodes()) if (nd.id == nid) { found = true; break; }
+                if (!found) {
+                    for (const auto& nd : r.getNodes())
+                        if (nd.text == want) { nid = nd.id; found = true; break; }
+                }
+            }
+            if (found) {
+                r.setKeyboardFocus(nid);
+                std::printf("focused node %u (%s)\n", (unsigned)nid, want.c_str());
+            } else {
+                std::printf("warn: node \"%s\" not found for --focus\n", want.c_str());
+            }
+            i += 1;
         }
     }
 
