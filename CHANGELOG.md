@@ -39,6 +39,13 @@
   - 节点颜色改为 `renderer.drawColor()`（原来自己按 hover/按下做 tint）——
     CSS 状态样式、`transition`、`@keyframes` 现在在 GDI 后端同样生效，与 GL/D3D11 一致；
   - 全透明节点不再画成黑色块（GDI 没有 alpha 合成；图片与视频帧例外）。
+- **`test_renderer` 里一处逗号运算符误用**：`TEST("click empty keeps focus", (a, b))` 只检查了
+  后半段，改成 `&&` 后断言才真正生效（当前行为是正确的，属于测试自身的 bug）。
+- **非 Windows 平台拿不到任何字体**：`registerSystemFonts` 只有 Windows 分支，默认字形名还写死
+  `Segoe UI` → Linux/macOS 上所有绘制测试都无字形。补了常见路径探测（Noto CJK / WenQuanYi /
+  DejaVu / macOS PingFang·Helvetica）并把 `Segoe UI` 别名到实际可用字体。
+- **`binui_charts.cpp` 无条件 include 后端头**（含 `windows.h`）导致核心库在非 Windows 编不过；
+  现在 `LineChart::draw` 的后端绘制按 `_WIN32` 隔离，其他平台给空实现（vtable 仍完整）。
 - **盒模式伪元素改用 `div`（`BINUI_LIST`）**：`LABEL` 在三个后端里都只画文字，
   `content:""` 的纯装饰盒子（分隔条/色块）会完全看不见；未声明 `background` 的盒模式
   伪元素按透明处理并警告（否则会冒出默认灰底）。

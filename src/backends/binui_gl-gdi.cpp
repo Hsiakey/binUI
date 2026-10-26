@@ -1588,6 +1588,7 @@ template <typename Gfx>
 static void DrawVideoControlsTmpl(Gfx& gfx, const BinUIRenderer& renderer,
                                   const BinUIRenderer::NodeInfo& node,
                                   float x, float y, float nw, float opacity) {
+    (void)y;   // 控制条几何按节点矩形算，纵向不用外部传入
     BinUIRenderer::VideoBarGeo g;
     if (!BinUIRenderer::VideoBarLayout(node, g)) return;
     const auto* v = renderer.findVideo(node.id);

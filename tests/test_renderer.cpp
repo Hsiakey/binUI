@@ -290,7 +290,7 @@ int main() {
         // nodes[0]=root, nodes[1..9]=a..i
         uint16_t idA = r.getNodes()[1].id, idB = r.getNodes()[2].id, idC = r.getNodes()[3].id;
         uint16_t idD = r.getNodes()[4].id, idE = r.getNodes()[5].id, idF = r.getNodes()[6].id;
-        uint16_t idG = r.getNodes()[7].id, idH = r.getNodes()[8].id, idI = r.getNodes()[9].id;
+        uint16_t idH = r.getNodes()[8].id, idI = r.getNodes()[9].id;
 
         TEST("no keyboard focus initially", r.keyboardNode() == -1);
         TEST("no focus -> first node on any arrow", r.moveKeyboardFocus(BinUIRenderer::KeyDirection::RIGHT) == (int)idA);
@@ -343,7 +343,7 @@ int main() {
 
         // 点击同步键盘焦点
         TEST("click syncs keyboard focus", r.dispatchClick(130, 90) == (int)idE && r.isKeyboardFocused(idE));
-        TEST("click empty keeps focus", (r.dispatchClick(150, 250) == -1, r.keyboardNode() == (int)idE));
+        TEST("click empty keeps focus", r.dispatchClick(150, 250) == -1 && r.keyboardNode() == (int)idE);
     }
 
     // 9b. Tab 焦点循环：文档顺序、环绕、Shift+Tab 反向、跳过隐藏节点
