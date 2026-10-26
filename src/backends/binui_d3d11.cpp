@@ -1,0 +1,2420 @@
+// binui_d3d11.cpp - D3D11 GPU 渲染后端实现
+// 架构：BinUID3D 维护字形图集（FreeType 光栅化一次）+ 圆角九宫格模板 + 顶点批次，
+// drawNodesD3D 与 drawNodesGDI 语义一致地遍历节点树，全部绘制为 GPU 四边形，
+// BinUIAppD3D 提供无边框窗口与事件循环（VSync 按需呈现）。
+// 文字渲染委托 binui_font_renderer（FreeType + HarfBuzz），与平台解耦。
+#include "backends/binui_d3d11.h"
+
+#ifndef _WIN32
+#error "binui_d3d11 is Windows-only"
+#endif
+
+#include <windows.h>
+#include <windowsx.h>
+#include <d3d11.h>
+#include <dxgi1_2.h>
+#include <d3dcompiler.h>
+#include <gdiplus.h>
+#include <dwmapi.h>
+#include <cstdio>
+#include <cstring>
+#include <cmath>
+#include <vector>
+#include <unordered_map>
+#include <chrono>
+#include <algorithm>
+
+#include "binui_font_renderer.h"
+
+using namespace binui;
+
+// mingw-w64 无 __uuidof，显式 GUID
+static const IID IID_XDXGIDevice   = { 0x54EC77FA, 0x1377, 0x44E6, { 0x8C,0x32,0x88,0xFD,0x5F,0x44,0xC8,0x4C } };
+static const IID IID_XDXGIAdapter  = { 0x2411E7E1, 0x12AC, 0x4CCF, { 0xBD,0x14,0x97,0x98,0xE8,0x53,0x4D,0xC0 } };
+static const IID IID_XDXGIFactory2 = { 0x50C83A1C, 0xE072, 0x4C48, { 0x87,0xB0,0x36,0x30,0xFA,0x36,0xA6,0xD0 } };
+static const IID IID_XTexture2D    = { 0x6F15AAF2, 0xD208, 0x4E89, { 0x9A,0xB4,0x48,0x95,0x35,0xD3,0x4F,0x9C } };
+
+namespace {
+
+// ---------- 小工具 ----------
+// 按透明度缩放 alpha（0xAARRGGBB；RGB 保持直线色，Premult 时统一缩放）
+uint32_t ScaleAlpha(uint32_t c, float op) {
+    if (op >= 1.0f) return c;
+    if (op <= 0.0f) return c & 0x00FFFFFF;
+    uint32_t a = (uint32_t)(((c >> 24) & 0xFF) * op);
+    if (a > 255) a = 255;
+    return (c & 0x00FFFFFF) | (a << 24);
+}
+
+std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return L"";
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
+    std::wstring w(n, 0);
+    if (n > 0)
+        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), &w[0], n);
+    return w;
+}
+
+bool gdiplusReady() {
+    static bool ok = [] {
+        Gdiplus::GdiplusStartupInput in;
+        ULONG_PTR token = 0;
+        return Gdiplus::GdiplusStartup(&token, &in, nullptr) == Gdiplus::Ok;
+    }();
+    return ok;
+}
+
+// PNG/JPEG 原始字节 -> BGRA8 像素（失败返回空）
+std::vector<uint8_t> DecodeImagePixels(const uint8_t* data, size_t size, int& w, int& h) {
+    w = h = 0;
+    if (!gdiplusReady() || !data || size == 0) return {};
+
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!hg) return {};
+    {
+        void* p = GlobalLock(hg);
+        if (p) { memcpy(p, data, size); GlobalUnlock(hg); }
+    }
+    IStream* stream = nullptr;
+    if (CreateStreamOnHGlobal(hg, TRUE, &stream) != S_OK) { GlobalFree(hg); return {}; }
+    Gdiplus::Bitmap* bmp = Gdiplus::Bitmap::FromStream(stream);
+    stream->Release();
+    if (!bmp || bmp->GetLastStatus() != Gdiplus::Ok) { delete bmp; return {}; }
+
+    w = bmp->GetWidth();
+    h = bmp->GetHeight();
+    std::vector<uint8_t> px;
+    if (w > 0 && h > 0) {
+        Gdiplus::Rect r(0, 0, w, h);
+        Gdiplus::BitmapData bd;
+        if (bmp->LockBits(&r, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &bd) == Gdiplus::Ok) {
+            px.resize(static_cast<size_t>(w) * h * 4);
+            const uint8_t* src = static_cast<const uint8_t*>(bd.Scan0);
+            uint8_t* dst = px.data();
+            for (int y = 0; y < h; y++) {
+                memcpy(dst + static_cast<size_t>(y) * w * 4,
+                       src + static_cast<size_t>(y) * bd.Stride, static_cast<size_t>(w) * 4);
+            }
+            bmp->UnlockBits(&bd);
+        }
+    }
+    delete bmp;
+    return px;
+}
+
+// UTF-8 → 码点迭代
+struct Utf8Iter {
+    const std::string& s;
+    size_t i = 0;
+    uint32_t cp = 0;
+    bool next() {
+        if (i >= s.size()) return false;
+        uint8_t b0 = static_cast<uint8_t>(s[i]);
+        if (b0 < 0x80) { cp = b0; i++; return true; }
+        int n = (b0 & 0xE0) == 0xC0 ? 2 : (b0 & 0xF0) == 0xE0 ? 3 : 4;
+        uint32_t c = b0 & (0xFF >> (n + 1));
+        for (int k = 1; k < n && i + k < s.size(); k++)
+            c = (c << 6) | (static_cast<uint8_t>(s[i + k]) & 0x3F);
+        cp = c;
+        i += n;
+        return true;
+    }
+};
+
+// 颜色预乘（着色器输出为预乘 alpha，图集/模板本身已预乘）
+void Premult(uint32_t& c) {
+    uint32_t a = (c >> 24) & 0xFF;
+    if (a == 255) return;
+    if (a == 0) { c = 0; return; }
+    uint32_t r = (((c >> 16) & 0xFF) * a) / 255;
+    uint32_t g = (((c >> 8) & 0xFF) * a) / 255;
+    uint32_t b = ((c & 0xFF) * a) / 255;
+    c = (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+// ---------- 数据 ----------
+struct D3DVertex {
+    float x, y;
+    uint32_t color; // 0xAARRGGBB（直通，PS 内预乘）
+    float u, v;
+};
+
+struct Batch {
+    uint32_t first = 0;  // 顶点起始（6 顶点/四边形）
+    uint32_t count = 0;  // 四边形数
+    int sx = 0, sy = 0, sw = 0, sh = 0;
+    uint8_t linear = 0;  // 0=点采样(字形/纯色) 1=线性(圆角/图片)
+    ID3D11ShaderResourceView* srv = nullptr;
+};
+
+struct Glyph {
+    uint16_t cell = 0;
+    uint8_t advW = 0;
+};
+
+struct Atlas {
+    ID3D11Texture2D* tex = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    int sizePx = 1024;
+    int cellW = 0, cellH = 0;
+    int cols = 0;
+    int next = 1;             // 格子 0 保留给纯色用（见下）
+    int ascent = 0, descent = 0;
+    float size = 0;
+    int weight = 400;
+    bool cjk = false;
+    std::string face;         // 字体面名（FontEngine 注册名）
+    std::unordered_map<uint32_t, Glyph> glyphs;
+};
+
+struct RoundTex {
+    ID3D11Texture2D* tex = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    int t = 0;         // 模板边长（4r）
+    int corner = 0;    // 角区边长（2r+1）
+};
+
+// ---------- emoji 簇检测 ----------
+// 是否 emoji 相关码点（含变体选择符/ZWJ/区域指示符/键帽）
+bool IsEmojiCp(uint32_t cp) {
+    if (cp >= 0x1F000 && cp <= 0x1FAFF) return true;   // 表情/符号/扩展
+    if (cp >= 0x2190 && cp <= 0x21FF) return true;     // 箭头
+    if (cp >= 0x2300 && cp <= 0x27BF) return true;     // 杂项符号/技术/装饰
+    if (cp >= 0x2900 && cp <= 0x297F) return true;     // 补充箭头
+    if (cp >= 0x2B00 && cp <= 0x2BFF) return true;     // 杂项符号/箭头
+    if (cp >= 0x1F1E6 && cp <= 0x1F1FF) return true;   // 区域指示符（国旗）
+    if (cp >= 0xFE00 && cp <= 0xFE0F) return true;     // 变体选择符
+    if (cp == 0x200D) return true;                     // ZWJ
+    if (cp == 0x20E3) return true;                     // 键帽
+    return cp == 0x00A9 || cp == 0x00AE || cp == 0x203C || cp == 0x2049 ||
+           cp == 0x2122 || cp == 0x2139 || cp == 0x3030 || cp == 0x303D ||
+           cp == 0x3297 || cp == 0x3299;
+}
+
+// 从 cps[0] 起的 emoji 簇长度：键帽序列 / ZWJ 序列 / 肤色修饰 / VS / 区域指示符双拼
+size_t EmojiClusterLen(const uint32_t* cps, size_t n) {
+    uint32_t first = cps[0];
+    if ((first == '#' || first == '*' || (first >= '0' && first <= '9')) && n > 1) {
+        if (cps[1] == 0xFE0F && n > 2 && cps[2] == 0x20E3) return 3;
+        if (cps[1] == 0x20E3) return 2;
+    }
+    if (!IsEmojiCp(first)) return 1;
+    size_t j = 1;
+    int ris = (first >= 0x1F1E6 && first <= 0x1F1FF) ? 1 : 0;
+    while (j < n) {
+        uint32_t c = cps[j];
+        if (c == 0x200D) {                 // ZWJ：吞掉其后的成员
+            if (j + 1 >= n) break;
+            j += 2;
+            continue;
+        }
+        if (c == 0xFE0F || c == 0xFE0E || c == 0x20E3) { j++; continue; }
+        if (c >= 0x1F3FB && c <= 0x1F3FF) { j++; continue; }   // 肤色修饰
+        if (c >= 0x1F1E6 && c <= 0x1F1FF) {                   // 区域指示符：仅双拼
+            if (ris == 1) { j++; ris = 2; continue; }
+            break;
+        }
+        break;
+    }
+    return j;
+}
+
+uint64_t EmojiClusterKey(const uint32_t* cps, size_t n) {
+    uint64_t h = 14695981039346656037ull;
+    for (size_t i = 0; i < n; i++) {
+        uint64_t c = cps[i];
+        for (int b = 0; b < 4; b++) {
+            h ^= (c & 0xFF);
+            h *= 1099511628211ull;
+            c >>= 8;
+        }
+    }
+    return h;
+}
+
+// ---------- 彩色字形（FreeType COLR 合成） ----------
+struct ColorGlyph {
+    uint16_t cell = 0;
+    uint16_t advW = 0;     // 簇前进宽（像素）
+    uint16_t w = 0;        // 实际像素宽
+    uint16_t h = 0;        // 实际像素高
+    uint16_t baseline = 0; // 合成缓冲内基线 y
+};
+
+struct ColorAtlas {
+    ID3D11Texture2D* tex = nullptr;
+    ID3D11ShaderResourceView* srv = nullptr;
+    int sizePx = 1024;
+    int cellW = 0, cellH = 0;
+    int cols = 0;
+    int next = 0;
+    float size = 0;
+    std::unordered_map<uint64_t, ColorGlyph> glyphs;
+};
+
+constexpr size_t kMaxVerts = 100000; // 2MB 动态缓冲上限（约 16.6k 四边形）
+
+} // namespace
+
+struct BinUID3D::Impl {
+    HWND hwnd = nullptr;
+    int winW = 0, winH = 0;
+    bool vsync = true;
+    bool ready = false;
+    bool transparent = false; // 分层窗口（UpdateLayeredWindow）
+
+    // 分层窗口呈现缓冲（32bit BGRA premultiplied）
+    HBITMAP layeredDib = nullptr;
+    HDC layeredDC = nullptr;
+    void* layeredBits = nullptr;
+    int layeredW = 0, layeredH = 0;
+    ID3D11Texture2D* stagingTex = nullptr; // 离屏读回用（USAGE_STAGING）
+
+    ID3D11Device* device = nullptr;
+    ID3D11DeviceContext* ctx = nullptr;
+    IDXGISwapChain* swap = nullptr;
+    ID3D11RenderTargetView* rtv = nullptr;
+    ID3D11VertexShader* vs = nullptr;
+    ID3D11PixelShader* ps = nullptr;
+    ID3D11InputLayout* il = nullptr;
+    ID3D11Buffer* cb = nullptr;
+    ID3D11Buffer* vb = nullptr;
+    ID3D11SamplerState* samPoint = nullptr;
+    ID3D11SamplerState* samLinear = nullptr;
+    ID3D11BlendState* blend = nullptr;
+    ID3D11RasterizerState* ras = nullptr;
+    ID3D11ShaderResourceView* whiteSrv = nullptr; // 1×1 纯白（纯色四边形）
+    // 持久离屏帧缓冲：局部重绘只更新脏区，present 时整帧 blit 到交换链
+    ID3D11Texture2D* offTex = nullptr;
+    ID3D11RenderTargetView* offRtv = nullptr;
+    ID3D11ShaderResourceView* offSrv = nullptr;
+
+    // 场景
+    std::vector<D3DVertex> verts;
+    std::vector<Batch> batches;
+    Batch* curBatch = nullptr;
+    int scissor[4] = { 0, 0, 0, 0 };
+    int scissorDepth = 0;
+    uint8_t curLinear = 0;
+    ID3D11ShaderResourceView* curSrv = nullptr;
+
+    // 字形图集（按 size/weight/字体族）
+    std::unordered_map<uint64_t, Atlas*> atlases;
+    std::string asciiFont = "Segoe UI";
+    static constexpr const char* cjkFont = "Microsoft YaHei";
+    static constexpr const char* emojiFont = "Segoe UI Emoji";
+
+    // 跨平台字体服务（FreeType 光栅化 + HarfBuzz 整形）
+    binui_font::FontEngine font;
+    bool fontReady = false;
+
+    std::unordered_map<uint32_t, ColorAtlas*> colorAtlases;        // 按字号
+    // 圆角模板（按 radius；负 key = 描边）
+    std::unordered_map<int, RoundTex> rounds;
+
+    // 图片纹理缓存（按 imageIndex）
+    std::unordered_map<uint16_t, ID3D11ShaderResourceView*> images;
+    std::unordered_map<uint16_t, uint32_t> imageGen; // 换图 generation：不一致时重新上传
+
+    // GDI 光栅化 DC
+    HDC rasterDC = nullptr;
+    HBITMAP rasterBmp = nullptr;
+    void* rasterBits = nullptr;
+    int rasterW = 0, rasterH = 0;
+
+    ~Impl() {
+        shutdown();
+        if (rasterBmp) DeleteObject(rasterBmp);
+        if (rasterDC) DeleteDC(rasterDC);
+    }
+
+    bool createDeviceAndSwapchain() {
+        D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_10_1,
+                                       D3D_FEATURE_LEVEL_10_0 };
+        // BGRA_SUPPORT：交换链/纹理使用 B8G8R8A8 所需
+        HRESULT hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_HARDWARE, nullptr,
+                                       D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                       levels, 3, D3D11_SDK_VERSION, &device, nullptr, &ctx);
+        if (FAILED(hr)) {
+            hr = D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr,
+                                   D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                   levels, 3, D3D11_SDK_VERSION, &device, nullptr, &ctx);
+        }
+        if (FAILED(hr) || !device || !ctx) {
+            std::fprintf(stderr, "[d3d11] CreateDevice failed hr=0x%08X\n", (unsigned)hr);
+            return false;
+        }
+
+        IDXGIDevice* dxgiDev = nullptr;
+        IDXGIAdapter* adapter = nullptr;
+        IDXGIFactory2* factory2 = nullptr;
+        if (FAILED(device->QueryInterface(IID_XDXGIDevice, (void**)&dxgiDev)) ||
+            FAILED(dxgiDev->GetAdapter(&adapter)) ||
+            FAILED(adapter->GetParent(IID_XDXGIFactory2, (void**)&factory2))) {
+            std::fprintf(stderr, "[d3d11] DXGI factory resolve failed\n");
+            if (dxgiDev) dxgiDev->Release();
+            if (adapter) adapter->Release();
+            return false;
+        }
+
+        DXGI_SWAP_CHAIN_DESC1 sd = {};
+        sd.Width = static_cast<UINT>(winW);
+        sd.Height = static_cast<UINT>(winH);
+        sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        sd.SampleDesc.Count = 1;
+        sd.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        sd.BufferCount = 2;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+        hr = factory2->CreateSwapChainForHwnd(device, hwnd, &sd, nullptr, nullptr,
+                                              (IDXGISwapChain1**)&swap);
+        factory2->Release();
+        dxgiDev->Release();
+        adapter->Release();
+        if (FAILED(hr) || !swap) {
+            std::fprintf(stderr, "[d3d11] CreateSwapChainForHwnd failed hr=0x%08X\n", (unsigned)hr);
+            return false;
+        }
+        return createRenderTarget();
+    }
+
+    bool createRenderTarget() {
+        if (rtv) { rtv->Release(); rtv = nullptr; }
+        ID3D11Texture2D* back = nullptr;
+        if (FAILED(swap->GetBuffer(0, IID_XTexture2D, (void**)&back))) {
+            std::fprintf(stderr, "[d3d11] GetBuffer failed\n");
+            return false;
+        }
+        HRESULT hr = device->CreateRenderTargetView(back, nullptr, &rtv);
+        back->Release();
+        if (FAILED(hr)) std::fprintf(stderr, "[d3d11] CreateRTV failed hr=0x%08X\n", (unsigned)hr);
+        return SUCCEEDED(hr);
+    }
+
+    bool compileShaders() {
+        const char* hlsl =
+            "cbuffer CB : register(b0) { float2 viewSize; };\n"
+            "struct VSIn { float2 pos : POSITION; float4 col : COLOR; float2 uv : TEXCOORD; };\n"
+            "struct PSIn { float4 pos : SV_Position; float4 col : COLOR; float2 uv : TEXCOORD; };\n"
+            "PSIn vs(VSIn v) {\n"
+            "  PSIn o;\n"
+            "  o.pos = float4(v.pos.x / viewSize.x * 2 - 1, 1 - v.pos.y / viewSize.y * 2, 0, 1);\n"
+            "  o.col = v.col;\n"
+            "  o.uv = v.uv;\n"
+            "  return o;\n"
+            "}\n"
+            "Texture2D tex : register(t0);\n"
+            "SamplerState sam : register(s0);\n"
+            "float4 ps(PSIn i) : SV_Target {\n"
+            "  float4 t = tex.Sample(sam, i.uv);\n"
+            "  return float4(t.rgb * i.col.rgb, t.a * i.col.a);\n"
+            "}\n";
+        ID3DBlob* vsBlob = nullptr;
+        ID3DBlob* psBlob = nullptr;
+        ID3DBlob* err = nullptr;
+        if (FAILED(D3DCompile(hlsl, strlen(hlsl), "binui", nullptr, nullptr, "vs", "vs_4_0",
+                              0, 0, &vsBlob, &err)) ||
+            FAILED(D3DCompile(hlsl, strlen(hlsl), "binui", nullptr, nullptr, "ps", "ps_4_0",
+                              0, 0, &psBlob, &err))) {
+            if (err) {
+                std::fprintf(stderr, "[d3d11] shader error: %s\n",
+                             static_cast<const char*>(err->GetBufferPointer()));
+                err->Release();
+            }
+            return false;
+        }
+        device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr, &vs);
+        device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr, &ps);
+        if (!vs || !ps) { vsBlob->Release(); psBlob->Release(); return false; }
+
+        D3D11_INPUT_ELEMENT_DESC elems[] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        };
+        device->CreateInputLayout(elems, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &il);
+        vsBlob->Release();
+        psBlob->Release();
+        return il != nullptr;
+    }
+
+    bool createStates() {
+        D3D11_BUFFER_DESC cbd = {};
+        cbd.ByteWidth = 16;
+        cbd.Usage = D3D11_USAGE_DEFAULT;
+        cbd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        if (FAILED(device->CreateBuffer(&cbd, nullptr, &cb))) {
+            std::fprintf(stderr, "[d3d11] CB failed\n");
+            return false;
+        }
+
+        D3D11_BUFFER_DESC vbd = {};
+        vbd.ByteWidth = static_cast<UINT>(kMaxVerts * sizeof(D3DVertex));
+        vbd.Usage = D3D11_USAGE_DYNAMIC;
+        vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        vbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device->CreateBuffer(&vbd, nullptr, &vb))) {
+            std::fprintf(stderr, "[d3d11] VB failed\n");
+            return false;
+        }
+
+        D3D11_SAMPLER_DESC smd = {};
+        smd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+        smd.AddressU = smd.AddressV = smd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        smd.MaxAnisotropy = 1;
+        smd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        smd.MinLOD = 0;
+        smd.MaxLOD = D3D11_FLOAT32_MAX;
+        HRESULT shr = device->CreateSamplerState(&smd, &samPoint);
+        if (FAILED(shr)) {
+            std::fprintf(stderr, "[d3d11] sampler point failed hr=0x%08X removed=0x%08X\n",
+                         (unsigned)shr, (unsigned)device->GetDeviceRemovedReason());
+            return false;
+        }
+        smd.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        shr = device->CreateSamplerState(&smd, &samLinear);
+        if (FAILED(shr)) {
+            std::fprintf(stderr, "[d3d11] sampler linear failed hr=0x%08X removed=0x%08X\n",
+                         (unsigned)shr, (unsigned)device->GetDeviceRemovedReason());
+            return false;
+        }
+
+        D3D11_BLEND_DESC bd = {};
+        bd.RenderTarget[0].BlendEnable = TRUE;
+        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE; // 预乘 alpha
+        bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+        bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+        if (FAILED(device->CreateBlendState(&bd, &blend))) {
+            std::fprintf(stderr, "[d3d11] blend failed\n");
+            return false;
+        }
+
+        D3D11_RASTERIZER_DESC rd = {};
+        rd.FillMode = D3D11_FILL_SOLID;
+        rd.CullMode = D3D11_CULL_NONE;
+        rd.ScissorEnable = TRUE;
+        if (FAILED(device->CreateRasterizerState(&rd, &ras))) {
+            std::fprintf(stderr, "[d3d11] rasterizer failed\n");
+            return false;
+        }
+
+        // 1×1 纯白纹理（纯色四边形使用）
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = td.Height = 1;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        const uint8_t white[4] = { 255, 255, 255, 255 };
+        D3D11_SUBRESOURCE_DATA init = { white, 4, 0 };
+        ID3D11Texture2D* wt = nullptr;
+        if (FAILED(device->CreateTexture2D(&td, &init, &wt)) ||
+            FAILED(device->CreateShaderResourceView(wt, nullptr, &whiteSrv))) {
+            std::fprintf(stderr, "[d3d11] white texture failed\n");
+            if (wt) wt->Release();
+            return false;
+        }
+        wt->Release();
+
+        UINT stride = sizeof(D3DVertex);
+        UINT offset = 0;
+        float blendFactor[4] = { 0, 0, 0, 0 };
+        ctx->OMSetBlendState(blend, blendFactor, 0xFFFFFFFF);
+        ctx->RSSetState(ras);
+        D3D11_VIEWPORT vp = { 0, 0, static_cast<float>(winW), static_cast<float>(winH), 0, 1 };
+        ctx->RSSetViewports(1, &vp);
+        ctx->IASetInputLayout(il);
+        ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ctx->IASetVertexBuffers(0, 1, &vb, &stride, &offset);
+        ctx->PSSetShader(ps, nullptr, 0);
+        ctx->VSSetShader(vs, nullptr, 0);
+        ctx->VSSetConstantBuffers(0, 1, &cb);
+        return true;
+    }
+
+    // ---------- GDI 光栅化 ----------
+    // DIB 必须与目标尺寸精确一致：UpdateSubresource 按 cellW*4 行距读取，
+    // 复用更大的 DIB 会导致字形/模板数据错位（斜条纹垃圾）
+    bool ensureRasterDC(int w, int h) {
+        if (rasterDC && rasterW == w && rasterH == h) return true;
+        if (rasterBmp) DeleteObject(rasterBmp);
+        if (rasterDC) DeleteDC(rasterDC);
+        rasterDC = CreateCompatibleDC(nullptr);
+        BITMAPINFO bi = {};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h; // 自上而下
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        rasterBmp = CreateDIBSection(rasterDC, &bi, DIB_RGB_COLORS, &rasterBits, nullptr, 0);
+        if (!rasterBmp) return false;
+        SelectObject(rasterDC, rasterBmp);
+        rasterW = w;
+        rasterH = h;
+        return true;
+    }
+
+    Atlas* getAtlas(float size, int weight, bool cjk, bool emoji = false) {
+        uint64_t key = (static_cast<uint64_t>(std::lround(size)) << 32) |
+                       (static_cast<uint64_t>(weight & 0xFFFF) << 16) | (cjk ? 1 : 0) |
+                       (emoji ? 2u : 0u);
+        auto it = atlases.find(key);
+        if (it != atlases.end()) return it->second;
+
+        Atlas* a = new Atlas();
+        a->size = size;
+        a->weight = weight;
+        a->cjk = cjk;
+        a->cellH = static_cast<int>(std::ceil(size * 1.4f)) + 2;
+        a->cellW = a->cellH;
+        a->cols = a->sizePx / a->cellW;
+        a->face = emoji ? emojiFont : (cjk ? cjkFont : asciiFont);
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = td.Height = static_cast<UINT>(a->sizePx);
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        std::vector<uint8_t> zeros(static_cast<size_t>(a->sizePx) * a->sizePx * 4, 0);
+        D3D11_SUBRESOURCE_DATA init = { zeros.data(), static_cast<UINT>(a->sizePx) * 4, 0 };
+        if (FAILED(device->CreateTexture2D(&td, &init, &a->tex)) ||
+            FAILED(device->CreateShaderResourceView(a->tex, nullptr, &a->srv))) {
+            if (a->tex) a->tex->Release();
+            a->tex = nullptr;
+            delete a;
+            return nullptr;
+        }
+        binui_font::FontMetrics fm = font.metrics(a->face, size);
+        a->ascent = fm.ascent;
+        a->descent = fm.descent;
+
+        atlases[key] = a;
+        return a;
+    }
+
+    // 把单个码点光栅化进图集格子（FreeType 灰度字形 → 白字预乘 alpha）
+    void rasterGlyph(Atlas* a, uint32_t cp) {
+        int total = a->cols * (a->sizePx / a->cellH);
+        if (a->next >= total) return; // 图集已满（调用方兜底：跳过绘制）
+        binui_font::GrayGlyph g;
+        bool ok = font.renderGlyph(a->face, a->size, cp, g);
+        if (!ok || !g.alpha || g.height <= 0) {
+            // 空白字形（如空格）：无像素但有有效 advance —— 仍占一格并缓存，
+            // 否则 glyphFor 返回 null，测宽/绘制都不推进，单词会挤在一起
+            if (ok && g.advance > 0) {
+                Glyph gl;
+                gl.cell = static_cast<uint16_t>(a->next++); // 格子保持全零纹理（不可见）
+                gl.advW = static_cast<uint8_t>(std::min(255, std::max(0, g.advance)));
+                a->glyphs[cp] = gl;
+            }
+            return;
+        }
+
+        ensureRasterDC(a->cellW, a->cellH);
+        memset(rasterBits, 0, static_cast<size_t>(a->cellW) * a->cellH * 4);
+        // 以基线摆放：字形顶距格子顶部 ascent+1 像素（与绘制端 top = baseline - (ascent+1) 对齐）
+        int ox = 1 + g.left;
+        int oy = (a->ascent + 1) - g.top;
+        uint8_t* dst = static_cast<uint8_t*>(rasterBits);
+        for (int y = 0; y < g.height; y++) {
+            int py = oy + y;
+            if (py < 0 || py >= a->cellH) continue;
+            const uint8_t* src = g.alpha + static_cast<size_t>(y) * g.pitch;
+            uint8_t* row = dst + static_cast<size_t>(py) * a->cellW * 4;
+            for (int x = 0; x < g.width; x++) {
+                int px = ox + x;
+                if (px < 0 || px >= a->cellW) continue;
+                uint8_t al = src[x];
+                if (al == 0) continue;
+                uint8_t* p = row + static_cast<size_t>(px) * 4;
+                p[0] = p[1] = p[2] = p[3] = al;   // BGRA 白 + alpha（预乘）
+            }
+        }
+
+        int cell = a->next++;
+        int cx = (cell % a->cols) * a->cellW;
+        int cy = (cell / a->cols) * a->cellH;
+        D3D11_BOX box = { static_cast<UINT>(cx), static_cast<UINT>(cy), 0,
+                          static_cast<UINT>(cx + a->cellW), static_cast<UINT>(cy + a->cellH), 1 };
+        ctx->UpdateSubresource(a->tex, 0, &box, rasterBits, static_cast<UINT>(a->cellW) * 4, 0);
+
+        Glyph gl;
+        gl.cell = static_cast<uint16_t>(cell);
+        // 真实 advance（以前 +1：文字比真实排版宽、组合符号被推离基字）
+        gl.advW = static_cast<uint8_t>(std::min(255, std::max(0, g.advance)));
+        a->glyphs[cp] = gl;
+    }
+
+    const Glyph* glyphFor(Atlas* a, uint32_t cp) {
+        auto it = a->glyphs.find(cp);
+        if (it != a->glyphs.end()) return &it->second;
+        rasterGlyph(a, cp);
+        it = a->glyphs.find(cp);
+        return it != a->glyphs.end() ? &it->second : nullptr;
+    }
+
+    // ---------- 彩色字形（FreeType COLR 合成） ----------
+    // 用 HarfBuzz 整形整簇（GSUB 合体/旗帜/肤色），FreeType 枚举 COLR 层合成，
+    // 结果（预乘 BGRA）上传进彩色图集格子
+    bool rasterColorCluster(ColorAtlas* a, uint64_t key, const uint32_t* cps, size_t n) {
+        int total = a->cols * (a->sizePx / a->cellH);
+        if (a->next >= total) return false;
+
+        binui_font::ColorGlyph cg;
+        if (!font.renderColorCluster(emojiFont, a->size, cps, n, cg)) return false;
+        if (cg.width <= 0 || cg.height <= 0 || !cg.bgra) return false;
+
+        ensureRasterDC(a->cellW, a->cellH);
+        memset(rasterBits, 0, static_cast<size_t>(a->cellW) * a->cellH * 4);
+        // 合成图 → 格子左上角（超出格子部分裁剪）
+        int cw = std::min(cg.width, a->cellW);
+        int ch = std::min(cg.height, a->cellH);
+        uint8_t* dst = static_cast<uint8_t*>(rasterBits);
+        for (int y = 0; y < ch; y++)
+            memcpy(dst + static_cast<size_t>(y) * a->cellW * 4,
+                   cg.bgra + static_cast<size_t>(y) * cg.width * 4,
+                   static_cast<size_t>(cw) * 4);
+
+        int cell = a->next++;
+        int cx = (cell % a->cols) * a->cellW;
+        int cy = (cell / a->cols) * a->cellH;
+        D3D11_BOX box = { static_cast<UINT>(cx), static_cast<UINT>(cy), 0,
+                          static_cast<UINT>(cx + a->cellW), static_cast<UINT>(cy + a->cellH), 1 };
+        ctx->UpdateSubresource(a->tex, 0, &box, rasterBits, static_cast<UINT>(a->cellW) * 4, 0);
+
+        ColorGlyph g;
+        g.cell = static_cast<uint16_t>(cell);
+        g.advW = static_cast<uint16_t>(std::min(4095, cg.advance + 1));
+        g.w = static_cast<uint16_t>(cw);
+        g.h = static_cast<uint16_t>(ch);
+        g.baseline = static_cast<uint16_t>(std::min(4095, cg.baseline));
+        a->glyphs[key] = g;
+        return true;
+    }
+
+    ColorAtlas* getColorAtlas(float size) {
+        uint32_t key = static_cast<uint32_t>(std::lround(size));
+        auto it = colorAtlases.find(key);
+        if (it != colorAtlases.end()) return it->second;
+
+        ColorAtlas* a = new ColorAtlas();
+        a->size = size;
+        a->cellH = static_cast<int>(std::ceil(size * 1.4f)) + 2;
+        a->cellW = a->cellH * 4;   // 家庭/旗帜等宽序列（≈2em）留足空间
+        a->cols = a->sizePx / a->cellW;
+        if (a->cols < 1) { delete a; return nullptr; }
+
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = td.Height = static_cast<UINT>(a->sizePx);
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        std::vector<uint8_t> zeros(static_cast<size_t>(a->sizePx) * a->sizePx * 4, 0);
+        D3D11_SUBRESOURCE_DATA init = { zeros.data(), static_cast<UINT>(a->sizePx) * 4, 0 };
+        if (FAILED(device->CreateTexture2D(&td, &init, &a->tex)) ||
+            FAILED(device->CreateShaderResourceView(a->tex, nullptr, &a->srv))) {
+            if (a->tex) a->tex->Release();
+            a->tex = nullptr;
+            delete a;
+            return nullptr;
+        }
+        colorAtlases[key] = a;
+        return a;
+    }
+
+    const ColorGlyph* colorGlyphFor(ColorAtlas* a, const uint32_t* cps, size_t n) {
+        uint64_t key = EmojiClusterKey(cps, n);
+        auto it = a->glyphs.find(key);
+        if (it != a->glyphs.end()) return &it->second;
+        rasterColorCluster(a, key, cps, n);
+        it = a->glyphs.find(key);
+        return it != a->glyphs.end() ? &it->second : nullptr;
+    }
+
+    // 簇度量：len = 簇长，adv = 前进宽，color = 是否彩色图集
+    struct ClusterMetric {
+        size_t len = 1;
+        float adv = 0;
+        bool color = false;
+    };
+
+    ClusterMetric clusterMetric(float size, int weight, const uint32_t* cps, size_t n) {
+        ClusterMetric m;
+        m.len = EmojiClusterLen(cps, n);
+        float fallback = std::ceil(size * 0.6f);
+        if (!(m.len > 1 || IsEmojiCp(cps[0]))) {
+            Atlas* a = getAtlas(size, weight, cps[0] >= 0x80);
+            const Glyph* g = a ? glyphFor(a, cps[0]) : nullptr;
+            m.adv = g ? static_cast<float>(g->advW) : fallback;
+            return m;
+        }
+        if (fontReady) {
+            ColorAtlas* ca = getColorAtlas(size);
+            const ColorGlyph* g = ca ? colorGlyphFor(ca, cps, m.len) : nullptr;
+            if (g) {
+                m.adv = static_cast<float>(g->advW);
+                m.color = true;
+                return m;
+            }
+        }
+        // 降级：逐码点走灰度图集（emoji 用 Segoe UI Emoji 单色字形）
+        for (size_t i = 0; i < m.len; i++) {
+            Atlas* a = getAtlas(size, weight, cps[i] >= 0x80, IsEmojiCp(cps[i]));
+            const Glyph* g = a ? glyphFor(a, cps[i]) : nullptr;
+            m.adv += g ? static_cast<float>(g->advW) : fallback;
+        }
+        return m;
+    }
+
+    // 圆角模板（九宫格）：4r×4r 白色圆角矩形（实心/2px 描边），预乘 alpha
+    RoundTex& roundFor(int radius, bool stroke) {
+        int r = std::max(1, radius);
+        int key = stroke ? -r : r;
+        auto it = rounds.find(key);
+        if (it != rounds.end()) return it->second;
+
+        int t = std::max(8, r * 4);
+        ensureRasterDC(t, t);
+        memset(rasterBits, 0, static_cast<size_t>(t) * t * 4);
+
+        // 解析式逐像素覆盖率（1px 抗锯齿边缘），替代 GDI RoundRect（无 AA，转角锯齿明显）。
+        // 模板几何与 GDI 一致：圆角矩形外框 [1, t-1]，角半轴 r；填充 = 内部，描边 = 2px 带。
+        {
+            uint32_t* px = static_cast<uint32_t*>(rasterBits);
+            const float half = (t - 2.0f) / 2.0f;
+            const float inset = half - static_cast<float>(r); // 直线段起始距中心
+            const float c0 = static_cast<float>(t) / 2.0f;
+            for (int i = 0; i < t; i++) {
+                for (int j = 0; j < t; j++) {
+                    float fx = fabsf(j + 0.5f - c0) - inset;
+                    float fy = fabsf(i + 0.5f - c0) - inset;
+                    float dx = fx > 0 ? fx : 0.0f;
+                    float dy = fy > 0 ? fy : 0.0f;
+                    float dist = sqrtf(dx * dx + dy * dy) - static_cast<float>(r);
+                    float cov = stroke ? 1.0f - fabsf(dist) : 0.5f - dist;
+                    cov = cov < 0.0f ? 0.0f : (cov > 1.0f ? 1.0f : cov);
+                    uint8_t lum = static_cast<uint8_t>(cov * 255.0f + 0.5f);
+                    uint32_t v = (static_cast<uint32_t>(lum) << 24) |
+                                 (static_cast<uint32_t>(lum) << 16) |
+                                 (static_cast<uint32_t>(lum) << 8) | lum;
+                    px[i * t + j] = v;
+                }
+            }
+        }
+
+        RoundTex rt;
+        rt.t = t;
+        rt.corner = r * 2 + 1;
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = td.Height = static_cast<UINT>(t);
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA init = { rasterBits, static_cast<UINT>(t) * 4, 0 };
+        if (FAILED(device->CreateTexture2D(&td, &init, &rt.tex)) ||
+            FAILED(device->CreateShaderResourceView(rt.tex, nullptr, &rt.srv))) {
+            if (rt.tex) rt.tex->Release();
+            rt.tex = nullptr;
+            rt.srv = nullptr;
+        }
+        return rounds.emplace(key, rt).first->second;
+    }
+
+    bool uploadImage(uint16_t index, const uint8_t* data, size_t size, uint32_t generation) {
+        auto it = images.find(index);
+        auto git = imageGen.find(index);
+        if (it != images.end() && git != imageGen.end() && git->second == generation)
+            return it->second != nullptr;
+
+        int w = 0, h = 0;
+        std::vector<uint8_t> px = DecodeImagePixels(data, size, w, h);
+        if (px.empty()) {
+            images[index] = nullptr;
+            imageGen[index] = generation;
+            return false;
+        }
+        if (it != images.end() && it->second) it->second->Release();
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = static_cast<UINT>(w);
+        td.Height = static_cast<UINT>(h);
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; // DecodeImagePixels 为 BGRA
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA init = { px.data(), static_cast<UINT>(w) * 4, 0 };
+        ID3D11Texture2D* tex = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+        if (FAILED(device->CreateTexture2D(&td, &init, &tex)) ||
+            FAILED(device->CreateShaderResourceView(tex, nullptr, &srv))) {
+            if (tex) tex->Release();
+            images[index] = nullptr;
+            imageGen[index] = generation;
+            return false;
+        }
+        tex->Release();
+        images[index] = srv;
+        imageGen[index] = generation;
+        return true;
+    }
+
+    // 原始 RGBA 像素直传纹理（RGBA 字节序，无解码）
+    bool uploadImageRaw(uint16_t index, int w, int h, const uint8_t* rgba, uint32_t generation) {
+        auto it = images.find(index);
+        auto git = imageGen.find(index);
+        if (it != images.end() && git != imageGen.end() && git->second == generation)
+            return it->second != nullptr;
+        if (w <= 0 || h <= 0 || !rgba) return false;
+        if (it != images.end() && it->second) it->second->Release();
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = static_cast<UINT>(w);
+        td.Height = static_cast<UINT>(h);
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; // 原始像素为 RGBA
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA init = { rgba, static_cast<UINT>(w) * 4, 0 };
+        ID3D11Texture2D* tex = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+        if (FAILED(device->CreateTexture2D(&td, &init, &tex)) ||
+            FAILED(device->CreateShaderResourceView(tex, nullptr, &srv))) {
+            if (tex) tex->Release();
+            images[index] = nullptr;
+            imageGen[index] = generation;
+            return false;
+        }
+        tex->Release();
+        images[index] = srv;
+        imageGen[index] = generation;
+        return true;
+    }
+
+    // 持久离屏帧缓冲（大小 = 窗口客户区）
+    bool createOffscreen() {
+        if (offSrv) { offSrv->Release(); offSrv = nullptr; }
+        if (offRtv) { offRtv->Release(); offRtv = nullptr; }
+        if (offTex) { offTex->Release(); offTex = nullptr; }
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = static_cast<UINT>(winW);
+        td.Height = static_cast<UINT>(winH);
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device->CreateTexture2D(&td, nullptr, &offTex)) ||
+            FAILED(device->CreateRenderTargetView(offTex, nullptr, &offRtv)) ||
+            FAILED(device->CreateShaderResourceView(offTex, nullptr, &offSrv))) {
+            if (offTex) { offTex->Release(); offTex = nullptr; }
+            if (offRtv) { offRtv->Release(); offRtv = nullptr; }
+            if (offSrv) { offSrv->Release(); offSrv = nullptr; }
+            return false;
+        }
+        if (transparent) {
+            float tr[4] = { 0, 0, 0, 0 };
+            ctx->ClearRenderTargetView(offRtv, tr);
+        } else {
+            float white[4] = { 1, 1, 1, 1 };
+            ctx->ClearRenderTargetView(offRtv, white);
+        }
+        return true;
+    }
+
+    // ---------- 场景 ----------
+    void beginBatch() {
+        if (curBatch &&
+            curBatch->sx == scissor[0] && curBatch->sy == scissor[1] &&
+            curBatch->sw == scissor[2] - scissor[0] && curBatch->sh == scissor[3] - scissor[1] &&
+            curBatch->linear == curLinear && curBatch->srv == curSrv)
+            return;
+        Batch b;
+        b.first = static_cast<uint32_t>(verts.size()); // 起始顶点索引
+        b.count = 0;
+        b.sx = scissor[0];
+        b.sy = scissor[1];
+        b.sw = scissor[2] - scissor[0];
+        b.sh = scissor[3] - scissor[1];
+        b.linear = curLinear;
+        b.srv = curSrv;
+        batches.push_back(b);
+        curBatch = &batches.back();
+    }
+
+    void emitQuad(float x0, float y0, float x1, float y1,
+                  float u0, float v0, float u1, float v1, uint32_t color) {
+        if (verts.size() + 6 > kMaxVerts) return; // 缓冲上限，丢弃多余
+        beginBatch();
+        // 0xAARRGGBB → 0xAABBGGRR：R8G8B8A8_UNORM 按内存字节序读（byte0=R）
+        uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
+        D3DVertex v[6] = {
+            { x0, y0, sw, u0, v0 }, { x1, y0, sw, u1, v0 }, { x0, y1, sw, u0, v1 },
+            { x0, y1, sw, u0, v1 }, { x1, y0, sw, u1, v0 }, { x1, y1, sw, u1, v1 },
+        };
+        verts.insert(verts.end(), v, v + 6);
+        curBatch->count++;
+    }
+
+    void emitQuadRot(float x0, float y0, float x1, float y1,
+                     float x2, float y2, float x3, float y3, uint32_t color) {
+        if (verts.size() + 6 > kMaxVerts) return;
+        beginBatch();
+        uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
+        D3DVertex v[6] = {
+            { x0, y0, sw, 0, 0 }, { x1, y1, sw, 1, 0 }, { x2, y2, sw, 1, 1 },
+            { x2, y2, sw, 1, 1 }, { x3, y3, sw, 0, 1 }, { x0, y0, sw, 0, 0 },
+        };
+        verts.insert(verts.end(), v, v + 6);
+        curBatch->count++;
+    }
+
+    void flushAll() {
+        if (verts.empty() || !vb) return;
+        D3D11_MAPPED_SUBRESOURCE map = {};
+        if (FAILED(ctx->Map(vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
+        memcpy(map.pData, verts.data(), verts.size() * sizeof(D3DVertex));
+        ctx->Unmap(vb, 0);
+
+        for (const auto& b : batches) {
+            if (b.count == 0) continue;
+            D3D11_RECT r = { b.sx, b.sy, b.sx + b.sw, b.sy + b.sh };
+            if (r.right <= r.left || r.bottom <= r.top) continue;
+            ctx->RSSetScissorRects(1, &r);
+            ctx->PSSetShaderResources(0, 1, &b.srv);
+            ctx->PSSetSamplers(0, 1, b.linear ? &samLinear : &samPoint);
+            ctx->Draw(b.count * 6, b.first);
+        }
+    }
+
+    void shutdown() {
+        for (auto& kv : atlases) {
+            if (kv.second->tex) kv.second->tex->Release();
+            if (kv.second->srv) kv.second->srv->Release();
+            delete kv.second;
+        }
+        atlases.clear();
+        for (auto& kv : colorAtlases) {
+            if (kv.second->tex) kv.second->tex->Release();
+            if (kv.second->srv) kv.second->srv->Release();
+            delete kv.second;
+        }
+        colorAtlases.clear();
+        for (auto& kv : rounds) {
+            if (kv.second.tex) kv.second.tex->Release();
+            if (kv.second.srv) kv.second.srv->Release();
+        }
+        rounds.clear();
+        for (auto& kv : images) {
+            if (kv.second) kv.second->Release();
+        }
+        images.clear();
+        if (whiteSrv) { whiteSrv->Release(); whiteSrv = nullptr; }
+        if (offSrv) { offSrv->Release(); offSrv = nullptr; }
+        if (offRtv) { offRtv->Release(); offRtv = nullptr; }
+        if (offTex) { offTex->Release(); offTex = nullptr; }
+        if (stagingTex) { stagingTex->Release(); stagingTex = nullptr; }
+        if (layeredDib) { DeleteObject(layeredDib); layeredDib = nullptr; }
+        if (layeredDC) { DeleteDC(layeredDC); layeredDC = nullptr; }
+        if (rtv) { rtv->Release(); rtv = nullptr; }
+        if (samPoint) { samPoint->Release(); samPoint = nullptr; }
+        if (samLinear) { samLinear->Release(); samLinear = nullptr; }
+        if (blend) { blend->Release(); blend = nullptr; }
+        if (ras) { ras->Release(); ras = nullptr; }
+        if (il) { il->Release(); il = nullptr; }
+        if (vs) { vs->Release(); vs = nullptr; }
+        if (ps) { ps->Release(); ps = nullptr; }
+        if (cb) { cb->Release(); cb = nullptr; }
+        if (vb) { vb->Release(); vb = nullptr; }
+        if (swap) { swap->Release(); swap = nullptr; }
+        if (ctx) { ctx->Release(); ctx = nullptr; }
+        if (device) { device->Release(); device = nullptr; }
+        ready = false;
+    }
+};
+
+// ============================================================
+// BinUID3D
+// ============================================================
+BinUID3D::BinUID3D() : impl_(new Impl()) {}
+BinUID3D::~BinUID3D() { delete impl_; }
+
+bool BinUID3D::init(void* hwnd, int width, int height, bool vsync) {
+    impl_->hwnd = static_cast<HWND>(hwnd);
+    impl_->winW = width;
+    impl_->winH = height;
+    impl_->vsync = vsync;
+    impl_->scissor[0] = 0;
+    impl_->scissor[1] = 0;
+    impl_->scissor[2] = width;
+    impl_->scissor[3] = height;
+
+    if (!impl_->createDeviceAndSwapchain()) { impl_->shutdown(); return false; }
+    if (!impl_->compileShaders()) { impl_->shutdown(); return false; }
+    if (!impl_->createStates()) { impl_->shutdown(); return false; }
+    if (!impl_->createOffscreen()) { impl_->shutdown(); return false; }
+    impl_->fontReady = impl_->font.init();
+    binui_font::registerSystemFonts(impl_->font);   // 失败仅降级：文本/emoji 不绘制
+    impl_->ready = true;
+    float v[2] = { static_cast<float>(width), static_cast<float>(height) };
+    impl_->ctx->UpdateSubresource(impl_->cb, 0, nullptr, v, 0, 0);
+    return true;
+}
+
+void BinUID3D::shutdown() { impl_->shutdown(); }
+bool BinUID3D::isReady() const { return impl_->ready; }
+int BinUID3D::width() const { return impl_->winW; }
+int BinUID3D::height() const { return impl_->winH; }
+void BinUID3D::setVsync(bool on) { impl_->vsync = on; }
+
+void BinUID3D::setTransparent(bool t) { impl_->transparent = t; }
+
+void BinUID3D::resize(int width, int height) {
+    if (!impl_->ready || (width == impl_->winW && height == impl_->winH)) return;
+    impl_->winW = width;
+    impl_->winH = height;
+    if (impl_->swap) {
+        HRESULT hr = impl_->swap->ResizeBuffers(0, static_cast<UINT>(width), static_cast<UINT>(height),
+                                                DXGI_FORMAT_UNKNOWN, 0);
+        if (FAILED(hr)) {
+            std::fprintf(stderr, "[d3d11] ResizeBuffers hr=0x%08X (retry)\n", (unsigned)hr);
+            // 重试一次（快速连续 resize 时 Present 尚未完成可能失败）
+            hr = impl_->swap->ResizeBuffers(0, static_cast<UINT>(width), static_cast<UINT>(height),
+                                            DXGI_FORMAT_UNKNOWN, 0);
+        }
+        impl_->createRenderTarget();
+    }
+    impl_->createOffscreen(); // 离屏随窗口重建（内容丢弃，下帧全量重绘）
+    float v[2] = { static_cast<float>(width), static_cast<float>(height) };
+    impl_->ctx->UpdateSubresource(impl_->cb, 0, nullptr, v, 0, 0);
+    impl_->scissor[0] = 0;
+    impl_->scissor[1] = 0;
+    impl_->scissor[2] = width;
+    impl_->scissor[3] = height;
+}
+
+void BinUID3D::beginFrame(const void* clipRect) {
+    (void)clipRect; // 脏区底座色由 drawNodesD3D 根节点背景填充提供，无需在此清屏
+    if (!impl_->ready) return;
+    impl_->verts.clear();
+    impl_->batches.clear();
+    impl_->curBatch = nullptr;
+    impl_->scissorDepth = 0;
+    impl_->curLinear = 0;
+    impl_->curSrv = impl_->whiteSrv;
+    impl_->scissor[0] = 0;
+    impl_->scissor[1] = 0;
+    impl_->scissor[2] = impl_->winW;
+    impl_->scissor[3] = impl_->winH;
+
+    // 绘制目标 = 持久离屏帧缓冲
+    impl_->ctx->OMSetRenderTargets(1, &impl_->offRtv, nullptr);
+
+    // 不在此整帧 ClearRenderTargetView：该 API 不受 scissor 限制，会清空整个离屏，
+    // 局部重绘时把脏区以外的持久像素抹白/抹透明（悬停后其余元素消失的根因）。
+    // 脏区底色由 drawNodesD3D 的根节点背景填充（按 clipRect 范围）提供。
+}
+
+void BinUID3D::present() {
+    if (!impl_->ready) return;
+    impl_->flushAll(); // 画到离屏帧缓冲
+
+    if (impl_->transparent) {
+        // 分层窗口：离屏 BGRA premultiplied 读回（top-down，无需翻转）→ UpdateLayeredWindow
+        int w = impl_->winW, h = impl_->winH;
+        if (!impl_->stagingTex || impl_->layeredW != w || impl_->layeredH != h) {
+            if (impl_->stagingTex) { impl_->stagingTex->Release(); impl_->stagingTex = nullptr; }
+            if (impl_->layeredDib) { DeleteObject(impl_->layeredDib); impl_->layeredDib = nullptr; }
+            if (impl_->layeredDC) { DeleteDC(impl_->layeredDC); impl_->layeredDC = nullptr; }
+            D3D11_TEXTURE2D_DESC td = {};
+            impl_->offTex->GetDesc(&td);
+            td.Usage = D3D11_USAGE_STAGING;
+            td.BindFlags = 0;
+            td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            if (FAILED(impl_->device->CreateTexture2D(&td, nullptr, &impl_->stagingTex))) {
+                std::fprintf(stderr, "[d3d11] staging texture failed\n");
+                return;
+            }
+            BITMAPINFO bi = {};
+            bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bi.bmiHeader.biWidth = w;
+            bi.bmiHeader.biHeight = -h; // 顶层（top-down）
+            bi.bmiHeader.biPlanes = 1;
+            bi.bmiHeader.biBitCount = 32;
+            bi.bmiHeader.biCompression = BI_RGB;
+            impl_->layeredDib = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &impl_->layeredBits, nullptr, 0);
+            impl_->layeredDC = CreateCompatibleDC(nullptr);
+            impl_->layeredW = w;
+            impl_->layeredH = h;
+        }
+        if (!impl_->layeredDib || !impl_->layeredBits) return;
+        impl_->ctx->CopyResource(impl_->stagingTex, impl_->offTex);
+        D3D11_MAPPED_SUBRESOURCE map = {};
+        if (SUCCEEDED(impl_->ctx->Map(impl_->stagingTex, 0, D3D11_MAP_READ, 0, &map))) {
+            const uint8_t* src = static_cast<const uint8_t*>(map.pData);
+            uint8_t* dst = static_cast<uint8_t*>(impl_->layeredBits);
+            size_t srcPitch = map.RowPitch;
+            size_t dstPitch = static_cast<size_t>(w) * 4;
+            for (int y = 0; y < h; y++)
+                memcpy(dst + y * dstPitch, src + y * srcPitch, dstPitch);
+            impl_->ctx->Unmap(impl_->stagingTex, 0);
+            HDC screenDC = GetDC(nullptr);
+            HGDIOBJ old = SelectObject(impl_->layeredDC, impl_->layeredDib);
+            RECT wr;
+            GetWindowRect(impl_->hwnd, &wr);
+            POINT dstPt = { wr.left, wr.top };
+            SIZE sz = { w, h };
+            POINT srcPt = { 0, 0 };
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+            UpdateLayeredWindow(impl_->hwnd, screenDC, &dstPt, &sz,
+                                impl_->layeredDC, &srcPt, 0, &bf, ULW_ALPHA);
+            SelectObject(impl_->layeredDC, old);
+            ReleaseDC(nullptr, screenDC);
+        }
+        return;
+    }
+
+    // 整帧 blit：离屏 → 交换链 backbuffer
+    impl_->ctx->OMSetRenderTargets(1, &impl_->rtv, nullptr);
+    D3D11_RECT full = { 0, 0, impl_->winW, impl_->winH };
+    impl_->ctx->RSSetScissorRects(1, &full);
+    impl_->ctx->PSSetShaderResources(0, 1, &impl_->offSrv);
+    impl_->ctx->PSSetSamplers(0, 1, &impl_->samLinear);
+    D3D11_MAPPED_SUBRESOURCE map = {};
+    if (SUCCEEDED(impl_->ctx->Map(impl_->vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        float wf = static_cast<float>(impl_->winW);
+        float hf = static_cast<float>(impl_->winH);
+        D3DVertex v[6] = {
+            { 0, 0, 0xFFFFFFFF, 0, 0 }, { wf, 0, 0xFFFFFFFF, 1, 0 }, { 0, hf, 0xFFFFFFFF, 0, 1 },
+            { 0, hf, 0xFFFFFFFF, 0, 1 }, { wf, 0, 0xFFFFFFFF, 1, 0 }, { wf, hf, 0xFFFFFFFF, 1, 1 },
+        };
+        memcpy(map.pData, v, sizeof(v));
+        impl_->ctx->Unmap(impl_->vb, 0);
+        impl_->ctx->Draw(6, 0);
+    }
+    HRESULT hr = impl_->swap->Present(impl_->vsync ? 1 : 0, 0);
+    if (FAILED(hr) && hr != DXGI_STATUS_OCCLUDED)
+        std::fprintf(stderr, "[d3d11] Present hr=0x%08X\n", (unsigned)hr);
+}
+
+// ---------- 原语 ----------
+void BinUID3D::fillRect(float x, float y, float w, float h, uint32_t color) {
+    if (!impl_->ready || w <= 0 || h <= 0) return;
+    impl_->curLinear = 0;
+    impl_->curSrv = impl_->whiteSrv;
+    Premult(color);
+    impl_->emitQuad(x, y, x + w, y + h, 0, 0, 1, 1, color);
+}
+
+void BinUID3D::fillLine(float x0, float y0, float x1, float y1, float width, uint32_t color) {
+    if (!impl_->ready || width <= 0) return;
+    float dx = x1 - x0, dy = y1 - y0;
+    float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 1e-4f) return;
+    float px = -dy / len * width * 0.5f;
+    float py = dx / len * width * 0.5f;
+    impl_->curLinear = 0;
+    impl_->curSrv = impl_->whiteSrv;
+    Premult(color);
+    impl_->emitQuadRot(x0 + px, y0 + py, x1 + px, y1 + py,
+                       x1 - px, y1 - py, x0 - px, y0 - py, color);
+}
+
+void BinUID3D::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
+    if (!impl_->ready || w <= 0 || h <= 0) return;
+    int r = static_cast<int>(radius);
+    r = std::max(0, std::min(r, static_cast<int>(std::min(w, h) / 2)));
+    if (r <= 0) { fillRect(x, y, w, h, color); return; }
+
+    RoundTex& rt = impl_->roundFor(r, false);
+    if (!rt.srv) { fillRect(x, y, w, h, color); return; }
+
+    float t = static_cast<float>(rt.t);
+    float cu = static_cast<float>(rt.corner) / t;
+    float strip0 = 0.5f;
+    float strip1 = 0.5f + 1.0f / t;
+    float c = static_cast<float>(rt.corner);
+
+    Premult(color);
+    impl_->curLinear = 1;
+    impl_->curSrv = rt.srv;
+    auto quad = [&](float qx, float qy, float qw, float qh,
+                    float u0, float v0, float u1, float v1) {
+        impl_->emitQuad(qx, qy, qx + qw, qy + qh, u0, v0, u1, v1, color);
+    };
+    quad(x, y, c, c, 0, 0, cu, cu);
+    quad(x + w - c, y, c, c, 1 - cu, 0, 1, cu);
+    quad(x, y + h - c, c, c, 0, 1 - cu, cu, 1);
+    quad(x + w - c, y + h - c, c, c, 1 - cu, 1 - cu, 1, 1);
+    quad(x + c, y, w - 2 * c, c, strip0, 0, strip1, cu);
+    quad(x + c, y + h - c, w - 2 * c, c, strip0, 1 - cu, strip1, 1);
+    quad(x, y + c, c, h - 2 * c, 0, strip0, cu, strip1);
+    quad(x + w - c, y + c, c, h - 2 * c, 1 - cu, strip0, 1, strip1);
+    quad(x + c, y + c, w - 2 * c, h - 2 * c, strip0, strip0, strip1, strip1);
+    impl_->curLinear = 0;
+    impl_->curSrv = impl_->whiteSrv;
+}
+
+void BinUID3D::strokeRounded(float x, float y, float w, float h, float radius,
+                             float thickness, uint32_t color) {
+    (void)thickness;
+    if (!impl_->ready || w <= 0 || h <= 0) return;
+    int r = static_cast<int>(radius);
+    r = std::max(0, std::min(r, static_cast<int>(std::min(w, h) / 2)));
+    if (r <= 0) { fillRect(x, y, w, h, color); return; }
+
+    RoundTex& rt = impl_->roundFor(r, true);
+    if (!rt.srv) { fillRect(x, y, w, h, color); return; }
+
+    float t = static_cast<float>(rt.t);
+    float cu = static_cast<float>(rt.corner) / t;
+    float strip0 = 0.5f;
+    float strip1 = 0.5f + 1.0f / t;
+    float c = static_cast<float>(rt.corner);
+
+    Premult(color);
+    impl_->curLinear = 1;
+    impl_->curSrv = rt.srv;
+    auto quad = [&](float qx, float qy, float qw, float qh,
+                    float u0, float v0, float u1, float v1) {
+        impl_->emitQuad(qx, qy, qx + qw, qy + qh, u0, v0, u1, v1, color);
+    };
+    quad(x, y, c, c, 0, 0, cu, cu);
+    quad(x + w - c, y, c, c, 1 - cu, 0, 1, cu);
+    quad(x, y + h - c, c, c, 0, 1 - cu, cu, 1);
+    quad(x + w - c, y + h - c, c, c, 1 - cu, 1 - cu, 1, 1);
+    quad(x + c, y, w - 2 * c, c, strip0, 0, strip1, cu);
+    quad(x + c, y + h - c, w - 2 * c, c, strip0, 1 - cu, strip1, 1);
+    quad(x, y + c, c, h - 2 * c, 0, strip0, cu, strip1);
+    quad(x + w - c, y + c, c, h - 2 * c, 1 - cu, strip0, 1, strip1);
+    quad(x + c, y + c, w - 2 * c, h - 2 * c, strip0, strip0, strip1, strip1);
+    impl_->curLinear = 0;
+    impl_->curSrv = impl_->whiteSrv;
+}
+
+float BinUID3D::textWidth(float size, int weight, const std::string& utf8) {
+    if (!impl_->ready) return 0;
+    std::vector<uint32_t> cps;
+    Utf8Iter it{ utf8 };
+    while (it.next()) cps.push_back(it.cp);
+    float w = 0;
+    size_t i = 0;
+    while (i < cps.size()) {
+        auto m = impl_->clusterMetric(size, weight, cps.data() + i, cps.size() - i);
+        w += m.adv;
+        i += m.len;
+    }
+    return w;
+}
+
+void BinUID3D::fontMetrics(float size, int weight, int& ascent, int& lineHeight) {
+    Atlas* a = impl_->getAtlas(size, weight, false);
+    if (!a) { ascent = lineHeight = static_cast<int>(size); return; }
+    ascent = a->ascent;
+    lineHeight = a->ascent + a->descent;
+}
+
+void BinUID3D::drawText(float x, float y, float size, int weight,
+                        const std::string& utf8, uint32_t color,
+                        bool centerH, bool centerV) {
+    if (!impl_->ready || utf8.empty()) return;
+    float w = textWidth(size, weight, utf8);
+    if (centerH) x -= w / 2;
+
+    int ascent = 0, lineH = 0;
+    fontMetrics(size, weight, ascent, lineH);
+    if (centerV) y -= lineH / 2.0f;
+    // 像素对齐：字形位图按整数像素设计，半像素定位会被双线性过滤糊掉；
+    // advance 是整数，所以起点/基线取整后整行字形都落在整数像素上
+    float baseline = std::floor(y + 0.5f);
+    x = std::floor(x + 0.5f);
+
+    std::vector<uint32_t> cps;
+    Utf8Iter it{ utf8 };
+    while (it.next()) cps.push_back(it.cp);
+
+    Premult(color);
+    impl_->curLinear = 0;
+    impl_->curSrv = impl_->whiteSrv;
+    float cx = x;
+    auto drawGray = [&](uint32_t cp) {
+        Atlas* a = impl_->getAtlas(size, weight, cp >= 0x80, IsEmojiCp(cp));
+        if (!a) return;
+        const Glyph* g = impl_->glyphFor(a, cp);
+        if (!g) return;
+        float t = static_cast<float>(a->sizePx);
+        float cell = static_cast<float>(a->cellW);
+        float gx = (g->cell % a->cols) * cell;
+        float gy = (g->cell / a->cols) * cell;
+        float top = baseline - (a->ascent + 1);
+        impl_->curSrv = a->srv;
+        impl_->emitQuad(cx, top, cx + cell, top + cell,
+                        gx / t, gy / t, (gx + cell) / t, (gy + cell) / t, color);
+        cx += g->advW;
+    };
+
+    size_t i = 0;
+    while (i < cps.size()) {
+        size_t n = EmojiClusterLen(cps.data() + i, cps.size() - i);
+        bool colorCp = impl_->fontReady && (n > 1 || IsEmojiCp(cps[i]));
+        if (colorCp) {
+            ColorAtlas* ca = impl_->getColorAtlas(size);
+            const ColorGlyph* g = ca ? impl_->colorGlyphFor(ca, cps.data() + i, n) : nullptr;
+            if (g) {
+                float t = static_cast<float>(ca->sizePx);
+                float cell = static_cast<float>(ca->cellW);
+                float gx = (g->cell % ca->cols) * cell;
+                float gy = (g->cell / ca->cols) * ca->cellH;
+                float top = baseline - g->baseline;
+                impl_->curSrv = ca->srv;
+                impl_->emitQuad(cx, top, cx + g->w, top + g->h,
+                                gx / t, gy / t, (gx + g->w) / t, (gy + g->h) / t,
+                                0xFFFFFFFF);   // 彩色字形：白色顶点，不染色
+                cx += g->advW;
+                i += n;
+                continue;
+            }
+        }
+        for (size_t k = 0; k < n; k++) drawGray(cps[i + k]);
+        i += n;
+    }
+    impl_->curSrv = impl_->whiteSrv;
+}
+
+void BinUID3D::drawTextWrapped(float x, float y, float maxW, float size, int weight,
+                               const std::string& utf8, uint32_t color, int align) {
+    if (!impl_->ready || utf8.empty()) return;
+    int ascent = 0, lineH = 0;
+    fontMetrics(size, weight, ascent, lineH);
+
+    std::vector<uint32_t> cps;
+    Utf8Iter it{ utf8 };
+    while (it.next()) cps.push_back(it.cp);
+
+    float ly = y;
+    size_t pos = 0;
+    while (pos < cps.size()) {
+        float w = 0;
+        size_t end = pos;
+        while (end < cps.size()) {
+            uint32_t c = cps[end];
+            if (c == '\n') break;
+            auto m = impl_->clusterMetric(size, weight, cps.data() + end, cps.size() - end);
+            if (end > pos && w + m.adv > maxW) break;
+            w += m.adv;
+            end += m.len;
+        }
+        if (end == pos) end++;
+        bool newline = end < cps.size() && cps[end] == '\n';
+        std::string seg;
+        for (size_t k = pos; k < end && cps[k] != '\n'; k++) {
+            uint32_t c = cps[k];
+            if (c < 0x80) seg += static_cast<char>(c);
+            else if (c < 0x800) {
+                seg += static_cast<char>(0xC0 | (c >> 6));
+                seg += static_cast<char>(0x80 | (c & 0x3F));
+            } else if (c < 0x10000) {
+                seg += static_cast<char>(0xE0 | (c >> 12));
+                seg += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+                seg += static_cast<char>(0x80 | (c & 0x3F));
+            } else {
+                seg += static_cast<char>(0xF0 | (c >> 18));
+                seg += static_cast<char>(0x80 | ((c >> 12) & 0x3F));
+                seg += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
+                seg += static_cast<char>(0x80 | (c & 0x3F));
+            }
+        }
+        if (!seg.empty()) {
+            float lx = x;
+            if (align == 1)      lx = x + (maxW - w) / 2.0f;
+            else if (align == 2) lx = x + (maxW - w);
+            if (lx < x) lx = x; // 超长行不向左溢出
+            drawText(lx, ly + ascent, size, weight, seg, color);
+        }
+        ly += lineH;
+        pos = newline ? end + 1 : end;
+    }
+}
+
+bool BinUID3D::prepareImage(uint16_t index, const uint8_t* data, size_t size, uint32_t generation) {
+    if (!impl_->ready) return false;
+    return impl_->uploadImage(index, data, size, generation);
+}
+
+bool BinUID3D::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba, uint32_t generation) {
+    if (!impl_->ready) return false;
+    return impl_->uploadImageRaw(index, w, h, rgba, generation);
+}
+
+void BinUID3D::drawImage(uint16_t index, float x, float y, float w, float h) {
+    if (!impl_->ready || w <= 0 || h <= 0) return;
+    auto it = impl_->images.find(index);
+    if (it == impl_->images.end() || !it->second) return;
+    impl_->curLinear = 1;
+    impl_->curSrv = it->second;
+    impl_->emitQuad(x, y, x + w, y + h, 0, 0, 1, 1, 0xFFFFFFFF);
+    impl_->curLinear = 0;
+    impl_->curSrv = impl_->whiteSrv;
+}
+
+int BinUID3D::pushClip(float x, float y, float w, float h) {
+    if (!impl_->ready) return impl_->scissorDepth;
+    int depth = impl_->scissorDepth++;
+    int l = std::max(impl_->scissor[0], static_cast<int>(x));
+    int t = std::max(impl_->scissor[1], static_cast<int>(y));
+    int r = std::min(impl_->scissor[2], static_cast<int>(x + w));
+    int b = std::min(impl_->scissor[3], static_cast<int>(y + h));
+    impl_->scissor[0] = l;
+    impl_->scissor[1] = t;
+    impl_->scissor[2] = r;
+    impl_->scissor[3] = b;
+    return depth;
+}
+
+void BinUID3D::popClipTo(int depth) {
+    impl_->scissorDepth = depth;
+    if (impl_->scissorDepth == 0) {
+        impl_->scissor[0] = 0;
+        impl_->scissor[1] = 0;
+        impl_->scissor[2] = impl_->winW;
+        impl_->scissor[3] = impl_->winH;
+    }
+}
+
+void BinUID3D::setFontName(const char* name) {
+    if (name && *name) impl_->asciiFont = name;
+}
+
+// ============================================================
+// 视频节点绘制辅助（v9，与 GL 后端同构）
+// ============================================================
+namespace binui {
+
+static void FormatVideoTime(double sec, char* buf, size_t n) {
+    if (sec < 0) sec = 0;
+    int s = (int)(sec + 0.5);
+    snprintf(buf, n, "%d:%02d", s / 60, s % 60);
+}
+
+// 控制条：底条 + 进度轨道/已播放/滑块 + 播放暂停图标 + 时间文本
+template <typename Gfx>
+static void DrawVideoControlsTmpl(Gfx& gfx, const BinUIRenderer& renderer,
+                                  const BinUIRenderer::NodeInfo& node,
+                                  float x, float y, float nw, float opacity) {
+    BinUIRenderer::VideoBarGeo g;
+    if (!BinUIRenderer::VideoBarLayout(node, g)) return;
+    const auto* v = renderer.findVideo(node.id);
+    if (!v) return;
+
+    uint32_t barBg   = ScaleAlpha(0xB4000000, opacity);
+    uint32_t trackC  = ScaleAlpha(0x4DFFFFFF, opacity);
+    uint32_t solidC  = ScaleAlpha(0xFFFFFFFF, opacity);
+    uint32_t timeC   = ScaleAlpha(0xD9FFFFFF, opacity);
+
+    // 底条（覆盖到视频底缘）
+    gfx.fillRect(x, g.y, nw, g.h, barBg);
+
+    double dur = v->duration, pos = v->position;
+    float ratio = (dur > 0) ? (float)std::min(std::max(pos / dur, 0.0), 1.0) : 0.0f;
+
+    // 进度轨道 + 已播放段
+    gfx.fillRounded(g.trX, g.trY, g.trW, g.trH, g.trH * 0.5f, trackC);
+    float playedW = g.trW * ratio;
+    if (playedW >= 2.0f)
+        gfx.fillRounded(g.trX, g.trY, playedW, g.trH, g.trH * 0.5f, solidC);
+
+    // 滑块（圆）
+    float tcx = g.trX + playedW;
+    float tcy = g.trY + g.trH * 0.5f;
+    gfx.fillRounded(tcx - g.thumbR, tcy - g.thumbR,
+                    g.thumbR * 2, g.thumbR * 2, g.thumbR, solidC);
+
+    // 播放/暂停图标（按钮中心）
+    float bx = g.btnX + g.btnS * 0.5f;
+    float by = g.btnY + g.btnS * 0.5f;
+    if (v->playing) { // ⏸ 两根竖条
+        gfx.fillRect(bx - 5, by - 7, 3.5f, 14.0f, solidC);
+        gfx.fillRect(bx + 1.5f, by - 7, 3.5f, 14.0f, solidC);
+    } else {          // ▶ 行扫描三角形（宽边在左、顶点朝右）
+        for (int j = 0; j < 7; j++) {
+            float frac = 1.0f - std::fabs(j - 3) / 4.0f;
+            float wl = 13.0f * frac;
+            if (wl >= 1.0f) gfx.fillRect(bx - 5.5f, by - 7 + j * 2.0f, wl, 2.0f, solidC);
+        }
+    }
+
+    // 时间文本（右对齐）：m:ss / m:ss
+    char cur[16] = "0:00", tot[16] = "0:00";
+    FormatVideoTime(pos, cur, sizeof(cur));
+    if (dur > 0) FormatVideoTime(dur, tot, sizeof(tot));
+    std::string label = std::string(cur) + " / " + tot;
+    float tw = gfx.textWidth(12.0f, 400, label);
+    int asc = 0, lh = 0;
+    gfx.fontMetrics(12.0f, 400, asc, lh);
+    gfx.drawText(x + nw - 10 - tw, g.y + (g.h - lh) * 0.5f + asc,
+                 12.0f, 400, label, timeC);
+}
+
+} // namespace binui（视频绘制辅助）
+
+// ============================================================
+// drawNodesD3D：与 drawNodesGDI 语义一致的节点树 GPU 绘制
+// ============================================================
+namespace binui {
+void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clipRect,
+                  const std::function<void(BinUID3D&, uint16_t, float, float, float, float)>& canvas) {
+    const auto& nodes = renderer.getNodes();
+    int winW = gfx.width();
+    int winH = gfx.height();
+
+    int clipL = 0, clipT = 0, clipR = winW, clipB = winH;
+    if (clipRect) {
+        const int* c = static_cast<const int*>(clipRect);
+        int l = c[0], t = c[1], r = c[2], b = c[3];
+        if (r > l && b > t && l >= 0 && t >= 0 && r <= winW && b <= winH) {
+            clipL = l; clipT = t; clipR = r; clipB = b;
+        }
+    }
+
+    std::unordered_map<uint16_t, size_t> byId;
+    byId.reserve(nodes.size());
+    for (size_t i = 0; i < nodes.size(); i++) byId[nodes[i].id] = i;
+
+    std::unordered_map<uint16_t, binui::BinUIRenderer::ScrollState> scrolls;
+    for (const auto& node : nodes) {
+        if (node.flags & BINUI_SCROLLABLE) {
+            if (const auto* s = renderer.scrollState(node.id)) scrolls[node.id] = *s;
+        }
+    }
+
+    // 预计算：父传子祖先索引 / 隐藏 / 滚动偏移 / 最内层滚动视口
+    std::vector<int32_t> parentIdx(nodes.size(), -1);
+    std::vector<uint8_t> hidden(nodes.size(), 0);
+    std::vector<float> offX(nodes.size(), 0), offY(nodes.size(), 0);
+    std::vector<int32_t> vpL(nodes.size(), 0), vpT(nodes.size(), 0),
+                         vpR(nodes.size(), 0), vpB(nodes.size(), 0);
+    std::vector<uint8_t> hasVp(nodes.size(), 0);
+    for (size_t i = 0; i < nodes.size(); i++) {
+        const auto& node = nodes[i];
+        if (node.parentId == 0xFFFF) continue;
+        auto pit = byId.find(node.parentId);
+        if (pit == byId.end()) continue;
+        const size_t pi = pit->second;
+        parentIdx[i] = static_cast<int32_t>(pi);
+        if (hidden[pi] || !(nodes[pi].flags & BINUI_VISIBLE)) { hidden[i] = 1; continue; }
+        offX[i] = offX[pi];
+        offY[i] = offY[pi];
+        const auto& par = nodes[pi];
+        if (par.flags & BINUI_SCROLLABLE) {
+            auto sit = scrolls.find(par.id);
+            if (sit != scrolls.end()) { offX[i] += sit->second.x; offY[i] += sit->second.y; }
+            hasVp[i] = 1;
+            vpL[i] = static_cast<int32_t>(par.x);
+            vpT[i] = static_cast<int32_t>(par.y);
+            vpR[i] = static_cast<int32_t>(par.x + par.width);
+            vpB[i] = static_cast<int32_t>(par.y + par.height);
+        } else {
+            hasVp[i] = hasVp[pi];
+            vpL[i] = vpL[pi]; vpT[i] = vpT[pi];
+            vpR[i] = vpR[pi]; vpB[i] = vpB[pi];
+        }
+    }
+
+    // 根节点背景（填充绘制范围；RGBA 画布按 alpha 与底色合成）
+    for (const auto& node : nodes) {
+        if (node.type == BINUI_ROOT && (node.flags & BINUI_VISIBLE)) {
+            gfx.fillRect(static_cast<float>(clipL), static_cast<float>(clipT),
+                         static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT),
+                         node.color);
+            break;
+        }
+    }
+
+    // 绘制顺序：按 z-index 分层（v10）由渲染器统一给出，同层流式先于 absolute、DOM 顺序
+    const std::vector<uint32_t> order = renderer.drawOrder();
+    for (size_t oi = 0; oi < order.size(); oi++) {
+        const size_t i = order[oi];
+        const auto& node = nodes[i];
+        if (!(node.flags & BINUI_VISIBLE) || hidden[i]) continue;
+        if (node.type == BINUI_ROOT) continue;
+
+        int x = static_cast<int>(node.x) - static_cast<int>(offX[i]);
+        int y = static_cast<int>(node.y) - static_cast<int>(offY[i]);
+        int nw = static_cast<int>(node.width);
+        int nh = static_cast<int>(node.height);
+
+        // BINUI_LINE：x,y = 起点；width,height = 终点；radius = 线宽
+        if (node.type == BINUI_LINE) {
+            float x1 = node.x - offX[i], y1 = node.y - offY[i];
+            float x2 = node.width - offX[i], y2 = node.height - offY[i];
+            uint32_t dc = renderer.drawColor(node.id);
+            float op = renderer.drawOpacity(node.id);
+            float ddx = renderer.drawOffsetX(node.id), ddy = renderer.drawOffsetY(node.id);
+            x1 += ddx; y1 += ddy; x2 += ddx; y2 += ddy;
+            if (op < 1.0f) dc = ScaleAlpha(dc, op);
+            float mnx = std::min(x1, x2), mny = std::min(y1, y2);
+            float mxx = std::max(x1, x2), mxy = std::max(y1, y2);
+            // 线宽扩展：水平/垂直线的某维跨度为 0，零面积 clip 会把整批绘制在 flush 时丢弃
+            float lw = (float)node.radius;
+            mnx -= lw; mny -= lw; mxx += lw; mxy += lw;
+            if (mxx <= clipL || mnx >= clipR || mxy <= clipT || mny >= clipB) continue;
+            if (hasVp[i] && (mxx <= vpL[i] || mnx >= vpR[i] || mxy <= vpT[i] || mny >= vpB[i])) continue;
+            int savedDepth = gfx.pushClip(mnx, mny, mxx - mnx, mxy - mny);
+            gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
+                         static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
+            bool draw = true;
+            size_t cur = i;
+            while (draw) {
+                const auto& anc = nodes[cur];
+                if (anc.parentId == 0xFFFF) break;
+                auto pit = byId.find(anc.parentId);
+                if (pit == byId.end()) break;
+                cur = pit->second;
+                const auto& par = nodes[cur];
+                if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
+                gfx.pushClip(par.x, par.y, par.width, par.height);
+            }
+            if (draw) gfx.fillLine(x1, y1, x2, y2, (float)node.radius, dc);
+            gfx.popClipTo(savedDepth);
+            continue;
+        }
+
+        // v7 动画：颜色（含 hover/按下 tint 与过渡）、透明度、平移、缩放、圆角
+        uint32_t dc = renderer.drawColor(node.id);
+        float opacity = renderer.drawOpacity(node.id);
+        float dx = renderer.drawOffsetX(node.id);
+        float dy = renderer.drawOffsetY(node.id);
+        float scale = renderer.drawScale(node.id);
+        float animRadius = renderer.drawRadius(node.id);
+        if (opacity < 1.0f) dc = ScaleAlpha(dc, opacity);
+        if (scale != 1.0f) {
+            float cx = x + nw / 2.0f, cy = y + nh / 2.0f;
+            nw = (int)(nw * scale); nh = (int)(nh * scale);
+            x = (int)(cx - nw / 2.0f); y = (int)(cy - nh / 2.0f);
+        }
+        x += (int)dx; y += (int)dy;
+        int effRadius = animRadius >= 0 ? (int)animRadius : (int)node.radius;
+
+        if (x + nw <= clipL || x >= clipR || y + nh <= clipT || y >= clipB) continue;
+        if (hasVp[i] && (x + nw <= vpL[i] || x >= vpR[i] ||
+                         y + nh <= vpT[i] || y >= vpB[i])) continue;
+
+        // 裁剪链：自身 + 祖先 + 本次重绘范围（scissor 求交）。
+        // 关键：持久离屏上节点重绘若不做脏矩形裁剪，会把整个节点矩形重涂，
+        // 覆盖掉脏区以外（未重绘）的子元素/兄弟元素 → 悬停时内部元素消失。
+        int savedDepth = gfx.pushClip(static_cast<float>(x), static_cast<float>(y),
+                                      static_cast<float>(nw), static_cast<float>(nh));
+        gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
+                     static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
+        bool draw = true;
+        size_t cur = i;
+        while (draw) {
+            const auto& anc = nodes[cur];
+            if (anc.parentId == 0xFFFF) break;
+            auto pit = byId.find(anc.parentId);
+            if (pit == byId.end()) break;
+            cur = pit->second;
+            const auto& par = nodes[cur];
+            if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
+            gfx.pushClip(par.x, par.y, par.width, par.height);
+        }
+
+        if (draw) {
+            uint32_t cc = dc;
+            uint32_t textCol = ScaleAlpha(0xFFFFFFFF, opacity);
+            uint32_t accentCol = ScaleAlpha(0xFFBB86FC, opacity);
+            int pad = node.padding;
+            int fs = node.fontSize ? node.fontSize : 14;
+
+            switch (node.type) {
+                case BINUI_LABEL: {
+                    int asc = 0, lh = 0;
+                    gfx.fontMetrics(static_cast<float>(fs), 400, asc, lh);
+                    const float availW = static_cast<float>(nw - 2 * pad);
+                    const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
+                                    : (node.flags & BINUI_TEXT_RIGHT) ? 2 : 0;
+                    if (node.text.find('\n') != std::string::npos) {
+                        // 多行文本（<br> / '\n'）：整块垂直居中，逐行换行绘制（按 align 对齐）
+                        size_t lines = 1;
+                        for (char c : node.text) if (c == '\n') lines++;
+                        float blockH = static_cast<float>(lines) * lh;
+                        float top = static_cast<float>(y) + (nh - blockH) / 2.0f;
+                        if (top < static_cast<float>(y)) top = static_cast<float>(y);
+                        gfx.drawTextWrapped(static_cast<float>(x + pad), top,
+                                            availW > 1.0f ? availW : 1.0f,
+                                            static_cast<float>(fs), 400, node.text, cc, align);
+                    } else {
+                        float base = static_cast<float>(y) + (nh - lh) / 2.0f + asc;
+                        float tx = static_cast<float>(x + pad);
+                        if (align != 0) {
+                            const float tw = gfx.textWidth(static_cast<float>(fs), 400, node.text);
+                            tx += (align == 1) ? (availW - tw) / 2.0f : (availW - tw);
+                            if (tx < static_cast<float>(x + pad)) tx = static_cast<float>(x + pad);
+                        }
+                        gfx.drawText(tx, base, static_cast<float>(fs), 400, node.text, cc);
+                    }
+                    break;
+                }
+                case BINUI_BUTTON: {
+                    int radius = effRadius;
+                    if (radius > 0)
+                        gfx.fillRounded(static_cast<float>(x), static_cast<float>(y),
+                                        static_cast<float>(nw), static_cast<float>(nh),
+                                        static_cast<float>(radius), cc);
+                    else
+                        gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
+                                     static_cast<float>(nw), static_cast<float>(nh), cc);
+                    if (!node.text.empty()) {
+                        int bs = node.fontSize ? node.fontSize : 14;
+                        float tw = gfx.textWidth(static_cast<float>(bs), 700, node.text);
+                        int asc = 0, lh = 0;
+                        gfx.fontMetrics(static_cast<float>(bs), 700, asc, lh);
+                        float tx = x + pad + (nw - 2 * pad - tw) / 2.0f;
+                        float base = y + (nh - lh) / 2.0f + asc;
+                        gfx.drawText(tx, base, static_cast<float>(bs), 700, node.text, textCol);
+                    }
+                    break;
+                }
+                case BINUI_INPUT: {
+                    gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
+                                 static_cast<float>(nw), static_cast<float>(nh), cc);
+                    gfx.fillRect(static_cast<float>(x), static_cast<float>(y + nh - 2),
+                                 static_cast<float>(nw), 2, accentCol);
+
+                    bool editing = renderer.isFocused(node.id);
+                    std::string text = node.text;
+                    size_t caret = 0, selStart = 0;
+                    if (editing) {
+                        text = renderer.edit().value;
+                        caret = renderer.edit().caret;
+                        selStart = renderer.edit().selStart;
+                    }
+
+                    if (!text.empty()) {
+                        int asc = 0, lh = 0;
+                        gfx.fontMetrics(static_cast<float>(fs), 400, asc, lh);
+                        float base = static_cast<float>(y) + (nh - lh) / 2.0f + asc;
+                        float tx = static_cast<float>(x + pad + 4);
+                        gfx.drawText(tx, base, static_cast<float>(fs), 400, text, accentCol);
+
+                        if (editing) {
+                            size_t a = std::min(caret, selStart);
+                            size_t b = std::max(caret, selStart);
+                            if (a != b) {
+                                float wa = gfx.textWidth(static_cast<float>(fs), 400, text.substr(0, a));
+                                float wb = gfx.textWidth(static_cast<float>(fs), 400, text.substr(0, b));
+                                gfx.fillRect(tx + wa, static_cast<float>(y + 2),
+                                             wb - wa, static_cast<float>(nh - 4),
+                                             ScaleAlpha(0x66BB86FC, opacity));
+                            }
+                            if (caretBlinkOn()) {
+                                float wc = gfx.textWidth(static_cast<float>(fs), 400, text.substr(0, caret));
+                                gfx.fillRect(tx + wc, static_cast<float>(y + 2),
+                                             2, static_cast<float>(nh - 4), accentCol);
+                            }
+                        }
+                    }
+                    break;
+                }
+                case BINUI_LIST: {
+                    int radius = effRadius;
+                    if (radius > 0)
+                        gfx.fillRounded(static_cast<float>(x), static_cast<float>(y),
+                                        static_cast<float>(nw), static_cast<float>(nh),
+                                        static_cast<float>(radius), cc);
+                    else
+                        gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
+                                     static_cast<float>(nw), static_cast<float>(nh), cc);
+                    if (!node.text.empty()) {
+                        const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
+                                        : (node.flags & BINUI_TEXT_RIGHT) ? 2 : 0;
+                        gfx.drawTextWrapped(static_cast<float>(x + pad + 12),
+                                            static_cast<float>(y + pad + 8),
+                                            static_cast<float>(nw - 2 * pad - 24),
+                                            static_cast<float>(fs), 400, node.text, textCol, align);
+                    }
+                    break;
+                }
+                case BINUI_IMAGE: {
+                    const ImageResource* img = renderer.getImage(node.imageIndex);
+                    bool drawn = false;
+                    if (img && !img->data.empty()) {
+                        uint32_t gen = renderer.imageGeneration(node.imageIndex);
+                        if (img->rawPixels) {
+                            if (gfx.prepareImageRaw(node.imageIndex, img->width, img->height,
+                                                    img->data.data(), gen))
+                                gfx.drawImage(node.imageIndex, static_cast<float>(x),
+                                              static_cast<float>(y),
+                                              static_cast<float>(nw), static_cast<float>(nh));
+                            drawn = true;
+                        } else if (gfx.prepareImage(node.imageIndex, img->data.data(),
+                                                    img->data.size(), gen)) {
+                            gfx.drawImage(node.imageIndex, static_cast<float>(x),
+                                          static_cast<float>(y),
+                                          static_cast<float>(nw), static_cast<float>(nh));
+                            drawn = true;
+                        }
+                    }
+                    if (!drawn) {
+                        if (effRadius > 0)
+                            gfx.fillRounded(static_cast<float>(x), static_cast<float>(y),
+                                            static_cast<float>(nw), static_cast<float>(nh),
+                                            static_cast<float>(effRadius), cc);
+                        else
+                            gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
+                                         static_cast<float>(nw), static_cast<float>(nh), cc);
+                        if (!node.text.empty()) {
+                            int asc = 0, lh = 0;
+                            gfx.fontMetrics(24.0f, 300, asc, lh);
+                            gfx.drawText(x + nw / 2.0f, y + nh / 2.0f - lh / 2.0f + asc,
+                                         24.0f, 300, node.text, textCol, true, false);
+                        }
+                    }
+                    break;
+                }
+                case BINUI_VIDEO: {
+                    // 底色：无解码帧时显示（深色海报底）
+                    if (effRadius > 0)
+                        gfx.fillRounded(static_cast<float>(x), static_cast<float>(y),
+                                        static_cast<float>(nw), static_cast<float>(nh),
+                                        static_cast<float>(effRadius), cc);
+                    else
+                        gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
+                                     static_cast<float>(nw), static_cast<float>(nh), cc);
+
+                    // 解码帧（伪图片槽，rawPixels）：contain-fit letterbox
+                    const ImageResource* img = renderer.getImage(node.imageIndex);
+                    if (img && img->rawPixels && !img->data.empty() &&
+                        img->width > 0 && img->height > 0) {
+                        uint32_t gen = renderer.imageGeneration(node.imageIndex);
+                        if (gfx.prepareImageRaw(node.imageIndex, img->width, img->height,
+                                                img->data.data(), gen)) {
+                            float ar = static_cast<float>(img->width) / img->height;
+                            float boxAr = static_cast<float>(nw) / nh;
+                            float fw, fh;
+                            if (ar > boxAr) { fw = static_cast<float>(nw); fh = fw / ar; }
+                            else            { fh = static_cast<float>(nh); fw = fh * ar; }
+                            gfx.drawImage(node.imageIndex,
+                                          x + (nw - fw) * 0.5f, y + (nh - fh) * 0.5f, fw, fh);
+                        }
+                    }
+
+                    // 浏览器式控制条（暂停常显/播放中悬停显示）
+                    if (renderer.videoControlsVisible(node.id))
+                        DrawVideoControlsTmpl(gfx, renderer, node,
+                                              static_cast<float>(x), static_cast<float>(y),
+                                              static_cast<float>(nw), opacity);
+                    break;
+                }
+                case BINUI_SVG:
+                case BINUI_CANVAS: {
+                    int radius = effRadius;
+                    if (radius > 0)
+                        gfx.fillRounded(static_cast<float>(x), static_cast<float>(y),
+                                        static_cast<float>(nw), static_cast<float>(nh),
+                                        static_cast<float>(radius), cc);
+                    else
+                        gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
+                                     static_cast<float>(nw), static_cast<float>(nh), cc);
+                    if (node.type == BINUI_CANVAS && canvas)
+                        canvas(gfx, node.id, static_cast<float>(x), static_cast<float>(y),
+                               static_cast<float>(nw), static_cast<float>(nh));
+                    break;
+                }
+                default:
+                    break;
+            }
+
+            if (renderer.isKeyboardFocused(node.id)) {
+                gfx.strokeRounded(static_cast<float>(x + 2), static_cast<float>(y + 2),
+                                  static_cast<float>(nw - 4), static_cast<float>(nh - 4),
+                                  10.0f, 2.0f, textCol);
+            }
+        }
+
+        gfx.popClipTo(savedDepth);
+    }
+
+    // 滚动条（轨道 + 滑块）：同样裁剪到本次重绘范围，避免滚动条整条重涂
+    int sbDepth = gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
+                               static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
+    for (const auto& node : nodes) {
+        if (!(node.flags & BINUI_SCROLLABLE) || !(node.flags & BINUI_VISIBLE)) continue;
+        float ch = renderer.contentHeight(node.id);
+        auto sit = scrolls.find(node.id);
+        float sy = sit != scrolls.end() ? sit->second.y : 0;
+        int x = static_cast<int>(node.x), y = static_cast<int>(node.y);
+        int nw = static_cast<int>(node.width), nh = static_cast<int>(node.height);
+        if (ch <= nh + 0.5f) continue;
+
+        int barW = 8;
+        gfx.fillRect(static_cast<float>(x + nw - barW), static_cast<float>(y),
+                     static_cast<float>(barW), static_cast<float>(nh), 0xFF2E2E2E);
+        float thumbH = std::max(24.0f, static_cast<float>(nh) * nh / ch);
+        float maxScroll = ch - nh;
+        float thumbY = maxScroll > 0 ? sy / maxScroll * (nh - thumbH) : 0;
+        gfx.fillRect(static_cast<float>(x + nw - barW + 2), static_cast<float>(y + thumbY),
+                     4.0f, thumbH, 0xFF5A5A5A);
+    }
+    gfx.popClipTo(sbDepth);
+}
+
+// ============================================================
+// placeCaretAtClickD3D（基于字形 advance 测量）
+// ============================================================
+void placeCaretAtClickD3D(BinUIRenderer& renderer, BinUID3D& gfx, float cx, float cy) {
+    if (!renderer.isEditing()) return;
+    const auto& edit = renderer.edit();
+
+    const auto& nodes = renderer.getNodes();
+    const binui::BinUIRenderer::NodeInfo* node = nullptr;
+    for (const auto& n : nodes) {
+        if (n.id == edit.nodeId) { node = &n; break; }
+    }
+    if (!node || node->type != BINUI_INPUT) return;
+    if (cy < node->y || cy > node->y + node->height) return;
+
+    std::wstring wtext = Utf8ToWide(edit.value);
+    float textX = static_cast<float>(node->x) + node->padding + 4;
+    float target = cx - textX;
+    int fs = node->fontSize ? node->fontSize : 14;
+    if (target <= 0) { renderer.setCaretByUtf16Index(0); return; }
+
+    // 累计前缀宽度（UTF-16 单位），找越过点击点的位置
+    std::string prefix;
+    size_t idx = 0;
+    float w = 0;
+    for (size_t i = 0; i < wtext.size(); i++) {
+        unsigned cp = wtext[i];
+        std::string ch;
+        if (cp < 0x80) ch += static_cast<char>(cp);
+        else if (cp < 0x800) {
+            ch += static_cast<char>(0xC0 | (cp >> 6));
+            ch += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            ch += static_cast<char>(0xE0 | (cp >> 12));
+            ch += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            ch += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            ch += static_cast<char>(0xF0 | (cp >> 18));
+            ch += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            ch += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            ch += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+        float cw = gfx.textWidth(static_cast<float>(fs), 400, prefix + ch) - w;
+        if (w + cw / 2 >= target) break; // 越过字形中点即算越过
+        w += cw;
+        prefix += ch;
+        idx = i + 1;
+    }
+    renderer.setCaretByUtf16Index(idx);
+}
+
+// ============================================================
+// 光标闪烁
+// ============================================================
+bool caretBlinkOn() {
+    using namespace std::chrono;
+    static auto last = steady_clock::now();
+    static bool on = true;
+    auto now = steady_clock::now();
+    if (duration_cast<milliseconds>(now - last).count() >= 500) {
+        on = !on;
+        last = now;
+    }
+    return on;
+}
+
+// 标题栏判定（与 GDI 后端 isTitlebarDrag 语义一致）：
+// hitTest 只命中交互节点（按钮/输入等）→ 命中则不拖；
+// 否则检查点击是否落在任一可见 TITLEBAR 节点矩形内
+bool isTitlebarDrag(const BinUIRenderer& renderer, float x, float y) {
+    const auto& nodes = renderer.getNodes();
+    if (renderer.hitTest(x, y) >= 0) return false;
+    for (const auto& n : nodes)
+        if ((n.flags & BINUI_TITLEBAR) && (n.flags & BINUI_VISIBLE) &&
+            x >= n.x && x <= n.x + n.width && y >= n.y && y <= n.y + n.height)
+            return true;
+    return false;
+}
+
+void BinUIAppD3D::beginWindowDrag() {
+    if (!hwnd_) return;
+    ReleaseCapture();
+    POINT p;
+    GetCursorPos(&p);
+    SendMessageA(static_cast<HWND>(hwnd_), WM_NCLBUTTONDOWN, HTCAPTION,
+                 MAKELPARAM(p.x, p.y));
+}
+
+void BinUIAppD3D::minimize() {
+    if (hwnd_) ShowWindow(static_cast<HWND>(hwnd_), SW_MINIMIZE);
+}
+
+// 手动 resize 拖拽循环（窗口无 WS_THICKFRAME，系统不提供 resize，这里自行实现）。
+// 关键：拖拽期间每轮消息后立即渲染一帧（与 GDI 的 WM_PAINT 同步重绘一致），
+// 否则窗口尺寸变了却无呈现，松手才补一帧 → 卡顿/花屏。
+void BinUIAppD3D::startResize(int hit) {
+    const int MIN_W = 320, MIN_H = 240;
+    HWND hwnd = static_cast<HWND>(hwnd_);
+    SetCapture(hwnd);
+    POINT start;
+    GetCursorPos(&start);
+    RECT startRect;
+    GetWindowRect(hwnd, &startRect);
+    while (GetAsyncKeyState(VK_LBUTTON) & 0x8000) {
+        MSG m;
+        while (PeekMessageA(&m, nullptr, 0, 0, PM_REMOVE)) {
+            TranslateMessage(&m);
+            DispatchMessageA(&m);
+        }
+        POINT cur;
+        GetCursorPos(&cur);
+        RECT r = startRect;
+        int dx = cur.x - start.x, dy = cur.y - start.y;
+        switch (hit) {
+            case HTLEFT:          r.left += dx; break;
+            case HTRIGHT:         r.right += dx; break;
+            case HTTOP:           r.top += dy; break;
+            case HTBOTTOM:        r.bottom += dy; break;
+            case HTTOPLEFT:       r.left += dx; r.top += dy; break;
+            case HTTOPRIGHT:      r.right += dx; r.top += dy; break;
+            case HTBOTTOMLEFT:    r.left += dx; r.bottom += dy; break;
+            case HTBOTTOMRIGHT:   r.right += dx; r.bottom += dy; break;
+        }
+        if (r.right - r.left < MIN_W) {
+            if (hit == HTLEFT || hit == HTTOPLEFT || hit == HTBOTTOMLEFT)
+                r.left = r.right - MIN_W;
+            else
+                r.right = r.left + MIN_W;
+        }
+        if (r.bottom - r.top < MIN_H) {
+            if (hit == HTTOP || hit == HTTOPLEFT || hit == HTTOPRIGHT)
+                r.top = r.bottom - MIN_H;
+            else
+                r.bottom = r.top + MIN_H;
+        }
+        // 等比缩放（<canvas aspect="...">）：以主导边为基准约束另一边
+        if (aspect_ > 0) {
+            LONG wd = r.right - r.left, ht = r.bottom - r.top;
+            if (hit == HTTOP || hit == HTBOTTOM) {
+                wd = static_cast<LONG>(ht * aspect_ + 0.5f);
+                if (hit == HTTOP) r.top = r.bottom - ht;
+                else r.bottom = r.top + ht;
+            } else {
+                ht = static_cast<LONG>(wd / aspect_ + 0.5f);
+                if (hit == HTTOPLEFT || hit == HTTOP || hit == HTTOPRIGHT)
+                    r.top = r.bottom - ht;
+                else
+                    r.bottom = r.top + ht;
+            }
+            if (hit == HTLEFT || hit == HTTOPLEFT || hit == HTBOTTOMLEFT)
+                r.left = r.right - wd;
+            else
+                r.right = r.left + wd;
+        }
+        SetWindowPos(hwnd, nullptr, r.left, r.top,
+            r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+        // 同步渲染：应用本轮的 resize 并绘制/呈现（拖动不卡顿、不花屏）
+        applyPendingResize();
+        renderOnce();
+        Sleep(1);
+    }
+    ReleaseCapture();
+}
+
+// ============================================================
+// BinUIAppD3D：无边框窗口 + 事件循环
+// ============================================================
+LRESULT CALLBACK BinUIAppD3D::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    BinUIAppD3D* app = reinterpret_cast<BinUIAppD3D*>(GetWindowLongPtrA(hwnd, GWLP_USERDATA));
+    if (!app) return DefWindowProcA(hwnd, msg, wParam, lParam);
+
+    switch (msg) {
+        case WM_MOUSEMOVE: {
+            if (!app->trackingLeave_) {
+                POINT cursor;
+                RECT wrect;
+                if (GetCursorPos(&cursor) && GetWindowRect(hwnd, &wrect) && PtInRect(&wrect, cursor)) {
+                    TRACKMOUSEEVENT tme = { sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0 };
+                    TrackMouseEvent(&tme);
+                    app->trackingLeave_ = true;
+                }
+            }
+            app->handleMouseMove(static_cast<float>(LOWORD(lParam)),
+                                 static_cast<float>(HIWORD(lParam)));
+            return 0;
+        }
+        case WM_LBUTTONDOWN:
+            app->handleMousePress(static_cast<float>(LOWORD(lParam)),
+                                  static_cast<float>(HIWORD(lParam)));
+            SetFocus(hwnd);
+            return 0;
+        case WM_LBUTTONUP:
+            app->handleMouseRelease(static_cast<float>(LOWORD(lParam)),
+                                    static_cast<float>(HIWORD(lParam)));
+            return 0;
+        case WM_MOUSELEAVE:
+            app->trackingLeave_ = false;
+            app->handleMouseLeave();
+            return 0;
+        case WM_MOUSEWHEEL: {
+            short delta = static_cast<short>(HIWORD(wParam));
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            ScreenToClient(hwnd, &pt);
+            app->handleMouseWheel(static_cast<float>(pt.x), static_cast<float>(pt.y),
+                                  static_cast<float>(delta) / 120.0f * 40.0f);
+            return 0;
+        }
+        case WM_CHAR:
+            app->handleChar(static_cast<wchar_t>(wParam));
+            return 0;
+        case WM_KEYDOWN:
+            app->handleKey(static_cast<int>(wParam));
+            return 0;
+        case WM_KILLFOCUS:
+            app->handleFocusLost();
+            return 0;
+        case WM_SIZE:
+            app->handleResize(LOWORD(lParam), HIWORD(lParam));
+            return 0;
+        case WM_NCLBUTTONDOWN: {
+            // 无 WS_THICKFRAME：命中边框热区时自行启动 resize 循环
+            if (!app->resizable_) return DefWindowProcA(hwnd, msg, wParam, lParam);
+            switch (wParam) {
+                case HTLEFT: case HTRIGHT: case HTTOP: case HTBOTTOM:
+                case HTTOPLEFT: case HTTOPRIGHT: case HTBOTTOMLEFT:
+                case HTBOTTOMRIGHT: {
+                    if (IsZoomed(hwnd))
+                        return DefWindowProcA(hwnd, msg, wParam, lParam);
+                    app->startResize(static_cast<int>(wParam));
+                    return 0;
+                }
+                default:
+                    return DefWindowProcA(hwnd, msg, wParam, lParam);
+            }
+        }
+        case WM_NCHITTEST: {
+            // 无边框窗口：边框 8px 热区用于调整大小，其余为客户区
+            if (!app->resizable_) return HTCLIENT;
+            RECT rc;
+            GetWindowRect(hwnd, &rc);
+            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+            const int bw = 8;
+            bool l = pt.x - rc.left < bw, t = pt.y - rc.top < bw;
+            bool r = rc.right - pt.x < bw, b = rc.bottom - pt.y < bw;
+            if (l && t) return HTTOPLEFT;
+            if (r && t) return HTTOPRIGHT;
+            if (l && b) return HTBOTTOMLEFT;
+            if (r && b) return HTBOTTOMRIGHT;
+            if (l) return HTLEFT;
+            if (r) return HTRIGHT;
+            if (t) return HTTOP;
+            if (b) return HTBOTTOM;
+            return HTCLIENT;
+        }
+        case WM_CLOSE:
+            app->requestExit();
+            return 0;
+        case WM_DESTROY:
+            PostQuitMessage(0);
+            return 0;
+    }
+    return DefWindowProcA(hwnd, msg, wParam, lParam);
+}
+
+BinUIAppD3D::BinUIAppD3D(int width, int height, bool vsync)
+    : width_(width), height_(height), vsync_(vsync) {}
+
+void BinUIAppD3D::setWindowOptions(bool resizable, float aspect, bool transparent, const char* title) {
+    resizable_ = resizable;
+    aspect_ = aspect > 0 ? aspect : 0;
+    transparent_ = transparent;
+    if (title) title_ = title;
+}
+
+BinUIAppD3D::~BinUIAppD3D() { gfx_.shutdown(); }
+
+void BinUIAppD3D::invalidateRect(int x, int y, int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    if (dirty_) {
+        dirtyL_ = std::min(dirtyL_, x);
+        dirtyT_ = std::min(dirtyT_, y);
+        dirtyR_ = std::max(dirtyR_, x + w);
+        dirtyB_ = std::max(dirtyB_, y + h);
+    } else {
+        dirty_ = true;
+        dirtyL_ = x; dirtyT_ = y; dirtyR_ = x + w; dirtyB_ = y + h;
+    }
+}
+
+void BinUIAppD3D::invalidateAll() {
+    dirty_ = true;
+    dirtyL_ = 0; dirtyT_ = 0; dirtyR_ = width_; dirtyB_ = height_;
+}
+
+int BinUIAppD3D::run() {
+    SetProcessDPIAware();
+
+    const char* CLASS_NAME = "BinUIAppD3DWindow";
+    WNDCLASSA wc = {};
+    wc.lpfnWndProc = BinUIAppD3D::wndProc;
+    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.lpszClassName = CLASS_NAME;
+    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    wc.hbrBackground = nullptr;
+    RegisterClassA(&wc);
+
+    RECT work = { 0, 0, 800, 600 };
+    SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
+    int winW = std::min(width_, static_cast<int>(work.right - work.left));
+    int winH = std::min(height_, static_cast<int>(work.bottom - work.top));
+    int winX = work.left + ((work.right - work.left) - winW) / 2;
+    int winY = work.top + ((work.bottom - work.top) - winH) / 2;
+
+    // 无边框：WS_POPUP 无标题栏/边框/系统菜单；WS_MAXIMIZEBOX 允许 Win+↑ 最大化
+    DWORD exStyle = 0;
+    if (transparent_) exStyle |= WS_EX_LAYERED;
+    HWND hwnd = CreateWindowExA(exStyle, CLASS_NAME, title_.c_str(),
+        WS_POPUP | WS_MAXIMIZEBOX | WS_VISIBLE, winX, winY, winW, winH,
+        nullptr, nullptr, wc.hInstance, nullptr);
+    if (!hwnd) {
+        std::fprintf(stderr, "[d3d11] Failed to create window\n");
+        return 1;
+    }
+    hwnd_ = hwnd;
+    SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
+    // 禁用 Windows 11 DWM 自动圆角：UI 圆角由 border-radius 属性自控（跨平台一致）
+    DWORD corner = DWMWCP_DONOTROUND;
+    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
+
+    gfx_.setTransparent(transparent_);
+    if (!gfx_.init(hwnd, winW, winH, vsync_)) {
+        std::fprintf(stderr, "[d3d11] D3D11 init failed\n");
+        return 1;
+    }
+    SetFocus(hwnd);
+    width_ = winW;
+    height_ = winH;
+    invalidateAll(); // 首帧全量绘制（初始脏矩形为空，避免透明窗口首帧空白）
+
+    auto lastTime = std::chrono::high_resolution_clock::now();
+    running_ = true;
+    MSG msg = {};
+
+    while (running_) {
+        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) { running_ = false; break; }
+            TranslateMessage(&msg);
+            DispatchMessageA(&msg);
+        }
+
+        auto now = std::chrono::high_resolution_clock::now();
+        float dt = std::chrono::duration<float>(now - lastTime).count();
+        lastTime = now;
+        if (dt > 0.1f) dt = 1.0f / 60.0f;
+        if (update_) update_(dt);
+
+        renderOnce();
+        Sleep(1);
+    }
+
+    DestroyWindow(hwnd);
+    hwnd_ = nullptr;
+    return 0;
+}
+
+void BinUIAppD3D::handleMouseMove(float x, float y) { if (move_) move_(x, y); }
+void BinUIAppD3D::handleMousePress(float x, float y) { if (press_) press_(x, y); }
+void BinUIAppD3D::handleMouseRelease(float x, float y) { if (release_) release_(x, y); }
+void BinUIAppD3D::handleMouseLeave() { if (leave_) leave_(); }
+
+void BinUIAppD3D::handleMouseWheel(float x, float y, float dy) { if (wheel_) wheel_(x, y, dy); }
+
+void BinUIAppD3D::handleResize(int w, int h) {
+    if (w <= 0 || h <= 0) return;
+    // 只记录：拖拽期间 WM_SIZE 高频到达，实际 resize（重排/FBO 重建/重绘）每帧应用一次
+    pendingW_ = w;
+    pendingH_ = h;
+}
+
+void BinUIAppD3D::applyPendingResize() {
+    if (pendingW_ <= 0 || pendingH_ <= 0) return;
+    int w = pendingW_, h = pendingH_;
+    pendingW_ = pendingH_ = 0;
+    width_ = w;
+    height_ = h;
+    if (resize_) resize_(w, h);
+    gfx_.resize(w, h);
+    invalidateAll();
+}
+
+void BinUIAppD3D::renderOnce() {
+    applyPendingResize();
+    if (dirty_ && gfx_.isReady()) {
+        int rc[4] = { dirtyL_, dirtyT_, dirtyR_, dirtyB_ };
+        gfx_.beginFrame(rc);
+        if (draw_) draw_(gfx_, rc);
+        gfx_.present();
+        dirty_ = false;
+    }
+}
+
+void BinUIAppD3D::handleChar(wchar_t ch) {
+    if (ch >= 0xD800 && ch <= 0xDBFF) { pendingHigh_ = ch; return; }
+    unsigned cp;
+    if (ch >= 0xDC00 && ch <= 0xDFFF && pendingHigh_) {
+        cp = 0x10000 + ((static_cast<unsigned>(pendingHigh_) - 0xD800) << 10) + (ch - 0xDC00);
+        pendingHigh_ = 0;
+    } else {
+        pendingHigh_ = 0;
+        cp = static_cast<unsigned>(ch);
+    }
+    if (cp < 0x20 || cp == 0x7F) return;
+    if (char_) {
+        std::string s;
+        if (cp < 0x80) s += static_cast<char>(cp);
+        else if (cp < 0x800) {
+            s += static_cast<char>(0xC0 | (cp >> 6));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            s += static_cast<char>(0xE0 | (cp >> 12));
+            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            s += static_cast<char>(0xF0 | (cp >> 18));
+            s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            s += static_cast<char>(0x80 | (cp & 0x3F));
+        }
+        char_(s);
+    }
+}
+
+void BinUIAppD3D::handleKey(int vk) {
+    if (key_) key_(vk);
+}
+
+void BinUIAppD3D::handleFocusLost() {
+    pendingHigh_ = 0;
+    if (focus_) focus_(false);
+}
+
+} // namespace binui

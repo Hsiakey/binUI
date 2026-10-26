@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<app_window width="720" height="520" bg="#0E0E13" title="CSS 伪类 / 伪元素">
+<html width="720" height="520" bg="#0E0E13">
+<head>
+    <meta charset="UTF-8">
+    <title>CSS 伪类 / 伪元素演示</title>
+    <style>
+        body { font-size: 13px; }
+
+        /* ---- 运行时伪类：:hover / :active / :focus / :checked ---- */
+        .btn {
+            width: 132px; height: 40px;
+            background: #23232E; color: #F5F5F7;
+            border-radius: 10; font-size: 13px;
+            transition: background-color 0.18s ease, transform 0.18s ease;
+        }
+        .btn:hover  { background: #3B2F63; transform: scale(1.04); }
+        .btn:active { background: #7C6FF0; transform: scale(0.97); }
+
+        .ghost { width: 132px; height: 40px; background: #1A1A22; color: #A78BFA;
+                 border-radius: 10; }
+        .ghost:hover  { background: #221B33; }
+        .ghost:active { background: #7C6FF0; }
+
+        .field { width: 276px; height: 40px; background: #16161D; color: #D4D4D8;
+                 border-radius: 10; padding: 10; font-size: 13px;
+                 transition: background-color 0.15s ease; }
+        .field:focus { background: #2A2350; }
+
+        .toggle { width: 132px; height: 40px; background: #1A1A22; color: #9CA3AF;
+                  border-radius: 10; transition: background-color 0.15s ease; }
+        .toggle:hover   { background: #23232E; }
+        .toggle:checked { background: #10B981; color: #062018; }
+
+        /* ---- 结构伪类：兄弟序号在编译期求值 ---- */
+        .row { height: 26px; width: 276px; font-size: 12px; color: #9CA3AF; }
+        .row:nth-child(odd)  { color: #7C6FF0; }
+        .row:last-child      { color: #10B981; }
+        .row:first-child     { color: #F5F5F7; }
+
+        /* ---- 伪元素 --- */
+        .bullet { height: 24px; width: 276px; color: #D4D4D8; font-size: 13px; }
+        .bullet::before { content: "\25B8  "; }
+        .bullet:last-child { color: #F5F5F7; }
+
+        .tag::before { content: attr(data-tag); }
+        .rule { margin-top: 8px; background: transparent; }
+        .rule::after { content: ""; width: 276px; height: 2px; background: #5A5A70; }
+    </style>
+</head>
+<body>
+    <titlebar style="position:absolute; left:0; top:0; width:720; height:44; background:#16161D">
+        <span style="position:absolute; left:14; top:11; width:300; height:20; color:#F5F5F7; font-size:14">CSS 伪类 / 伪元素</span>
+        <span style="position:absolute; left:330; top:14; width:300; height:16; color:#8A8A95; font-size:11">hover 按钮 · focus 输入框 · 点复选框切 :checked</span>
+        <button id="close" style="position:absolute; left:676; top:8; width:28; height:28; background:#E5484D; border-radius:6">✕</button>
+    </titlebar>
+
+    <!-- 卡片 1：运行时伪类 -->
+    <div style="position:absolute; left:16; top:56; width:332; height:212; background:#16161D; border-radius:14">
+        <span style="position:absolute; left:16; top:12; width:200; height:18; color:#F5F5F7; font-size:13">运行时伪类</span>
+        <button id="b1" class="btn" style="position:absolute; left:16; top:44">悬停 / 按下</button>
+        <button id="b2" class="ghost" style="position:absolute; left:164; top:44">:hover / :active</button>
+        <input id="b3" class="field" style="position:absolute; left:16; top:98" placeholder="点这里聚焦（:focus）"/>
+        <button id="b4" class="toggle" style="position:absolute; left:16; top:152">点我切换 :checked</button>
+        <span style="position:absolute; left:164; top:158; width:150; height:32; color:#6E6E78; font-size:11">:checked 由外壳调用 setNodeChecked</span>
+    </div>
+
+    <!-- 卡片 2：结构伪类 -->
+    <div style="position:absolute; left:364; top:56; width:332; height:212; background:#16161D; border-radius:14">
+        <span style="position:absolute; left:16; top:12; width:200; height:18; color:#F5F5F7; font-size:13">结构伪类（编译期求值）</span>
+        <div style="position:absolute; left:16; top:40">
+            <span class="row">第 1 项：:first-child → 白</span>
+            <span class="row">第 2 项：even → 灰</span>
+            <span class="row">第 3 项：:nth-child(odd) → 紫</span>
+            <span class="row">第 4 项：even → 灰</span>
+            <span class="row">第 5 项：:last-child → 绿</span>
+        </div>
+        <span style="position:absolute; left:16; top:184; width:300; height:16; color:#6E6E78; font-size:11">同权重规则按文档序层叠，:last-child 最后写</span>
+    </div>
+
+    <!-- 卡片 3：伪元素 -->
+    <div style="position:absolute; left:16; top:280; width:680; height:224; background:#16161D; border-radius:14">
+        <span style="position:absolute; left:16; top:12; width:300; height:18; color:#F5F5F7; font-size:13">伪元素 ::before / ::after</span>
+        <div style="position:absolute; left:16; top:44">
+            <span class="bullet">内联 ::before（内容并入宿主文本）</span>
+            <span class="bullet">第二条：同一规则命中所有元素</span>
+            <span class="bullet">最后一条命中 :last-child</span>
+        </div>
+        <div style="position:absolute; left:360; top:44; width:304">
+            <span class="tag" data-tag="★ " style="height:24px; width:276px; color:#FBBF24">content: attr(data-tag)</span>
+            <span class="tag" data-tag="◆ " style="height:24px; width:276px; color:#22D3EE">属性值直接当成内容</span>
+            <div class="rule" style="margin-top:8px"></div>
+        </div>
+        <span style="position:absolute; left:16; top:196; width:640; height:16; color:#6E6E78; font-size:11">盒模式 ::after（带 width/height/background）会合成独立子节点：上方的 2px 分隔线</span>
+    </div>
+</body>
+</html>

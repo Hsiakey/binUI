@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<app_window width="560" height="600" transparent="true" bg="rgba(0,0,0,0)" title="BinUI MW Hero">
+<html width="560" height="600" bg="rgba(0,0,0,0)">
+<head>
+    <meta charset="UTF-8">
+    <title>binUI 独立窗口模式 · 立绘</title>
+    <style>
+        body { font-family: "Microsoft YaHei UI"; }
+        @keyframes idleBob {
+            0%, 100% { transform: translateY(0); }
+            50%      { transform: translateY(-12px); }
+        }
+    </style>
+</head>
+<body>
+    <!-- 立绘：只属于本窗口/进程 -->
+    <img id="hero" src="NOELA_N001_1227x1227.png"
+         animation="idleBob 3.2s ease-in-out 0s infinite"
+         style="position:absolute; left:16; top:28; width:528; height:528; z-index:1"></img>
+
+    <!-- 覆盖整窗的透明标题栏：在立绘上按住即可拖动整个窗口（PNG 之外区域透出舞台） -->
+    <titlebar style="position:absolute; left:0; top:0; width:560; height:600; background:rgba(0,0,0,0); z-index:10">
+        <span style="position:absolute; left:12; top:8; width:420; height:18; color:rgba(196,181,253,0.75); font-size:11">立绘窗口 · 进程 B（透明 · 拖动移动）</span>
+    </titlebar>
+</body>
+</html>

@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux:
+    name: Linux / GCC / CMake
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # third_party（FreeType + HarfBuzz，约 130 MB）不入库，先拉源码
+      - name: 拉取 third_party
+        run: sh scripts/fetch-deps.sh
+
+      - name: 配置
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: 构建
+        run: cmake --build build -j"$(nproc)"
+
+      # ctest 里包含 check_examples：示例 UI 必须编译成功且零警告
+      - name: 测试
+        run: ctest --test-dir build --output-on-failure
+
+  windows:
+    name: Windows / MinGW-w64 / CMake
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            git
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+
+      - name: 拉取 third_party
+        run: sh scripts/fetch-deps.sh
+
+      - name: 配置
+        run: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+
+      - name: 构建
+        run: cmake --build build -j4
+
+      - name: 测试
+        run: ctest --test-dir build --output-on-failure

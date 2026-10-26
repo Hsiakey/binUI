@@ -1,0 +1,31 @@
+<binui width="900" height="680" bg="#0A0A0A">
+    <!-- 左面板背景 -->
+    <card x="0" y="30" w="180" h="390" color="#001100" radius="0"/>
+    <!-- 中面板背景 -->
+    <card x="180" y="30" w="450" h="390" color="#001100" radius="0"/>
+    <!-- 右面板背景 -->
+    <card x="630" y="30" w="270" h="390" color="#000800" radius="0"/>
+    <!-- 自绘标题栏（可拖动窗口；─ 最小化，□ 最大化，✕ 关闭） -->
+    <titlebar x="0" y="0" w="900" h="30" color="#003300">
+        <label x="8" y="4" w="300" h="22" color="#00FF00" size="14">● 视觉监视器</label>
+        <button x="840" y="0" w="20" h="30" color="#003300" size="14">─</button>
+        <button x="860" y="0" w="20" h="30" color="#003300" size="14">□</button>
+        <button x="880" y="0" w="20" h="30" color="#003300" size="14">✕</button>
+    </titlebar>
+    <!-- 左侧内容 -->
+    <label x="6" y="34" w="80" h="20" color="#00FF00" size="13">原画</label>
+    <card x="10" y="56" w="160" h="90" color="#000000" radius="0"/>
+    <label x="6" y="156" w="80" h="20" color="#00FF00" size="13">目标</label>
+    <card x="10" y="176" w="160" h="90" color="#000000" radius="0"/>
+    <!-- 识别面板 -->
+    <label x="186" y="34" w="80" h="20" color="#00FF00" size="13">识别</label>
+    <card x="190" y="60" w="430" h="340" color="#000000" radius="0"/>
+    <!-- 信息面板 -->
+    <label x="634" y="34" w="80" h="20" color="#00FF00" size="13">信息</label>
+    <label x="634" y="56" w="262" h="340" color="#B0B0B0" size="12">等待连接...</label>
+    <!-- 日志面板 -->
+    <card x="0" y="420" w="900" h="260" color="#000800" radius="0"/>
+    <label x="6" y="424" w="80" h="20" color="#00FF00" size="13">日志</label>
+    <label x="8" y="448" w="880" h="18" color="#00FF00" size="11">[系统] 视觉监视器已启动</label>
+    <label x="8" y="466" w="880" h="18" color="#00FF00" size="11">[系统] 等待 WebSocket 连接...</label>
+</binui>

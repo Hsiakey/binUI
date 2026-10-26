@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 安全漏洞（请勿公开）
+    url: https://github.com/Hsiakey/binUI/security/advisories/new
+    about: 越界、崩溃、路径穿越等安全问题请走私密渠道，见 SECURITY.md
+  - name: 使用问题 / 讨论
+    url: https://github.com/Hsiakey/binUI/discussions
+    about: 怎么用、怎么写 UI、能不能实现某个效果，先在这里问

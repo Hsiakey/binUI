@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<app_window width="920" height="210" bg="#12101A" title="BinUI MW Dialog">
+<html width="920" height="210" bg="#12101A">
+<head>
+    <meta charset="UTF-8">
+    <title>binUI 独立窗口模式 · 对话</title>
+    <style>
+        body { font-family: "Microsoft YaHei UI"; }
+        button { transition: background-color 0.18s ease, transform 0.18s ease; }
+    </style>
+</head>
+<body>
+    <!-- 标题栏（可拖动本窗口） -->
+    <titlebar style="position:absolute; left:0; top:0; width:920; height:40; background:#0A0A14; z-index:100">
+        <span style="position:absolute; left:14; top:10; width:520; height:20; color:#E9E4F5; font-size:13">对话窗口（进程 #3 / 共 3 个）</span>
+        <button id="btnMin"   style="position:absolute; left:852; top:6; width:28; height:28; background:#23232E; border-radius:6; z-index:110">─</button>
+        <button id="btnClose" style="position:absolute; left:888; top:6; width:28; height:28; background:#E5484D; border-radius:6; z-index:110">✕</button>
+    </titlebar>
+
+    <!-- 对话框主体 -->
+    <div style="position:absolute; left:16; top:50; width:888; height:146; background:rgba(28,24,44,0.96); border-radius:14; z-index:10">
+        <span style="position:absolute; left:18; top:12; width:220; height:26; color:#C4B5FD; font-size:18; z-index:11">诺艾拉</span>
+        <div style="position:absolute; left:18; top:44; width:852; height:88; color:#F5F5F7; font-size:15; z-index:11">这句台词、这块文本框，运行在与舞台/立绘完全不同的进程里。三个窗口都是独立的顶窗口：可分别拖动、最小化、关闭；立绘窗口是分层透明窗口（UpdateLayeredWindow 预乘 alpha），PNG 之外的区域直接透出舞台窗口。</div>
+    </div>
+
+    <!-- 快捷按钮行（各自独立点击） -->
+    <button id="btnAuto" style="position:absolute; left:600; top:166; width:64; height:26; background:#23232E; border-radius:6; color:#E9E4F5; font-size:12; z-index:20">自动</button>
+    <button id="btnSkip" style="position:absolute; left:672; top:166; width:64; height:26; background:#23232E; border-radius:6; color:#E9E4F5; font-size:12; z-index:20">快进</button>
+    <button id="btnSave" style="position:absolute; left:744; top:166; width:64; height:26; background:#23232E; border-radius:6; color:#E9E4F5; font-size:12; z-index:20">存档</button>
+    <button id="btnLoad" style="position:absolute; left:816; top:166; width:64; height:26; background:#23232E; border-radius:6; color:#E9E4F5; font-size:12; z-index:20">读档</button>
+</body>
+</html>

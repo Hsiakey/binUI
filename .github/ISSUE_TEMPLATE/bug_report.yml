@@ -1,0 +1,65 @@
+name: Bug 报告
+description: 报告一个可复现的问题
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        安全漏洞请走 [SECURITY.md](../blob/main/SECURITY.md) 的私密渠道，不要在这里公开。
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: 现象
+      description: 发生了什么，期望是什么。
+      placeholder: 按钮 hover 不变色 / 编译崩溃 / 文本位置偏 1px …
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: 最小复现
+      description: 一段 self-contained 的 HTML/XML 源码 + 相关的 cpp 片段最能定位问题。
+      render: html
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: 版本
+      description: git commit 或 tag，加上 `BINUI_VERSION`（include/binui_format.h）。
+      placeholder: v0.0.2 / commit 1a2b3c4 / BINUI_VERSION=11
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: 平台
+      multiple: true
+      options:
+        - Windows (MinGW)
+        - Windows (MSVC)
+        - Linux
+        - macOS
+        - 其他 / 未知
+
+  - type: dropdown
+    id: backend
+    attributes:
+      label: 绘制后端
+      options:
+        - OpenGL 3.3 (binui_gl-gdi)
+        - D3D11
+        - GDI
+        - 仅核心（无后端）
+        - 不确定
+
+  - type: textarea
+    id: warnings
+    attributes:
+      label: 编译警告
+      description: `CompileResult::warnings` 或 stderr 里的 `[binui] warning:` 原文（没有就写"无"）。
+      render: text

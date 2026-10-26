@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>binUI 单窗口模式 · NOELA — 浏览器复刻</title>
+<style>
+  /* =====================================================================
+     singlewindow/main.html 的 1:1 浏览器复刻。
+     只使用 binUI 支持的图元：纯色 / rgba / border-radius / 图片 / transform。
+     坐标、尺寸、配色、z-index 顺序均与 main.html 一一对应。
+     ===================================================================== */
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0a0810;
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+  }
+
+  /* 画布：1000x700，等价于 <app_window width=1000 height=700 bg=#171223> */
+  .stage {
+    position: relative;
+    width: 1000px;
+    height: 700px;
+    background: #171223;
+    overflow: hidden;
+    color: #E9E4F5;
+    user-select: none;
+  }
+
+  .abs { position: absolute; }
+
+  /* ---------------- 舞台背光（z-index 1，呼吸动画） ---------------- */
+  .glow {
+    border-radius: 50%;
+    z-index: 1;
+    animation: glowPulse 4s ease-in-out infinite;
+  }
+  .glow-a { left: 210px; top: 96px;  width: 580px; height: 580px; background: rgba(139,92,246,0.10); }
+  .glow-b { left: 300px; top: 156px; width: 400px; height: 400px; background: rgba(167,139,250,0.10); }
+
+  /* ---------------- 立绘（z-index 2） ---------------- */
+  #hero {
+    left: 270px; top: 145px; width: 460px; height: 460px;
+    z-index: 2;
+    animation: idleBob 3.2s ease-in-out infinite;
+  }
+
+  /* ---------------- HUD 徽标（z-index 8） ---------------- */
+  #hud {
+    left: 40px; top: 96px; width: 180px; height: 64px;
+    background: rgba(18,14,26,0.86);
+    border-radius: 12px;
+    z-index: 8;
+  }
+  #hud .l1 { left: 14px; top: 10px; width: 160px; color: #C4B5FD; font-size: 13px; }
+  #hud .l2 { left: 14px; top: 34px; width: 160px; color: #8A8A95; font-size: 11px; }
+
+  /* ---------------- 对话框（z-index 10） ---------------- */
+  #dialog {
+    left: 40px; top: 520px; width: 920px; height: 150px;
+    background: rgba(18,14,26,0.93);
+    border-radius: 16px;
+    z-index: 10;
+  }
+  #avatar-frame {
+    left: 14px; top: 14px; width: 126px; height: 126px;
+    background: #2A2440; border-radius: 14px;
+    z-index: 11;
+  }
+  #avatar {
+    left: 22px; top: 22px; width: 110px; height: 110px;
+    z-index: 12;
+  }
+  #dialog .name {
+    left: 152px; top: 16px; width: 300px;
+    color: #C4B5FD; font-size: 18px; z-index: 13;
+  }
+  #dialog .body {
+    left: 152px; top: 52px; width: 748px; height: 80px;
+    color: #F5F5F7; font-size: 16px; line-height: 24px;
+    z-index: 13;
+  }
+  /* 回车后切换成的输入框（默认隐藏） */
+  #dialog .edit {
+    left: 152px; top: 54px; width: 748px; height: 40px;
+    display: none;
+    background: rgba(255,255,255,0.06);
+    border: 1px solid rgba(139,92,246,0.55);
+    border-radius: 8px;
+    color: #E9E4F5; font-size: 16px; font-family: inherit;
+    padding: 0 14px; outline: none;
+    z-index: 13;
+  }
+  #dialog .edit::placeholder { color: #6E6E78; }
+
+  /* ---------------- 标题栏（z-index 100） ---------------- */
+  #titlebar {
+    left: 0; top: 0; width: 1000px; height: 44px;
+    background: #100C1A; z-index: 100;
+    cursor: move;
+  }
+  #titlebar .title { left: 14px; top: 12px; width: 400px; color: #E9E4F5; font-size: 14px; }
+  #titlebar .hint  { left: 672px; top: 15px; width: 220px; color: #6E6E78; font-size: 11px; }
+  .tb-btn {
+    top: 8px; width: 28px; height: 28px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    color: #E9E4F5; font-size: 13px; z-index: 110; cursor: pointer;
+    transition: background-color .18s ease, transform .18s ease;
+  }
+  .tb-btn:active { transform: scale(0.94); }
+  #btnMin   { left: 912px; background: #23232E; }
+  #btnMin:hover { background: #2E2E3C; }
+  #btnClose { left: 948px; background: #E5484D; }
+  #btnClose:hover { background: #F0565B; }
+
+  @keyframes idleBob   { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+  @keyframes glowPulse { 0%,100% { opacity: 0.35; } 50% { opacity: 0.75; } }
+</style>
+</head>
+<body>
+  <div class="stage" id="stage">
+
+    <!-- 舞台背光 —— <div glow-a> <div glow-b>，z-index 1 -->
+    <div class="abs glow glow-a" id="glowA"></div>
+    <div class="abs glow glow-b" id="glowB"></div>
+
+    <!-- 立绘 —— <img id=hero z-index 2, idleBob> -->
+    <img class="abs" id="hero" src="../../tests/NOELA_N001_1227x1227.png" alt="NOELA">
+
+    <!-- HUD 徽标 —— z-index 8 -->
+    <div class="abs" id="hud">
+      <span class="abs l1">立绘 · 透明通道</span>
+      <span class="abs l2">z-index 分层采样</span>
+    </div>
+
+    <!-- 对话框 —— z-index 10：头像框(11) < 头像(12) < 文本(13) -->
+    <div class="abs" id="dialog">
+      <div class="abs" id="avatar-frame"></div>
+      <img class="abs" id="avatar" src="../../tests/NOELA_N001_1227x1227.png" alt="avatar">
+      <span class="abs name">诺艾拉</span>
+      <div class="abs body">同屏合成多个图层：立绘(z2) &lt; HUD(z8) &lt; 对话框(z10) &lt; 头像框(z11) &lt; 头像(z12)。图片经 Gdiplus 解码为 BGRA、上传为 GPU 纹理后按节点矩形绘制，z-index 决定覆盖顺序。窗口改为等比缩放，拖动边框时整棵 UI 保持 1000×700 比例不变形。</div>
+      <input class="abs edit" id="edit" type="text" placeholder="输入你想说的话，按 Enter 发送…">
+    </div>
+
+    <!-- 标题栏 —— z-index 100 -->
+    <div class="abs" id="titlebar">
+      <span class="abs title">单窗口模式 · NOELA_N001（1227×1227 PNG → GPU 纹理）</span>
+      <span class="abs hint">ESC 退出 · 拖标题栏移动 · 窗口等比缩放</span>
+      <div class="abs tb-btn" id="btnMin">─</div>
+      <div class="abs tb-btn" id="btnClose">✕</div>
+    </div>
+
+  </div>
+
+<script>
+  const nameEl = document.querySelector('#dialog .name');
+  const bodyEl = document.querySelector('#dialog .body');
+  const editEl = document.getElementById('edit');
+
+  let editing = false;
+
+  function enterEdit() {
+    editing = true;
+    bodyEl.style.display = 'none';
+    editEl.style.display = 'block';
+    editEl.value = '';
+    editEl.focus();
+    nameEl.textContent = '你';
+  }
+
+  function exitEdit(commit) {
+    editing = false;
+    editEl.style.display = 'none';
+    bodyEl.style.display = '';
+    if (commit && editEl.value.trim()) bodyEl.textContent = editEl.value;
+    nameEl.textContent = '诺艾拉';
+  }
+
+  document.addEventListener('keydown', e => {
+    if (e.key !== 'Enter') return;
+    e.preventDefault();
+    if (!editing) enterEdit();
+    else exitEdit(true);
+  });
+</script>
+</body>
+</html>

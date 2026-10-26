@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<app_window width="960" height="660" bg="#0E0E13" title="SVG / Canvas">
+<html width="960" height="660" bg="#0E0E13">
+<head>
+    <meta charset="UTF-8">
+    <title>SVG Canvas 演示</title>
+    <style>
+        body { font-family: Segoe UI; }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50%      { transform: scale(1.5); }
+        }
+    </style>
+</head>
+<body>
+    <titlebar style="position:absolute; left:0; top:0; width:960; height:44; background:#16161D">
+        <span animation="pulse 2s ease-in-out 0s infinite" style="position:absolute; left:14; top:8; width:28; height:28; color:#A78BFA; font-size:18">✏️</span>
+        <span style="position:absolute; left:48; top:12; width:220; height:20; color:#F5F5F7; font-size:14">SVG / Canvas 演示</span>
+        <span style="position:absolute; left:280; top:15; width:340; height:16; color:#8A8A95; font-size:12">SVG 声明式矢量 · Canvas 命令式绘制</span>
+        <span style="position:absolute; left:812; top:15; width:92; height:16; color:#6E6E78; font-size:11">ESC 退出</span>
+        <button style="position:absolute; left:872; top:8; width:28; height:28; background:#23232E; border-radius:6">─</button>
+        <button style="position:absolute; left:906; top:8; width:28; height:28; background:#E5484D; border-radius:6">✕</button>
+    </titlebar>
+
+    <!-- SVG 卡片：声明式矢量图（rect/circle/line/polyline/polygon） -->
+    <div style="position:absolute; left:16; top:56; width:456; height:284; background:#16161D; border-radius:16">
+        <span style="position:absolute; left:20; top:12; width:200; height:18; color:#F5F5F7; font-size:13">SVG 声明式矢量图</span>
+        <svg style="position:absolute; left:16; top:40; width:424; height:232">
+            <!-- 网格横线 -->
+            <line x1="0" y1="40" x2="424" y2="40" stroke="#2A2A35" stroke-width="1"/>
+            <line x1="0" y1="116" x2="424" y2="116" stroke="#2A2A35" stroke-width="1"/>
+            <line x1="0" y1="192" x2="424" y2="192" stroke="#2A2A35" stroke-width="1"/>
+            <!-- 背景柱 rect（条形示意） -->
+            <rect x="16"  y="60"  width="36" height="140" rx="6" fill="#1E2233"/>
+            <rect x="76"  y="100" width="36" height="100" rx="6" fill="#1E2233"/>
+            <rect x="136" y="80"  width="36" height="120" rx="6" fill="#1E2233"/>
+            <rect x="196" y="40"  width="36" height="160" rx="6" fill="#1E2233"/>
+            <rect x="256" y="110" width="36" height="90"  rx="6" fill="#1E2233"/>
+            <rect x="316" y="130" width="36" height="70"  rx="6" fill="#1E2233"/>
+            <rect x="376" y="60"  width="36" height="140" rx="6" fill="#1E2233"/>
+            <!-- 折线 polyline -->
+            <polyline points="16,200 52,170 88,188 124,150 160,164 196,120 232,136 268,90 304,108 340,64 376,82 424,40"
+                      stroke="#22D3EE" stroke-width="3"/>
+            <!-- 多边形轮廓 polygon（闭合） -->
+            <polygon points="0,220 40,210 80,216 120,202 160,208 200,192 240,198 280,184 320,190 360,178 424,186 424,232 0,232"
+                     stroke="#7C6FF0" stroke-width="2"/>
+            <!-- 数据点 circle（pulse 动画 = 普通节点可 tween） -->
+            <circle cx="52"  cy="170" r="5" fill="#A78BFA"/>
+            <circle cx="196" cy="120" r="5" fill="#A78BFA"/>
+            <circle cx="340" cy="64"  r="5" fill="#A78BFA"/>
+        </svg>
+    </div>
+
+    <!-- Canvas 卡片：命令式绘制面（cpp 回调按帧画频谱） -->
+    <div style="position:absolute; left:488; top:56; width:456; height:284; background:#16161D; border-radius:16">
+        <span style="position:absolute; left:20; top:12; width:200; height:18; color:#F5F5F7; font-size:13">Canvas 命令式绘制面</span>
+        <canvas id="cvEq" style="position:absolute; left:16; top:40; width:424; height:232; background:#121218; border-radius:12"></canvas>
+        <span style="position:absolute; left:20; top:288; width:424; height:14; color:#6E6E78; font-size:10"></span>
+    </div>
+
+    <!-- 底部说明 -->
+    <div style="position:absolute; left:16; top:348; width:928; height:72; background:#16161D; border-radius:16">
+        <span style="position:absolute; left:20; top:14; width:460; height:16; color:#C9C9D2; font-size:12">SVG 子图形 = 普通节点：line(x1/y1/x2/y2+stroke) · polyline/polygon(points) · circle(cx/cy/r+fill) · rect(x/y/width/height+rx)</span>
+        <span style="position:absolute; left:20; top:36; width:460; height:16; color:#6E6E78; font-size:11">全部支持 CSS transition/animation（translate/opacity/颜色），坐标相对 &lt;svg&gt; 容器</span>
+        <span style="position:absolute; left:500; top:14; width:400; height:16; color:#C9C9D2; font-size:12">&lt;canvas id&gt; 空绘制面：drawNodesGL 遇节点时回调应用，已裁剪到画布矩形</span>
+        <span style="position:absolute; left:500; top:36; width:400; height:16; color:#6E6E78; font-size:11">应用 updateFn 每帧更新数据 + invalidateRect → 帧内回调重绘（立即式）</span>
+    </div>
+</body>
+</html>
+</app_window>

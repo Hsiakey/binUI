@@ -1,0 +1,599 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>binUI Agent · 双视图原型（聊天 / Galgame）</title>
+<style>
+  /* =====================================================================
+     双视图原型：同一份 transcript，两个渲染器
+       · 聊天视图  —— 全量、可滚动、可复制（上下文窗口）
+       · Galgame 视图 —— Director 把 transcript 投影成「节拍」，打字机 + 翻页，
+                         念不出来的内容（代码/表格/清单）路由到右侧详情面板
+     只使用 binUI 支持的图元，方便之后移植。
+     ===================================================================== */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: #0a0810;
+    font-family: "Microsoft YaHei UI", "Microsoft YaHei", sans-serif;
+    color: #E9E4F5;
+  }
+  .stage { position: relative; width: 1000px; height: 700px; background: #171223; overflow: hidden; user-select: none; }
+  .abs { position: absolute; }
+
+  /* ---------------- 背光（舞台感，两视图共用） ---------------- */
+  .glow { border-radius: 50%; z-index: 0; animation: glowPulse 4s ease-in-out infinite; }
+  .glow-a { left: 210px; top: 96px;  width: 580px; height: 580px; background: rgba(139,92,246,0.10); }
+  .glow-b { left: 300px; top: 156px; width: 400px; height: 400px; background: rgba(167,139,250,0.10); }
+
+  /* ================= Galgame 视图 ================= */
+  #galView { display: block; }
+  #hero { left: 270px; top: 145px; width: 460px; height: 460px; z-index: 2;
+          animation: idleBob 3.2s ease-in-out infinite; }
+
+  .chip { background: rgba(18,14,26,0.86); border-radius: 12px; }
+  .chapter { left: 30px; top: 64px; width: 200px; height: 56px; z-index: 8; }
+  .chapter .k { left: 14px; top: 9px; color: #C4B5FD; font-size: 11px; letter-spacing: 1px; }
+  .chapter .v { left: 14px; top: 28px; color: #E9E4F5; font-size: 13px; }
+
+  /* 控制条 */
+  .galctl { left: 520px; top: 486px; width: 440px; height: 30px; z-index: 20;
+            display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+  .cbtn { height: 30px; padding: 0 14px; border-radius: 8px; background: #23232E; color: #E9E4F5;
+          font-size: 12.5px; display: flex; align-items: center; cursor: pointer;
+          transition: background-color .15s ease, transform .15s ease; }
+  .cbtn:hover { background: #2E2E3C; }
+  .cbtn:active { transform: scale(0.96); }
+  .cbtn.on { background: #8B5CF6; color: #FFFFFF; }
+
+  /* 对话框 */
+  #galDialog { left: 40px; top: 522px; width: 920px; height: 150px;
+               background: rgba(18,14,26,0.93); border-radius: 16px; z-index: 10; }
+  .avatar-frame { left: 14px; top: 14px; width: 126px; height: 126px; background: #2A2440; border-radius: 14px; z-index: 11; }
+  .avatar { left: 22px; top: 22px; width: 110px; height: 110px; z-index: 12; }
+  #galName { left: 152px; top: 16px; width: 300px; color: #C4B5FD; font-size: 18px; z-index: 13; }
+  #galBody { left: 152px; top: 52px; width: 740px; height: 84px; color: #F5F5F7; font-size: 16px;
+             line-height: 24px; white-space: pre-wrap; z-index: 13; }
+  #galEdit { left: 152px; top: 54px; width: 740px; height: 40px; display: none;
+             background: rgba(255,255,255,0.06); border: 1px solid rgba(139,92,246,0.55);
+             border-radius: 8px; color: #E9E4F5; font-size: 16px; font-family: inherit;
+             padding: 0 14px; outline: none; z-index: 13; }
+  #galEdit::placeholder { color: #6E6E78; }
+  #galMark { right: 18px; bottom: 12px; color: #A78BFA; font-size: 13px; z-index: 14;
+             display: none; animation: hintBlink 1.1s ease-in-out infinite; }
+
+  /* 状态行：对话框下方的模型 / 思考强度 / CTX */
+  #galStatus { left: 40px; top: 676px; width: 920px; height: 22px; z-index: 12;
+               display: flex; align-items: center; gap: 20px; font-size: 11.5px; color: #6E6E78; }
+  #galStatus .st-model { color: #8A8A95; }
+  #galStatus .st-effort { color: #A78BFA; }
+  #galStatus .st-ctx { margin-left: auto; }
+
+  /* 详情面板（overlay，右缘，露出立绘） */
+  #detailPanel { left: 726px; top: 78px; width: 254px; height: 384px; display: none;
+                 background: rgba(10,8,18,0.97); border: 1px solid rgba(139,92,246,0.5);
+                 border-radius: 12px; z-index: 80; }
+  #detailPanel .d-head { left: 0; top: 0; width: 254px; height: 36px; border-bottom: 1px solid rgba(139,92,246,0.25); }
+  #detailPanel .d-title { left: 14px; top: 9px; width: 190px; color: #C4B5FD; font-size: 13px; }
+  #detailPanel .d-close { right: 10px; top: 8px; width: 20px; height: 20px; color: #8A8A95; font-size: 13px;
+                          display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  #detailPanel .d-close:hover { color: #E9E4F5; }
+  #detailPanel .d-body { left: 12px; top: 44px; width: 230px; height: 296px; overflow-y: auto;
+                         white-space: pre-wrap; font-family: "Cascadia Mono", Consolas, monospace;
+                         font-size: 12px; line-height: 18px; color: #C9D1D9; }
+  #detailPanel .d-copy { left: 12px; bottom: 10px; width: 230px; height: 28px; border-radius: 7px;
+                         background: #23232E; color: #E9E4F5; font-size: 12px;
+                         display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  #detailPanel .d-copy:hover { background: #2E2E3C; }
+
+  /* backlog 覆盖层 */
+  #backlog { left: 120px; top: 70px; width: 760px; height: 430px; display: none;
+             background: #0B0914; border: 1px solid rgba(139,92,246,0.3);
+             border-radius: 14px; z-index: 90; }
+  #backlog .b-head { left: 18px; top: 14px; color: #C4B5FD; font-size: 14px; }
+  #backlog .b-close { right: 16px; top: 12px; width: 22px; height: 22px; color: #8A8A95; font-size: 14px;
+                      display: flex; align-items: center; justify-content: center; cursor: pointer; }
+  #backlog .b-close:hover { color: #E9E4F5; }
+  #backlog .b-list { left: 18px; top: 48px; width: 724px; height: 364px; overflow-y: auto; }
+  .bk-item { padding: 7px 8px; border-radius: 8px; font-size: 13.5px; line-height: 20px; cursor: pointer; }
+  .bk-item:hover { background: rgba(139,92,246,0.15); }
+  .bk-who { color: #A78BFA; margin-right: 8px; }
+  .bk-who.user { color: #7BE0B0; }
+  .bk-txt { color: #C9C4D8; }
+
+  /* ================= 聊天视图 ================= */
+  #chatView { display: none; }
+  #chatList { left: 60px; top: 64px; width: 880px; height: 452px; overflow-y: auto; padding-right: 8px; z-index: 2; }
+  .msg { display: flex; gap: 10px; margin: 12px 0; align-items: flex-start; }
+  .msg.user { flex-direction: row-reverse; }
+  .msg .col { max-width: 660px; display: flex; flex-direction: column; }
+  .msg.agent .col { align-items: flex-start; }
+  .msg.user  .col { align-items: flex-end; }
+  .av { flex: 0 0 40px; width: 40px; height: 40px; border-radius: 10px; overflow: hidden; }
+  .av img { width: 100%; height: 100%; object-fit: cover; object-position: 50% 12%; display: block; }
+  .av.user { background: #1E3A2E; border: 1px solid rgba(123,224,176,0.4); color: #7BE0B0;
+             font-size: 14px; display: flex; align-items: center; justify-content: center; }
+  .who { font-size: 12px; color: #8A8A95; margin-bottom: 4px; padding: 0 4px; }
+  .msg.user .who { color: #7BE0B0; }
+  .bubble { background: rgba(139,92,246,0.12); border: 1px solid rgba(139,92,246,0.22);
+            border-radius: 12px; padding: 10px 14px; color: #EDEAF7; font-size: 14px; line-height: 22px; }
+  .msg.user .bubble { background: rgba(123,224,176,0.12); border-color: rgba(123,224,176,0.24); color: #EAF7F0; }
+  .bubble .txt { white-space: pre-wrap; }
+  .bubble pre { margin: 8px 0 0; background: #0B0912; border: 1px solid rgba(255,255,255,0.06);
+                border-radius: 8px; padding: 10px 12px; overflow-x: auto;
+                font-family: "Cascadia Mono", Consolas, monospace; font-size: 12.5px; line-height: 18px; color: #C9D1D9; }
+  .copy { margin-top: 4px; font-size: 11px; color: #6E6E78; cursor: pointer; padding: 0 4px; }
+  .copy:hover { color: #A78BFA; }
+
+  /* 输入框：融入主色（深色卡片）+ 底部工具条（左侧功能图标 / 右侧朗读 + 发送） */
+  #chatInput { left: 60px; top: 532px; width: 880px; height: 140px; background: rgba(18,14,26,0.95);
+               border: 1px solid rgba(139,92,246,0.28); border-radius: 18px; z-index: 10;
+               display: flex; flex-direction: column; padding: 12px 14px 8px;
+               box-shadow: 0 10px 28px rgba(0,0,0,0.35); }
+  #chatInput .cbox { flex: 1; width: 100%; background: transparent; border: none; outline: none;
+                     resize: none; color: #E9E4F5; font-size: 15px; line-height: 22px;
+                     font-family: inherit; padding: 2px 4px; }
+  #chatInput .cbox::placeholder { color: #6E6E78; }
+  #chatInput .bar { display: flex; align-items: center; gap: 2px; height: 34px; }
+  #chatInput .ic { width: 32px; height: 32px; border-radius: 8px; flex: 0 0 32px;
+                   display: flex; align-items: center; justify-content: center;
+                   color: #8A8A95; cursor: pointer; transition: background-color .15s ease, color .15s ease; }
+  #chatInput .ic:hover { background: rgba(255,255,255,0.06); color: #E9E4F5; }
+  #chatInput .ic svg { width: 20px; height: 20px; }
+  #chatInput .ic.chev { flex: 0 0 18px; width: 18px; }
+  #chatInput .ic.chev svg { width: 14px; height: 14px; }
+  #chatInput .spacer { flex: 1; }
+  #chatInput .csend { height: 34px; padding: 0 18px; margin-left: 6px; border-radius: 10px;
+                      background: rgba(255,255,255,0.06); color: #6E6E78; font-size: 14px;
+                      display: flex; align-items: center; justify-content: center; cursor: pointer;
+                      transition: background-color .15s ease, color .15s ease; }
+  #chatInput .csend.active { background: #8B5CF6; color: #FFFFFF; }
+
+  /* ================= 标题栏 ================= */
+  #titlebar { left: 0; top: 0; width: 1000px; height: 44px; background: #100C1A; z-index: 200; }
+  #titlebar .title { left: 14px; top: 12px; width: 340px; color: #E9E4F5; font-size: 14px; }
+  .mode-toggle { left: 388px; top: 8px; height: 28px; background: #0B0912; border-radius: 9px;
+                 padding: 3px; display: flex; gap: 3px; z-index: 210; }
+  .mode-seg { padding: 0 12px; height: 22px; display: flex; align-items: center; border-radius: 6px;
+              font-size: 12px; color: #8A8A95; cursor: pointer; }
+  .mode-seg.active { background: #8B5CF6; color: #FFFFFF; }
+  #titlebar .hint { left: 620px; top: 15px; width: 280px; color: #6E6E78; font-size: 11px; }
+  .tb-btn { top: 8px; width: 28px; height: 28px; border-radius: 6px; display: flex; align-items: center;
+            justify-content: center; color: #E9E4F5; font-size: 13px; z-index: 210; cursor: pointer;
+            transition: background-color .15s ease, transform .15s ease; }
+  .tb-btn:active { transform: scale(0.94); }
+  #btnMin { left: 912px; background: #23232E; }
+  #btnMin:hover { background: #2E2E3C; }
+  #btnClose { left: 948px; background: #E5484D; }
+  #btnClose:hover { background: #F0565B; }
+
+  @keyframes idleBob   { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-10px); } }
+  @keyframes glowPulse { 0%,100% { opacity: 0.35; } 50% { opacity: 0.75; } }
+  @keyframes hintBlink { 0%,100% { opacity: 0.25; } 50% { opacity: 1.0; } }
+
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(139,92,246,0.35); border-radius: 4px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+</head>
+<body>
+<div class="stage">
+
+  <div class="abs glow glow-a"></div>
+  <div class="abs glow glow-b"></div>
+
+  <!-- ================= Galgame 视图 ================= -->
+  <div id="galView">
+    <img class="abs" id="hero" src="../../tests/NOELA_N001_1227x1227.png" alt="NOELA">
+
+    <div class="abs chip chapter">
+      <span class="abs k">CHAPTER 01</span>
+      <span class="abs v">与向导的对话</span>
+    </div>
+
+    <div class="abs galctl">
+      <div class="cbtn" id="autoBtn">AUTO</div>
+      <div class="cbtn" id="skipBtn">跳过</div>
+      <div class="cbtn" id="logBtn">记录</div>
+      <div class="cbtn" id="fullBtn">查看全文</div>
+    </div>
+
+    <div class="abs" id="galDialog">
+      <div class="abs avatar-frame"></div>
+      <img class="abs avatar" src="../../tests/NOELA_N001_1227x1227.png" alt="avatar">
+      <span class="abs" id="galName">诺艾拉</span>
+      <div class="abs" id="galBody"></div>
+      <input class="abs" id="galEdit" type="text" placeholder="输入你想说的话，按 Enter 发送…">
+      <span class="abs" id="galMark">▼</span>
+    </div>
+
+    <div class="abs" id="galStatus">
+      <span class="st-model">模型 deepseek-v4.1</span>
+      <span class="st-effort">思考强度 中</span>
+      <span class="st-ctx">CTX 8.2k / 128k</span>
+    </div>
+
+    <div class="abs" id="detailPanel">
+      <div class="abs d-head">
+        <span class="abs d-title" id="dTitle">详情</span>
+        <div class="abs d-close" id="dClose">✕</div>
+      </div>
+      <div class="abs d-body" id="dBody"></div>
+      <div class="abs d-copy" id="dCopy">复制</div>
+    </div>
+
+    <div class="abs" id="backlog">
+      <span class="abs b-head">记录</span>
+      <div class="abs b-close" id="bClose">✕</div>
+      <div class="abs b-list" id="bList"></div>
+    </div>
+  </div>
+
+  <!-- ================= 聊天视图 ================= -->
+  <div id="chatView">
+    <div class="abs" id="chatList"></div>
+    <div class="abs" id="chatInput">
+      <textarea class="cbox" id="chatEdit" placeholder="给诺艾拉发消息…"></textarea>
+      <div class="bar">
+        <div class="ic" title="表情"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5a4.5 4.5 0 0 0 7 0"/><circle cx="9" cy="9.5" r="0.7" fill="currentColor" stroke="none"/><circle cx="15" cy="9.5" r="0.7" fill="currentColor" stroke="none"/></svg></div>
+        <div class="ic" title="组件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 4v10l-7 4-7-4V7z"/><path d="M12 12v11"/><path d="M5 7l7 5 7-5"/></svg></div>
+        <div class="ic" title="文件"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4 6h5l2 2h9v11H4z"/></svg></div>
+        <div class="ic" title="工具"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="2.4"/><circle cx="6" cy="18" r="2.4"/><path d="M8.1 7.6L20 19"/><path d="M8.1 16.4L20 5"/></svg></div>
+        <div class="ic chev" title="更多"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg></div>
+        <div class="ic" title="语音"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M6 11a6 6 0 0 0 12 0"/><path d="M12 17v4"/></svg></div>
+        <div class="spacer"></div>
+        <div class="ic" title="朗读"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M8 10v4"/><path d="M12 8.5v7"/><path d="M16 10v4"/></svg></div>
+        <div class="csend" id="chatSend">发送</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ================= 标题栏 ================= -->
+  <div class="abs" id="titlebar">
+    <span class="abs title">binUI · Agent 双视图原型</span>
+    <div class="abs mode-toggle">
+      <div class="mode-seg" data-mode="chat">聊天视图</div>
+      <div class="mode-seg active" data-mode="gal">Galgame 视图</div>
+    </div>
+    <span class="abs hint">Enter 推进 / 发送 · 滚轮上滑看历史 · 切换视图不丢进度</span>
+    <div class="abs tb-btn" id="btnMin">─</div>
+    <div class="abs tb-btn" id="btnClose">✕</div>
+  </div>
+
+</div>
+
+<script>
+/* ============================================================
+   1) Transcript —— 唯一真源（后端保留全部）
+   ============================================================ */
+const transcript = [];          // { role:'agent'|'user', content:'...' }
+
+const GREETING =
+  '……啊，你终于来了。我是诺艾拉，这个界面的向导。直接说的话，我会用打字机讲给你听；内容太长的话，我会整理到右侧面板。';
+
+const REPLIES = [
+  '让我把思路拆开说。\n\n' +
+  '首先，双视图的核心是同一份 transcript 供两个渲染器读取：聊天视图全量呈现，galgame 视图则通过一个 director 把它切成节拍。\n\n' +
+  '需要处理的边界有这样几类：\n' +
+  '- 代码块与表格：念不出来，交给右侧详情面板\n' +
+  '- 超长段落：按句子切分成多拍\n' +
+  '- 推理过程：折叠进内心独白\n' +
+  '- 玩家输入：走同一份 transcript 同步\n\n' +
+  '下面是一段示意代码：\n\n' +
+  '```cpp\n' +
+  'struct Beat {\n    int     msgIndex;\n    Channel channel;   // speak | detail\n    std::string text;\n};\n' +
+  '```\n\n' +
+  '大概就是这样，细节我都放在右边了。',
+  '好的，我记下了。还有别的想问的吗？直接说就行。'
+];
+let replyCount = 0;
+function replyFor() { return REPLIES[Math.min(replyCount++, REPLIES.length - 1)]; }
+
+/* ============================================================
+   2) Director —— transcript → galgame 节拍
+   ============================================================ */
+// 2.1 分段：先切代码围栏，再按空行分段，超长段落按句子切
+function segment(text) {
+  const blocks = [];
+  const re = /```[\s\S]*?```/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) blocks.push({ kind: 'text', text: text.slice(last, m.index) });
+    blocks.push({ kind: 'code', text: m[0] });
+    last = re.lastIndex;
+  }
+  if (last < text.length) blocks.push({ kind: 'text', text: text.slice(last) });
+
+  const out = [];
+  for (const b of blocks) {
+    if (b.kind === 'code') { out.push({ kind: 'code', text: b.text.trim() }); continue; }
+    const paras = b.text.split(/\n{2,}/).map(s => s.trim()).filter(Boolean);
+    for (const para of paras) {
+      if (para.length <= 90) { out.push({ kind: 'plain', text: para }); continue; }
+      const sents = para.split(/(?<=[。！？.!?])/).map(s => s.trim()).filter(Boolean);
+      let cur = '';
+      for (const s of sents) {
+        if (cur && (cur + s).length > 90) { out.push({ kind: 'plain', text: cur }); cur = s; }
+        else cur += s;
+      }
+      if (cur) out.push({ kind: 'plain', text: cur });
+    }
+  }
+  return out;
+}
+
+// 2.2 分频道：speak（对话盒） / detail（详情面板）
+function classify(block, msg, msgIndex) {
+  let channel = 'speak', kind = 'plain', panel = block.text;
+  if (block.kind === 'code') {
+    channel = 'detail'; kind = 'code';
+    panel = block.text.replace(/^```[^\n]*\n?/, '').replace(/\n?```$/, '');
+  } else if (/\|.*\|/.test(block.text) && block.text.split('\n').length >= 2) {
+    channel = 'detail'; kind = 'table';
+  } else if ((block.text.match(/^\s*([-*]|\d+\.)\s/gm) || []).length >= 3) {
+    channel = 'detail'; kind = 'list';
+  }
+  const speaker = msg.role === 'user' ? '你' : '诺艾拉';
+  const leadMap = { code: '代码我整理到右侧面板了：', table: '表格整理在右侧：', list: '清单给你放在右边了：' };
+  return {
+    msgIndex, role: msg.role, channel, kind,
+    text: block.text, panel, speaker,
+    lead: channel === 'detail' ? leadMap[kind] : block.text
+  };
+}
+
+function project(msg, msgIndex) {
+  return segment(msg.content).map(b => classify(b, msg, msgIndex));
+}
+
+/* ============================================================
+   3) Galgame 播放机
+   ============================================================ */
+let mode = 'gal';
+let beats = [];
+let beatIndex = -1;
+let state = 'idle';            // idle | typing | wait | input
+let cur = null;
+let fullText = '', typed = 0;
+let typeTimer = null, pending = null, autoOn = false;
+let currentMsgIndex = 0;
+
+const $ = id => document.getElementById(id);
+const galBody = $('galBody'), galName = $('galName'), galEdit = $('galEdit'), galMark = $('galMark');
+const detailPanel = $('detailPanel'), dTitle = $('dTitle'), dBody = $('dBody'), dCopy = $('dCopy');
+const backlog = $('backlog'), bList = $('bList');
+const chatList = $('chatList'), chatEdit = $('chatEdit');
+
+function startBeats() { beatIndex = -1; nextBeat(); }
+
+function nextBeat() {
+  clearTimeout(pending); pending = null;
+  closeDetail();
+  hideEdit();
+  beatIndex++;
+  if (beatIndex >= beats.length) { enterInput(); return; }
+  beginType(beats[beatIndex]);
+}
+
+function beginType(beat) {
+  cur = beat;
+  galName.textContent = beat.speaker;
+  currentMsgIndex = beat.msgIndex;
+  fullText = beat.channel === 'detail' ? beat.lead : beat.text;
+  galBody.textContent = ''; typed = 0;
+  galMark.style.display = 'none';
+  if (beat.role === 'user') { galBody.textContent = fullText; finishType(); return; }
+  state = 'typing';
+  typeTimer = setInterval(tick, 22);
+}
+
+function tick() {
+  typed++;
+  galBody.textContent = fullText.slice(0, typed);
+  if (typed >= fullText.length) finishType();
+}
+
+function finishType() {
+  if (typeTimer) { clearInterval(typeTimer); typeTimer = null; }
+  galBody.textContent = fullText;
+  state = 'wait';
+  galMark.style.display = (beatIndex < beats.length - 1) ? 'block' : 'none';
+  if (cur.channel === 'detail') openDetail(cur);
+  if (cur.role === 'user') pending = setTimeout(nextBeat, 450);
+  else if (autoOn) pending = setTimeout(nextBeat, 900);
+}
+
+function advance() {
+  if (mode !== 'gal') return;
+  if (state === 'typing') { finishType(); return; }
+  if (state === 'wait') { nextBeat(); return; }
+}
+
+function enterInput() {
+  state = 'input';
+  galName.textContent = '你';
+  galBody.textContent = '';
+  galMark.style.display = 'none';
+  galEdit.style.display = 'block';
+  galEdit.value = '';
+  galEdit.focus();
+}
+function hideEdit() { galEdit.style.display = 'none'; }
+
+/* ============================================================
+   4) 提交输入（两视图共用一条路径）
+   ============================================================ */
+function submitUser(text) {
+  text = (text || '').trim();
+  if (!text) return;
+
+  const ui = transcript.length;
+  transcript.push({ role: 'user', content: text });
+  beats.push(...project(transcript[ui], ui));
+
+  const ai = transcript.length;
+  transcript.push({ role: 'agent', content: replyFor() });
+  beats.push(...project(transcript[ai], ai));
+
+  if (mode === 'chat') { renderChat(); scrollBottom(); }
+  else { nextBeat(); }
+}
+
+/* ============================================================
+   5) 详情面板 / backlog / 聊天视图渲染
+   ============================================================ */
+function openDetail(beat) {
+  dTitle.textContent = '详情 · ' + ({ code: '代码', table: '表格', list: '清单' }[beat.kind] || '内容');
+  dBody.textContent = beat.panel;
+  detailPanel.style.display = 'block';
+}
+function closeDetail() { detailPanel.style.display = 'none'; }
+
+function toggleBacklog(force) {
+  const show = force === undefined ? backlog.style.display !== 'block' : force;
+  if (show) { renderBacklog(); backlog.style.display = 'block'; bList.scrollTop = bList.scrollHeight; }
+  else backlog.style.display = 'none';
+}
+function renderBacklog() {
+  bList.innerHTML = '';
+  const played = beats.slice(0, Math.min(beatIndex + 1, beats.length));
+  played.forEach(b => {
+    const item = document.createElement('div');
+    item.className = 'bk-item';
+    const who = document.createElement('span');
+    who.className = 'bk-who' + (b.role === 'user' ? ' user' : '');
+    who.textContent = b.speaker;
+    const txt = document.createElement('span');
+    txt.className = 'bk-txt';
+    txt.textContent = (b.channel === 'detail' ? b.lead : b.text).slice(0, 48);
+    item.appendChild(who); item.appendChild(txt);
+    item.onclick = () => { toggleBacklog(false); setMode('chat'); scrollToMsg(b.msgIndex); };
+    bList.appendChild(item);
+  });
+}
+
+function renderChat() {
+  chatList.innerHTML = '';
+  transcript.forEach((m, i) => {
+    const row = document.createElement('div');
+    row.className = 'msg ' + m.role;
+    row.dataset.i = i;
+    const av = document.createElement('div'); av.className = 'av ' + m.role;
+    if (m.role === 'agent') {
+      const im = document.createElement('img');
+      im.src = '../../tests/NOELA_N001_1227x1227.png';
+      im.alt = '';
+      av.appendChild(im);
+    } else {
+      av.textContent = '你';
+    }
+    const col = document.createElement('div'); col.className = 'col';
+    const who = document.createElement('div'); who.className = 'who';
+    who.textContent = m.role === 'user' ? '你' : '诺艾拉';
+    col.appendChild(who);
+    const bubble = document.createElement('div'); bubble.className = 'bubble';
+    renderContent(bubble, m.content);
+    col.appendChild(bubble);
+    const cp = document.createElement('div'); cp.className = 'copy'; cp.textContent = '复制';
+    cp.onclick = () => { try { navigator.clipboard.writeText(m.content); } catch (e) {}
+                         cp.textContent = '已复制'; setTimeout(() => cp.textContent = '复制', 1200); };
+    col.appendChild(cp);
+    row.appendChild(av);
+    row.appendChild(col);
+    chatList.appendChild(row);
+  });
+}
+function renderContent(el, text) {
+  const re = /```([\s\S]*?)```/g;
+  let last = 0, m;
+  while ((m = re.exec(text))) {
+    if (m.index > last) addText(el, text.slice(last, m.index));
+    const pre = document.createElement('pre');
+    pre.textContent = m[1].replace(/^\n/, '').replace(/^[a-zA-Z0-9_+-]*\n/, '').replace(/\n$/, '');
+    el.appendChild(pre);
+    last = re.lastIndex;
+  }
+  if (last < text.length) addText(el, text.slice(last));
+}
+function addText(el, s) {
+  if (!s.trim()) return;
+  const p = document.createElement('div'); p.className = 'txt'; p.textContent = s.trim();
+  el.appendChild(p);
+}
+function scrollBottom() { chatList.scrollTop = chatList.scrollHeight; }
+function scrollToMsg(i) {
+  const el = chatList.querySelector('[data-i="' + i + '"]');
+  if (el) el.scrollIntoView({ block: 'center' });
+}
+
+/* ============================================================
+   6) 视图切换
+   ============================================================ */
+function setMode(next) {
+  if (next === mode) return;
+  mode = next;
+  document.querySelectorAll('.mode-seg').forEach(s => s.classList.toggle('active', s.dataset.mode === mode));
+  $('galView').style.display  = mode === 'gal' ? 'block' : 'none';
+  $('chatView').style.display = mode === 'chat' ? 'block' : 'none';
+
+  if (mode === 'chat') { renderChat(); scrollToMsg(currentMsgIndex); }
+  else { if (state !== 'typing' && beatIndex < beats.length - 1) nextBeat(); }
+}
+
+/* ============================================================
+   7) 事件绑定
+   ============================================================ */
+document.querySelectorAll('.mode-seg').forEach(seg => seg.onclick = () => setMode(seg.dataset.mode));
+
+$('skipBtn').onclick = advance;
+$('autoBtn').onclick = () => { autoOn = !autoOn; $('autoBtn').classList.toggle('on', autoOn); };
+$('logBtn').onclick  = () => toggleBacklog();
+$('fullBtn').onclick = () => { setMode('chat'); scrollToMsg(currentMsgIndex); };
+$('dClose').onclick  = closeDetail;
+$('dCopy').onclick   = () => { try { navigator.clipboard.writeText(dBody.textContent); } catch (e) {}
+                              dCopy.textContent = '已复制'; setTimeout(() => dCopy.textContent = '复制', 1200); };
+$('bClose').onclick  = () => toggleBacklog(false);
+
+// galgame 视图：滚轮上滑 = 打开历史（backlog），滑到底再下滑 = 收起
+$('galView').addEventListener('wheel', e => {
+  if (mode !== 'gal') return;
+  if (detailPanel.style.display === 'block') return;         // 详情面板内滚动不触发
+  if (e.deltaY < 0) {
+    if (backlog.style.display !== 'block') { toggleBacklog(true); e.preventDefault(); }
+  } else if (e.deltaY > 0 && backlog.style.display === 'block') {
+    const atBottom = bList.scrollTop + bList.clientHeight >= bList.scrollHeight - 2;
+    if (atBottom) { toggleBacklog(false); e.preventDefault(); }
+  }
+}, { passive: false });
+
+galEdit.addEventListener('keydown', e => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const v = galEdit.value; galEdit.value = '';
+    submitUser(v);
+  }
+});
+chatEdit.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChat(); }
+});
+function sendChat() { const v = chatEdit.value; chatEdit.value = ''; updateSendState(); submitUser(v); }
+function updateSendState() { $('chatSend').classList.toggle('active', chatEdit.value.trim().length > 0); }
+chatEdit.addEventListener('input', updateSendState);
+document.getElementById('chatSend').onclick = sendChat;
+
+document.addEventListener('keydown', e => {
+  if (e.target === galEdit || e.target === chatEdit) return;
+  if (e.key === 'Escape') { closeDetail(); toggleBacklog(false); return; }
+  if (mode === 'gal' && e.key === 'Enter') { e.preventDefault(); advance(); }
+});
+
+/* ============================================================
+   8) 启动
+   ============================================================ */
+transcript.push({ role: 'agent', content: GREETING });
+beats.push(...project(transcript[0], 0));
+renderChat();
+startBeats();
+</script>
+</body>
+</html>

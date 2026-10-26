@@ -1,0 +1,43 @@
+name: 功能请求
+description: 提一个新的能力或改进
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 你要解决什么问题
+      description: 先写场景，不要直接写"请支持 XXX 属性"——有场景才知道该做到哪一步。
+      placeholder: 我在做一个活动页，需要在卡片上做 hover 抬升，现在只能靠渲染器猜的 tint…
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 你期望的行为
+      description: |
+        如果是 CSS/HTML 相关，给出你希望生效的写法；若涉及二进制布局变化，说明是否需要新段/新字段。
+      render: html
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: 涉及模块
+      multiple: true
+      options:
+        - 编译器（HTML/XML/CSS 解析）
+        - 渲染器（节点状态/命中/事件）
+        - 字体渲染（FreeType/HarfBuzz）
+        - 绘制后端（GL/D3D11/GDI）
+        - 二进制格式
+        - 文档 / 示例
+        - 打包与工具链
+
+  - type: checkboxes
+    id: constraints
+    attributes:
+      label: 约束确认
+      options:
+        - label: 该能力不需要引入新依赖（字体/视频之外的第三方库）
+        - label: 若需要改二进制布局，我接受升 `BINUI_VERSION` 并同步三处文档
+        - label: 我没有要求"写了没效果"的静默支持（不支持时应打编译警告）

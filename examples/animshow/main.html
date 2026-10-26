@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<app_window width="1000" height="720" bg="#0E0E13" title="binUI 动画实验室">
+<html width="1000" height="720" bg="#0E0E13">
+<head>
+    <meta charset="UTF-8">
+    <title>binUI 动画实验室</title>
+    <style>
+        body { font-family: Segoe UI; }
+        @keyframes scalePulse {
+            0%, 100% { transform: scale(1); opacity: 1; }
+            50%      { transform: scale(1.45); opacity: 0.55; }
+        }
+        @keyframes slideX {
+            from { transform: translateX(0); }
+            to   { transform: translateX(200px); }
+        }
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50%      { transform: translateY(-64px); }
+        }
+        @keyframes popColor {
+            from { opacity: 0; background-color: #3B82F6; }
+            to   { opacity: 1; background-color: #10B981; }
+        }
+        @keyframes pulse {
+            0%, 100% { transform: scale(1); }
+            50%      { transform: scale(1.25); }
+        }
+        @keyframes bob {
+            0%, 100% { transform: translateY(0); }
+            50%      { transform: translateY(-16px); }
+        }
+        @keyframes colorCycle {
+            0%   { background-color: #8B5CF6; }
+            33%  { background-color: #EC4899; }
+            66%  { background-color: #06B6D4; }
+            100% { background-color: #8B5CF6; }
+        }
+        @keyframes fadeScale {
+            0%, 100% { opacity: 0.2; transform: scale(0.7); }
+            50%      { opacity: 1;   transform: scale(1.2); }
+        }
+        button { transition: background-color 0.25s ease, transform 0.2s ease; }
+        .swatch { transition: background-color 0.3s ease; }
+    </style>
+</head>
+<body>
+    <!-- 标题栏（TITLEBAR → 按下可拖动窗口） -->
+    <titlebar style="position:absolute; left:0; top:0; width:1000; height:44; background:#16161D">
+        <span animation="pulse 2s ease-in-out 0s infinite" style="position:absolute; left:14; top:8; width:28; height:28; color:#A78BFA; font-size:18">♻</span>
+        <span style="position:absolute; left:48; top:12; width:220; height:20; color:#F5F5F7; font-size:14">binUI 动画实验室</span>
+        <span style="position:absolute; left:270; top:15; width:220; height:16; color:#8A8A95; font-size:12">关键帧 · 过渡 · 缓动 · 填充</span>
+        <span style="position:absolute; left:812; top:15; width:92; height:16; color:#6E6E78; font-size:11">ESC 退出</span>
+        <button style="position:absolute; left:912; top:8; width:28; height:28; background:#23232E; border-radius:6">─</button>
+        <button style="position:absolute; left:946; top:8; width:28; height:28; background:#E5484D; border-radius:6">✕</button>
+    </titlebar>
+
+    <!-- 第 1 行 -->
+    <!-- 面板：缓动曲线 -->
+    <div style="position:absolute; left:16; top:56; width:316; height:196; background:#16161D; border-radius:16">
+        <span style="position:absolute; left:20; top:12; width:200; height:18; color:#F5F5F7; font-size:13">缓动曲线 Easing</span>
+        <div style="position:absolute; left:16; top:36; width:284; height:1; background:#23232E"></div>
+        <div animation="scalePulse 1.6s ease 0s infinite" style="position:absolute; left:30; top:56; width:40; height:40; background:#A78BFA; border-radius:12"></div>
+        <div animation="scalePulse 1.6s linear 0s infinite" style="position:absolute; left:88; top:56; width:40; height:40; background:#8B5CF6; border-radius:12"></div>
+        <div animation="scalePulse 1.6s ease-in 0s infinite" style="position:absolute; left:146; top:56; width:40; height:40; background:#7C3AED; border-radius:12"></div>
+        <div animation="scalePulse 1.6s ease-out 0s infinite" style="position:absolute; left:204; top:56; width:40; height:40; background:#6D28D9; border-radius:12"></div>
+        <div animation="scalePulse 1.6s ease-in-out 0s infinite" style="position:absolute; left:262; top:56; width:40; height:40; background:#5B21B6; border-radius:12"></div>
+        <span style="position:absolute; left:16; top:108; width:68; height:14; color:#9A9AA5; font-size:11; text-align:center">ease</span>
+        <span style="position:absolute; left:74; top:108; width:68; height:14; color:#9A9AA5; font-size:11; text-align:center">linear</span>
+        <span style="position:absolute; left:132; top:108; width:68; height:14; color:#9A9AA5; font-size:11; text-align:center">ease-in</span>
+        <span style="position:absolute; left:190; top:108; width:68; height:14; color:#9A9AA5; font-size:11; text-align:center">ease-out</span>
+        <span style="position:absolute; left:248; top:108; width:68; height:14; color:#9A9AA5; font-size:11; text-align:center">ease-in-out</span>
+    </div>
+
+    <!-- 面板：方向与次数 -->
+    <div style="position:absolute; left:340; top:56; width:316; height:196; background:#16161D; border-radius:16">
+        <span style="position:absolute; left:20; top:12; width:240; height:18; color:#F5F5F7; font-size:13">方向 · 次数 Direction</span>
+        <div style="position:absolute; left:16; top:36; width:284; height:1; background:#23232E"></div>
+        <span style="position:absolute; left:20; top:96; width:56; height:14; color:#9A9AA5; font-size:11">normal</span>
+        <span style="position:absolute; left:20; top:128; width:56; height:14; color:#9A9AA5; font-size:11">reverse</span>
+        <span style="position:absolute; left:20; top:160; width:56; height:14; color:#9A9AA5; font-size:11">alternate</span>
+        <span style="position:absolute; left:20; top:192; width:56; height:14; color:#9A9AA5; font-size:11">alt-rev</span>
+        <div animation="slideX 1.4s ease 0s 2 normal" style="position:absolute; left:88; top:90; width:22; height:22; background:#A78BFA; border-radius:11"></div>
+        <div animation="slideX 1.4s ease 0s 2 reverse" style="position:absolute; left:88; top:122; width:22; height:22; background:#8B5CF6; border-radius:11"></div>
+        <div animation="slideX 1.4s ease 0s 2 alternate" style="position:absolute; left:88; top:154; width:22; height:22; background:#7C3AED; border-radius:11"></div>
+        <div animation="slideX 1.4s ease 0s 2 alternate-reverse" style="position:absolute; left:88; top:186; width:22; height:22; background:#6D28D9; border-radius:11"></div>
+    </div>
+
+    <!-- 面板：时长 -->
+    <div style="position:absolute; left:664; top:56; width:316; height:196; background:#16161D; border-radius:16">
+        <span style="position:absolute; left:20; top:12; width:200; height:18; color:#F5F5F7; font-size:13">时长 Duration</span>
+        <div style="position:absolute; left:16; top:36; width:284; height:1; background:#23232E"></div>
+        <div style="position:absolute; left:24; top:120; width:268; height:1; background:#26262F"></div>
+        <div animation="bounce 0.5s ease-in-out 0.05s infinite" style="position:absolute; left:96; top:94; width:26; height:26; background:#06B6D4; border-radius:13"></div>
+        <div animation="bounce 1s ease-in-out 0.15s infinite" style="position:absolute; left:158; top:94; width:26; height:26; background:#F59E0B; border-radius:13"></div>
+        <div animation="bounce 2s ease-in-out 0.3s infinite" style="position:absolute; left:220; top:94; width:26; height:26; background:#EC4899; border-radius:13"></div>
+        <span style="position:absolute; left:86; top:132; width:46; height:14; color:#9A9AA5; font-size:11; text-align:center">0.5s</span>
+        <span style="position:absolute; left:148; top:132; width:46; height:14; color:#9A9AA5; font-size:11; text-align:center">1s</span>
+        <span style="position:absolute; left:210; top:132; width:46; height:14; color:#9A9AA5; font-size:11; text-align:center">2s</span>
+    </div>
+
+    <!-- 第 2 行 -->
+    <!-- 面板：填充模式 -->
+    <div style="position:absolute; left:16; top:260; width:316; height:196; background:#16161D; border-radius:16">
+        <span style="position:absolute; left:20; top:12; width:200; height:18; color:#F5F5F7; font-size:13">填充模式 Fill Mode</span>
+        <button style="position:absolute; left:256; top:10; width:52; height:22; background:#23232E; border-radius:6; color:#A78BFA; font-size:12">↻ 重播</button>
+        <div style="position:absolute; left:16; top:36; width:284; height:1; background:#23232E"></div>
+        <div animation="popColor 0.9s ease 1s 1 normal none" style="position:absolute; left:28; top:58; width:40; height:40; background:#1C1C25; border-radius:10"></div>
+        <div animation="popColor 0.9s ease 1s 1 normal backwards" style="position:absolute; left:98; top:58; width:40; height:40; background:#1C1C25; border-radius:10"></div>
+        <div animation="popColor 0.9s ease 1s 1 normal forwards" style="position:absolute; left:168; top:58; width:40; height:40; background:#1C1C25; border-radius:10"></div>
+        <div animation="popColor 0.9s ease 1s 1 normal both" style="position:absolute; left:238; top:58; width:40; height:40; background:#1C1C25; border-radius:10"></div>
+        <span style="position:absolute; left:12; top:110; width:72; height:14; color:#9A9AA5; font-size:11; text-align:center">none</span>
+        <span style="position:absolute; left:82; top:110; width:72; height:14; color:#9A9AA5; font-size:11; text-align:center">backwards</span>
+        <span style="position:absolute; left:152; top:110; width:72; height:14; color:#9A9AA5; font-size:11; text-align:center">forwards</span>
+        <span style="position:absolute; left:222; top:110; width:72; height:14; color:#9A9AA5; font-size:11; text-align:center">both</span>
+        <span style="position:absolute; left:20; top:132; width:276; height:14; color:#6E6E78; font-size:10">延迟 1s · 单次播放：backwards 延迟期显示起点，forwards 结束后保持终点</span>
+    </div>
+
+    <!-- 面板：无限动画 -->
+    <div style="position:absolute; left:340; top:260; width:316; height:196; background:#16161D; border-radius:16">
+        <span style="position:absolute; left:20; top:12; width:200; height:18; color:#F5F5F7; font-size:13">无限动画 Infinite</span>
+        <div style="position:absolute; left:16; top:36; width:284; height:1; background:#23232E"></div>
+        <div animation="pulse 1.1s ease-in-out 0s infinite" style="position:absolute; left:44; top:58; width:46; height:46; background:#8B5CF6; border-radius:23"></div>
+        <div animation="bob 1.6s ease-in-out 0s infinite" style="position:absolute; left:152; top:68; width:26; height:26; background:#10B981; border-radius:13"></div>
+        <div animation="colorCycle 3s linear 0s infinite" style="position:absolute; left:240; top:58; width:46; height:46; background:#8B5CF6; border-radius:23"></div>
+        <span style="position:absolute; left:26; top:116; width:84; height:14; color:#9A9AA5; font-size:11; text-align:center">脉冲 scale</span>
+        <span style="position:absolute; left:122; top:116; width:84; height:14; color:#9A9AA5; font-size:11; text-align:center">漂浮 translate</span>
+        <span style="position:absolute; left:222; top:116; width:84; height:14; color:#9A9AA5; font-size:11; text-align:center">变色 color</span>
+        <span style="position:absolute; left:20; top:140; width:276; height:14; color:#6E6E78; font-size:10">iteration: infinite — 首帧后持续运行，配合局部重绘不闪烁</span>
+    </div>
+
+    <!-- 面板：透明度与缩放 -->
+    <div style="position:absolute; left:664; top:260; width:316; height:196; background:#16161D; border-radius:16">
+        <span style="position:absolute; left:20; top:12; width:240; height:18; color:#F5F5F7; font-size:13">透明度 · 缩放 Opacity × Scale</span>
+        <div style="position:absolute; left:16; top:36; width:284; height:1; background:#23232E"></div>
+        <div animation="fadeScale 2.4s ease-in-out 0s infinite" style="position:absolute; left:126; top:60; width:64; height:64; background:#A78BFA; border-radius:16"></div>
+        <span style="position:absolute; left:110; top:136; width:96; height:14; color:#9A9AA5; font-size:11; text-align:center">fade + scale</span>
+        <span style="position:absolute; left:20; top:160; width:276; height:14; color:#6E6E78; font-size:10">同一关键帧同时驱动多个属性（opacity + transform）</span>
+    </div>
+
+    <!-- 第 3 行 -->
+    <!-- 面板：悬停过渡 -->
+    <div style="position:absolute; left:16; top:464; width:640; height:192; background:#16161D; border-radius:16">
+        <span style="position:absolute; left:20; top:12; width:240; height:18; color:#F5F5F7; font-size:13">悬停过渡 Hover Transition</span>
+        <div style="position:absolute; left:16; top:36; width:608; height:1; background:#23232E"></div>
+        <button style="position:absolute; left:24; top:52; width:56; height:56; background:#8B5CF6; border-radius:14"></button>
+        <button style="position:absolute; left:88; top:52; width:56; height:56; background:#EC4899; border-radius:14"></button>
+        <button style="position:absolute; left:152; top:52; width:56; height:56; background:#06B6D4; border-radius:14"></button>
+        <button style="position:absolute; left:216; top:52; width:56; height:56; background:#F59E0B; border-radius:14"></button>
+        <button style="position:absolute; left:280; top:52; width:56; height:56; background:#10B981; border-radius:14"></button>
+        <button style="position:absolute; left:344; top:52; width:56; height:56; background:#EF4444; border-radius:14"></button>
+        <span style="position:absolute; left:20; top:122; width:420; height:14; color:#6E6E78; font-size:10">悬停色块 → 变亮 + 放大（background-color 0.25s · transform 0.2s）</span>
+        <button style="position:absolute; left:500; top:50; width:120; height:40; background:#8B5CF6; border-radius:10; color:#FFFFFF; font-size:13">↻ 重播全部</button>
+        <span style="position:absolute; left:496; top:96; width:132; height:14; color:#6E6E78; font-size:10">所有动画从头播放</span>
+    </div>
+
+    <!-- 面板：运行时 API -->
+    <div style="position:absolute; left:664; top:464; width:316; height:192; background:#16161D; border-radius:16">
+        <span style="position:absolute; left:20; top:12; width:240; height:18; color:#F5F5F7; font-size:13">运行时 API Runtime</span>
+        <div style="position:absolute; left:16; top:36; width:284; height:1; background:#23232E"></div>
+        <div class="swatch" style="position:absolute; left:24; top:52; width:56; height:56; background:#8B5CF6; border-radius:14"></div>
+        <button style="position:absolute; left:96; top:52; width:196; height:30; background:#23232E; border-radius:8; color:#F5F5F7; font-size:12">▶ 切换色块颜色</button>
+        <button style="position:absolute; left:96; top:90; width:196; height:30; background:#23232E; border-radius:8; color:#A78BFA; font-size:12">↻ 重播动画</button>
+        <span style="position:absolute; left:24; top:122; width:276; height:14; color:#6E6E78; font-size:10">setStyleColor(id, BG_COLOR, c) + transition</span>
+    </div>
+</body>
+</html>
+</app_window>
