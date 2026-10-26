@@ -43,6 +43,9 @@
 - `binui_compile` 把每条编译警告打印两遍（编译器自己写 stderr + 工具再打 warnings）。
 - `offscreen_render` 保存 PNG 后以 `0xC0000005` 退出：GDI+ 的 `Bitmap(HBITMAP,…)` 不拷贝像素，
   却让 `Bitmap` 活过了 `DeleteObject(dib)`；现在先析构再删。
+- **hover 放大时边框被"削掉一半"**：`invalidateNode` 只按布局矩形失效，`transform:scale()`
+  长出来的那一圈（边框/底色/焦点环）永远不在重绘区里，于是只留下缩回前的残影。
+  新增 `renderer.invalidRect()`（布局矩形 ∪ 动画缩放/平移包围盒 + pad），9 个示例统一改用它。
 - **键盘焦点环的圆角写死成 10**（三个后端都是），圆角 8 的按钮上会套出一个半径不同的环，
   看着像"双线框"；现在跟随节点自身圆角与内缩。
 - Makefile 的头文件依赖只覆盖了部分输出目录，`backends/`、`platform/`、`common/`、`bin/`

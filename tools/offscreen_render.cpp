@@ -94,6 +94,33 @@ int main(int argc, char** argv) {
                 std::printf("node %-3u type=%u rect=(%.0f,%.0f %.0fx%.0f) radius=%u text=\"%s\"\n",
                             (unsigned)nd.id, (unsigned)nd.type, nd.x, nd.y, nd.width, nd.height,
                             (unsigned)nd.radius, nd.text.c_str());
+        } else if ((arg == "--hover" || arg == "--active") && i + 1 < argc) {
+            // 模拟指针悬停/按下：验证 hover 缩放、状态样式、边框在缩放后的观感
+            const std::string want = argv[i + 1];
+            uint16_t nid = 0xFFFF;
+            if (!want.empty() && want.find_first_not_of("0123456789") == std::string::npos) {
+                nid = (uint16_t)atoi(want.c_str());
+            } else {
+                nid = r.findNodeByName(want);
+                if (nid == 0xFFFF)
+                    for (const auto& nd : r.getNodes())
+                        if (nd.text == want) { nid = nd.id; break; }
+            }
+            const BinUIRenderer::NodeInfo* hit = nullptr;
+            for (const auto& nd : r.getNodes()) if (nd.id == nid) { hit = &nd; break; }
+            if (hit) {
+                const float cx = hit->x + hit->width * 0.5f;
+                const float cy = hit->y + hit->height * 0.5f;
+                if (arg == "--hover") r.setHover(cx, cy);
+                else r.press(cx, cy);
+                // 让 transition 走完再画：stepAnimations 用的是真实时钟
+                Sleep(280);
+                r.stepAnimations();
+                std::printf("%s node %u at (%.0f,%.0f)\n", arg.c_str() + 2, (unsigned)nid, cx, cy);
+            } else {
+                std::printf("warn: node not found for %s\n", arg.c_str());
+            }
+            i += 1;
         } else if (arg == "--focus" && i + 1 < argc) {
             // 让某个节点处于键盘焦点（验证焦点环/状态样式；按名字或 id 都行）
             const std::string want = argv[i + 1];

@@ -92,11 +92,12 @@ int main(int argc, char* argv[]) {
         for (const auto& n : renderer.getNodes()) if (n.id == id) return &n;
         return nullptr;
     };
-    auto invalidateNode = [&](uint16_t id) {
-        const auto* n = findNode(id);
-        if (!n || !(n->flags & BINUI_VISIBLE)) return;
-        app.invalidateRect((int)std::floor(n->x), (int)std::floor(n->y),
-                           (int)std::ceil(n->width), (int)std::ceil(n->height));
+        auto invalidateNode = [&](uint16_t id) {
+        // 失效矩形必须含动画后的包围盒：hover 放大时只按布局矩形失效，
+        // 长出来的那一圈（边框/底色）不会被重绘，看上去就是"边框被削掉一半"
+        float bx, by, bw, bh;
+        if (renderer.invalidRect(id, bx, by, bw, bh))
+            app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
     };
 
     const BinUIRenderer::NodeInfo* ln = findNode(logId);

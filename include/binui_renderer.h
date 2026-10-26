@@ -289,6 +289,12 @@ public:
     float drawScale(uint16_t nodeId) const;     // 1 = 原尺寸（绕中心缩放）
     float drawRadius(uint16_t nodeId) const;    // 圆角半径（-1 = 无动画，用节点原值）
 
+    // 节点这一帧的失效矩形：布局矩形 ∪ 动画位移/缩放后的包围盒，各边再外扩 pad。
+    // 只按布局矩形失效，:hover 放大时"长出来"的那一圈（边框/底色）不会被重绘，
+    // 表现为"边框被削掉一半"；缩回时旧位置也会留残影。返回 false = 节点不存在/不可见。
+    bool invalidRect(uint16_t nodeId, float& x, float& y, float& w, float& h,
+                     float pad = 2.0f) const;
+
     // ============ 状态样式（v11：CSS :hover/:active/:focus/:checked） ============
     // 编译期把伪类规则编译成"状态目标"：指针/焦点/勾选变化时渲染器切换目标值，
     // 声明了 transition 的节点走过渡通道（否则瞬时）。未声明状态样式的节点仍按

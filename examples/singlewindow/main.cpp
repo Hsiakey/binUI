@@ -91,21 +91,12 @@ int main(int argc, char* argv[]) {
             if (n.id == id) return &n;
         return nullptr;
     };
-    auto invalidateNode = [&](uint16_t id) {
-        const auto* n = findNode(id);
-        if (!n || !(n->flags & BINUI_VISIBLE)) return;
-        float l = n->x, t = n->y, r = n->x + n->width, b = n->y + n->height;
-        float s = renderer.drawScale(id);
-        if (s != 1.0f) {
-            float cx = n->x + n->width / 2.0f, cy = n->y + n->height / 2.0f;
-            float nw = n->width * s, nh = n->height * s;
-            l = std::min(l, cx - nw / 2.0f); t = std::min(t, cy - nh / 2.0f);
-            r = std::max(r, cx + nw / 2.0f); b = std::max(b, cy + nh / 2.0f);
-        }
-        l += renderer.drawOffsetX(id); t += renderer.drawOffsetY(id);
-        r += renderer.drawOffsetX(id); b += renderer.drawOffsetY(id);
-        app.invalidateRect((int)std::floor(l), (int)std::floor(t),
-                           (int)std::ceil(r - l), (int)std::ceil(b - t));
+        auto invalidateNode = [&](uint16_t id) {
+        // 失效矩形必须含动画后的包围盒：hover 放大时只按布局矩形失效，
+        // 长出来的那一圈（边框/底色）不会被重绘，看上去就是"边框被削掉一半"
+        float bx, by, bw, bh;
+        if (renderer.invalidRect(id, bx, by, bw, bh))
+            app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
     };
 
     bool heroVisible = true;

@@ -2373,4 +2373,36 @@ float BinUIRenderer::drawRadius(uint16_t nodeId) const {
     return -1.0f;
 }
 
+// 失效矩形 = 布局矩形 ∪ 动画（位移/绕中心缩放）后的包围盒 + pad。
+// 少了这一步，:hover 放大 1.05 时只有布局矩形那块被重绘：长出来的边框/底色留在
+// 旧缓冲区里，看上去就是"两边的边框被削掉一半"；缩回时旧位置还会留残影。
+bool BinUIRenderer::invalidRect(uint16_t nodeId, float& x, float& y, float& w, float& h,
+                                float pad) const {
+    auto it = nodeIndexById_.find(nodeId);
+    if (it == nodeIndexById_.end()) return false;
+    const auto& n = nodes_[it->second];
+    if (!(n.flags & BINUI_VISIBLE)) return false;
+
+    float l = n.x, t = n.y, r = n.x + n.width, b = n.y + n.height;
+    const float s = drawScale(nodeId);
+    if (s != 1.0f && s > 0.0f) {
+        const float cx = n.x + n.width * 0.5f, cy = n.y + n.height * 0.5f;
+        const float hw = n.width * s * 0.5f, hh = n.height * s * 0.5f;
+        l = std::min(l, cx - hw);
+        t = std::min(t, cy - hh);
+        r = std::max(r, cx + hw);
+        b = std::max(b, cy + hh);
+    }
+    // 平移动画可能来回，两个方向都覆盖（否则回弹时会留下拖影）
+    const float dx = drawOffsetX(nodeId), dy = drawOffsetY(nodeId);
+    l += std::min(0.0f, dx);
+    r += std::max(0.0f, dx);
+    t += std::min(0.0f, dy);
+    b += std::max(0.0f, dy);
+
+    l -= pad; t -= pad; r += pad; b += pad;
+    x = l; y = t; w = r - l; h = b - t;
+    return true;
+}
+
 } // namespace binui

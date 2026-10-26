@@ -246,7 +246,7 @@ HTML5 编译规则：
 - `<video>` 视频播放（v9）：编译为 `BINUI_VIDEO` 节点 + 视频描述段；属性 `src`（相对 UI 文件目录）、`autoplay`、`loop`、`muted`、`controls`（浏览器式控制条）、`volume="0..1"`。播放状态机（play/pause/seek/回绕/ENDED 事件）在渲染器内实现，**解码像素由可选模块推送**——见「视频播放」章节；未启用模块时仅绘制底色，控制条交互照常。
 - 滚动容器：`overflow:auto/scroll` 产生固定视口（不再自动扩展高度），运行时支持 `scrollTo`/`scrollBy`/滚轮（`scrollAt`）/滚动条拖动，命中测试与绘制均按滚动偏移并裁剪视口，`SCROLL` 事件通知变化。**`overflow:hidden` 只裁剪不滚动**（v13 起与 `auto/scroll` 区分：不出滚动条、不响应滚轮，`renderer.isUserScrollable()` 为 false）。
 - 键盘导航：方向键在可交互节点间移动焦点（`moveKeyboardFocus`：优先同行/列的最近者，其次加权距离；跳过隐藏/非交互节点），Tab/Shift+Tab 按文档顺序循环焦点（`cycleKeyboardFocus`，环绕、跳过隐藏；编辑中提交并移出），Enter/Space 激活（INPUT 进入编辑、其余触发 `CLICK`），点击过的节点自动成为键盘焦点；Win32 后端绘制白色焦点环。文本框编辑中方向键仍操作光标。
-- 局部重绘：主循环改为事件驱动（无消息时零轮询，空闲 CPU≈0%）；应用侧维护脏矩形（悬停/按下/滚轮/拖动/打字/光标闪烁只标记受影响节点），`WM_PAINT` 用 `ps.rcPaint` 裁剪持久离屏缓冲，仅重绘相交节点并只 `BitBlt` 脏区。
+- 局部重绘：主循环改为事件驱动（无消息时零轮询，空闲 CPU≈0%）；应用侧维护脏矩形（悬停/按下/滚轮/拖动/打字/光标闪烁只标记受影响节点），`WM_PAINT` 用 `ps.rcPaint` 裁剪持久离屏缓冲，仅重绘相交节点并只 `BitBlt` 脏区。**失效矩形要用 `renderer.invalidRect()`**：它返回"布局矩形 ∪ 动画缩放/平移后的包围盒 + pad"，只按布局矩形失效时 `transform:scale()` 放开的那一圈（边框/底色/焦点环）不会被重绘，看起来就是"边框被削掉一半"。
 - 交互状态：渲染器维护指针 hover/按下/焦点/勾选状态（`setHover`/`press`/`release`/`cancelPress`/`setKeyboardFocus`/`setNodeChecked`），`release` 在原节点上才触发 `CLICK`（按下/拖出/松开的完整语义），`HOVER`/`PRESS` 事件可选监听；作者写了 CSS 状态样式时按作者的来（见上「运行时伪类」），没写时按钮悬停变亮、按下变暗（Win32 后端）。状态样式可用 `renderer.stateStyle(id, BINUI_ST_HOVER)` 查询编译产物、`activeStateStyle(id)` 查询当前生效项。
 - 文本框编辑：点击 `input` 自动聚焦，渲染器维护光标/选区（UTF-8 安全），支持插入/退格/删除/方向键/Home/End/Shift 选区；`blur` 提交并触发 `INPUT` 事件，`FOCUS` 事件通知焦点变化。Win32 后端负责键盘消息（含 IME/代理对）与光标闪烁/选区绘制（`placeCaretAtClick` 点击定位光标）。
 - `<head>/<meta>/<title>/<link>/<script>/<style>` 内容不生成节点。

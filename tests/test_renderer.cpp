@@ -849,6 +849,44 @@ int main() {
         TEST("drawOrder: absolute sibling above container", pb > pc && pb > p2);
     }
 
+    // ---- 失效矩形：必须覆盖动画缩放/平移后的包围盒 ----
+    // 只按布局矩形失效时，hover 放大出来的那一圈不会被重绘 —— 表现就是
+    // "边框被削掉一半"。这条用例把区间关系钉住。
+    {
+        BinUIRenderer r;
+        auto res = CompileBinUIEx(
+            "<html><body><button id=\"b\" style=\"left:100; top:60; width:120; height:40;"
+            " transition: transform 0.2s ease; background:#333; color:#fff\">x</button>"
+            "</body></html>");
+        TEST("invalidRect: 布局可解析", !res.layout.empty() &&
+             r.loadLayout(res.layout.data(), res.layout.size()));
+        const uint16_t id = r.findNodeByName("b");
+        float x0 = 0, y0 = 0, w0 = 0, h0 = 0;
+        TEST("invalidRect: 静止时等于布局矩形",
+             r.invalidRect(id, x0, y0, w0, h0, 0.0f) &&
+             std::fabs(x0 - 100.0f) < 0.6f && std::fabs(y0 - 60.0f) < 0.6f &&
+             std::fabs(w0 - 120.0f) < 0.6f && std::fabs(h0 - 40.0f) < 0.6f);
+
+        // 触发 hover（按钮默认有 1.05 放大 + 提亮），把过渡走完
+        r.setHover(160.0f, 80.0f);
+        for (int i = 0; i < 60; i++) r.stepAnimations();
+        const float sc = r.drawScale(id);
+        float x1 = 0, y1 = 0, w1 = 0, h1 = 0;
+        const bool ok = r.invalidRect(id, x1, y1, w1, h1, 0.0f);
+        if (sc > 1.0f) {
+            const float hw = 120.0f * sc * 0.5f, hh = 40.0f * sc * 0.5f;
+            TEST("invalidRect: hover 放大后覆盖放大后的包围盒",
+                 ok && x1 <= 160.0f - hw + 0.6f && y1 <= 80.0f - hh + 0.6f &&
+                 x1 + w1 >= 160.0f + hw - 0.6f && y1 + h1 >= 80.0f + hh - 0.6f);
+            TEST("invalidRect: 同时仍覆盖原布局矩形",
+                 ok && x1 <= 100.6f && y1 <= 60.6f &&
+                 x1 + w1 >= 219.4f && y1 + h1 >= 99.4f);
+        } else {
+            TEST("invalidRect: 未进入缩放态时仍返回布局矩形", ok &&
+                 std::fabs(x1 - 100.0f) < 0.6f && std::fabs(w1 - 120.0f) < 0.6f);
+        }
+    }
+
     printf("\n=== Results: %d tests failed ===\n", failed);
     return failed > 0 ? 1 : 0;
 }
