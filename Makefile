@@ -5,6 +5,10 @@
 CXX      ?= g++
 CXXFLAGS ?= -std=c++17 -Wall -Wextra -O2 -MMD -MP
 LDFLAGS  ?=
+# 静态链接 C++ 运行时：产物常在 sh 下被执行（make 的 SHELL=sh），而 Git for Windows
+# 的 /mingw64/bin 排在本机 MinGW 前面，会先命中版本不匹配的 libstdc++-6.dll，
+# 表现为莫名其妙的退出码 127。静态链接后产物自包含，换环境也不会炸。
+RTLINK   ?= -static-libgcc -static-libstdc++
 
 SRC_DIR  := src
 INC_DIR  := include
@@ -30,6 +34,7 @@ LIB_OBJS := \
     $(BUILD_DIR)/compiler/binui_compiler.o \
     $(BUILD_DIR)/renderer/binui_renderer.o \
     $(BUILD_DIR)/font/binui_font_renderer.o \
+    $(BUILD_DIR)/common/binui_link.o \
     $(BUILD_DIR)/binui_charts.o
 LIB_A    := $(BUILD_DIR)/libbinui.a
 
@@ -57,6 +62,27 @@ $(LIB_A): $(LIB_OBJS)
 	ar rcs $@ $^
 
 # =============================================
+# 组件二进制：.bum.xml -> .bum（产物落 build 目录，不污染源码树）
+# =============================================
+COMPONENT_BUMS := \
+    $(BUILD_DIR)/assets/components/titlebar.bum \
+    $(BUILD_DIR)/assets/components/card.bum \
+    $(BUILD_DIR)/assets/components/dock.bum
+
+# 静态链接：构建脚本经常在 sh/PowerShell 等不同环境里调用它，
+# 动态 MinGW 运行时（libstdc++-6.dll 等）在某些 PATH 下找不到（sh 下表现为退出码 127）
+$(BIN_DIR)/binui_compile$(EXT): tools/binui_compile.cpp $(LIB_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
+
+$(BUILD_DIR)/assets/components/%.bum: $(EXA_DIR)/components/%.bum.xml $(BIN_DIR)/binui_compile$(EXT)
+	@mkdir -p $(dir $@)
+	$(BIN_DIR)/binui_compile$(EXT) $< -o $@
+
+.PHONY: components
+components: $(COMPONENT_BUMS)
+
+# =============================================
 # 第三方源码（FreeType / HarfBuzz，体积大不入库）
 # =============================================
 .PHONY: deps
@@ -77,33 +103,33 @@ TEST_BINS := \
 
 $(BIN_DIR)/test_binui$(EXT): tests/test_binui.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -o $@ $< $(LIB_A)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
 
 $(BIN_DIR)/test_renderer$(EXT): tests/test_renderer.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -o $@ $< $(LIB_A)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
 
 $(BIN_DIR)/test_renderer_real$(EXT): tests/test_renderer_real.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -o $@ $< $(LIB_A)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
 
 $(BIN_DIR)/test_compiler$(EXT): tests/test_compiler.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -o $@ $< $(LIB_A)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
 
 $(BIN_DIR)/test_anim$(EXT): tests/test_anim.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -o $@ $< $(LIB_A)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
 
 # test_hot_reload 需要 examples/ 下的 binui_paths.h / binui_hot_reload.h
 $(BIN_DIR)/test_hot_reload$(EXT): tests/test_hot_reload.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -I$(EXA_DIR) -o $@ $< $(LIB_A)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -I$(EXA_DIR) -o $@ $< $(LIB_A)
 
 # test_font 需要 FreeType/HarfBuzz 头与预编译静态库
 $(BIN_DIR)/test_font$(EXT): tests/test_font.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Ithird_party/freetype/include -Ithird_party/harfbuzz/src \
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Ithird_party/freetype/include -Ithird_party/harfbuzz/src \
 	    -o $@ $< $(LIB_A) -Lthird_party/freetype/build -lfreetype \
 	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
@@ -155,41 +181,43 @@ $(BUILD_DIR)/examples/%.o: $(EXA_DIR)/%.cpp
 
 $(BIN_DIR)/vision_monitor$(EXT): $(BUILD_DIR)/examples/app_win32.o $(BUILD_DIR)/examples/vision_monitor/main.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)/vision_monitor
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIB_A) $(WINLIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS)
 	cp -f $(EXA_DIR)/vision_monitor/main.binui.xml $(WIN_BIN)/vision_monitor/main.binui.xml
 
 $(BIN_DIR)/animshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)/animshow
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/animshow/main.html $(WIN_BIN)/animshow/main.html
 
 $(BIN_DIR)/svgdemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)/svgdemo
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/svgdemo/main.html $(WIN_BIN)/svgdemo/main.html
 
-$(BIN_DIR)/components$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/components/main.o $(LIB_A)
+$(BIN_DIR)/components$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/components/main.o $(LIB_A) $(COMPONENT_BUMS)
 	@mkdir -p $(BIN_DIR)/components
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/components/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/components/main.html $(WIN_BIN)/components/main.html
-	cp -f $(EXA_DIR)/components/titlebar.bum.xml $(WIN_BIN)/components/titlebar.bum.xml
+	# 二进制组件（编译期产物）+ 一个纯源码组件，演示"混放"
+	cp -f $(BUILD_DIR)/assets/components/titlebar.bum $(WIN_BIN)/components/titlebar.bum
+	cp -f $(BUILD_DIR)/assets/components/card.bum $(WIN_BIN)/components/card.bum
+	cp -f $(BUILD_DIR)/assets/components/dock.bum $(WIN_BIN)/components/dock.bum
 	cp -f $(EXA_DIR)/components/button.bum.xml $(WIN_BIN)/components/button.bum.xml
-	cp -f $(EXA_DIR)/components/card.bum.xml $(WIN_BIN)/components/card.bum.xml
 
 $(BIN_DIR)/cssshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/cssshow/main.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)/cssshow
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/cssshow/main.html $(WIN_BIN)/cssshow/main.html
 
 $(BIN_DIR)/singlewindow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/singlewindow/main.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)/singlewindow
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/singlewindow/main.html $(WIN_BIN)/singlewindow/main.html
 	cp -f examples/assets/noela.png $(WIN_BIN)/singlewindow/NOELA_N001_1227x1227.png
 
 $(BIN_DIR)/multiwindow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/multiwindow/main.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)/multiwindow
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/multiwindow/stage.html $(WIN_BIN)/multiwindow/stage.html
 	cp -f $(EXA_DIR)/multiwindow/hero.html $(WIN_BIN)/multiwindow/hero.html
 	cp -f $(EXA_DIR)/multiwindow/dialog.html $(WIN_BIN)/multiwindow/dialog.html
@@ -197,7 +225,7 @@ $(BIN_DIR)/multiwindow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/
 
 $(BIN_DIR)/galgamechat$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/galgamechat/main.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)/galgamechat
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/galgamechat/main.html $(WIN_BIN)/galgamechat/main.html
 	cp -f examples/assets/noela.png $(WIN_BIN)/galgamechat/NOELA_N001_1227x1227.png
 
@@ -208,7 +236,7 @@ $(BUILD_DIR)/binui_video_stub.o: $(SRC_DIR)/binui_video_stub.cpp
 
 $(BIN_DIR)/videodemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/videodemo/main.o $(BUILD_DIR)/binui_video_stub.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)/videodemo
-	$(CXX) $(LDFLAGS) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/videodemo/main.html $(WIN_BIN)/videodemo/main.html
 	cp -rf $(EXA_DIR)/videodemo/media $(WIN_BIN)/videodemo/media
 
@@ -216,6 +244,7 @@ all: $(LIB_A) $(TEST_BINS) $(DEMO_BINS)
 
 # 调试工具（可选，不入 all）：离屏渲染 / 窗口抓取 / 窗口枚举
 TOOL_BINS := \
+    $(BIN_DIR)/binui_compile$(EXT) \
     $(BIN_DIR)/offscreen_render$(EXT) \
     $(BIN_DIR)/window_capture$(EXT) \
     $(BIN_DIR)/enum_windows$(EXT) \
@@ -224,20 +253,20 @@ TOOL_BINS := \
 # 示例 UI 零警告检查（CMake 也会注册成 ctest 用例）
 $(BIN_DIR)/check_examples$(EXT): tools/check_examples.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -o $@ $< $(LIB_A) $(GL_LIBS)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A) $(GL_LIBS)
 
 $(BIN_DIR)/offscreen_render$(EXT): tools/offscreen_render.cpp $(SRC_DIR)/platform/app_win32.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -I$(EXA_DIR) -Isrc -o $@ $< $(SRC_DIR)/platform/app_win32.cpp \
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -I$(EXA_DIR) -Isrc -o $@ $< $(SRC_DIR)/platform/app_win32.cpp \
 	    $(LIB_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
 
 $(BIN_DIR)/window_capture$(EXT): tools/window_capture.cpp
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ $< -lgdiplus -lgdi32 -luser32
+	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $< -lgdiplus -lgdi32 -luser32
 
 $(BIN_DIR)/enum_windows$(EXT): tools/enum_windows.cpp
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -o $@ $< -luser32
+	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $< -luser32
 
 .PHONY: tools
 tools: $(TOOL_BINS)

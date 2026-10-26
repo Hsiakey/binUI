@@ -193,8 +193,12 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         return false;
     }
 
+    // 留存布局字节：mountComponent() 在它上面做组件合并
+    layoutBytes_.assign(data, data + size);
+
     nodes_.clear();
     nodeIndexById_.clear();
+    mountedAnchors_.clear();
     specOf_.clear();
     flexOf_.clear();
     specData_.clear();
@@ -459,51 +463,83 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         }
     }
 
-    // ---- 名称段（v8，位于视频段之后；缺失 = 布局无命名节点） ----
+    // ---- 名称段（v8，位于资源段/组件引用段之后；缺失 = 布局无命名节点） ----
+    // 段序（v12）：窗口描述 / 动画 / 视频 / 状态样式 / 资源 / 组件引用 / 名称，
+    // 除名称段外都恒定写出，所以按游标顺序跳段即可。
+    auto sectionAt = [&](int skip) -> const uint8_t* {
+        const uint8_t* q = specEnd;
+        size_t rem = size - static_cast<size_t>(q - data);
+        for (int k = 0; k < skip; k++) {
+            if (rem < sizeof(uint32_t)) return nullptr;
+            uint32_t n = 0;
+            memcpy(&n, q, sizeof(n));
+            if (rem < sizeof(uint32_t) + n) return nullptr;
+            q += sizeof(uint32_t) + n;
+            rem -= sizeof(uint32_t) + n;
+        }
+        return rem >= sizeof(uint32_t) ? q : nullptr;
+    };
+
+    // ---- 资源段（v12）：imageIndex -> 图片路径（布局自描述） ----
+    imagePaths_.clear();
+    if (const uint8_t* ip = sectionAt(4)) {
+        uint32_t ib = 0;
+        memcpy(&ib, ip, sizeof(ib));
+        if (ib >= sizeof(uint32_t) && size - static_cast<size_t>(ip - data) >= sizeof(uint32_t) + ib) {
+            const uint8_t* payload = ip + sizeof(uint32_t);   // 段数据起点
+            uint32_t ic = 0;
+            memcpy(&ic, payload, sizeof(ic));
+            for (uint32_t i = 0; i < ic; i++) {
+                const size_t at = sizeof(uint32_t) + (size_t)i * sizeof(uint32_t); // 含计数字段
+                if (at + sizeof(uint32_t) > ib) break;
+                uint32_t off = 0;
+                memcpy(&off, payload + at, sizeof(off));
+                imagePaths_.emplace_back(off < header->stringSize ? stringTable + off : "");
+            }
+        }
+    }
+
+    // ---- 组件引用段（v12）：<use ... external> 的锚点与组件路径 ----
+    componentRefs_.clear();
+    if (const uint8_t* cp = sectionAt(5)) {
+        uint32_t cb = 0;
+        memcpy(&cb, cp, sizeof(cb));
+        if (cb >= sizeof(uint32_t) && size - static_cast<size_t>(cp - data) >= sizeof(uint32_t) + cb) {
+            const uint8_t* q = cp + sizeof(uint32_t);
+            uint32_t cc = 0;
+            memcpy(&cc, q, sizeof(cc));
+            q += sizeof(cc);
+            const uint8_t* qend = cp + sizeof(uint32_t) + cb;
+            for (uint32_t i = 0; i < cc && q + sizeof(BinUIComponentRef) <= qend; i++) {
+                BinUIComponentRef ref;
+                memcpy(&ref, q, sizeof(ref));
+                q += sizeof(ref);
+                ComponentRef cr;
+                cr.anchorId = ref.anchorId;
+                cr.src = ref.srcOffset < header->stringSize ? stringTable + ref.srcOffset : "";
+                componentRefs_.push_back(std::move(cr));
+            }
+        }
+    }
+
     nameToId_.clear();
-    {
-        const uint8_t* np = specEnd;
-        if (winDesc_.present) {
-            uint32_t wb = 0;
-            memcpy(&wb, specEnd, sizeof(uint32_t));
-            np = specEnd + sizeof(uint32_t) + wb;
-        }
-        size_t nrem = size - (np - data);
-        if (nrem >= sizeof(uint32_t)) {
-            uint32_t abytes = 0;
-            memcpy(&abytes, np, sizeof(uint32_t));
-            if (nrem >= sizeof(uint32_t) + abytes) np += sizeof(uint32_t) + abytes; // 跳过动画段
-        }
-        nrem = size - (np - data);
-        if (nrem >= sizeof(uint32_t)) {
-            uint32_t vbytes = 0;
-            memcpy(&vbytes, np, sizeof(uint32_t));
-            if (nrem >= sizeof(uint32_t) + vbytes) np += sizeof(uint32_t) + vbytes; // 跳过视频段
-        }
-        nrem = size - (np - data);
-        if (nrem >= sizeof(uint32_t)) {
-            uint32_t sbytes = 0;
-            memcpy(&sbytes, np, sizeof(uint32_t));
-            if (nrem >= sizeof(uint32_t) + sbytes) np += sizeof(uint32_t) + sbytes; // 跳过状态样式段
-        }
-        nrem = size - (np - data);
-        if (nrem >= sizeof(uint32_t)) {
-            uint32_t nbytes = 0;
-            memcpy(&nbytes, np, sizeof(uint32_t));
-            if (nbytes > 0 && nrem >= sizeof(uint32_t) + nbytes) {
-                const uint8_t* q = np + sizeof(uint32_t);
-                const uint8_t* qend = q + nbytes;
-                if (q + sizeof(uint32_t) <= qend) {
-                    uint32_t nc = 0;
-                    memcpy(&nc, q, sizeof(uint32_t)); q += sizeof(uint32_t);
-                    for (uint32_t i = 0; i < nc && q + 8 <= qend; i++) {
-                        uint32_t nodeId = 0, nameOff = 0;
-                        memcpy(&nodeId, q, sizeof(uint32_t));
-                        memcpy(&nameOff, q + sizeof(uint32_t), sizeof(uint32_t));
-                        q += 8;
-                        if (nameOff < header->stringSize && nodeId <= 0xFFFF)
-                            nameToId_[std::string(stringTable + nameOff)] = (uint16_t)nodeId;
-                    }
+    if (const uint8_t* np = sectionAt(6)) {
+        uint32_t nbytes = 0;
+        memcpy(&nbytes, np, sizeof(uint32_t));
+        if (nbytes > 0 && size - static_cast<size_t>(np - data) >= sizeof(uint32_t) + nbytes) {
+            const uint8_t* q = np + sizeof(uint32_t);
+            const uint8_t* qend = q + nbytes;
+            if (q + sizeof(uint32_t) <= qend) {
+                uint32_t nc = 0;
+                memcpy(&nc, q, sizeof(uint32_t));
+                q += sizeof(uint32_t);
+                for (uint32_t i = 0; i < nc && q + 8 <= qend; i++) {
+                    uint32_t nodeId = 0, nameOff = 0;
+                    memcpy(&nodeId, q, sizeof(uint32_t));
+                    memcpy(&nameOff, q + sizeof(uint32_t), sizeof(uint32_t));
+                    q += 8;
+                    if (nameOff < header->stringSize && nodeId <= 0xFFFF)
+                        nameToId_[std::string(stringTable + nameOff)] = (uint16_t)nodeId;
                 }
             }
         }
@@ -532,7 +568,35 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
               << (winDesc_.present ? " (+window desc)" : "")
               << (!animDefs_.empty() || !transitions_.empty() ? " (+anim)" : "")
               << (!videos_.empty() ? " (+video x" + std::to_string(videos_.size()) + ")" : "")
+              << (imagePaths_.empty() ? std::string()
+                                      : " (+imgs x" + std::to_string(imagePaths_.size()) + ")")
+              << (componentRefs_.empty() ? std::string()
+                                         : " (+mounts x" + std::to_string(componentRefs_.size()) + ")")
               << std::endl;
+    return true;
+}
+
+// ============================================================
+// 组件挂载（外挂 .bum）：编译期同款链接器，运行期现场合并
+// ============================================================
+bool BinUIRenderer::mountComponent(const uint8_t* data, size_t size, uint16_t anchorId) {
+    if (!data || size == 0) {
+        std::cerr << "[binui] mountComponent: 组件数据为空" << std::endl;
+        return false;
+    }
+    if (layoutBytes_.empty()) {
+        std::cerr << "[binui] mountComponent: 还没有布局（先 loadLayout）" << std::endl;
+        return false;
+    }
+    std::vector<uint8_t> merged = layoutBytes_;   // 拷贝：loadLayout 会重写 layoutBytes_
+    std::string err;
+    if (!MergeLayout(merged, data, size, anchorId, nullptr, nullptr, &err)) {
+        std::cerr << "[binui] mountComponent 失败：" << err << std::endl;
+        return false;
+    }
+    if (!loadLayout(merged.data(), merged.size())) return false;
+    mountedAnchors_.insert(anchorId);
+    std::cout << "[binui] Mounted component under node " << anchorId << std::endl;
     return true;
 }
 

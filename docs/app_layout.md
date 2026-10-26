@@ -65,7 +65,7 @@ myapp/
 2. $BINUI_UI 环境变量
 3. <exeDir>/<exeName>/main.html        子目录形态
 4. <exeDir>/main.html                  平铺形态
-5. <exeDir>/<exeName>/main.binui       已编译产物（跳过编译）
+5. <exeDir>/<exeName>/main.bui         已编译产物（跳过编译；旧名 .binui 也认）
 6. <repo>/examples/<name>/main.html    仅 debug/未安装构建（源码树内直接跑）
 7. 全部失败 → GenerateDefaultBinUI() + stderr 警告（保留现有行为，不黑屏退出）
 ```

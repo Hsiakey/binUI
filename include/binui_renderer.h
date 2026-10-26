@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "binui_format.h"
+#include "binui_link.h"
 
 namespace binui {
 
@@ -71,6 +72,25 @@ public:
 
     // 解析 binUI（.xhtml）二进制布局
     bool loadLayout(const uint8_t* data, size_t size);
+
+    // ============ 组件挂载（外挂 .bum）============
+    // 把一份组件布局挂到 anchorId 节点下，然后按合并后的布局重新解析。
+    // 与编译期内联共用同一个链接器（binui_link），合并规则完全一致：
+    // 节点 id 重编号、字符串表后移、规格/状态/动画/视频/资源段一起迁移。
+    // 挂载会重置指针/键盘/编辑等瞬时状态（节点 id 变了，锚点之前的焦点无意义）。
+    bool mountComponent(const uint8_t* data, size_t size, uint16_t anchorId);
+    // 该锚点是否已挂过组件（ex::MountAll 用它保证幂等）
+    bool isComponentMounted(uint16_t anchorId) const {
+        return mountedAnchors_.count(anchorId) != 0;
+    }
+
+    // 布局里记录的 imageIndex -> 图片路径（v12 资源段；布局自描述）
+    const std::vector<std::string>& imagePaths() const { return imagePaths_; }
+    // 布局里记录的运行期挂载点（v12 组件引用段，<use ... external>）
+    const std::vector<ComponentRef>& componentRefs() const { return componentRefs_; }
+    // 当前布局二进制（含编译期内联的组件；mountComponent 之后会变大）
+    const std::vector<uint8_t>& layoutBytes() const { return layoutBytes_; }
+
     void loadResources(const std::unordered_map<std::string, std::vector<uint8_t>>& resources);
 
     // 记录 imageIndex -> 资源路径（与编译器输出 CompileResult::images 顺序一致）
@@ -285,6 +305,10 @@ private:
     std::vector<NodeInfo> nodes_;
     std::unordered_map<uint16_t, size_t> nodeIndexById_;
     std::unordered_map<std::string, uint16_t> nameToId_; // v8 名称表：htmlId -> nodeId
+    std::vector<uint8_t> layoutBytes_;                   // 当前布局（组件合并的基底）
+    std::vector<std::string> imagePaths_;                // v12 资源段：imageIndex -> 路径
+    std::vector<ComponentRef> componentRefs_;            // v12 组件引用段：运行期挂载点
+    std::unordered_set<uint16_t> mountedAnchors_;        // 已挂载组件的锚点（幂等）
     uint16_t nextNodeId_ = 0;                            // v8 动态节点 id 分配
     std::unordered_map<std::string, ImageResource> images_;
     std::vector<std::string> imageOrder_;

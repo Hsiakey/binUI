@@ -3,6 +3,7 @@
 #include "binui_format.h"
 #include <cstdio>
 #include <cmath>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -1196,7 +1197,6 @@ int main() {
             "<use src=\"card.bum.xml\" x=\"10\" y=\"110\" w=\"200\" heading=\"卡片标题\"/>"
             "<use x=\"10\" y=\"200\"/>"
             "<use src=\"missing.bum.xml\" x=\"10\" y=\"240\"/>"
-            "<use src=\"packed.bum\" x=\"10\" y=\"280\"/>"
             "</body></html>");
 
         auto res = CompileBinUIFileEx((dir / "host.html").generic_string());
@@ -1218,15 +1218,92 @@ int main() {
         TEST("component: nested <use> expanded", cardBtn != nullptr);
         TEST("component: nested heading substituted", findByText("卡片标题") != nullptr);
 
-        int noSrc = 0, missingFile = 0, binaryNotSupported = 0;
+        int noSrc = 0, missingFile = 0;
         for (const auto& w : res.warnings) {
             if (w.find("缺少 src") != std::string::npos) noSrc++;
             if (w.find("读不到组件文件") != std::string::npos) missingFile++;
-            if (w.find("二进制组件") != std::string::npos) binaryNotSupported++;
         }
         TEST("component: missing src warns", noSrc == 1);
         TEST("component: missing file warns", missingFile == 1);
-        TEST("component: binary .bum not supported yet warns", binaryNotSupported == 1);
+
+        // ---- v12：二进制组件 .bum（编译期由链接器离线合并）----
+        writeFile("pack.bum.xml",
+            "<div style=\"height:30\"><span style=\"height:20; color:#00FF00\">打包组件</span></div>");
+        const auto packRes = CompileBinUIFileEx((dir / "pack.bum.xml").generic_string());
+        TEST("component: binary build produces layout", !packRes.layout.empty());
+        {
+            std::ofstream f(dir / "pack.bum", std::ios::binary);
+            f.write(reinterpret_cast<const char*>(packRes.layout.data()),
+                    static_cast<std::streamsize>(packRes.layout.size()));
+        }
+        writeFile("binhost.html",
+            "<html><body>"
+            "<use src=\"pack.bum\" x=\"10\" y=\"10\" w=\"140\"/>"
+            "<use src=\"pack.bum\" external x=\"10\" y=\"60\" w=\"140\"/>"
+            "</body></html>");
+        const auto bres = CompileBinUIFileEx((dir / "binhost.html").generic_string());
+        BinUIRenderer rb;
+        TEST("component: binary host parses",
+             !bres.layout.empty() && rb.loadLayout(bres.layout.data(), bres.layout.size()));
+        int packed = 0;
+        const BinUIRenderer::NodeInfo* packedSpan = nullptr;
+        for (const auto& n : rb.getNodes())
+            if (n.text == "打包组件") { packed++; packedSpan = &n; }
+        TEST("component: binary .bum inlined at compile time", packed == 1);
+        const BinUIRenderer::NodeInfo* packedWrap = nullptr;
+        if (packedSpan)
+            for (const auto& n : rb.getNodes())
+                if (n.id == packedSpan->parentId) packedWrap = &n;
+        TEST("component: <use w> 覆盖二进制组件根宽",
+             packedWrap && std::fabs(packedWrap->width - 140.0f) < 0.5f);
+        TEST("component: binary 组件根坐标落在锚点处",
+             packedWrap && std::fabs(packedWrap->y - 10.0f) < 0.5f);
+
+        // ---- v12：外挂组件（external）-> 组件引用段 + 运行期挂载 ----
+        TEST("component: external <use> 记录一个挂载点", rb.componentRefs().size() == 1);
+        TEST("component: 挂载点路径已相对宿主改写",
+             !rb.componentRefs().empty() && rb.componentRefs()[0].src.find("pack.bum") != std::string::npos);
+        if (!rb.componentRefs().empty()) {
+            const uint16_t anchor = rb.componentRefs()[0].anchorId;
+            std::vector<uint8_t> packBytes = packRes.layout;
+            TEST("component: 运行期挂载成功",
+                 rb.mountComponent(packBytes.data(), packBytes.size(), anchor));
+            int after = 0;
+            for (const auto& n : rb.getNodes())
+                if (n.text == "打包组件") after++;
+            TEST("component: 挂载后节点数增加", after == packed + 1);
+            TEST("component: 已挂载标记幂等", rb.isComponentMounted(anchor));
+        }
+
+        // ---- 二进制与源码并存：二进制优先；源码更新则改用源码并告警 ----
+        {
+            std::ofstream f(dir / "pack.bum.xml", std::ios::binary);
+            f << "<div style=\"height:30\"><span style=\"height:20\">源码更新版</span></div>";
+        }
+        std::filesystem::last_write_time(
+            dir / "pack.bum.xml",
+            std::filesystem::last_write_time(dir / "pack.bum") + std::chrono::seconds(5));
+        const auto nres = CompileBinUIFileEx((dir / "binhost.html").generic_string());
+        bool staleWarn = false;
+        for (const auto& w : nres.warnings)
+            if (w.find("源码比二进制新") != std::string::npos) staleWarn = true;
+        TEST("component: 源码比二进制新时告警", staleWarn);
+        BinUIRenderer rn;
+        rn.loadLayout(nres.layout.data(), nres.layout.size());
+        bool hasNewText = false;
+        for (const auto& n : rn.getNodes())
+            if (n.text == "源码更新版") hasNewText = true;
+        TEST("component: 源码更新版生效（改用源码内联）", hasNewText);
+
+        // ---- v12：资源段（布局自描述：imageIndex -> 图片路径）----
+        writeFile("img.html",
+            "<html><body><img src=\"noela.png\" style=\"width:40; height:40\"/></body></html>");
+        const auto ires = CompileBinUIFileEx((dir / "img.html").generic_string());
+        BinUIRenderer ri;
+        ri.loadLayout(ires.layout.data(), ires.layout.size());
+        TEST("v12: 资源段随布局写出",
+             !ires.images.empty() && ri.imagePaths().size() == ires.images.size() &&
+             ri.imagePaths()[0] == ires.images[0]);
 
         // 参数值按纯文本注入：传进来的标签不能变成真节点
         writeFile("inject.bum.xml", "<div style=\"height:20\"><span>{{body}}</span></div>");

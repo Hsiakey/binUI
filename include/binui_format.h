@@ -9,7 +9,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v7: 动画段；v8: 名称表；v9: 视频描述段（<video>，可选编解码模块见 include/binui_video.h）
 // v10: 节点 zIndex（CSS z-index 简化实现：数值越大越靠上，同值下 absolute 高于流式）
 // v11: 状态样式段（CSS :hover/:active/:focus/:checked 的运行时切换目标）
-constexpr uint32_t BINUI_VERSION    = 11;
+// v12: 资源段（imageIndex -> 图片路径，布局自描述）+ 组件引用段（外挂 .bum 的锚点与路径）
+constexpr uint32_t BINUI_VERSION    = 12;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -287,5 +288,33 @@ struct BinUIStateStyle {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIStateStyle) == 16, "BinUIStateStyle must be 16 bytes");
+
+// ============================================================
+// 资源段（v12，恒定写出，位于状态样式段之后、组件引用段之前）
+// 布局：uint32 imgBytes（0 = 无资源）+ uint32 imgCount + uint32 pathOffset[imgCount]
+// pathOffset 指向字符串表（UTF-8 路径，按 imageIndex 顺序）。
+//
+// 有了这段，布局就是自描述的：外壳不必再依赖编译器返回的图片列表就能按
+// imageIndex 加载资源；组件二进制（.bum）合并进宿主时，资源下标在这里整体重排。
+// ============================================================
+
+// ============================================================
+// 组件引用段（v12，恒定写出，位于资源段之后、名称段之前）
+// 布局：uint32 compBytes（0 = 无外挂组件）+ uint32 compCount + BinUIComponentRef[compCount]
+//
+// <use src="x.bum" external> 表示"运行期挂载"：编译器留一个占位节点（锚点），
+// 把组件路径记进本段；外壳读取后用 renderer.mountComponent() 把组件布局挂上去。
+// 未标 external 的 <use> 一律在编译期合并进单个 .bui（见 docs/components.md）：
+// 源码形式编译期内联（可参数化），二进制形式由链接器离线合并。
+// ============================================================
+#pragma pack(push, 1)
+struct BinUIComponentRef {
+    uint16_t anchorId;   // 宿主里的占位节点 id（组件挂到它下面）
+    uint8_t  flags;      // 保留（0）
+    uint8_t  reserved;
+    uint32_t srcOffset;  // 组件路径在字符串表中的偏移（UTF-8）
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUIComponentRef) == 8, "BinUIComponentRef must be 8 bytes");
 
 } // namespace binui

@@ -1,6 +1,7 @@
 // check_examples.cpp - 示例 UI 零警告检查
 // 用法: check_examples [目录...]（默认 examples）
-// 对目录下所有 *.html 与 *.binui.xml 逐个编译：编译为空或产生任何编译警告都算失败。
+// 对目录下所有 UI 源码（*.html / *.bum.xml / *.bui.xml / *.binui.xml）逐个编译：
+// 编译为空或产生任何编译警告都算失败。
 // "写了没效果" 是 bug —— 这条检查就是防止示例 UI 里悄悄积累不支持的写法。
 #include <cstdio>
 #include <cstring>
@@ -8,9 +9,16 @@
 #include <string>
 #include <vector>
 
+#include "binui_asset.h"
 #include "binui_compiler.h"
+#include "binui_link.h"
 
 namespace fs = std::filesystem;
+
+static bool EndsWith(const std::string& s, const char* tail) {
+    const size_t n = std::strlen(tail);
+    return s.size() > n && s.compare(s.size() - n, n, tail) == 0;
+}
 
 int main(int argc, char** argv) {
     std::vector<std::string> dirs;
@@ -30,9 +38,8 @@ int main(int argc, char** argv) {
             const std::string base = ent.path().filename().generic_string();
             if (base.rfind("mockup", 0) == 0) continue;
             const std::string p = ent.path().generic_string();
-            if (p.size() > 5 && p.compare(p.size() - 5, 5, ".html") == 0)
-                files.push_back(p);
-            else if (p.size() > 11 && p.compare(p.size() - 11, 11, ".binui.xml") == 0)
+            if (EndsWith(p, ".html") || EndsWith(p, ".bum.xml") || EndsWith(p, ".bui.xml") ||
+                EndsWith(p, ".binui.xml"))
                 files.push_back(p);
         }
         if (ec) {
@@ -52,6 +59,20 @@ int main(int argc, char** argv) {
         for (const auto& w : r.warnings) {
             std::printf("WARN %s: %s\n", f.c_str(), w.c_str());
             failed++;
+        }
+        // 外挂组件（<use ... external>）：引用的组件必须真的能解析到（二进制或源码），
+        // 否则运行期会静默少一块界面 —— 这类问题值得在 CI 就拦住
+        const std::string srcDir = fs::path(f).parent_path().generic_string();
+        for (const auto& ref : binui::ReadComponentRefs(r.layout.data(), r.layout.size())) {
+            const binui::AssetFile af = binui::ProbeAsset(srcDir, ref.src);
+            if (!af.valid()) {
+                std::printf("FAIL %s: 外挂组件缺失 %s（锚点 #%u）\n",
+                            f.c_str(), ref.src.c_str(), (unsigned)ref.anchorId);
+                failed++;
+            } else {
+                std::printf("OK   %s: 外挂组件 %s -> %s\n", f.c_str(), ref.src.c_str(),
+                            af.kind == binui::AssetKind::BinaryLayout ? "二进制" : "源码");
+            }
         }
         std::printf("OK   %s: %zu bytes, %zu images\n", f.c_str(), r.layout.size(), r.images.size());
     }

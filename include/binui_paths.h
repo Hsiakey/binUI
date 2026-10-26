@@ -131,7 +131,7 @@ inline LaunchArgs ParseArgs(int argc, char* argv[]) {
 //   2. $BINUI_UI
 //   3. <exeDir>/<appName>/<fileName>        子目录形态
 //   4. <exeDir>/<fileName>                  平铺形态
-//   5. <exeDir>/<appName>/<base>.binui      已编译产物（跳过编译）
+//   5. <exeDir>/<appName>/<base>.bui        已编译产物（跳过编译；旧名 .binui 仍认）
 //   6. <repo>/examples/<appName>/<fileName> 源码树内直接跑（未安装/未复制时）
 // 返回真实路径；全部失败返回空（调用方回退 GenerateDefaultBinUI）。
 inline std::string ResolveUI(const LaunchArgs& a, const std::string& appName,
@@ -162,12 +162,14 @@ inline std::string ResolveUI(const LaunchArgs& a, const std::string& appName,
     // 4. 平铺形态
     if (std::string p = hit(Join(exeDir, fileName)); !p.empty()) return p;
 
-    // 5. 已编译产物：同 base 名换 .binui 后缀
+    // 5. 已编译产物：同 base 名换 .bui 后缀（旧名 .binui 兼容）
     {
         size_t dot = fileName.find_last_of('.');
         std::string base = dot == std::string::npos ? fileName : fileName.substr(0, dot);
-        if (std::string p = hit(Join(appDir, base + ".binui")); !p.empty()) return p;
-        if (std::string p = hit(Join(exeDir, base + ".binui")); !p.empty()) return p;
+        for (const char* ext : {".bui", ".binui"}) {
+            if (std::string p = hit(Join(appDir, base + ext)); !p.empty()) return p;
+            if (std::string p = hit(Join(exeDir, base + ext)); !p.empty()) return p;
+        }
     }
 
     // 6. 源码树内直接跑（demo 从构建目录外启动时的兜底）

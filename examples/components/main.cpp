@@ -1,14 +1,15 @@
-// components/main.cpp - 组件化（.bum.xml）演示（OpenGL 3.3 无边框窗口）
-// 覆盖 v11 的新能力：
-//   · 运行时伪类 :hover / :active / :focus / :checked —— 编译成状态样式段，
-//     渲染器按指针/焦点/勾选状态切换目标值（声明了 transition 就走过渡）
-//   · 结构伪类 :first-child / :nth-child() / :last-child —— 编译期按兄弟序号求值
-//   · 伪元素 ::before / ::after —— 内联模式并入宿主文本，盒模式合成子节点
+// components/main.cpp - 组件化演示（.bui / .bum / .bum.xml 混放）
+// 覆盖 v12 的组件链接能力：
+//   · 源码组件 .bum.xml：编译期内联（可参数化 {{param}}）
+//   · 二进制组件 .bum：编译期由 binui_link 离线合并（同一套合并规则）
+//   · 外挂组件 external：编译器只留占位节点，运行期 ex::MountAll() 现场挂载
+// 另外演示 v11 的运行时伪类 :hover / :active / :focus（状态样式段）
 #include <cstdio>
 #include <string>
 #include <vector>
 
 #include "binui_compiler.h"
+#include "binui_component.h"
 #include "binui_renderer.h"
 #include "backends/binui_gl-gdi.h"
 #include "binui_paths.h"
@@ -45,6 +46,19 @@ int main(int argc, char* argv[]) {
         std::fprintf(stderr, "[components] Failed to load layout\n");
         return 1;
     }
+
+    // ---- 外挂组件（<use ... external>）：运行期挂载 ----
+    const std::string uiDir = binui::ex::DirOf(uiPath);
+    auto mountAll = [&]() {
+        const int nodesBefore = (int)renderer.getNodes().size();
+        const binui::ex::MountReport rep =
+            binui::ex::MountAll(renderer, uiDir, renderer.layoutBytes());
+        if (rep.mounted || rep.failed)
+            std::printf("[components] 外挂组件：挂载 %d，跳过 %d，失败 %d（新增节点 %d）\n",
+                        rep.mounted, rep.skipped, rep.failed,
+                        (int)renderer.getNodes().size() - nodesBefore);
+    };
+    mountAll();
 
     const auto& wd = renderer.windowDesc();
     const auto& nodes = renderer.getNodes();
@@ -132,8 +146,10 @@ int main(int argc, char* argv[]) {
 
     app.setUpdateFn([&](float dt) {
         (void)dt;
-        if (hot.Tick(renderer, "components", winW, winH) == binui::ex::HotReload::Result::Reloaded)
+        if (hot.Tick(renderer, "components", winW, winH) == binui::ex::HotReload::Result::Reloaded) {
+            mountAll();          // 重编后外挂组件要重新挂（新布局里只剩占位节点）
             app.invalidateAll();
+        }
         for (uint16_t id : renderer.stepAnimations())   // 过渡/关键帧重绘
             invalidateNode(id);
     });

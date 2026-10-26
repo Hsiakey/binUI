@@ -2,9 +2,11 @@
   button.bum.xml —— 按钮组件（带自己的 :hover 过渡）
 
   参数：
-    label  按钮文字
-    w      宽度（像素，必填）
+    label  按钮文字（可选，默认「按钮」）
+    w      宽度（可选，默认 132）
     bg     底色（可选，默认 #23232E）
+
+  参数都带默认值：内联时由 <use> 属性覆盖；单独编成 button.bum 时取默认值。
 
   注意：组件自带的 <style> 会并进宿主样式表 —— 是"全局"的，多个实例共享同一条规则。
   所以参数化的样式要写在内联 style 上（每个实例独立），别写在 <style> 里。
@@ -20,5 +22,5 @@
     .cmp-btn:active { background: #7C6FF0; transform: scale(0.97); }
 </style>
 <div class="cmp-wrap" style="height:40">
-    <button class="cmp-btn" style="position:absolute; left:0; top:0; width:{{w}}; height:40; background:{{bg=#23232E}}">{{label}}</button>
+    <button class="cmp-btn" style="position:absolute; left:0; top:0; width:{{w=132}}; height:40; background:{{bg=#23232E}}">{{label=按钮}}</button>
 </div>

@@ -2,10 +2,26 @@
 
 都是独立小程序，不参与库构建。统一在仓库根目录执行（工具里的相对路径按仓库根解析）。
 
+## binui_compile —— UI / 组件源码编译成二进制
+
+```bash
+make tools && build-mingw/bin/binui_compile.exe examples/components/titlebar.bum.xml
+#   -> examples/components/titlebar.bum
+build-mingw/bin/binui_compile.exe examples/components/main.html -o build/main.bui
+build-mingw/bin/binui_compile.exe dist/titlebar.bum -o dist2/titlebar.bum   # 已是二进制 -> 原样拷贝
+```
+
+约定：`.bui` = 单个界面（应用入口），`.bum` = 组件；两者都可以只发源码
+（`.bui.xml` / `.bum.xml`）、只发二进制，或两种都发（加载时二进制优先）。
+`make components` / CMake 的 `components_bums` 目标会在构建期生成示例组件二进制。
+详见 [docs/components.md](../docs/components.md)。
+
 ## check_examples —— 示例 UI 零警告检查
 
-把 `examples/` 下所有 `*.html`、`*.binui.xml`（`mockup*.html` 设计稿除外）逐个编译，
-**编译为空或产生任何编译警告都算失败**。CMake 里已注册成 ctest 用例（CI 会跑）。
+把 `examples/` 下所有 `*.html`、`*.bum.xml`、`*.bui.xml`、`*.binui.xml`
+（`mockup*.html` 设计稿除外）逐个编译，**编译为空或产生任何编译警告都算失败**；
+此外还校验 `<use ... external>` 引用的外挂组件是否真的能解析到（二进制或源码）。
+CMake 里已注册成 ctest 用例（CI 会跑）。
 
 ```bash
 make tools && build-mingw/bin/check_examples.exe examples

@@ -50,10 +50,15 @@ add_library(binui STATIC
     src/compiler/binui_compiler.cpp
     src/renderer/binui_renderer.cpp
     src/font/binui_font_renderer.cpp
+    src/common/binui_link.cpp
     src/binui_charts.cpp
 )
 target_include_directories(binui PUBLIC ${CMAKE_SOURCE_DIR}/include PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(binui PUBLIC freetype harfbuzz)
+
+# UI 源码 -> 二进制布局（.bui / .bum）的命令行编译器；构建期编组件、CI 里也能单独用
+add_executable(binui_compile tools/binui_compile.cpp)
+target_link_libraries(binui_compile PRIVATE binui)
 
 # =============================================
 # Win32 演示外壳 + 示例
@@ -107,16 +112,35 @@ if(WIN32)
             "$<TARGET_FILE_DIR:svgdemo>/svgdemo/main.html"
     )
 
-    # components：<use src="x.bum.xml"> 编译期组件内联（标题栏 / 按钮 / 组合卡片）
+    # components：组件化三形态（.bum 二进制内联 / .bum.xml 源码内联 / external 运行期挂载）
+    # .bum 由 binui_compile 在构建期从 .bum.xml 生成，不进源码树
+    set(BINUI_COMPONENT_BUMS "")
+    foreach(cname titlebar card dock)
+        set(bum_out "${CMAKE_BINARY_DIR}/assets/components/${cname}.bum")
+        add_custom_command(
+            OUTPUT "${bum_out}"
+            COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/assets/components"
+            COMMAND $<TARGET_FILE:binui_compile>
+                    "${CMAKE_SOURCE_DIR}/examples/components/${cname}.bum.xml" -o "${bum_out}"
+            DEPENDS binui_compile "${CMAKE_SOURCE_DIR}/examples/components/${cname}.bum.xml"
+            COMMENT "binui: ${cname}.bum.xml -> ${cname}.bum"
+            VERBATIM
+        )
+        list(APPEND BINUI_COMPONENT_BUMS "${bum_out}")
+    endforeach()
+    add_custom_target(components_bums ALL DEPENDS ${BINUI_COMPONENT_BUMS})
+
     add_executable(components examples/components/main.cpp)
     target_link_libraries(components PRIVATE gl_shell)
+    add_dependencies(components components_bums)
     add_custom_command(TARGET components POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:components>/components"
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
             "${CMAKE_SOURCE_DIR}/examples/components/main.html"
-            "${CMAKE_SOURCE_DIR}/examples/components/titlebar.bum.xml"
             "${CMAKE_SOURCE_DIR}/examples/components/button.bum.xml"
-            "${CMAKE_SOURCE_DIR}/examples/components/card.bum.xml"
+            "${CMAKE_BINARY_DIR}/assets/components/titlebar.bum"
+            "${CMAKE_BINARY_DIR}/assets/components/card.bum"
+            "${CMAKE_BINARY_DIR}/assets/components/dock.bum"
             "$<TARGET_FILE_DIR:components>/components/"
     )
     # cssshow：CSS 伪类（:hover/:active/:focus/:checked）+ 伪元素（::before/::after）
@@ -263,6 +287,11 @@ install(FILES
     include/binui_format.h
     include/binui_renderer.h
     include/binui_compiler.h
+    include/binui_link.h
+    include/binui_asset.h
+    include/binui_component.h
+    include/binui_paths.h
+    include/binui_hot_reload.h
     DESTINATION include/binui
 )
 

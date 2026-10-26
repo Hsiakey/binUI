@@ -7,6 +7,7 @@
 #include <windows.h>
 #include <gdiplus.h>
 #include "binui_compiler.h"
+#include "binui_component.h"
 #include "binui_renderer.h"
 #include "platform/app_win32.h"
 
@@ -42,13 +43,24 @@ int main(int argc, char** argv) {
 
     BinUIRenderer r;
     if (!r.loadLayout(res.layout.data(), res.layout.size())) { std::printf("load failed\n"); return 1; }
+
+    // 外挂组件（<use ... external>）：与运行时一样现场挂载，预览才完整
+    const std::string uiDir = binui::ex::DirOf(argv[1]);
+    if (!r.componentRefs().empty()) {
+        const binui::ex::MountReport rep = binui::ex::MountAll(r, uiDir, r.layoutBytes());
+        std::printf("mounted %d external component(s), %d failed\n", rep.mounted, rep.failed);
+    }
+
     const auto& nodes = r.getNodes();
     int W = (int)nodes[0].width, H = (int)nodes[0].height;
 
+    // 资源清单来自布局自带的 v12 资源段（不再依赖编译期的 res.images）
+    const std::vector<std::string> imgPaths = r.imagePaths();
     std::unordered_map<std::string, std::vector<uint8_t>> resources;
-    for (const auto& p : res.images) {
+    for (const auto& p : imgPaths) {
         FILE* f = nullptr;
-        fopen_s(&f, p.c_str(), "rb");
+        fopen_s(&f, (uiDir + p).c_str(), "rb");
+        if (!f) fopen_s(&f, p.c_str(), "rb");
         if (f) {
             fseek(f, 0, SEEK_END);
             long sz = ftell(f);
@@ -61,7 +73,7 @@ int main(int argc, char** argv) {
             std::printf("warn: image %s not found\n", p.c_str());
         }
     }
-    r.setImageOrder(res.images);
+    r.setImageOrder(imgPaths);
     r.loadResources(resources);
 
     for (int i = 3; i < argc; i++) {

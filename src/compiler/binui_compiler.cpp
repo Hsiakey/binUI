@@ -1,6 +1,8 @@
 // binui_compiler.cpp - UI 源码 -> binUI (.xhtml) 二进制布局编译器
 #include "binui_compiler.h"
+#include "binui_asset.h"
 #include "binui_format.h"
+#include "binui_link.h"
 
 #include <fstream>
 #include <sstream>
@@ -918,8 +920,47 @@ static void AppendStateSection(std::vector<uint8_t>& buf,
     memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
 
-std::vector<uint8_t> CompileBinUISource(const std::string& source) {
-    return CompileBinUIEx(source).layout;
+// 追加资源段（v12）：uint32 imgBytes + uint32 imgCount + uint32 pathOffset[]
+// 恒定写出（无资源时 imgBytes=4，只有计数 0），让布局自描述：外壳不必再依赖
+// 编译器返回的图片列表就能按 imageIndex 加载；组件合并时资源下标在这里重排。
+static void AppendImageSection(std::vector<uint8_t>& buf,
+                               const std::vector<uint32_t>& imgOffsets) {
+    size_t start = buf.size();
+    std::vector<uint8_t> data;
+    auto wu = [&](uint32_t x) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&x);
+        data.insert(data.end(), p, p + 4);
+    };
+    wu((uint32_t)imgOffsets.size());
+    for (uint32_t o : imgOffsets) wu(o);
+    uint32_t nbytes = (uint32_t)data.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
+
+// 追加组件引用段（v12）：uint32 compBytes + uint32 compCount + BinUIComponentRef[]
+// 恒定写出（无外挂组件时 compBytes=4），位于资源段之后、名称段之前。
+static void AppendComponentSection(std::vector<uint8_t>& buf,
+                                   const std::vector<BinUIComponentRef>& refs) {
+    size_t start = buf.size();
+    std::vector<uint8_t> data;
+    auto wu = [&](uint32_t x) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&x);
+        data.insert(data.end(), p, p + 4);
+    };
+    wu((uint32_t)refs.size());
+    if (!refs.empty())
+        data.insert(data.end(),
+                    reinterpret_cast<const uint8_t*>(refs.data()),
+                    reinterpret_cast<const uint8_t*>(refs.data() + refs.size()));
+    uint32_t nbytes = (uint32_t)data.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
+
+std::vector<uint8_t> CompileBinUISource(const std::string& source) {    return CompileBinUIEx(source).layout;
 }
 
 CompileResult CompileBinUIEx(const std::string& source) {
@@ -1500,6 +1541,9 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     }
 
     // build string table
+    // v12 资源段存的是偏移，图片路径必须先进表
+    if (outImages)
+        for (const auto& p : *outImages) getOrAddString(p);
     for (auto& [nodeId, txt] : textMap)
         getOrAddString(txt);
 
@@ -1540,6 +1584,13 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     }
     AppendVideoSection(buf, videoDescs);
     AppendStateSection(buf, {});   // XML 路径：无 <style>，但段恒定写出保证解析链确定
+    {
+        std::vector<uint32_t> imgOffsets;
+        if (outImages)
+            for (const auto& p : *outImages) imgOffsets.push_back(offsets[getOrAddString(p)]);
+        AppendImageSection(buf, imgOffsets);
+    }
+    AppendComponentSection(buf, {}); // XML 路径：无 <use>，段恒定写出保证解析链确定
     AppendNameSection(buf, nodeNames, offsets);
 
     return buf;
@@ -2122,15 +2173,16 @@ static std::vector<HNode> ParseElements(const std::string& html, std::string& st
 // ============================================================
 // 组件内联：<use src="路径.bum.xml"> / <component src=…>
 //
-// 语义（编译期展开，运行时零开销、二进制格式不变）：
-//   · src 相对"当前 UI 文件所在目录"解析；组件文件里的相对资源 src 会被改写成宿主相对路径
-//   · 组件源码里的 {{参数名}} 用 <use> 上的同名属性替换；未提供则替换为空并警告
-//   · 组件顶层元素视为"组件根"：其属性（背景/尺寸/圆角…）合入替换节点，
-//     <use> 自身属性优先（可覆盖组件默认尺寸/底色/文字）
+// 语义（见 docs/components.md）：
+//   · src 相对"当前 UI 文件所在目录"解析；按 include/binui_asset.h 的规则选文件
+//     （二进制 .bum/.bui 优先，源码更新时改用源码并告警）
+//   · 源码组件：{{参数名}} 用 <use> 上的同名属性替换；未提供则替换为空并警告；
+//     组件顶层元素视为"组件根"，其属性合入替换节点，<use> 自身属性优先
+//   · 二进制组件：留占位节点，编译期由 binui_link 离线合并（与运行期挂载同一套规则）
+//   · <use ... external>：只留占位节点 + 组件引用段，运行期 ex::MountAll() 挂载
 //   · 组件自带的 <style> 并进宿主样式表：组件可被宿主主题化（也意味着选择器会互相影响，
 //     建议组件内用带前缀的类名）
 //   · 嵌套组件递归展开，同一文件引用多次就展开多份（每个实例独立）
-//   · 二进制组件（.bum/.binui）暂不支持，遇到会明确警告（见 docs/components.md）
 // ============================================================
 static bool ReadWholeFile(const std::string& path, std::string& out) {
     std::ifstream in(path, std::ios::binary);
@@ -2142,8 +2194,11 @@ static bool ReadWholeFile(const std::string& path, std::string& out) {
 }
 
 // {{name}} → <use> 上的同名属性值（未提供则空串 + 警告）
+// defaultsOnly=true 时只替换带默认值的形式 {{name=默认}}：用于"把组件源码
+// 单独编成 .bum"——参数取默认值，裸 {{name}} 原样留给内联时替换。
 static std::string SubstituteParams(const std::string& src,
-                                    const std::unordered_map<std::string, std::string>& params) {
+                                    const std::unordered_map<std::string, std::string>& params,
+                                    bool defaultsOnly = false) {
     std::string out;
     out.reserve(src.size());
     for (size_t i = 0; i < src.size(); ) {
@@ -2161,6 +2216,11 @@ static std::string SubstituteParams(const std::string& src,
                 const std::string* val = nullptr;
                 if (it != params.end()) val = &it->second;
                 else if (eq != std::string::npos) val = &fallback;
+                if (defaultsOnly && eq == std::string::npos) {
+                    out += src.substr(i, end + 2 - i);   // 裸 {{name}}：留给内联时替换
+                    i = end + 2;
+                    continue;
+                }
                 if (val) {
                     // 参数值按纯文本注入：转义 & < > —— 否则传进来的值里若含 <use> 之类的标签，
                     // 会被后续解析当成真元素（踩过一次：body="内部 <use> …" 凭空多出一个节点）
@@ -2182,9 +2242,48 @@ static std::string SubstituteParams(const std::string& src,
     return out;
 }
 
+// 单独编译组件源码时：{{param=默认}} 取默认值（裸 {{param}} 留给内联时替换）。
+// 这样 .bum.xml 既能被 <use> 内联传参，也能自己编成 .bum —— 两种形态语义一致。
+static std::string ApplyParamDefaults(const std::string& src) {
+    static const std::unordered_map<std::string, std::string> kNoParams;
+    return SubstituteParams(src, kNoParams, /*defaultsOnly=*/true);
+}
+
+// ============================================================
+// 组件来源解析：.bum/.bui 二进制 与 .bum.xml/.bui.xml 源码
+//
+// 作者可以只放二进制、只放源码，或两种都放（甚至按组件混放）：
+//   · 无扩展名的 src 依次探测 x.bum / x.bui → x.bum.xml / x.bui.xml / x.html / x.xml
+//   · 二进制优先；但源码比二进制新（mtime）时按源码内联并告警 —— 改源码保存后
+//     热重载就能看到效果，不会因为忘了重编 .bum 而"改了没反应"
+//   · <use src="x.bum" external> 表示运行期挂载：编译期只留占位节点 + 组件引用段
+// ============================================================
+struct PendingComponent {
+    std::string path;             // 解析后的组件文件路径（链接器直接用）
+    std::string label;            // 诊断用（<use> 的 id 或标签）
+    int         linkIndex = 0;
+    bool        external = false; // true = 运行期挂载（写组件引用段）
+    // <use> 上的尺寸/底色覆盖：二进制组件里参数已固化，这几个仍可覆盖
+    // （原样保留属性文本，等 CompileHTML 里用统一的值解析器换算）
+    std::string wAttr, hAttr, radiusAttr, bgAttr;
+};
+
+static thread_local std::vector<PendingComponent> tl_pendingComponents;
+static thread_local std::unordered_map<int, uint16_t> tl_pendingAnchor; // linkIndex -> 占位节点 id
+
+// 相对宿主 UI 目录改写：外挂组件的路径要能跟着 .bui 一起搬
+static std::string RebaseToHost(const std::string& hostDir, const std::string& path) {
+    if (hostDir.empty() || path.empty()) return path;
+    std::error_code ec;
+    const auto rel = std::filesystem::relative(std::filesystem::path(path),
+                                               std::filesystem::path(hostDir), ec);
+    if (ec) return path;
+    const std::string s = rel.generic_string();
+    return s.empty() ? path : s;
+}
+
 static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets,
-                             const std::string& baseDir, int depth) {
-    bool any = false;
+                             const std::string& baseDir, int depth) {    bool any = false;
     for (const auto& e : elems)
         if (e.tag == "use" || e.tag == "component") { any = true; break; }
     if (!any) return;
@@ -2221,27 +2320,34 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
         std::string compStyles;
         std::string compDir = baseDir;
         std::string failReason;
-        auto endsWith = [](const std::string& s, const char* tail) {
-            const size_t n = std::strlen(tail);
-            return s.size() > n && s.compare(s.size() - n, n, tail) == 0;
-        };
+        bool deferred = false;   // 二进制内联 / 运行期外挂：留占位节点，稍后处理
+        const bool external = e.attrs.count("external") > 0 ||
+                              (e.attrs.count("mode") > 0 &&
+                               LowerCopy(TrimCopy(e.attrs.at("mode"))) == "external");
+        // 二进制 / 源码的选择规则见 include/binui_asset.h（二进制优先，源码更新则优先源码）
+        const AssetFile af = ProbeAsset(baseDir, srcRel);
         if (srcRel.empty()) {
             failReason = "缺少 src 属性";
-        } else if (endsWith(srcRel, ".bum") || endsWith(srcRel, ".binui")) {
-            failReason = "二进制组件（" + srcRel + "）暂不支持，请改用 .bum.xml 源码形式";
+        } else if (!af.valid()) {
+            failReason = "读不到组件文件「" + srcRel + "」（.bum / .bui / .bum.xml 都不存在）";
         } else {
-            const std::string compPath = baseDir.empty()
-                ? srcRel
-                : (std::filesystem::path(baseDir) / srcRel).lexically_normal().generic_string();
-            compDir = std::filesystem::path(compPath).parent_path().generic_string();
-            std::string compSrc;
-            if (!ReadWholeFile(compPath, compSrc)) {
-                failReason = "读不到组件文件 " + compPath;
+            compDir = std::filesystem::path(af.path).parent_path().generic_string();
+            const bool binary = (af.kind == AssetKind::BinaryLayout);
+            // 二进制在、但源码更新：这次用源码（改完保存就该看到效果），并明确告警
+            if (af.sourceNewer)
+                Warn("组件 " + srcRel + " 的源码比二进制新，已改用源码内联（建议重编后发布）");
+            if (binary || external) {
+                deferred = true;   // 占位节点 + 链接器（编译期）/渲染器（运行期）
             } else {
-                compSrc = SubstituteParams(compSrc, params);
-                compElems = ParseElements(compSrc, compStyles);
-                if (compElems.empty()) failReason = "组件 " + compPath + " 解析后没有元素";
-                else ExpandComponents(compElems, compStyles, compDir, depth + 1);
+                std::string compSrc;
+                if (!ReadWholeFile(af.path, compSrc)) {
+                    failReason = "读不到组件文件 " + af.path;
+                } else {
+                    compSrc = SubstituteParams(compSrc, params);
+                    compElems = ParseElements(compSrc, compStyles);
+                    if (compElems.empty()) failReason = "组件 " + af.path + " 解析后没有元素";
+                    else ExpandComponents(compElems, compStyles, compDir, depth + 1);
+                }
             }
         }
         if (!failReason.empty())
@@ -2272,6 +2378,30 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
             root.attrs[kv.first] = kv.second;
         }
         root.parentIdx = (e.parentIdx == SIZE_MAX) ? SIZE_MAX : remap[e.parentIdx];
+
+        // ---- 二进制内联 / 运行期外挂：登记待处理项，占位节点带上角标 ----
+        // （链接器（编译期）或渲染器（运行期）按锚点节点 id 把组件挂上来）
+        if (deferred) {
+            PendingComponent pc;
+            pc.path = af.path;
+            pc.label = label;
+            pc.linkIndex = static_cast<int>(tl_pendingComponents.size());
+            pc.external = external;
+            // <use> 的尺寸/底色/圆角对二进制组件依然有效（其余参数已在编 .bum 时固化）
+            auto pickAttr = [&](std::initializer_list<const char*> keys) -> std::string {
+                for (const char* k : keys) {
+                    auto it = e.attrs.find(k);
+                    if (it != e.attrs.end() && !it->second.empty()) return it->second;
+                }
+                return {};
+            };
+            pc.wAttr = pickAttr({"w", "width"});
+            pc.hAttr = pickAttr({"h", "height"});
+            pc.radiusAttr = pickAttr({"radius", "border-radius", "r"});
+            pc.bgAttr = pickAttr({"bg", "background"});
+            tl_pendingComponents.push_back(pc);
+            root.attrs["data-binui-link"] = std::to_string(pc.linkIndex);
+        }
 
         // ---- 组件内的相对资源路径 → 宿主相对路径 ----
         for (auto& ce : compElems) {
@@ -2310,8 +2440,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     };
 
     // ---- 1. 容错解析 HTML 为扁平元素列表（与组件内联共用 ParseElements）----
+    tl_pendingComponents.clear();   // 每次编译重置组件登记（CompileHTML 可被单独调用）
+    tl_pendingAnchor.clear();
     std::string styleSheets; // <style> 文本（@keyframes 与 transition/animation 规则）
-    std::vector<HNode> elems = ParseElements(html, styleSheets);
+    std::vector<HNode> elems = ParseElements(ApplyParamDefaults(html), styleSheets);
 
     // ---- 1.5 组件内联：<use src="x.bum.xml"> 展开成真实元素 ----
     ExpandComponents(elems, styleSheets, tl_uiBaseDir, 0);
@@ -2445,12 +2577,16 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     LenCtx curCtx;
 
     auto parseLen = [&](const std::string& s, float def, const char* what = "长度") -> float {
+        // 未替换的组件参数占位（{{w}} 之类）不是作者的错：编 .bum 时它还没被代入，
+        // 内联时会替换。静默回退默认值，别刷警告。
+        if (s.find("{{") != std::string::npos) return def;
         return ParseLenPct(s, def, curCtx, what).value;
     };
 
     // 解析颜色；失败返回 def（并已打警告）
     auto parseColorWith = [&](const std::string& s, uint32_t def, const char* what = "颜色") -> uint32_t {
         if (s.empty()) return def;
+        if (s.find("{{") != std::string::npos) return def;   // 同 parseLen：参数占位
         uint32_t c = def;
         if (!ParseColorValue(s, &c, what)) return def;
         return c;
@@ -3273,6 +3409,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         n.id = id++;
         hIdxToNodeId[ei] = n.id;
         n.parentId = pnodeId;
+        // 组件占位节点：记下锚点 id（编译期离线合并 / 运行期挂载都按它对接）
+        if (auto lk = e.attrs.find("data-binui-link"); lk != e.attrs.end())
+            tl_pendingAnchor[std::atoi(lk->second.c_str())] = n.id;
         n.type = type;
         n.flags = BINUI_VISIBLE;
         // HTML 模式下声明 left/top 或 position:absolute/fixed 的节点标记 ABSOLUTE
@@ -3662,6 +3801,19 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         wdesc.height = (uint32_t)rootH;
     }
 
+    // ---- 4.9 v12 段的字符串：图片路径 / 外挂组件路径 ----
+    // 段里存的是字符串表偏移，必须赶在计算表之前入表。
+    if (outImages)
+        for (const auto& p : *outImages) getOrAddString(p);
+    std::vector<std::pair<uint16_t, std::string>> extRefs; // 锚点节点 id -> 组件路径
+    for (const auto& pc : tl_pendingComponents) {
+        auto it = tl_pendingAnchor.find(pc.linkIndex);
+        if (it == tl_pendingAnchor.end() || !pc.external) continue;
+        const std::string rel = RebaseToHost(tl_uiBaseDir, pc.path);
+        getOrAddString(rel);
+        extRefs.emplace_back(it->second, rel);
+    }
+
     // ---- 5. 字符串表 + 序列化 ----
     for (auto& [nodeId, txt] : textMap)
         getOrAddString(txt);
@@ -3702,7 +3854,49 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     AppendAnimSection(buf, kfGroups, animDefs, transitions);
     AppendVideoSection(buf, videoDescs);
     AppendStateSection(buf, stateStyles);
+    {
+        // 资源段（v12）：imageIndex -> 图片路径
+        std::vector<uint32_t> imgOffsets;
+        if (outImages)
+            for (const auto& p : *outImages) imgOffsets.push_back(offsets[getOrAddString(p)]);
+        AppendImageSection(buf, imgOffsets);
+    }
+    {
+        // 组件引用段（v12）：外挂组件的锚点与路径
+        std::vector<BinUIComponentRef> refs;
+        for (const auto& er : extRefs) {
+            BinUIComponentRef r = {};
+            r.anchorId = er.first;
+            r.srcOffset = offsets[getOrAddString(er.second)];
+            refs.push_back(r);
+        }
+        AppendComponentSection(buf, refs);
+    }
     AppendNameSection(buf, nodeNames, offsets);
+
+    // ---- 6. 二进制组件：编译期离线合并 ----
+    // 与运行期 renderer.mountComponent() 用的是同一个链接器（binui_link），
+    // 所以"内嵌"和"外挂"的合并结果一致。
+    bool linked = false;
+    for (const auto& pc : tl_pendingComponents) {
+        if (pc.external) continue;
+        auto it = tl_pendingAnchor.find(pc.linkIndex);
+        if (it == tl_pendingAnchor.end()) continue;
+        LinkOptions lo;
+        lo.compDir = std::filesystem::path(pc.path).parent_path().generic_string();
+        lo.hostDir = tl_uiBaseDir;
+        if (!pc.wAttr.empty()) { lo.hasW = true; lo.w = parseLen(pc.wAttr, 0); }
+        if (!pc.hAttr.empty()) { lo.hasH = true; lo.h = parseLen(pc.hAttr, 0); }
+        if (!pc.radiusAttr.empty()) { lo.hasRadius = true; lo.radius = parseLen(pc.radiusAttr, 0); }
+        if (!pc.bgAttr.empty()) { lo.hasColor = true; lo.color = parseColorWith(pc.bgAttr, 0, "组件底色"); }
+        std::string err;
+        if (MergeLayoutFile(buf, pc.path, it->second, &lo, nullptr, &err)) {
+            linked = true;
+        } else {
+            Warn("组件链接 " + pc.label + "：" + err + "（保留空占位节点）");
+        }
+    }
+    if (linked && outImages) *outImages = ReadImagePaths(buf.data(), buf.size());
 
     return buf;
 }
@@ -3866,6 +4060,9 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     wdesc.bgColor = 0xFF121212;
     wdesc.title = "binUI Demo";
     AppendWindowDesc(buf, wdesc);
+    // 手写布局没有规格/动画/视频/状态段，但 v12 的两段恒定写出，保证解析链一致
+    AppendImageSection(buf, {});
+    AppendComponentSection(buf, {});
 
     return buf;
 }

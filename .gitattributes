@@ -27,6 +27,10 @@ Makefile text
 *.gif  binary
 *.ico  binary
 *.binui binary
+*.bui  binary
+*.bum  binary
 
 # 生成的二进制布局文件不参与 GitHub 语言统计
 *.binui linguist-generated
+*.bui   linguist-generated
+*.bum   linguist-generated

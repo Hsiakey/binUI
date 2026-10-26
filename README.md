@@ -3,7 +3,7 @@
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
-[![Format v11](https://img.shields.io/badge/binUI%20format-v11-orange.svg)](include/binui_format.h)
+[![Format v12](https://img.shields.io/badge/binUI%20format-v12-orange.svg)](include/binui_format.h)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](#跨平台方向)
 
 把 **UI 描述源码（XML / HTML5）编译为紧凑的二进制布局（binUI），再解析为节点树供任何渲染后端绘制**。纯 C++17，核心（编译/解析/命中测试/事件）无平台 API 依赖；字体渲染基于 FreeType + HarfBuzz（`third_party` 静态源码，跨平台一致）。
@@ -31,7 +31,7 @@ src/
   binui_video_*.cpp 视频模块（FFmpeg 实现 / 无依赖桩）
 examples/           演示（每个子目录 = 一个 demo：main.cpp + main.html）
   assets/           演示共用图片（noela.png；构建时拷到各 demo 目录、按原名引用）
-  components/       组件化示例：titlebar/button/card 三个 .bum.xml + 引用它们的 main.html
+  components/       组件化示例：.bum 二进制（titlebar/card/dock）+ .bum.xml 源码（button）+ 宿 main.html
 tests/              测试（轻量自写断言，7 个独立可执行文件）
 tools/              调试工具：离屏渲染 / 窗口抓取 / 窗口枚举 / 示例 UI 检查（见 tools/README.md）
 docs/               设计文档、图片、设计稿（见 docs/README.md；组件规范见 docs/components.md）
@@ -50,6 +50,9 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `include/binui_renderer.h` | binUI 解析、节点状态、命中测试、事件分发（纯 C++） |
 | `include/binui_charts.h` | 高层图表 API：HTML 空容器 + 代码填数据，`tick()` 自动驱动动画 |
 | `include/binui_font_renderer.h` | 跨平台字体服务：FreeType 光栅化（灰度 + COLR 彩色）+ HarfBuzz 整形 |
+| `include/binui_link.h` | **布局链接器**：把组件布局合并进宿主（节点 id 重编号/坐标平移/各段迁移），编译期内联与运行期挂载共用 |
+| `include/binui_asset.h` | 组件文件探测：二进制优先、源码更新则优先源码（同一份规则供编译器与加载器使用） |
+| `include/binui_component.h` | 外挂组件加载（header-only）：`ex::MountAll()` 按布局里的组件引用段挂载 `.bum` |
 | `include/binui_video.h` | 可选视频编解码模块接口：FFmpeg 解码 + WASAPI 音频（`BINUI_ENABLE_VIDEO`，默认 OFF 桩实现零依赖） |
 | `src/platform/app_win32.*` | 演示用 Win32 窗口外壳 + GDI 绘制后端（可替换为其他平台后端） |
 | `include/binui_paths.h` | 跨平台路径解析：exe 真实路径（`GetModuleFileName`/`/proc/self/exe`）+ UI 查找顺序 + 图片资源加载（`--ui` / `$BINUI_UI`） |
@@ -59,7 +62,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `examples/animshow` | 动画实验室：缓动/方向/时长/fill/infinite/悬停过渡/运行时 API |
 | `examples/svgdemo` | `<svg>` 声明式矢量 + `<canvas>` 命令式绘制面 |
 | `examples/cssshow` | **CSS 伪类/伪元素**：`:hover`/`:focus`/`:checked` + `:nth-child` + `::before`/`::after` |
-| `examples/components` | **组件化**：`<use src="x.bum.xml">` 编译期内联 + 参数替换 + 嵌套组件 |
+| `examples/components` | **组件化三形态**：`.bum` 二进制内联 / `.bum.xml` 源码内联（可传参）/ `external` 运行期挂载 |
 | `examples/videodemo` | `<video>` 原生播放器：浏览器式控制条/进度拖动/键盘控制（解码取决于视频模块开关） |
 | `examples/singlewindow` | 单窗口模式：图片立绘 + z-index 分层 + 等比自适应，全部 UI 在同一窗口 |
 | `examples/multiwindow` | 独立窗口模式：多进程·多窗口（stage/hero/dialog 各自进程），立绘为透明分层窗口 |
@@ -132,7 +135,7 @@ build/bin/vision_monitor.exe   # 模拟数据流（GDI）
 build/bin/animshow.exe         # 动画实验室（OpenGL 3.3 无边框）
 build/bin/svgdemo.exe          # <svg> 声明式矢量 + <canvas> 命令式绘制面
 build/bin/cssshow.exe          # CSS 伪类/伪元素：hover/focus/checked + :nth-child + ::before
-build/bin/components.exe       # 组件化：<use src="x.bum.xml"> 内联标题栏/按钮/卡片
+build/bin/components.exe       # 组件化：二进制 .bum 内联 + 源码 .bum.xml 传参 + external 外挂
 build/bin/videodemo.exe        # <video> 播放器（解码需 BINUI_ENABLE_VIDEO=ON）
 build/bin/singlewindow.exe     # 单窗口模式：图片立绘 + z-index 分层 + 等比自适应
 build/bin/multiwindow.exe      # 独立窗口模式：多进程多窗口（自动拉起 stage/hero/dialog）
@@ -154,7 +157,7 @@ build/bin/svgdemo.exe --watch                                 # 用 exe 同级�
 build/bin/svgdemo.exe --watch --ui examples/svgdemo/main.html  # 直接盯源码树
 ```
 
-窗口尺寸/滚动位置/键盘焦点/输入框内容跨重载保留；编译失败保留旧界面。`--ui <path>` 显式指定 UI 文件，也可用 `$BINUI_UI`；默认查找顺序：`<exe>/<appName>/<file>` → `<exe>/<file>` → 已编译的 `.binui` → 源码树 `examples/<appName>/`（规则见 [`docs/app_layout.md`](docs/app_layout.md) §3）。
+窗口尺寸/滚动位置/键盘焦点/输入框内容跨重载保留；编译失败保留旧界面。`--ui <path>` 显式指定 UI 文件，也可用 `$BINUI_UI`；默认查找顺序：`<exe>/<appName>/<file>` → `<exe>/<file>` → 已编译的 `.bui`（旧名 `.binui` 也认）→ 源码树 `examples/<appName>/`（规则见 [`docs/app_layout.md`](docs/app_layout.md) §3）。
 
 ## 使用流程
 
@@ -199,9 +202,9 @@ renderer.restartAnimations();                                   // 重播所有�
 
 | 源码格式 | 说明 |
 |----------|------|
-| `.xml`   | 手写 XML，节点标签映射为节点类型（见 `examples/vision_monitor/main.binui.xml`） |
+| `.xml`   | 手写 XML，节点标签映射为节点类型（见 `examples/vision_monitor/main.binui.xml`）；`.bui.xml` / `.bum.xml` 同样按 XML 解析 |
 | `.html`  | HTML5 语法，支持流式布局与 `style` 绝对定位（见 `examples/animshow/main.html`） |
-| `.binui/.xhtml` | 已编译好的 binUI 二进制（直接 `loadLayout`，无需再编译） |
+| `.bui` / `.bum` | 已编译好的 binUI 二进制（`loadLayout` 直接吃；`.bui` = 界面，`.bum` = 组件） |
 
 HTML5 编译规则：
 - 标签映射：`html/body`→根，`button`→按钮，`input[type=text]`→输入框，`input[type=button/submit/reset]`→按钮（未写 `value` 时用内置文案 Submit / Reset / Button），`img`→图片，`h1~h6/p/span/label/a` 等→文本，`<br>`→文本内硬换行（编译成 `'\n'`，并撑开未声明高度的节点），`<li>`→文本（父为 `<ul>` 自动加 `• `，父为 `<ol>` 自动加序号），其余（`div/section/header/footer/nav/` 等）→容器。
@@ -210,13 +213,16 @@ HTML5 编译规则：
 - 边距：`margin`（及 `margin-top/right/bottom/left`，支持 1~4 值简写）影响流式间距与左右内缩。
 - 内边距：`padding`（及 `padding-top`）存入节点，绘制文本时内缩，并作为子元素的偏移基准。
 - 百分比尺寸：`width/height/left/top` 支持 `N%`（相对父容器内容盒宽/高解析）；根 `width/height:100%` 即铺满窗口（编译期按默认窗口 1280x720 解析，运行时由 `setSize` 驱动）。编译产物（v3）追加缩放规格段，渲染器 `setSize(w,h)` 时对百分比/流式/flex/自动宽节点重排，滚动偏移按新视口钳制；静态布局仅同步根尺寸。
-- **组件化（`<use src="x.bum.xml">`）**：把 UI 片段抽成可复用组件，编译期展开进宿主元素树 ——
-  运行时得到的仍是普通节点树（零开销、无新格式、命中/动画/热重载不变）。`{{参数}}` 用 `<use>`
-  上的同名属性替换（支持 `{{名=默认值}}`，参数值按纯文本注入，不会变成标签）；组件根属性可被
-  `<use>` 覆盖，`style`/`class` 是叠加；组件内可再引用组件（深度上限 8）；组件内的相对资源路径
-  自动改写成宿主相对路径。**组件自带的 `<style>` 是全局的**（可被宿主主题化，也需类名前缀约定），
-  参数化的样式请写内联。完整契约、`.bum` 二进制组件与运行时挂载的规划见
-  [docs/components.md](docs/components.md)。- **长度单位**：`px`（可省略）与 `%` 之外，还支持 `em`（相对该元素 `font-size`）、`rem`（相对根字号，默认 14）、`vw`/`vh`（相对**编译期**视口；不随运行时 resize 重排，需跟随请用 `%`）。**不支持的单位**（`pt/cm/mm/in/ex/ch/vmin/vmax`）与**函数值**（`calc/min/max/clamp`）会**打编译警告并回退默认值**，不再静默当成 px（警告同时收集在 `CompileResult::warnings`）。
+- **组件化（`.bui` / `.bum` / `.bum.xml`）**：一个界面 = 一个 `.bui`（组件全内联，运行期零依赖）；
+  想拆开就拆成 `.bui` + 若干 `.bum`，二进制与源码可混放。三条路线：
+  `<use src="x.bum.xml">` 源码内联（可传 `{{参数}}`）、`<use src="x.bum">` 二进制内联（链接器离线合并，
+  同一套合并规则，不暴露源码）、`<use src="x.bum" external>` 运行期挂载（布局里只留占位节点 +
+  组件引用段，`binui::ex::MountAll()` 挂上，换组件不用重编主 `.bui`）。加载优先级：**二进制优先，
+  源码 mtime 更新时改用源码并告警**（改源码保存即热重载，不会“改了没反应”）。参数值按纯文本注入
+  （不会变成标签），`{{名=默认值}}` 在单独编 `.bum` 时取默认值；组件内可再引用组件（深度上限 8）；
+  组件内相对资源路径自动改写成宿主相对路径，图片清单随布局写出（v12 资源段）。
+  **组件自带的 `<style>` 是全局的**（可被宿主主题化，也需类名前缀约定），参数化样式请写内联。
+  完整契约见 [docs/components.md](docs/components.md)。- **长度单位**：`px`（可省略）与 `%` 之外，还支持 `em`（相对该元素 `font-size`）、`rem`（相对根字号，默认 14）、`vw`/`vh`（相对**编译期**视口；不随运行时 resize 重排，需跟随请用 `%`）。**不支持的单位**（`pt/cm/mm/in/ex/ch/vmin/vmax`）与**函数值**（`calc/min/max/clamp`）会**打编译警告并回退默认值**，不再静默当成 px（警告同时收集在 `CompileResult::warnings`）。
 - 颜色：支持 CSS **命名色**（完整 147 色 + `transparent`）、`#RGB`/`#RRGGBB`、`#ARGB`/`#AARRGGBB`（**8 位按 binUI 约定的 AARRGGBB**，与 CSS 的 `#RRGGBBAA` 相反，首次使用会警告）、`rgb()/rgba()`（逗号或空格分隔、通道可写百分比、支持现代 `rgb(0 0 255 / 50%)`）、`hsl()/hsla()`。`!important` 会被剥离。无法识别的颜色**保留默认色并警告**（以前是静默变白/变透明）。
 - 尺寸约束：`min-width/max-width/min-height/max-height`（值支持 `N` 像素与 `N%` 相对父内容盒；XML 下为同名属性）。min 撑开尺寸（自动宽/声明宽小于最小值时）、max 收缩（百分比/自动宽超过上限时）；flex 子项弹性分配后同样受约束钳制（钳制释放的空间不向兄弟项再分配）。编译期按初始窗口生效，运行时 `setSize` 重排按新视口重新解析。
 - **等比 UI 缩放（`<app_window ui_scale="proportional">`）**：`setSize` 不再做流式/百分比/flex 重排，而是把整棵节点树的坐标/尺寸/字号/圆角按「新窗口 ÷ 设计尺寸」等比写回 `nodes_`——**固定像素布局也能整体跟手缩放**，且命中测试/滚动/绘制读同一份缩放后坐标、天然一致；字形按缩放后的字号重新光栅化（图集缓存，清晰不糊）。与 `window_resize="aspect"` 组合即"窗口仅等比例 + UI 等比缩放"。动态运行时节点（图表 API 的 `addNode`）不参与缩放，图表类应用不要启用此模式。
@@ -358,8 +364,17 @@ DetachVideoEngine();   // 进程退出前停止全部解码/输出线程
 │                          │  {nodeId, state(:hover/:active/:focus/:checked),
 │                          │   fields(颜色/缩放/圆角), color, scale, radius}
 │                          │  位于视频段之后、名称表之前；渲染器按状态切换目标值
+├──────────────────────────┤
+│ 资源段（v12，恒有）      │  uint32 imgBytes（恒有）+ imgCount + pathOffset[]
+│                          │  imageIndex → 图片路径；布局自描述，组件合并时
+│                          │  资源下标在这里整体重排（含视频伪图片槽）
+├──────────────────────────┤
+│ 组件引用段（v12，恒有）  │  uint32 compBytes（恒有）+ compCount
+│                          │  + BinUIComponentRef[] {anchorId, flags, srcOffset}
+│                          │  external 组件的占位节点与路径；运行期
+│                          │  ex::MountAll() 现场挂载（换组件不用重编主 .bui）
 └──────────────────────────┘
-（v4 起 BinUINode 追加 `radius` 圆角字段；元素默认直角，仅 `border-radius` 指定时圆角。v5 追加窗口描述段：`<app_window>` 编译期包裹层定义窗口，外壳据此创建。v6 追加 `minW/maxW/minH/maxH` 尺寸约束与 `relW/relH` 显式声明尺寸基准。v7 追加动画段（`@keyframes`/`animation`/`transition` → 关键帧组 + 动画定义 + 过渡）。v8 追加名称表：HTML `id` 属性 → 节点名（运行时 `findNodeByName`）。v9 追加视频描述段与 `BINUI_VIDEO` 节点类型（增量扩展，旧二进制不受影响）。v10 起 `BinUINode` 追加 `zIndex` 层叠字段——数值越大越靠上，同值下 absolute 高于流式、DOM 后声明者优先。v11 追加状态样式段：`<style>` 里 `:hover/:active/:focus/:checked` 的声明编译成运行时切换目标（结构伪类与 `::before/::after` 在编译期就展开成节点/普通样式，不进段）。）
+（v4 起 BinUINode 追加 `radius` 圆角字段；元素默认直角，仅 `border-radius` 指定时圆角。v5 追加窗口描述段：`<app_window>` 编译期包裹层定义窗口，外壳据此创建。v6 追加 `minW/maxW/minH/maxH` 尺寸约束与 `relW/relH` 显式声明尺寸基准。v7 追加动画段（`@keyframes`/`animation`/`transition` → 关键帧组 + 动画定义 + 过渡）。v8 追加名称表：HTML `id` 属性 → 节点名（运行时 `findNodeByName`）。v9 追加视频描述段与 `BINUI_VIDEO` 节点类型（增量扩展，旧二进制不受影响）。v10 起 `BinUINode` 追加 `zIndex` 层叠字段——数值越大越靠上，同值下 absolute 高于流式、DOM 后声明者优先。v11 追加状态样式段：`<style>` 里 `:hover/:active/:focus/:checked` 的声明编译成运行时切换目标（结构伪类与 `::before/::after` 在编译期就展开成节点/普通样式，不进段）。v12 追加资源段（`imageIndex` → 图片路径，布局自描述，外壳不必再单独传图片列表）与组件引用段（`external` 组件的占位节点与路径，运行期 `ex::MountAll()` 挂载）；`BINUI_VERSION` 升到 12，旧二进制需重新编译。）
 ```
 
 窗口缩放重排：应用收到 `WM_SIZE` → `renderer.setSize(w,h)` → 按规格段重排（百分比/flex 权重/流式光标/grow 容器）→ `invalidateAll` 全量重绘。GPU 后端的交换链重建与拖拽同步渲染细节见「绘制后端」的缩放处理要点。

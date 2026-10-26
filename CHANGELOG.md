@@ -6,18 +6,38 @@
 
 ## [Unreleased]
 
-### 新增 — 组件化（`<use src="x.bum.xml">` 编译期内联）
+### 新增 — 组件化：`.bui` / `.bum` / `.bum.xml`（【格式 v12】）
 
-- 把 UI 片段抽成组件：`<use src="标题栏.bum.xml" x="0" y="0" w="720" title="…"/>`，
-  编译器在展开阶段把组件源码拼进宿主元素树 —— **运行时仍是普通节点树**，二进制格式不变，
-  命中测试/动画/`--watch` 热重载全部照旧（详见 [docs/components.md](docs/components.md)）。
-- 参数：组件源码里的 `{{name}}` 用 `<use>` 上的同名属性替换；`{{name=默认值}}` 让参数可选
-  且不报警告；参数值按**纯文本注入**（转义 `& < >`），传进来的标签不会变成真元素。
-- 合并：组件根元素属性作为默认值、`<use>` 属性覆盖；`style`/`class` 叠加而非替换；
-  组件内可再引用组件（深度上限 8，超出判为循环引用并警告）。
-- 组件内的相对资源路径（`<img src>`/`<video src>`）自动改写成宿主相对路径。
-- 新演示 `examples/components`（`components.exe`）：标题栏 / 按钮 / 组合卡片三个组件，
-  含嵌套引用与宿主改色（`bg` 参数）。
+- **命名与分发**：一个界面 = 一个 `.bui`（组件全内联，运行期零依赖）；要拆开就是
+  `.bui` + 若干 `.bum`。组件可以是二进制 `.bum`、源码 `.bum.xml`，也可以两种都放；
+  作者还能按组件混放。旧名 `.binui` 仍被识别。
+- **加载优先级**：二进制优先；**源码 mtime 更新时改用源码并告警**——改源码保存后
+  `--watch` 直接生效，不会因为忘了重编 `.bum` 而“改了没反应”。规则只在
+  `include/binui_asset.h` 里实现，编译器与运行期加载器共用。
+- **布局链接器**（`include/binui_link.h` / `src/common/binui_link.cpp`）：把组件布局并进宿主——
+  节点 id 重编号、坐标平移到锚点内容原点、占位节点按组件包围盒撑大、字符串表后移重算偏移、
+  缩放规格/状态样式/动画/视频/资源/组件引用/名称段一并迁移；失败时宿主保持不变。
+- **编译期内联（默认）**：`<use src="x.bum.xml">` 走源码展开（可传参），
+  `<use src="x.bum">` 由链接器离线合并（不暴露源码）。两者产出同一个 `.bui`。
+- **运行期外挂**：`<use src="x.bum" external>` 只留占位节点 + 一条组件引用记录；
+  新增 `binui::ex::MountAll(renderer, dir, layout)` 与 `renderer.mountComponent()`，
+  换组件不用重编主 `.bui`（皮肤/插件面板）。挂载幂等，`isComponentMounted()` 可查。
+- **【格式 v12】两段新段（恒定写出，位于状态样式段之后、名称段之前）**：
+  - **资源段**：`imageIndex` → 图片路径，布局自描述。外壳不必再自己保存编译期的图片列表
+    （`renderer.imagePaths()` / `ex::LoadLayoutImages()`）；组件合并时资源下标在这里整体重排。
+  - **组件引用段**：`external` 组件的占位节点 id 与相对路径。
+- **参数**：`{{name}}` / `{{name=默认值}}`；单独编 `.bum` 时按默认值代入（裸 `{{name}}`
+  留给内联替换），所以同一份 `.bum.xml` 既能被 `<use>` 传参，也能自己编成 `.bum`。
+  未替换的参数占位不再触发“无法解析长度/颜色”的假警告。
+- **`<use>` 对二进制组件的覆盖**：`w` / `h` / `bg` / `radius` 仍可覆盖组件根
+  （其余参数在编 `.bum` 时已固化）。
+- **新工具 `binui_compile`**：`.bum.xml` → `.bum`、`main.html` → `main.bui`；
+  传入已是二进制的文件则原样拷贝，方便流水线统一。构建期由 `make components` /
+  CMake 的 `components_bums` 目标生成，产物不落源码树。
+- **`check_examples`** 覆盖 `.bum.xml` / `.bui.xml`，并校验外挂组件引用是否真的能解析到。
+- 演示 `examples/components` 重做：标题栏 `titlebar.bum`、卡片 `card.bum`（二进制内联）、
+  按钮 `button.bum.xml`（源码传参）、状态栏 `dock.bum`（`external` 运行期挂载），
+  三种形态同屏（见 [docs/components.md](docs/components.md)）。
 
 ### 新增 — CSS 伪类 / 伪元素（【格式 v11】）
 
