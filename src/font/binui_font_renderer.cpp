@@ -480,6 +480,43 @@ void registerSystemFonts(FontEngine& engine) {
     reg("SimSun", "simsun.ttc");
     reg("Arial", "arial.ttf");
     if (engine.defaultFace().empty()) engine.setDefaultFace("Segoe UI");
+#else
+    // 非 Windows：按发行版/系统的常见安装路径探测（Linux 各发行版 + macOS）。
+    // 一个都没有也不报错 —— 应用可以自己 addFont()，核心库不假设系统里必定有字体。
+    struct Cand { const char* face; const char* path; bool cjk; };
+    static const Cand kCands[] = {
+        {"Noto Sans CJK SC", "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",      true},
+        {"Noto Sans CJK SC", "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",      true},
+        {"Noto Sans CJK JP", "/usr/share/fonts/opentype/noto/NotoSansCJKjp-Regular.otf",    true},
+        {"Noto Sans CJK JP", "/usr/share/fonts/truetype/noto/NotoSansCJKjp-Regular.otf",    true},
+        {"WenQuanYi Micro Hei", "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",           true},
+        {"PingFang SC", "/System/Library/Fonts/PingFang.ttc",                               true},
+        {"DejaVu Sans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",                  false},
+        {"Liberation Sans", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", false},
+        {"Helvetica", "/System/Library/Fonts/Helvetica.ttc",                                false},
+    };
+    auto exists = [](const char* path) {
+        FILE* f = std::fopen(path, "rb");
+        if (!f) return false;
+        std::fclose(f);
+        return true;
+    };
+    const char* firstCjk = nullptr;
+    const char* firstAny = nullptr;
+    for (const auto& c : kCands) {
+        if (!exists(c.path)) continue;
+        engine.addFont(c.face, c.path);
+        if (!firstAny) firstAny = c.path;
+        if (!firstCjk && c.cjk) firstCjk = c.path;
+    }
+    // 默认字形名沿用 Windows 的 "Segoe UI"：上层代码与示例都按这个名字取字体，
+    // 这里把它别名到实际可用的字体（有中日韩字形优先），跨平台就不用改调用方。
+    if (const char* dflt = firstCjk ? firstCjk : firstAny) {
+        engine.addFont("Segoe UI", dflt);
+        engine.addFont("Microsoft YaHei", dflt);
+        engine.addFont("Noto Sans", dflt);
+        engine.setDefaultFace("Segoe UI");
+    }
 #endif
 }
 

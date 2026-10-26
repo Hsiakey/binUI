@@ -84,8 +84,11 @@ private:
     Impl* impl_;
 };
 
-// 内置 Windows 常见字体注册（Segoe UI / Segoe UI Emoji / 微软雅黑 回退 黑体）；
-// 非 Windows 平台为空操作，调用方用 addFont 自行注册
+// 注册系统字体：
+//   Windows  —— C:/Windows/Fonts 下的 Segoe UI / Segoe UI Emoji / 微软雅黑 / 黑体 / Arial
+//   其他平台 —— 探测常见路径（Noto CJK / WenQuanYi / DejaVu / macOS PingFang·Helvetica）
+// 两者都会把默认字形名 "Segoe UI" 别名到实际可用的字体（优先带中日韩字形），
+// 上层代码不必关心平台。系统里一个字体都没有时是空操作，应用可自行 addFont()。
 void registerSystemFonts(FontEngine& engine);
 
 } // namespace binui_font
