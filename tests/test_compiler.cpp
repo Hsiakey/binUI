@@ -3,6 +3,9 @@
 #include "binui_format.h"
 #include <cstdio>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <string>
 #include <vector>
 #include <unordered_map>
 
@@ -1165,6 +1168,80 @@ int main() {
         TEST("pseudo: ::after without content warns", noContentWarn == 1);
     }
 
+    {
+        // ---- 组件内联：<use src="x.bum.xml"> ----
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / "binui_test_cmp";
+        fs::create_directories(dir);
+        auto writeFile = [&](const std::string& name, const std::string& text) {
+            std::ofstream f(dir / name, std::ios::binary);
+            f << text;
+        };
+
+        // 组件：内联参数 + 带默认值的参数
+        writeFile("btn.bum.xml",
+            "<div style=\"height:40\">"
+            "<button style=\"position:absolute; left:0; top:0; width:{{w}}; height:40;"
+            " background:{{bg=#101010}}\">{{label}}</button></div>");
+        // 组合组件：内部再引用 btn.bum.xml
+        writeFile("card.bum.xml",
+            "<div style=\"height:80\">"
+            "<span style=\"height:20\">{{heading}}</span>"
+            "<use src=\"btn.bum.xml\" x=\"0\" y=\"24\" w=\"100\" label=\"卡片按钮\"/>"
+            "</div>");
+        writeFile("host.html",
+            "<html><body>"
+            "<use src=\"btn.bum.xml\" x=\"10\" y=\"10\" w=\"120\" label=\"确定\" bg=\"#FF0000\"/>"
+            "<use src=\"btn.bum.xml\" x=\"10\" y=\"60\" w=\"120\" label=\"默认底色\"/>"
+            "<use src=\"card.bum.xml\" x=\"10\" y=\"110\" w=\"200\" heading=\"卡片标题\"/>"
+            "<use x=\"10\" y=\"200\"/>"
+            "<use src=\"missing.bum.xml\" x=\"10\" y=\"240\"/>"
+            "<use src=\"packed.bum\" x=\"10\" y=\"280\"/>"
+            "</body></html>");
+
+        auto res = CompileBinUIFileEx((dir / "host.html").generic_string());
+        BinUIRenderer r;
+        TEST("component: parses", !res.layout.empty() && r.loadLayout(res.layout.data(), res.layout.size()));
+
+        auto findByText = [&](const std::string& text) -> const BinUIRenderer::NodeInfo* {
+            for (const auto& n : r.getNodes()) if (n.text == text) return &n;
+            return nullptr;
+        };
+        const auto* okBtn = findByText("确定");
+        TEST("component: param substituted into text", okBtn != nullptr);
+        TEST("component: param substituted into style",
+             okBtn && std::fabs(okBtn->width - 120.0f) < 0.5f && okBtn->color == 0xFFFF0000u);
+        const auto* dfltBtn = findByText("默认底色");
+        TEST("component: default value used when param omitted",
+             dfltBtn && dfltBtn->color == 0xFF101010u);
+        const auto* cardBtn = findByText("卡片按钮");
+        TEST("component: nested <use> expanded", cardBtn != nullptr);
+        TEST("component: nested heading substituted", findByText("卡片标题") != nullptr);
+
+        int noSrc = 0, missingFile = 0, binaryNotSupported = 0;
+        for (const auto& w : res.warnings) {
+            if (w.find("缺少 src") != std::string::npos) noSrc++;
+            if (w.find("读不到组件文件") != std::string::npos) missingFile++;
+            if (w.find("二进制组件") != std::string::npos) binaryNotSupported++;
+        }
+        TEST("component: missing src warns", noSrc == 1);
+        TEST("component: missing file warns", missingFile == 1);
+        TEST("component: binary .bum not supported yet warns", binaryNotSupported == 1);
+
+        // 参数值按纯文本注入：传进来的标签不能变成真节点
+        writeFile("inject.bum.xml", "<div style=\"height:20\"><span>{{body}}</span></div>");
+        writeFile("inject.html",
+            "<html><body><use src=\"inject.bum.xml\" x=\"0\" y=\"0\" w=\"300\""
+            " body=\"a &lt;use src=&quot;btn.bum.xml&quot;&gt; b\"/></body></html>");
+        auto res2 = CompileBinUIFileEx((dir / "inject.html").generic_string());
+        BinUIRenderer r2;
+        TEST("component: inject parses", !res2.layout.empty() && r2.loadLayout(res2.layout.data(), res2.layout.size()));
+        int textWithMarkup = 0;
+        for (const auto& n : r2.getNodes())
+            if (n.text.find("<use") != std::string::npos) textWithMarkup = 1;
+        TEST("component: param value injected as text, not markup", textWithMarkup == 1);
+        TEST("component: injection adds no extra nodes", r2.getNodes().size() == 3);
+    }
     printf("\n=== Results: %d tests failed ===\n", failed);
     return failed > 0 ? 1 : 0;
 }

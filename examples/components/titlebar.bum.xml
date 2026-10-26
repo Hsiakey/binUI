@@ -1,0 +1,15 @@
+<!--
+  titlebar.bum.xml —— 标题栏组件（源码形式，可读可编辑）
+
+  参数（<use titlebar.bum.xml title="…" hint="…">）：
+    title  主标题文字
+    hint   右侧说明文字
+
+  用法：
+    <use src="titlebar.bum.xml" x="0" y="0" w="720" title="你好" hint="说明"/>
+-->
+<div style="height:44; background:#16161D">
+    <span style="position:absolute; left:14; top:11; width:420; height:20; color:#F5F5F7; font-size:14">{{title}}</span>
+    <span style="position:absolute; left:430; top:14; width:300; height:16; color:#8A8A95; font-size:11">{{hint}}</span>
+    <button id="close" style="position:absolute; left:676; top:8; width:28; height:28; background:#E5484D; border-radius:6">✕</button>
+</div>

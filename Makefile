@@ -137,6 +137,7 @@ DEMO_BINS := \
     $(BIN_DIR)/animshow$(EXT) \
     $(BIN_DIR)/svgdemo$(EXT) \
     $(BIN_DIR)/cssshow$(EXT) \
+    $(BIN_DIR)/components$(EXT) \
     $(BIN_DIR)/singlewindow$(EXT) \
     $(BIN_DIR)/multiwindow$(EXT) \
     $(BIN_DIR)/galgamechat$(EXT) \
@@ -166,6 +167,14 @@ $(BIN_DIR)/svgdemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/svgd
 	@mkdir -p $(BIN_DIR)/svgdemo
 	$(CXX) $(LDFLAGS) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/svgdemo/main.html $(WIN_BIN)/svgdemo/main.html
+
+$(BIN_DIR)/components$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/components/main.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)/components
+	$(CXX) $(LDFLAGS) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	cp -f $(EXA_DIR)/components/main.html $(WIN_BIN)/components/main.html
+	cp -f $(EXA_DIR)/components/titlebar.bum.xml $(WIN_BIN)/components/titlebar.bum.xml
+	cp -f $(EXA_DIR)/components/button.bum.xml $(WIN_BIN)/components/button.bum.xml
+	cp -f $(EXA_DIR)/components/card.bum.xml $(WIN_BIN)/components/card.bum.xml
 
 $(BIN_DIR)/cssshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/cssshow/main.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)/cssshow

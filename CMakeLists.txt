@@ -107,6 +107,18 @@ if(WIN32)
             "$<TARGET_FILE_DIR:svgdemo>/svgdemo/main.html"
     )
 
+    # components：<use src="x.bum.xml"> 编译期组件内联（标题栏 / 按钮 / 组合卡片）
+    add_executable(components examples/components/main.cpp)
+    target_link_libraries(components PRIVATE gl_shell)
+    add_custom_command(TARGET components POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:components>/components"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${CMAKE_SOURCE_DIR}/examples/components/main.html"
+            "${CMAKE_SOURCE_DIR}/examples/components/titlebar.bum.xml"
+            "${CMAKE_SOURCE_DIR}/examples/components/button.bum.xml"
+            "${CMAKE_SOURCE_DIR}/examples/components/card.bum.xml"
+            "$<TARGET_FILE_DIR:components>/components/"
+    )
     # cssshow：CSS 伪类（:hover/:active/:focus/:checked）+ 伪元素（::before/::after）
     add_executable(cssshow examples/cssshow/main.cpp)
     target_link_libraries(cssshow PRIVATE gl_shell)

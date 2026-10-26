@@ -10,11 +10,11 @@
 
 > 前身 `.xec`（含打包器 xecpack、加载器 xecrun 与动态加载层）已评估砍除——那层对多数场景是负资产；**保留并重构了真正有价值的部分：UI 编译、解析与渲染内核**。项目现名为 **binUI**，与二进制布局格式同名。
 
-| 内置默认布局 | CSS 伪类 / 伪元素演示 |
-|---|---|
-| ![默认布局](docs/img/default-layout.png) | ![cssshow](docs/img/cssshow.png) |
+| 内置默认布局 | CSS 伪类 / 伪元素 | 组件化（`<use>`） |
+|---|---|---|
+| ![默认布局](docs/img/default-layout.png) | ![cssshow](docs/img/cssshow.png) | ![components](docs/img/components.png) |
 
-> 两张图都是 `tools/offscreen_render` 离屏渲染出来的真实布局（GDI 后端），不是设计稿。
+> 三张图都是 `tools/offscreen_render` 离屏渲染出来的真实布局（GDI 后端），不是设计稿。
 
 ## 目录结构
 
@@ -31,9 +31,10 @@ src/
   binui_video_*.cpp 视频模块（FFmpeg 实现 / 无依赖桩）
 examples/           演示（每个子目录 = 一个 demo：main.cpp + main.html）
   assets/           演示共用图片（noela.png；构建时拷到各 demo 目录、按原名引用）
+  components/       组件化示例：titlebar/button/card 三个 .bum.xml + 引用它们的 main.html
 tests/              测试（轻量自写断言，7 个独立可执行文件）
 tools/              调试工具：离屏渲染 / 窗口抓取 / 窗口枚举 / 示例 UI 检查（见 tools/README.md）
-docs/               设计文档、图片、设计稿（见 docs/README.md）
+docs/               设计文档、图片、设计稿（见 docs/README.md；组件规范见 docs/components.md）
 scripts/            fetch-deps.sh 等辅助脚本
 third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 ```
@@ -58,6 +59,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `examples/animshow` | 动画实验室：缓动/方向/时长/fill/infinite/悬停过渡/运行时 API |
 | `examples/svgdemo` | `<svg>` 声明式矢量 + `<canvas>` 命令式绘制面 |
 | `examples/cssshow` | **CSS 伪类/伪元素**：`:hover`/`:focus`/`:checked` + `:nth-child` + `::before`/`::after` |
+| `examples/components` | **组件化**：`<use src="x.bum.xml">` 编译期内联 + 参数替换 + 嵌套组件 |
 | `examples/videodemo` | `<video>` 原生播放器：浏览器式控制条/进度拖动/键盘控制（解码取决于视频模块开关） |
 | `examples/singlewindow` | 单窗口模式：图片立绘 + z-index 分层 + 等比自适应，全部 UI 在同一窗口 |
 | `examples/multiwindow` | 独立窗口模式：多进程·多窗口（stage/hero/dialog 各自进程），立绘为透明分层窗口 |
@@ -130,6 +132,7 @@ build/bin/vision_monitor.exe   # 模拟数据流（GDI）
 build/bin/animshow.exe         # 动画实验室（OpenGL 3.3 无边框）
 build/bin/svgdemo.exe          # <svg> 声明式矢量 + <canvas> 命令式绘制面
 build/bin/cssshow.exe          # CSS 伪类/伪元素：hover/focus/checked + :nth-child + ::before
+build/bin/components.exe       # 组件化：<use src="x.bum.xml"> 内联标题栏/按钮/卡片
 build/bin/videodemo.exe        # <video> 播放器（解码需 BINUI_ENABLE_VIDEO=ON）
 build/bin/singlewindow.exe     # 单窗口模式：图片立绘 + z-index 分层 + 等比自适应
 build/bin/multiwindow.exe      # 独立窗口模式：多进程多窗口（自动拉起 stage/hero/dialog）
@@ -207,7 +210,13 @@ HTML5 编译规则：
 - 边距：`margin`（及 `margin-top/right/bottom/left`，支持 1~4 值简写）影响流式间距与左右内缩。
 - 内边距：`padding`（及 `padding-top`）存入节点，绘制文本时内缩，并作为子元素的偏移基准。
 - 百分比尺寸：`width/height/left/top` 支持 `N%`（相对父容器内容盒宽/高解析）；根 `width/height:100%` 即铺满窗口（编译期按默认窗口 1280x720 解析，运行时由 `setSize` 驱动）。编译产物（v3）追加缩放规格段，渲染器 `setSize(w,h)` 时对百分比/流式/flex/自动宽节点重排，滚动偏移按新视口钳制；静态布局仅同步根尺寸。
-- **长度单位**：`px`（可省略）与 `%` 之外，还支持 `em`（相对该元素 `font-size`）、`rem`（相对根字号，默认 14）、`vw`/`vh`（相对**编译期**视口；不随运行时 resize 重排，需跟随请用 `%`）。**不支持的单位**（`pt/cm/mm/in/ex/ch/vmin/vmax`）与**函数值**（`calc/min/max/clamp`）会**打编译警告并回退默认值**，不再静默当成 px（警告同时收集在 `CompileResult::warnings`）。
+- **组件化（`<use src="x.bum.xml">`）**：把 UI 片段抽成可复用组件，编译期展开进宿主元素树 ——
+  运行时得到的仍是普通节点树（零开销、无新格式、命中/动画/热重载不变）。`{{参数}}` 用 `<use>`
+  上的同名属性替换（支持 `{{名=默认值}}`，参数值按纯文本注入，不会变成标签）；组件根属性可被
+  `<use>` 覆盖，`style`/`class` 是叠加；组件内可再引用组件（深度上限 8）；组件内的相对资源路径
+  自动改写成宿主相对路径。**组件自带的 `<style>` 是全局的**（可被宿主主题化，也需类名前缀约定），
+  参数化的样式请写内联。完整契约、`.bum` 二进制组件与运行时挂载的规划见
+  [docs/components.md](docs/components.md)。- **长度单位**：`px`（可省略）与 `%` 之外，还支持 `em`（相对该元素 `font-size`）、`rem`（相对根字号，默认 14）、`vw`/`vh`（相对**编译期**视口；不随运行时 resize 重排，需跟随请用 `%`）。**不支持的单位**（`pt/cm/mm/in/ex/ch/vmin/vmax`）与**函数值**（`calc/min/max/clamp`）会**打编译警告并回退默认值**，不再静默当成 px（警告同时收集在 `CompileResult::warnings`）。
 - 颜色：支持 CSS **命名色**（完整 147 色 + `transparent`）、`#RGB`/`#RRGGBB`、`#ARGB`/`#AARRGGBB`（**8 位按 binUI 约定的 AARRGGBB**，与 CSS 的 `#RRGGBBAA` 相反，首次使用会警告）、`rgb()/rgba()`（逗号或空格分隔、通道可写百分比、支持现代 `rgb(0 0 255 / 50%)`）、`hsl()/hsla()`。`!important` 会被剥离。无法识别的颜色**保留默认色并警告**（以前是静默变白/变透明）。
 - 尺寸约束：`min-width/max-width/min-height/max-height`（值支持 `N` 像素与 `N%` 相对父内容盒；XML 下为同名属性）。min 撑开尺寸（自动宽/声明宽小于最小值时）、max 收缩（百分比/自动宽超过上限时）；flex 子项弹性分配后同样受约束钳制（钳制释放的空间不向兄弟项再分配）。编译期按初始窗口生效，运行时 `setSize` 重排按新视口重新解析。
 - **等比 UI 缩放（`<app_window ui_scale="proportional">`）**：`setSize` 不再做流式/百分比/flex 重排，而是把整棵节点树的坐标/尺寸/字号/圆角按「新窗口 ÷ 设计尺寸」等比写回 `nodes_`——**固定像素布局也能整体跟手缩放**，且命中测试/滚动/绘制读同一份缩放后坐标、天然一致；字形按缩放后的字号重新光栅化（图集缓存，清晰不糊）。与 `window_resize="aspect"` 组合即"窗口仅等比例 + UI 等比缩放"。动态运行时节点（图表 API 的 `addNode`）不参与缩放，图表类应用不要启用此模式。

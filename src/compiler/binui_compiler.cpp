@@ -11,8 +11,11 @@
 #include <cstdlib>
 #include <algorithm>
 #include <array>
+#include <filesystem>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
+#include <vector>
 
 namespace binui {
 
@@ -145,6 +148,10 @@ struct CompileDiag {
 };
 
 static thread_local CompileDiag g_diag;
+
+// 当前 UI 文件所在目录（组件内联时的相对路径基准）；由 CompileBinUIFileEx 设置，
+// 字符串入口（CompileBinUIEx）为空 → <use src> 按工作目录解析。
+static thread_local std::string tl_uiBaseDir;
 
 // 同一条警告只报一次（同一份 UI 里 20 个元素写错单位，不该刷 20 行）
 static void Warn(const std::string& msg) {
@@ -980,6 +987,12 @@ CompileResult CompileBinUIFileEx(const std::string& path) {
     if (!in) return {};
     std::stringstream ss;
     ss << in.rdbuf();
+    // 组件内联（<use src="…">）要相对"当前 UI 文件所在目录"解析路径
+    struct BaseDirGuard {
+        std::string prev;
+        explicit BaseDirGuard(const std::string& d) : prev(tl_uiBaseDir) { tl_uiBaseDir = d; }
+        ~BaseDirGuard() { tl_uiBaseDir = prev; }
+    } guard{std::filesystem::path(path).parent_path().generic_string()};
     return CompileBinUIEx(ss.str());
 }
 
@@ -1179,11 +1192,6 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     auto getAttr = [](const XMLElem& e, const std::string& key, const std::string& def) -> std::string {
         auto it = e.attrs.find(key);
         return (it != e.attrs.end()) ? it->second : def;
-    };
-    auto getFloat = [&](const XMLElem& e, const std::string& key, float def) -> float {
-        std::string s = getAttr(e, key, "");
-        if (s.empty()) return def;
-        try { return std::stof(s); } catch (...) { return def; }
     };
     auto getColor = [&](const XMLElem& e, const std::string& key, uint32_t def) -> uint32_t {
         std::string s = getAttr(e, key, "");
@@ -1937,7 +1945,19 @@ static void ParseCssRules(const std::string& cssRaw, std::vector<CssRule>& out) 
 // HTML5 -> binUI
 // 支持显式 x/y/w/h 或 style 绝对定位；未定位的元素按流式自上而下堆叠
 // ============================================================
-std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::string>* outImages) {
+// ============================================================
+// 片段解析：HTML/XML 源码 → 扁平元素列表（深度优先顺序，父索引恒小于子索引）
+// 编译器主体与 <use> 组件内联共用同一份容错解析逻辑。
+// styleSheets 追加收集 <style> 文本（组件自带的 CSS 也会并进宿主样式表）。
+// ============================================================
+struct HNode {
+    std::string tag;
+    std::unordered_map<std::string, std::string> attrs;
+    std::string text;
+    size_t parentIdx;   // SIZE_MAX = 无父（顶层）
+};
+
+static std::vector<HNode> ParseElements(const std::string& html, std::string& styleSheets) {
     const std::unordered_set<std::string> voidTags = {
         "br", "hr", "img", "input", "meta", "link", "area", "base",
         "col", "embed", "source", "track", "wbr"
@@ -1948,16 +1968,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         return s;
     };
 
-    // ---- 1. 容错解析 HTML 为扁平元素列表 ----
-    struct HNode {
-        std::string tag;
-        std::unordered_map<std::string, std::string> attrs;
-        std::string text;
-        size_t parentIdx;   // SIZE_MAX = 无父（顶层）
-    };
     std::vector<HNode> elems;
     std::vector<size_t> openStack;
-    std::string styleSheets; // <style> 文本（@keyframes 与 transition/animation 规则）
 
     auto appendText = [&](const std::string& raw) {
         std::string t;
@@ -2044,11 +2056,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         }
 
         size_t gt = html.find('>', lt);
-        if (gt == std::string::npos) {
-            // 无匹配 > 的 < ：当作普通文本（容错：文本中的裸 < 不产生幽灵标签）
-            appendText("<");
-            break;
-        }
+
         std::string raw = html.substr(lt + 1, gt - lt - 1);
         bool selfClose = !raw.empty() && raw.back() == '/';
         if (selfClose) raw.pop_back();
@@ -2108,6 +2116,205 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         bool isVoid = selfClose || voidTags.count(tag) > 0;
         if (!isVoid) openStack.push_back(elems.size() - 1);
     }
+    return elems;
+}
+
+// ============================================================
+// 组件内联：<use src="路径.bum.xml"> / <component src=…>
+//
+// 语义（编译期展开，运行时零开销、二进制格式不变）：
+//   · src 相对"当前 UI 文件所在目录"解析；组件文件里的相对资源 src 会被改写成宿主相对路径
+//   · 组件源码里的 {{参数名}} 用 <use> 上的同名属性替换；未提供则替换为空并警告
+//   · 组件顶层元素视为"组件根"：其属性（背景/尺寸/圆角…）合入替换节点，
+//     <use> 自身属性优先（可覆盖组件默认尺寸/底色/文字）
+//   · 组件自带的 <style> 并进宿主样式表：组件可被宿主主题化（也意味着选择器会互相影响，
+//     建议组件内用带前缀的类名）
+//   · 嵌套组件递归展开，同一文件引用多次就展开多份（每个实例独立）
+//   · 二进制组件（.bum/.binui）暂不支持，遇到会明确警告（见 docs/components.md）
+// ============================================================
+static bool ReadWholeFile(const std::string& path, std::string& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    std::ostringstream ss;
+    ss << in.rdbuf();
+    out = ss.str();
+    return true;
+}
+
+// {{name}} → <use> 上的同名属性值（未提供则空串 + 警告）
+static std::string SubstituteParams(const std::string& src,
+                                    const std::unordered_map<std::string, std::string>& params) {
+    std::string out;
+    out.reserve(src.size());
+    for (size_t i = 0; i < src.size(); ) {
+        if (src[i] == '{' && i + 1 < src.size() && src[i + 1] == '{') {
+            const size_t end = src.find("}}", i + 2);
+            if (end != std::string::npos) {
+                // 支持 {{name}} 与 {{name=默认值}}；默认值让"可选参数"不再每处都报警告
+                const std::string inner = TrimCopy(src.substr(i + 2, end - i - 2));
+                const size_t eq = inner.find('=');
+                const std::string key = LowerCopy(TrimCopy(eq == std::string::npos
+                                                            ? inner : inner.substr(0, eq)));
+                const std::string fallback = (eq == std::string::npos)
+                                             ? std::string() : TrimCopy(inner.substr(eq + 1));
+                auto it = params.find(key);
+                const std::string* val = nullptr;
+                if (it != params.end()) val = &it->second;
+                else if (eq != std::string::npos) val = &fallback;
+                if (val) {
+                    // 参数值按纯文本注入：转义 & < > —— 否则传进来的值里若含 <use> 之类的标签，
+                    // 会被后续解析当成真元素（踩过一次：body="内部 <use> …" 凭空多出一个节点）
+                    for (char ch : *val) {
+                        if (ch == '&') out += "&amp;";
+                        else if (ch == '<') out += "&lt;";
+                        else if (ch == '>') out += "&gt;";
+                        else out += ch;
+                    }
+                } else {
+                    Warn("组件参数 \"" + key + "\" 未在 <use> 上提供，已按空串替换");
+                }
+                i = end + 2;
+                continue;
+            }
+        }
+        out += src[i++];
+    }
+    return out;
+}
+
+static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets,
+                             const std::string& baseDir, int depth) {
+    bool any = false;
+    for (const auto& e : elems)
+        if (e.tag == "use" || e.tag == "component") { any = true; break; }
+    if (!any) return;
+    if (depth > 8) {
+        Warn("组件嵌套超过 8 层，疑似循环引用，已停止展开");
+        return;
+    }
+
+
+    std::vector<HNode> out;
+    out.reserve(elems.size() * 2);
+    std::vector<size_t> remap(elems.size(), SIZE_MAX);
+
+    for (size_t oi = 0; oi < elems.size(); oi++) {
+        HNode& e = elems[oi];
+        if (e.tag != "use" && e.tag != "component") {
+            HNode copy = e;
+            copy.parentIdx = (copy.parentIdx == SIZE_MAX) ? SIZE_MAX : remap[copy.parentIdx];
+            remap[oi] = out.size();
+            out.push_back(std::move(copy));
+            continue;
+        }
+
+        // ---- src 与参数 ----
+        const std::string srcRel = e.attrs.count("src") ? TrimCopy(e.attrs.at("src")) : std::string();
+        const std::string label = e.attrs.count("id") ? ("#" + e.attrs.at("id")) : ("<" + e.tag + ">");
+        // 除 src 之外的所有属性都可以被组件里的 {{参数}} 引用：几何/样式类属性
+        // 既作为参数，也照样落到替换节点上（传 w=132 → 组件根宽 132，且 {{w}} = 132）
+        std::unordered_map<std::string, std::string> params;
+        for (const auto& kv : e.attrs)
+            if (kv.first != "src") params[kv.first] = kv.second;
+
+        std::vector<HNode> compElems;
+        std::string compStyles;
+        std::string compDir = baseDir;
+        std::string failReason;
+        auto endsWith = [](const std::string& s, const char* tail) {
+            const size_t n = std::strlen(tail);
+            return s.size() > n && s.compare(s.size() - n, n, tail) == 0;
+        };
+        if (srcRel.empty()) {
+            failReason = "缺少 src 属性";
+        } else if (endsWith(srcRel, ".bum") || endsWith(srcRel, ".binui")) {
+            failReason = "二进制组件（" + srcRel + "）暂不支持，请改用 .bum.xml 源码形式";
+        } else {
+            const std::string compPath = baseDir.empty()
+                ? srcRel
+                : (std::filesystem::path(baseDir) / srcRel).lexically_normal().generic_string();
+            compDir = std::filesystem::path(compPath).parent_path().generic_string();
+            std::string compSrc;
+            if (!ReadWholeFile(compPath, compSrc)) {
+                failReason = "读不到组件文件 " + compPath;
+            } else {
+                compSrc = SubstituteParams(compSrc, params);
+                compElems = ParseElements(compSrc, compStyles);
+                if (compElems.empty()) failReason = "组件 " + compPath + " 解析后没有元素";
+                else ExpandComponents(compElems, compStyles, compDir, depth + 1);
+            }
+        }
+        if (!failReason.empty())
+            Warn("组件内联 " + label + "：" + failReason + "（已按空容器处理）");
+
+        // ---- 替换节点：<use> 属性优先，其次是组件根属性 ----
+        HNode root;
+        root.tag = "div";
+        size_t compRootIdx = SIZE_MAX;
+        if (!compElems.empty()) {
+            for (size_t k = 0; k < compElems.size(); k++)
+                if (compElems[k].parentIdx == SIZE_MAX) { compRootIdx = k; break; }
+            if (compRootIdx != SIZE_MAX) {
+                root.attrs = compElems[compRootIdx].attrs;
+                root.text = compElems[compRootIdx].text;
+            }
+        }
+        // <use> 属性覆盖组件根属性；style/class 是"叠加"而非"替换"——
+        // 否则给组件传 style 会把组件自己的背景/尺寸全抹掉
+        for (const auto& kv : e.attrs) {
+            if (kv.first == "src") continue;
+            auto rit = root.attrs.find(kv.first);
+            if (rit != root.attrs.end() && !rit->second.empty() && !kv.second.empty() &&
+                (kv.first == "style" || kv.first == "class")) {
+                rit->second += (kv.first == "style" ? ";" : " ") + kv.second;
+                continue;
+            }
+            root.attrs[kv.first] = kv.second;
+        }
+        root.parentIdx = (e.parentIdx == SIZE_MAX) ? SIZE_MAX : remap[e.parentIdx];
+
+        // ---- 组件内的相对资源路径 → 宿主相对路径 ----
+        for (auto& ce : compElems) {
+            if (ce.tag != "img" && ce.tag != "video") continue;
+            auto sit = ce.attrs.find("src");
+            if (sit == ce.attrs.end() || sit->second.empty() || baseDir.empty()) continue;
+            if (compDir == baseDir) continue;
+            std::error_code ec;
+            const auto rel = std::filesystem::relative(
+                std::filesystem::path(compDir) / sit->second,
+                std::filesystem::path(baseDir), ec);
+            if (!ec) sit->second = rel.generic_string();
+        }
+
+        // ---- 落地：替换节点 + 组件子元素（父索引按局部表重映射）----
+        remap[oi] = out.size();
+        out.push_back(std::move(root));
+        if (!compElems.empty()) {
+            std::vector<size_t> cremap(compElems.size(), SIZE_MAX);
+            for (size_t k = 0; k < compElems.size(); k++) {
+                if (k == compRootIdx) continue;   // 组件根已被替换节点取代
+                HNode ce = compElems[k];
+                ce.parentIdx = (ce.parentIdx == compRootIdx) ? remap[oi] : cremap[ce.parentIdx];
+                cremap[k] = out.size();
+                out.push_back(std::move(ce));
+            }
+        }
+        styleSheets += compStyles;
+    }
+    elems.swap(out);
+}
+std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::string>* outImages) {
+    auto lowerStr = [](std::string s) {
+        for (auto& c : s) c = static_cast<char>(std::tolower((unsigned char)c));
+        return s;
+    };
+
+    // ---- 1. 容错解析 HTML 为扁平元素列表（与组件内联共用 ParseElements）----
+    std::string styleSheets; // <style> 文本（@keyframes 与 transition/animation 规则）
+    std::vector<HNode> elems = ParseElements(html, styleSheets);
+
+    // ---- 1.5 组件内联：<use src="x.bum.xml"> 展开成真实元素 ----
+    ExpandComponents(elems, styleSheets, tl_uiBaseDir, 0);
 
     if (elems.empty()) return {};
 

@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<app_window width="720" height="460" bg="#0E0E13" title="组件化（.bum.xml）">
+<html width="720" height="460" bg="#0E0E13">
+<head>
+    <meta charset="UTF-8">
+    <title>组件化：标题栏 / 按钮 / 卡片</title>
+    <style>
+        body { font-size: 13px; }
+        .panel { background: #16161D; border-radius: 14; }
+        .label { color: #F5F5F7; font-size: 13px; }
+        /* 宿主主题化：传 bg 参数覆盖组件默认底色（组件自己的 CSS 仍生效） */
+    </style>
+</head>
+<body>
+    <!-- 1) 标题栏组件：一个源文件，所有界面共用 -->
+    <use src="titlebar.bum.xml" x="0" y="0" w="720"
+         title="组件化：标题栏.bum.xml" hint="改组件源码，所有引用它的界面一起变"/>
+
+    <div class="panel" style="position:absolute; left:16; top:60; width:332; height:196">
+        <span class="label" style="position:absolute; left:16; top:12">按钮组件（自带 :hover 过渡）</span>
+        <use src="button.bum.xml" x="16" y="44" w="132" label="普通按钮"/>
+        <use src="button.bum.xml" x="164" y="44" w="150" label="第二个实例"/>
+        <use src="button.bum.xml" x="16" y="96" w="150" label="同一组件第三份"/>
+        <use src="button.bum.xml" x="164" y="96" w="150" label="第四份"/>
+
+        <!-- 宿主覆盖：给组件传 style 只是"叠加"，组件的圆角/字号还在 -->
+        <div style="position:absolute; left:16; top:148; width:300; height:44">
+            <use src="button.bum.xml" x="0" y="0" w="180" label="宿主改底色（bg 参数）" bg="#2A2350"/>
+        </div>
+    </div>
+
+    <div class="panel" style="position:absolute; left:372; top:60; width:332; height:196">
+        <span class="label" style="position:absolute; left:16; top:12">组合组件（卡片内部再引用按钮）</span>
+        <use src="card.bum.xml" x="16" y="44" w="290"
+             heading="card.bum.xml" body="内部 &lt;use&gt; 引用 button.bum.xml" action="卡片里的按钮"/>
+    </div>
+
+    <div class="panel" style="position:absolute; left:16; top:272; width:688; height:172">
+        <span class="label" style="position:absolute; left:16; top:12">说明</span>
+        <span style="position:absolute; left:16; top:40; width:656; height:112; color:#8A8A95; font-size:12">
+编译期展开：&lt;use src="x.bum.xml"&gt; 把组件源码拼进宿主元素树，运行时仍是普通节点树。<br>
+零额外开销、无新二进制格式、命中测试/动画/热重载照旧。<br>
+{{参数}} 用 &lt;use&gt; 上的同名属性替换，支持 {{名=默认值}}；参数值按纯文本注入。<br>
+组件自带的 &lt;style&gt; 并进宿主样式表：能量身定制，但参数化样式要写内联。<br>
+详见 docs/components.md
+</span>
+    </div>
+</body>
+</html>
