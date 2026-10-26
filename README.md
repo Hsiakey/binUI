@@ -79,6 +79,8 @@ git clone --depth 1 --branch VER-2-13-3 https://github.com/freetype/freetype.git
 git clone --depth 1 --branch 10.2.0    https://github.com/harfbuzz/harfbuzz.git third_party/harfbuzz
 ```
 
+各组件的许可证与分发注意事项见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
 CMake 会直接 `add_subdirectory` 编译为静态库（MSVC/MinGW 均可）；Makefile 路径使用预编译静态库（见 `Makefile` 的 `GPU_LIBS`，MinGW 下用 CMake 或 meson 预构建 `third_party/freetype/build/libfreetype.a`、`third_party/harfbuzz/build-static/src/libharfbuzz.a`）。
 
 ## 绘制后端

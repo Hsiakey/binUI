@@ -93,4 +93,4 @@ mingw32-make SHELL=sh test
 
 ## 许可证
 
-提交即表示同意以 [MIT](LICENSE) 授权你的贡献。
+提交即表示同意以 [MIT](LICENSE) 授权你的贡献；第三方组件的许可见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
