@@ -108,15 +108,20 @@ int main(int argc, char** argv) {
     RECT clip = { 0, 0, W, H };
     drawNodesGDI(mem, r, &clip);
 
-    Bitmap bmp(dib, nullptr);
-    CLSID pngClsid;
-    if (GetEncoderClsid(L"image/png", &pngClsid) == 0) {
-        wchar_t wpath[512];
-        MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, wpath, 512);
-        if (bmp.Save(wpath, &pngClsid, nullptr) == Ok) {
-            std::printf("saved %s (%dx%d)\n", argv[2], W, H);
-        } else {
-            std::printf("save failed\n");
+    // GDI+ 的 Bitmap(HBITMAP,…) 不拷贝像素：必须让 bmp 先析构，再 DeleteObject(dib)。
+    // 以前 bmp 和 dib 同在 main 作用域里，dib 先被删、bmp 析构时访问已释放的 DIB，
+    // 进程退出码变成 0xC0000005（PNG 其实已经写对了，但脚本会以为失败）。
+    {
+        Bitmap bmp(dib, nullptr);
+        CLSID pngClsid;
+        if (GetEncoderClsid(L"image/png", &pngClsid) == 0) {
+            wchar_t wpath[512];
+            MultiByteToWideChar(CP_UTF8, 0, argv[2], -1, wpath, 512);
+            if (bmp.Save(wpath, &pngClsid, nullptr) == Ok) {
+                std::printf("saved %s (%dx%d)\n", argv[2], W, H);
+            } else {
+                std::printf("save failed\n");
+            }
         }
     }
 
@@ -124,6 +129,7 @@ int main(int argc, char** argv) {
     DeleteObject(dib);
     DeleteDC(mem);
     ReleaseDC(nullptr, screen);
+    std::fflush(stdout);
     GdiplusShutdown(token);
     return 0;
 }

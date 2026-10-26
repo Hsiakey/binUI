@@ -91,6 +91,19 @@ public:
     // 当前布局二进制（含编译期内联的组件；mountComponent 之后会变大）
     const std::vector<uint8_t>& layoutBytes() const { return layoutBytes_; }
 
+    // v13 扩展绘制段：节点的文字色/边框/渐变/字重/行高/文字装饰（无条目返回 nullptr）
+    const BinUIPaintNode* paintOf(uint16_t nodeId) const {
+        auto it = paintIdx_.find(nodeId);
+        return it == paintIdx_.end() ? nullptr : &paints_[it->second];
+    }
+    // 该节点是否只是"裁剪容器"（CSS overflow:hidden）：可裁剪但不可滚动
+    bool isClipOnly(uint16_t nodeId) const { return clipOnly_.count(nodeId) != 0; }
+    // 该节点是否可被滚轮/拖动滚动（SCROLLABLE 且不是 clip-only）
+    bool isUserScrollable(uint16_t nodeId) const;
+
+    // 文字色：扩展绘制段有就用它，否则回退节点自带颜色（LABEL 的旧约定）
+    uint32_t textColorOf(uint16_t nodeId) const;
+
     void loadResources(const std::unordered_map<std::string, std::vector<uint8_t>>& resources);
 
     // 记录 imageIndex -> 资源路径（与编译器输出 CompileResult::images 顺序一致）
@@ -308,6 +321,9 @@ private:
     std::vector<uint8_t> layoutBytes_;                   // 当前布局（组件合并的基底）
     std::vector<std::string> imagePaths_;                // v12 资源段：imageIndex -> 路径
     std::vector<ComponentRef> componentRefs_;            // v12 组件引用段：运行期挂载点
+    std::vector<BinUIPaintNode> paints_;                 // v13 扩展绘制段
+    std::unordered_map<uint16_t, size_t> paintIdx_;      // nodeId -> paints_ 下标
+    std::unordered_set<uint16_t> clipOnly_;              // PAINT_CLIP_ONLY 的节点（overflow:hidden）
     std::unordered_set<uint16_t> mountedAnchors_;        // 已挂载组件的锚点（幂等）
     uint16_t nextNodeId_ = 0;                            // v8 动态节点 id 分配
     std::unordered_map<std::string, ImageResource> images_;

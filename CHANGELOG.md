@@ -6,6 +6,44 @@
 
 ## [Unreleased]
 
+### 新增 — 元素与 CSS：底色/文字色分家、边框、渐变、字重、行高（【格式 v13】）
+
+- **【格式 v13】扩展绘制段**：`BinUIPaintNode`（40 字节，稀疏）——文字色、四边边框
+  （宽度与颜色各自独立）、`linear-gradient` 底色、字重、行高、文字装饰线、`overflow:hidden`
+  的"只裁剪"标记。不往定长的 `BinUINode` 里加字段，旧布局语义不变；链接器合并组件时同样迁移。
+- **底色与文字色分家**（本轮最重要的一条）：以前只有一个颜色字段兼任两职，于是
+  `div { color:#333 }` 会被当成底色用掉、`span { background:transparent; color:#333 }`
+  直接让文字变透明、按钮文字恒白。现在 `background*` 是底色、`color` 是文字色，
+  **并且沿元素树继承**（`body{color:#333}` 对整棵树生效）—— 浅色主题终于能写。
+- **边框**：`border` / `border-width` / `border-color`（1~4 值展开）与
+  `border-top/right/bottom/left`，四边各自宽度与颜色，画在节点内侧不参与布局。
+- **渐变底色**：`linear-gradient(...)`（`to <side>` / `135deg`，取首尾两色）。条带按
+  "圆角区 1px 一条 + 直边区 ~32px 一条"切分，圆角渐变不会出现阶梯。
+- **排版**：`font-weight`（FreeType `FT_GlyphSlot_Embolden` 合成加粗，GDI/GL/D3D 三端一致，
+  测宽与绘制同步加宽）、`line-height`（倍数 / `%` / `px`）、`text-decoration`
+  （`underline` / `line-through` / `overline`）。
+- **选择器（补齐最大的一块表达力缺口）**：复合类 `.btn.primary`、属性选择器
+  `[type=text]` / `[href^=http]` / `[class~=x]` / `[lang|=zh]`、后代/子代/相邻兄弟/后续兄弟
+  组合子（`.card .title`、`.card > .title`、`h2 + p`、`h2 ~ p`）。组合子按 CSS 从右往左匹配，
+  兄弟序号只统计可视元素（`head/meta/script/style` 与伪元素合成盒不算）。
+- **容器默认透明**：`div/section` 等容器不再默认填 `#222222`（浅色主题的拦路虎）；
+  `<button>` / `<input>` 仍保留控件底色，`<rect>`/`<circle>` 仍是 SVG 语义的黑。
+- **文本节点高度估算**：未声明 `height` 的文本节点按估算行数撑开（CJK 1.0×字号、其余
+  0.52×字号，行距取 `line-height`）——以前段落按单行高排，第二行就压到下一个元素身上。
+- **容器撑高会推动后续兄弟**：自动高度的容器弹出时把"被内容撑高"的增量补到父容器的
+  流光标上，卡片里放几行字不会再把后面的元素压住。
+
+### 修复
+
+- `LABEL` 写了 `background`（哪怕 `transparent`）就把 `color` 当背景色解析，导致文字消失。
+- `overflow:hidden` 被当成可滚动容器（会出滚动条、响应滚轮）；现在只裁剪不滚动。
+- GDI 画布后端的长文本不换行（硬套 `DT_SINGLELINE`），与 GPU 后端表现不一致。
+- `binui_compile` 把每条编译警告打印两遍（编译器自己写 stderr + 工具再打 warnings）。
+- `offscreen_render` 保存 PNG 后以 `0xC0000005` 退出：GDI+ 的 `Bitmap(HBITMAP,…)` 不拷贝像素，
+  却让 `Bitmap` 活过了 `DeleteObject(dib)`；现在先析构再删。
+- Makefile 的头文件依赖只覆盖了部分输出目录，`backends/`、`platform/`、`common/`、`bin/`
+  改了头文件不会重编；补齐后 `make` 的结果才可信。
+
 ### 新增 — 组件化：`.bui` / `.bum` / `.bum.xml`（【格式 v12】）
 
 - **命名与分发**：一个界面 = 一个 `.bui`（组件全内联，运行期零依赖）；要拆开就是

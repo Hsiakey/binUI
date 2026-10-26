@@ -37,6 +37,7 @@ struct Doc {
     std::vector<BinUIStateStyle> states;
     std::vector<std::string> images;
     std::vector<ComponentRef> comps;
+    std::vector<BinUIPaintNode> paints;   // v13 扩展绘制段
     std::vector<std::pair<uint16_t, std::string>> names;
 };
 
@@ -321,6 +322,35 @@ bool ParseDoc(const void* data, size_t size, Doc& d) {
         if (!ok) r.rewind(mark);
     }
 
+    // ---- 扩展绘制段（v13） ----
+    {
+        const uint8_t* mark = r.cur();
+        uint32_t bytes = 0;
+        bool ok = false;
+        if (r.u32(bytes)) {
+            if (bytes == 0) {
+                ok = true;
+            } else {
+                const uint8_t* pp = nullptr;
+                if (r.blob(bytes, pp)) {
+                    Reader p(pp, pp + bytes);
+                    uint32_t pc = 0;
+                    if (p.u32(pc) && p.left() >= (size_t)pc * sizeof(BinUIPaintNode)) {
+                        const uint8_t* ep = nullptr;
+                        if (p.blob((size_t)pc * sizeof(BinUIPaintNode), ep)) {
+                            if (pc)
+                                d.paints.assign(reinterpret_cast<const BinUIPaintNode*>(ep),
+                                                reinterpret_cast<const BinUIPaintNode*>(ep) + pc);
+                            ok = true;
+                        }
+                    }
+                }
+                if (!ok) { d.paints.clear(); r.rewind(mark); }
+            }
+        }
+        if (!ok) r.rewind(mark);
+    }
+
     // ---- 名称段（v8，缺失 = 无命名节点） ----
     {
         uint32_t bytes = 0;
@@ -449,6 +479,13 @@ std::vector<uint8_t> EmitDoc(Doc& d) {
             ref.srcOffset = compSrcOffsets[k];
             PutRaw(p, &ref, sizeof(ref));
         }
+        PutSection(b, p);
+    }
+    // 扩展绘制段（段恒定写出；空段 = 只有计数 0，与编译器一致）
+    {
+        std::vector<uint8_t> p;
+        PutU32(p, static_cast<uint32_t>(d.paints.size()));
+        if (!d.paints.empty()) PutRaw(p, d.paints.data(), d.paints.size() * sizeof(BinUIPaintNode));
         PutSection(b, p);
     }
     // 名称段（非空才写）
@@ -671,6 +708,15 @@ bool MergeLayout(std::vector<uint8_t>& host, const void* comp, size_t compSize,
         BinUIStateStyle s2 = s;
         s2.nodeId = idMap[it->second];
         h.states.push_back(s2);
+    }
+
+    // ---- 扩展绘制段（v13）：组件节点的边框/文字色/渐变跟着搬过来 ----
+    for (auto& p : c.paints) {
+        auto it = compIdx.find(p.nodeId);
+        if (it == compIdx.end() || it->second == 0) continue;
+        BinUIPaintNode p2 = p;
+        p2.nodeId = idMap[it->second];
+        h.paints.push_back(p2);
     }
 
     // ---- 组件引用段（组件内再外挂组件时递归） ----

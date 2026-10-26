@@ -14,6 +14,7 @@
 #include <algorithm>
 #include <array>
 #include <filesystem>
+#include <functional>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -155,10 +156,15 @@ static thread_local CompileDiag g_diag;
 // 字符串入口（CompileBinUIEx）为空 → <use src> 按工作目录解析。
 static thread_local std::string tl_uiBaseDir;
 
-// 同一条警告只报一次（同一份 UI 里 20 个元素写错单位，不该刷 20 行）
+// 同一条警告只报一次（同一份 UI 里 20 个元素写错单位，不该刷 20 行）。
+// 装了收集器（CompileResult::warnings）就只入列表、不再直写 stderr ——
+// 以前无条件两者都做，命令行工具于是把每条警告打印了两遍。
 static void Warn(const std::string& msg) {
     if (g_diag.seen && !g_diag.seen->insert(msg).second) return;
-    if (g_diag.list) g_diag.list->push_back(msg);
+    if (g_diag.list) {
+        g_diag.list->push_back(msg);
+        return;
+    }
     std::fprintf(stderr, "[binui] warning: %s\n", msg.c_str());
 }
 
@@ -960,6 +966,27 @@ static void AppendComponentSection(std::vector<uint8_t>& buf,
     memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
 
+// 追加扩展绘制段（v13）：uint32 paintBytes + uint32 paintCount + BinUIPaintNode[]
+// 恒定写出（无扩展绘制时 paintBytes=4），位于组件引用段之后、名称段之前。
+static void AppendPaintSection(std::vector<uint8_t>& buf,
+                               const std::vector<BinUIPaintNode>& paints) {
+    size_t start = buf.size();
+    std::vector<uint8_t> data;
+    auto wu = [&](uint32_t x) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&x);
+        data.insert(data.end(), p, p + 4);
+    };
+    wu((uint32_t)paints.size());
+    if (!paints.empty())
+        data.insert(data.end(),
+                    reinterpret_cast<const uint8_t*>(paints.data()),
+                    reinterpret_cast<const uint8_t*>(paints.data() + paints.size()));
+    uint32_t nbytes = (uint32_t)data.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
+
 std::vector<uint8_t> CompileBinUISource(const std::string& source) {    return CompileBinUIEx(source).layout;
 }
 
@@ -1591,6 +1618,7 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
         AppendImageSection(buf, imgOffsets);
     }
     AppendComponentSection(buf, {}); // XML 路径：无 <use>，段恒定写出保证解析链确定
+    AppendPaintSection(buf, {});     // v13：XML 路径无扩展绘制，段同样恒定写出
     AppendNameSection(buf, nodeNames, offsets);
 
     return buf;
@@ -1623,6 +1651,14 @@ struct CssElemCtx {
     int  typeCnt = 0;
     bool isRoot = false;
     int  stateMask = 0; // BinUIStateFlag 的或；基础样式求值时恒为 0
+    // 属性选择器 [attr=v] 取值用。由 ctxOf() 指向元素的属性表（编译期元素表稳定，
+    // 且伪元素展开后有一次统一重绑，见 CompileHTML 里的 attrs 重绑循环）
+    const std::unordered_map<std::string, std::string>* attrs = nullptr;
+};
+
+// 属性选择器：[attr] / [attr=v] / [attr^=v] / [attr$=v] / [attr*=v] / [attr~=v] / [attr|=v]
+struct CssAttrSel {
+    std::string name, op, val;   // op: ""(存在) "=" "^=" "$=" "*=" "~=" "|="
 };
 
 struct CssPseudo {
@@ -1637,16 +1673,38 @@ struct CssPseudo {
     int a = 0, b = 0;      // An+B（结构伪类）
     int spec = 10;         // 特异性附加
     // :not(简单选择器) 的内层选择器
-    std::string ntag, ncls, nid;
+    std::string notTag, notId;
+    std::vector<std::string> notClasses;
+    std::vector<CssAttrSel> notAttrs;
 };
 
 struct CssRule {
-    std::string tag, cls, id;
-    std::string pseudoEl;              // "" = 普通规则；"before"/"after" = 伪元素
-    std::vector<CssPseudo> pseudos;
+    // 单条复杂选择器拆成的若干"简单选择器段"，从右往左匹配（CSS 标准方向）。
+    // 例：".card > .title:hover" → parts = [ {".card", comb='|'}, {".title:hover", comb='>'} ]
+    struct Simple {
+        std::string tag;                        // "" / "*" = 通配
+        std::string id;
+        std::vector<std::string> classes;       // .a.b.c 全部要命中
+        std::vector<CssAttrSel> attrs;
+        std::vector<CssPseudo> pseudos;
+        int spec = 0;
+        bool empty() const {
+            return tag.empty() && id.empty() && classes.empty() && attrs.empty() && pseudos.empty();
+        }
+    };
+    struct Part {
+        Simple sel;
+        char   comb = '|';                      // 与"左边那段"的关系：'|' 起始，' ' 后代，'>' 子，'+' 相邻，'~' 兄弟
+    };
+
+    std::vector<Part> parts;                    // 至少 1 段
+    std::string pseudoEl;                       // "" = 普通规则；"before"/"after" = 伪元素（只允许单段）
     int spec = 0;
-    size_t order = 0;                  // 文档序（同权重时后者胜）
+    size_t order = 0;                           // 文档序（同权重时后者胜）
     std::unordered_map<std::string, std::string> decls;
+
+    // 常用快捷访问：单段规则才有意义（伪元素规则必然单段）
+    const Simple& head() const { return parts.front().sel; }
 };
 
 // "An+B" / "odd" / "even" / "5" → (a, b)
@@ -1681,187 +1739,322 @@ static bool NthMatch(int a, int b, int idx1) {
     return (d % a) == 0 && (d / a) >= 0;
 }
 
-// 简单选择器（tag / .class / #id / tag.class / *）→ 拆成 tag/cls/id + 特异性
-static bool ParseSimpleSel(const std::string& oneIn, std::string& tag, std::string& cls,
-                           std::string& id, int& spec) {
-    const std::string one = TrimCopy(oneIn);
-    tag.clear(); cls.clear(); id.clear(); spec = 0;
-    if (one.empty()) return false;
-    if (one == "*") return true;
-    size_t ndots = 0, nhashes = 0;
-    for (char c : one) {
-        if (c == '.') ndots++;
-        else if (c == '#') nhashes++;
+// 单个"简单选择器段"：tag / .a.b / #id / [attr=v] / :pseudo(...) 的任意组合
+// 例："input.btn.primary:focus"、"a[href][target=_blank]"
+static bool ParseSimpleSelFull(const std::string& one, CssRule::Simple& out, std::string& why) {
+    const std::string s = TrimCopy(one);
+    why.clear();
+    if (s.empty()) { why = "为空"; return false; }
+    if (s == "*") return true;
+
+    size_t p = 0;
+    auto isNameChar = [](char c) {
+        return std::isalnum((unsigned char)c) || c == '_' || c == '-' || c == '*' ||
+               static_cast<unsigned char>(c) >= 0x80;
+    };
+
+    // 标签名（可省略）
+    if (s[p] != '.' && s[p] != '#' && s[p] != '[' && s[p] != ':') {
+        const size_t st = p;
+        while (p < s.size() && isNameChar(s[p])) p++;
+        if (p == st) { why = "标签名无法解析"; return false; }
+        out.tag = LowerCopy(s.substr(st, p - st));
+        if (out.tag != "*") out.spec += 1;
+        else out.tag.clear();
     }
-    if (ndots > 1 || nhashes > 1 || (nhashes == 1 && (one[0] != '#' || ndots > 0)))
-        return false;   // 复合选择器（.a.b / #a.b / #a#b）不做
-    const size_t dot = one.find('.');
-    if (one[0] == '.') {
-        cls = one.substr(1);
-        spec = 10;
-    } else if (one[0] == '#') {
-        id = one.substr(1);
-        spec = 100;
-    } else if (dot != std::string::npos) {
-        tag = LowerCopy(one.substr(0, dot));
-        cls = one.substr(dot + 1);
-        spec = 11;
-    } else {
-        tag = LowerCopy(one);
-        spec = 1;
+
+    while (p < s.size()) {
+        const char c = s[p];
+        if (c == '.') {
+            const size_t st = ++p;
+            while (p < s.size() && isNameChar(s[p]) && s[p] != '*') p++;
+            if (p == st) { why = "类名为空"; return false; }
+            out.classes.push_back(s.substr(st, p - st));
+            out.spec += 10;
+        } else if (c == '#') {
+            const size_t st = ++p;
+            while (p < s.size() && isNameChar(s[p]) && s[p] != '*') p++;
+            if (p == st) { why = "id 为空"; return false; }
+            out.id = s.substr(st, p - st);
+            out.spec += 100;
+        } else if (c == '[') {
+            const size_t close = s.find(']', p);
+            if (close == std::string::npos) { why = "属性选择器缺少 ]"; return false; }
+            std::string inner = TrimCopy(s.substr(p + 1, close - p - 1));
+            p = close + 1;
+            CssAttrSel a;
+            // 运算符：= ^= $= *= ~= |=
+            size_t op = std::string::npos;
+            for (size_t k = 1; k < inner.size(); k++) {
+                if (inner[k] == '=') {
+                    const char prev = inner[k - 1];
+                    if (prev == '^' || prev == '$' || prev == '*' || prev == '~' || prev == '|') {
+                        a.name = TrimCopy(inner.substr(0, k - 1));
+                        a.op = std::string(1, prev) + "=";
+                    } else {
+                        a.name = TrimCopy(inner.substr(0, k));
+                        a.op = "=";
+                    }
+                    op = k;
+                    break;
+                }
+            }
+            if (op == std::string::npos) {
+                a.name = inner;
+            } else {
+                a.val = TrimCopy(inner.substr(op + 1));
+                if (a.val.size() >= 2 &&
+                    ((a.val.front() == '"' && a.val.back() == '"') ||
+                     (a.val.front() == '\'' && a.val.back() == '\'')))
+                    a.val = a.val.substr(1, a.val.size() - 2);
+            }
+            if (a.name.empty()) { why = "属性选择器的属性名为空"; return false; }
+            if (a.name.size() > 2 && a.name[0] == '-' && a.name[1] == '-') {
+                why = "不支持按自定义属性（--x）选择";
+                return false;
+            }
+            a.name = LowerCopy(a.name);
+            out.attrs.push_back(std::move(a));
+            out.spec += 10;
+        } else if (c == ':') {
+            const bool isElem = (p + 1 < s.size() && s[p + 1] == ':');
+            p += isElem ? 2 : 1;
+            const size_t ns = p;
+            while (p < s.size() && (std::isalnum((unsigned char)s[p]) || s[p] == '-')) p++;
+            const std::string name = LowerCopy(s.substr(ns, p - ns));
+            std::string arg;
+            if (p < s.size() && s[p] == '(') {
+                const size_t as = ++p;
+                int depth = 1;
+                while (p < s.size() && depth > 0) {
+                    if (s[p] == '(') depth++;
+                    else if (s[p] == ')') { if (--depth == 0) break; }
+                    p++;
+                }
+                arg = s.substr(as, (p < s.size()) ? (p - as) : std::string::npos);
+                if (p < s.size()) p++;
+            }
+            if (name.empty()) { why = "伪类名为空"; return false; }
+            if (isElem) {
+                // 伪元素只在最后一段出现，交给 ParseCssSelector 处理
+                why = "伪元素位置错误";
+                return false;
+            }
+            CssPseudo ps;
+            ps.spec = 10;
+            if (name == "hover")        ps.kind = CssPseudo::HOVER;
+            else if (name == "active")  ps.kind = CssPseudo::ACTIVE;
+            else if (name == "focus")   ps.kind = CssPseudo::FOCUS;
+            else if (name == "checked") ps.kind = CssPseudo::CHECKED;
+            else if (name == "first-child")     { ps.kind = CssPseudo::FIRST_CHILD; }
+            else if (name == "last-child")      { ps.kind = CssPseudo::LAST_CHILD; }
+            else if (name == "only-child")      { ps.kind = CssPseudo::ONLY_CHILD; }
+            else if (name == "first-of-type")   { ps.kind = CssPseudo::FIRST_OF_TYPE; }
+            else if (name == "last-of-type")    { ps.kind = CssPseudo::LAST_OF_TYPE; }
+            else if (name == "only-of-type")    { ps.kind = CssPseudo::ONLY_OF_TYPE; }
+            else if (name == "nth-child" || name == "nth-last-child" ||
+                     name == "nth-of-type" || name == "nth-last-of-type") {
+                if (!ParseNthExpr(arg, &ps.a, &ps.b)) {
+                    why = "伪类 :" + name + "(" + arg + ") 的 An+B 表达式无法解析";
+                    return false;
+                }
+                ps.kind = (name == "nth-child") ? CssPseudo::NTH_CHILD
+                        : (name == "nth-last-child") ? CssPseudo::NTH_LAST_CHILD
+                        : (name == "nth-of-type") ? CssPseudo::NTH_OF_TYPE
+                        : CssPseudo::NTH_LAST_OF_TYPE;
+            } else if (name == "not") {
+                // :not(简单选择器段)：内层也允许 .a.b / [attr]
+                CssRule::Simple inner;
+                std::string w2;
+                if (!ParseSimpleSelFull(arg, inner, w2) || inner.empty()) {
+                    why = "伪类 :not(" + arg + ") 只支持内嵌简单选择器（tag/.class/#id/[attr]）";
+                    return false;
+                }
+                ps.kind = CssPseudo::NOT_SEL;
+                ps.notTag = inner.tag;
+                ps.notId = inner.id;
+                ps.notClasses = inner.classes;
+                ps.notAttrs.clear();
+                for (const auto& a : inner.attrs)
+                    ps.notAttrs.push_back({ a.name, a.op, a.val });
+                ps.spec = inner.spec;
+            } else if (name == "root") {
+                ps.kind = CssPseudo::ROOT;
+            } else {
+                why = "伪类 :" + name + " 暂不支持";
+                return false;
+            }
+            if (ps.kind <= CssPseudo::CHECKED) {
+                int runtimeCount = 0;
+                for (const auto& q : out.pseudos)
+                    if (q.kind <= CssPseudo::CHECKED) runtimeCount++;
+                if (++runtimeCount > 1) {
+                    why = "同一选择器出现多个运行时伪类（:hover/:active/:focus/:checked 只支持一个）";
+                    return false;
+                }
+            }
+            out.pseudos.push_back(ps);
+            out.spec += ps.spec;
+        } else {
+            why = std::string("无法识别选择器字符 '") + c + "'";
+            return false;
+        }
     }
-    return !(cls.empty() && id.empty() && tag.empty());
+    return !out.empty();
 }
 
-// 解析单个选择器（含伪类/伪元素）；失败时 why 说明原因
+// 复杂选择器：按组合子切成若干净段（后代 ' '/子 '>' /相邻 '+' /兄弟 '~'）
+static bool SplitComplexSelector(const std::string& in,
+                                 std::vector<std::pair<char, std::string>>& out,
+                                 std::string& why) {
+    std::string cur;
+    char pending = '|';        // 与"左邻"的关系；'|' = 首段
+    int depth = 0;             // () 与 [] 内的组合子不算
+    auto flush = [&]() -> bool {
+        const std::string t = TrimCopy(cur);
+        cur.clear();
+        if (t.empty()) return true;
+        out.emplace_back(pending == '|' && !out.empty() ? ' ' : pending, t);
+        pending = ' ';
+        return true;
+    };
+    for (char c : in) {
+        if (c == '(' || c == '[') depth++;
+        else if (c == ')' || c == ']') { if (depth > 0) depth--; }
+        if (depth == 0) {
+            if (c == ' ' || c == '\t' || c == '\n' || c == '\r') {
+                if (!TrimCopy(cur).empty()) flush();
+                continue;
+            }
+            if (c == '>' || c == '+' || c == '~') {
+                if (!flush()) return false;
+                if (TrimCopy(cur).empty() && out.empty()) { why = "组合子出现在选择器开头"; return false; }
+                pending = c;
+                continue;
+            }
+        }
+        cur += c;
+    }
+    if (!TrimCopy(cur).empty()) flush();
+    if (out.empty()) { why = "为空"; return false; }
+    // 首段的 comb 必须是 '|'
+    out.front().first = '|';
+    return true;
+}
+
+// 解析单个复杂选择器（含组合子/复合类/属性选择器/伪类/伪元素）
 static bool ParseCssSelector(const std::string& oneIn, CssRule& r, std::string& why) {
     const std::string one = TrimCopy(oneIn);
     why.clear();
     if (one.empty()) { why = "为空"; return false; }
-    if (one.find(' ') != std::string::npos || one.find('>') != std::string::npos ||
-        one.find('+') != std::string::npos || one.find('~') != std::string::npos) {
-        why = "含后代/子代/兄弟组合子";
-        return false;
-    }
-    if (one.find('[') != std::string::npos) {
-        why = "含属性选择器 [attr]";
-        return false;
-    }
-    std::string base = one, rest;
-    const size_t colon = one.find(':');
-    if (colon != std::string::npos) {
-        base = one.substr(0, colon);
-        rest = one.substr(colon);
-    }
-    if (base.empty()) base = "*";       // ":hover" 单独出现 → 通配
-    if (!ParseSimpleSel(base, r.tag, r.cls, r.id, r.spec)) {
-        why = "是复合选择器（本编译器只认一个 tag/class/id 的组合）";
-        return false;
-    }
 
-    int runtimeCount = 0;
-    size_t p = 0;
-    while (p < rest.size()) {
-        if (rest[p] != ':') { why = "伪类语法错误"; return false; }
-        const bool isElem = (p + 1 < rest.size() && rest[p + 1] == ':');
-        p += isElem ? 2 : 1;
-        const size_t ns = p;
-        while (p < rest.size() && (std::isalnum((unsigned char)rest[p]) || rest[p] == '-')) p++;
-        const std::string name = LowerCopy(rest.substr(ns, p - ns));
-        std::string arg;
-        if (p < rest.size() && rest[p] == '(') {
-            const size_t as = ++p;
-            int depth = 1;
-            while (p < rest.size() && depth > 0) {
-                if (rest[p] == '(') depth++;
-                else if (rest[p] == ')') { if (--depth == 0) break; }
-                p++;
-            }
-            arg = rest.substr(as, (p < rest.size()) ? (p - as) : std::string::npos);
-            if (p < rest.size()) p++;   // 跳过 ')'
+    std::vector<std::pair<char, std::string>> raw;
+    if (!SplitComplexSelector(one, raw, why)) return false;
+
+    // 伪元素拆出来（只能出现在最右段的末尾）
+    std::string lastText = raw.back().second;
+    std::string pseudoEl;
+    {
+        // 找最后一个顶层的 "::name"（不在 ()/[] 内）
+        int depth = 0;
+        size_t at = std::string::npos;
+        for (size_t i = 0; i + 1 < lastText.size(); i++) {
+            if (lastText[i] == '(' || lastText[i] == '[') depth++;
+            else if (lastText[i] == ')' || lastText[i] == ']') { if (depth > 0) depth--; }
+            if (depth == 0 && lastText[i] == ':' && lastText[i + 1] == ':') at = i;
         }
-        if (name.empty()) { why = "伪类名为空"; return false; }
-
-        if (isElem) {
-            if (!r.pseudoEl.empty() || runtimeCount > 0 || !r.pseudos.empty()) {
-                why = "伪元素之后不能再接伪类";
-                return false;
-            }
+        if (at != std::string::npos) {
+            const std::string after = lastText.substr(at + 2);
+            std::string name;
+            size_t q = 0;
+            while (q < after.size() && (std::isalnum((unsigned char)after[q]) || after[q] == '-')) q++;
+            name = LowerCopy(after.substr(0, q));
             if (name == "before" || name == "after") {
-                r.pseudoEl = name;
+                pseudoEl = name;
+                lastText = lastText.substr(0, at);
+                if (lastText.empty()) lastText = "*";
                 r.spec += 1;
-                continue;
-            }
-            why = "伪元素 ::" + name + " 没有对应渲染阶段（只支持 ::before/::after）";
-            return false;
-        }
-
-        CssPseudo ps;
-        ps.spec = 10;
-        if (name == "hover")        ps.kind = CssPseudo::HOVER;
-        else if (name == "active")  ps.kind = CssPseudo::ACTIVE;
-        else if (name == "focus")   ps.kind = CssPseudo::FOCUS;
-        else if (name == "checked") ps.kind = CssPseudo::CHECKED;
-        else if (name == "first-child")     { ps.kind = CssPseudo::FIRST_CHILD;     ps.spec = 10; }
-        else if (name == "last-child")      { ps.kind = CssPseudo::LAST_CHILD;      ps.spec = 10; }
-        else if (name == "only-child")      { ps.kind = CssPseudo::ONLY_CHILD;      ps.spec = 10; }
-        else if (name == "first-of-type")   { ps.kind = CssPseudo::FIRST_OF_TYPE;   ps.spec = 10; }
-        else if (name == "last-of-type")    { ps.kind = CssPseudo::LAST_OF_TYPE;    ps.spec = 10; }
-        else if (name == "only-of-type")    { ps.kind = CssPseudo::ONLY_OF_TYPE;    ps.spec = 10; }
-        else if (name == "nth-child" || name == "nth-last-child" ||
-                 name == "nth-of-type" || name == "nth-last-of-type") {
-            if (!ParseNthExpr(arg, &ps.a, &ps.b)) {
-                why = "伪类 :" + name + "(" + arg + ") 的 An+B 表达式无法解析";
-                return false;
-            }
-            ps.kind = (name == "nth-child") ? CssPseudo::NTH_CHILD
-                    : (name == "nth-last-child") ? CssPseudo::NTH_LAST_CHILD
-                    : (name == "nth-of-type") ? CssPseudo::NTH_OF_TYPE
-                    : CssPseudo::NTH_LAST_OF_TYPE;
-        } else if (name == "not") {
-            int innerSpec = 0;
-            if (!ParseSimpleSel(arg, ps.ntag, ps.ncls, ps.nid, innerSpec) ||
-                (ps.ntag.empty() && ps.ncls.empty() && ps.nid.empty())) {
-                why = "伪类 :not(" + arg + ") 只支持内嵌简单选择器（tag/.class/#id）";
-                return false;
-            }
-            ps.kind = CssPseudo::NOT_SEL;
-            ps.spec = innerSpec;
-        } else if (name == "root") {
-            ps.kind = CssPseudo::ROOT;
-            ps.spec = 10;
-        } else {
-            why = "伪类 :" + name + " 暂不支持";
-            return false;
-        }
-        if (ps.kind <= CssPseudo::CHECKED) {
-            if (++runtimeCount > 1) {
-                why = "同一选择器出现多个运行时伪类（:hover/:active/:focus/:checked 只支持一个）";
+            } else {
+                why = "伪元素 ::" + name + " 没有对应渲染阶段（只支持 ::before/::after）";
                 return false;
             }
         }
-        if (!r.pseudoEl.empty()) { why = "伪元素之后不能再接伪类"; return false; }
-        r.pseudos.push_back(ps);
-        r.spec += ps.spec;
     }
+
+    for (size_t k = 0; k < raw.size(); k++) {
+        CssRule::Part part;
+        part.comb = raw[k].first;
+        const std::string& text = (k + 1 == raw.size()) ? lastText : raw[k].second;
+        std::string w2;
+        if (!ParseSimpleSelFull(text, part.sel, w2)) {
+            why = "的 " + text + " 段" + w2;
+            return false;
+        }
+        r.spec += part.sel.spec;
+        r.parts.push_back(std::move(part));
+    }
+    if (r.parts.empty()) { why = "没有可匹配的简单选择器"; return false; }
+    r.pseudoEl = pseudoEl;
     return true;
 }
 
-// 规则是否带指定运行时伪类（:hover/:active/:focus/:checked）
+
+// 规则是否带指定运行时伪类（:hover/:active/:focus/:checked；任一段里出现即算）
 static bool CssHasStatePseudo(const CssRule& r, uint8_t bit) {
-    for (const auto& ps : r.pseudos) {
-        if (bit == BINUI_ST_HOVER   && ps.kind == CssPseudo::HOVER)   return true;
-        if (bit == BINUI_ST_ACTIVE  && ps.kind == CssPseudo::ACTIVE)  return true;
-        if (bit == BINUI_ST_FOCUS   && ps.kind == CssPseudo::FOCUS)   return true;
-        if (bit == BINUI_ST_CHECKED && ps.kind == CssPseudo::CHECKED) return true;
+    for (const auto& part : r.parts) {
+        for (const auto& ps : part.sel.pseudos) {
+            if (bit == BINUI_ST_HOVER   && ps.kind == CssPseudo::HOVER)   return true;
+            if (bit == BINUI_ST_ACTIVE  && ps.kind == CssPseudo::ACTIVE)  return true;
+            if (bit == BINUI_ST_FOCUS   && ps.kind == CssPseudo::FOCUS)   return true;
+            if (bit == BINUI_ST_CHECKED && ps.kind == CssPseudo::CHECKED) return true;
+        }
     }
     return false;
 }
 
-// 简单选择器是否命中（tag/cls/id）
-static bool CssSelMatches(const std::string& tag, const std::string& cls,
-                          const std::string& id, const CssElemCtx& c) {
-    if (!id.empty() && id != c.id) return false;
-    if (!tag.empty() && tag != c.tag) return false;
-    if (!cls.empty()) {
-        bool hit = false;   // class="a b c"：任一 token 命中即可
-        size_t p = 0;
-        while (p < c.cls.size()) {
-            const size_t e = c.cls.find_first_of(" \t", p);
-            const std::string tok = c.cls.substr(p, (e == std::string::npos) ? std::string::npos : e - p);
-            if (tok == cls) { hit = true; break; }
-            if (e == std::string::npos) break;
-            p = e + 1;
-        }
-        if (!hit) return false;
+// class="a b c" 里是否含 want（空白分隔 token）
+static bool CssClassHit(const std::string& cls, const std::string& want) {
+    size_t p = 0;
+    while (p < cls.size()) {
+        const size_t e = cls.find_first_of(" \t", p);
+        const std::string tok = cls.substr(p, (e == std::string::npos) ? std::string::npos : e - p);
+        if (tok == want) return true;
+        if (e == std::string::npos) break;
+        p = e + 1;
     }
-    return true;
+    return false;
 }
 
-// 完整规则匹配（含伪类求值：运行时伪类看 stateMask，结构伪类看兄弟序号）
-static bool CssRuleMatches(const CssRule& r, const CssElemCtx& c) {
-    if (!CssSelMatches(r.tag, r.cls, r.id, c)) return false;
-    for (const auto& ps : r.pseudos) {
+// 属性选择器是否命中
+static bool CssAttrMatches(const CssAttrSel& a, const CssElemCtx& c) {
+    if (!c.attrs) return false;
+    auto it = c.attrs->find(a.name);
+    if (it == c.attrs->end()) return false;
+    if (a.op.empty()) return true;
+    const std::string& v = it->second;
+    if (a.op == "=")  return v == a.val;
+    if (a.op == "^=") return !a.val.empty() && v.rfind(a.val, 0) == 0;
+    if (a.op == "$=") return !a.val.empty() && v.size() >= a.val.size() &&
+                             v.compare(v.size() - a.val.size(), a.val.size(), a.val) == 0;
+    if (a.op == "*=") return !a.val.empty() && v.find(a.val) != std::string::npos;
+    if (a.op == "~=") return !a.val.empty() && CssClassHit(v, a.val);
+    if (a.op == "|=") return v == a.val ||
+                             (v.size() > a.val.size() &&
+                              v.compare(0, a.val.size() + 1, a.val + "-") == 0);
+    return false;
+}
+
+// 单个"简单选择段"是否命中：tag / #id / .a.b / [attr] / 伪类求值
+// （组合子与祖先/兄弟关系由 CssRuleMatchesDom 处理，不在这里做）
+static bool CssSimpleMatches(const CssRule::Simple& sel, const CssElemCtx& c) {
+    if (!sel.id.empty() && sel.id != c.id) return false;
+    if (!sel.tag.empty() && sel.tag != c.tag) return false;
+    for (const auto& want : sel.classes)
+        if (!CssClassHit(c.cls, want)) return false;
+    for (const auto& a : sel.attrs)
+        if (!CssAttrMatches(a, c)) return false;
+
+    for (const auto& ps : sel.pseudos) {
         switch (ps.kind) {
             case CssPseudo::HOVER:   if (!(c.stateMask & BINUI_ST_HOVER))   return false; break;
             case CssPseudo::ACTIVE:  if (!(c.stateMask & BINUI_ST_ACTIVE))  return false; break;
@@ -1889,9 +2082,20 @@ static bool CssRuleMatches(const CssRule& r, const CssElemCtx& c) {
             case CssPseudo::NTH_LAST_OF_TYPE:
                 if (c.typeIdx < 0 || !NthMatch(ps.a, ps.b, c.typeCnt - c.typeIdx)) return false;
                 break;
-            case CssPseudo::NOT_SEL:
-                if (CssSelMatches(ps.ntag, ps.ncls, ps.nid, c)) return false;
+            case CssPseudo::NOT_SEL: {
+                // 内层全部命中 → 整体不命中
+                bool hit = true;
+                if (!ps.notId.empty() && ps.notId != c.id) hit = false;
+                if (hit && !ps.notTag.empty() && ps.notTag != c.tag) hit = false;
+                if (hit)
+                    for (const auto& want : ps.notClasses)
+                        if (!CssClassHit(c.cls, want)) { hit = false; break; }
+                if (hit)
+                    for (const auto& a : ps.notAttrs)
+                        if (!CssAttrMatches(a, c)) { hit = false; break; }
+                if (hit) return false;
                 break;
+            }
             case CssPseudo::ROOT: if (!c.isRoot) return false; break;
         }
     }
@@ -2184,6 +2388,93 @@ static std::vector<HNode> ParseElements(const std::string& html, std::string& st
 //     建议组件内用带前缀的类名）
 //   · 嵌套组件递归展开，同一文件引用多次就展开多份（每个实例独立）
 // ============================================================
+// ============================================================
+// 选择器匹配（需要元素树）：从最右段往左走组合子
+//   parts[i].comb 表示第 i 段与第 i-1 段的关系（' ' 后代 / '>' 子 / '+' 相邻 / '~' 兄弟）
+//   kids[父] = 会参与布局的子元素（与结构伪类同一口径）
+// ============================================================
+static std::vector<std::vector<size_t>> BuildKidIndex(const std::vector<HNode>& elems) {
+    auto nonVisual = [](const std::string& tag) {
+        return tag == "head" || tag == "title" || tag == "meta" || tag == "link" ||
+               tag == "script" || tag == "style" || tag == "app_window";
+    };
+    std::vector<std::vector<size_t>> kids(elems.size());
+    for (size_t i = 0; i < elems.size(); i++) {
+        if (nonVisual(elems[i].tag)) continue;
+        if (elems[i].attrs.count("_pseudo")) continue;   // 合成的伪元素盒不算元素（与浏览器一致）
+        const size_t p = elems[i].parentIdx;
+        if (p < elems.size()) kids[p].push_back(i);
+    }
+    return kids;
+}
+
+static bool CssRuleMatchesDom(const CssRule& r,
+                              const std::vector<HNode>& elems,
+                              const std::vector<std::vector<size_t>>& kids,
+                              const std::vector<CssElemCtx>& ctxs,
+                              size_t ei,
+                              int stateOverride = 0) {
+    if (r.parts.empty() || ei >= elems.size()) return false;
+    const auto& parts = r.parts;
+
+    // 同一父下的前一个可视兄弟
+    auto prevSibling = [&](size_t at) -> size_t {
+        const size_t par = elems[at].parentIdx;
+        if (par < kids.size()) {
+            const auto& kv = kids[par];
+            for (size_t k = 0; k < kv.size(); k++) {
+                if (kv[k] != at) continue;
+                return (k > 0) ? kv[k - 1] : SIZE_MAX;
+            }
+            return SIZE_MAX;
+        }
+        size_t found = SIZE_MAX;   // 没建索引（理论上不会）：线性兜底
+        for (size_t k = 0; k < elems.size() && k < at; k++)
+            if (elems[k].parentIdx == par && elems[k].parentIdx < elems.size()) found = k;
+        return found;
+    };
+
+    std::function<bool(size_t, size_t)> match = [&](size_t pi, size_t at) -> bool {
+        if (at >= elems.size()) return false;
+        CssElemCtx c = (at < ctxs.size()) ? ctxs[at] : CssElemCtx{};
+        if (c.tag.empty() && c.cls.empty() && c.id.empty()) {
+            c.tag = elems[at].tag;
+            auto ci = elems[at].attrs.find("class");
+            c.cls = (ci != elems[at].attrs.end()) ? ci->second : "";
+            auto ii = elems[at].attrs.find("id");
+            c.id = (ii != elems[at].attrs.end()) ? ii->second : "";
+        }
+        c.attrs = &elems[at].attrs;
+        if (stateOverride) c.stateMask = stateOverride;
+        if (!CssSimpleMatches(parts[pi].sel, c)) return false;
+        if (pi == 0) return true;
+
+        const char comb = parts[pi].comb;
+        if (comb == '>') {
+            const size_t par = elems[at].parentIdx;
+            return par < elems.size() && match(pi - 1, par);
+        }
+        if (comb == ' ') {
+            for (size_t p2 = elems[at].parentIdx; p2 < elems.size(); p2 = elems[p2].parentIdx) {
+                if (match(pi - 1, p2)) return true;
+                if (elems[p2].parentIdx == SIZE_MAX) break;
+            }
+            return false;
+        }
+        if (comb == '+') {
+            const size_t prev = prevSibling(at);
+            return prev != SIZE_MAX && match(pi - 1, prev);
+        }
+        if (comb == '~') {
+            for (size_t p2 = prevSibling(at); p2 != SIZE_MAX; p2 = prevSibling(p2))
+                if (match(pi - 1, p2)) return true;
+            return false;
+        }
+        return false;
+    };
+    return match(parts.size() - 1, ei);
+}
+
 static bool ReadWholeFile(const std::string& path, std::string& out) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return false;
@@ -2473,47 +2764,47 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     bool hasHtmlElem = false;
     for (const auto& e : elems)
         if (e.tag == "html") hasHtmlElem = true;
+    // 可视兄弟索引（父 -> 子），组合子与结构伪类共用。伪元素展开会改元素表，
+    // 展开后再建一次（selectors 只需与自己那张表配套的那一份）。
+    std::vector<std::vector<size_t>> cssKids = BuildKidIndex(elems);
     std::vector<CssElemCtx> elemCtx(elems.size());
     {
-        std::unordered_map<size_t, std::vector<size_t>> kids;   // 父索引（SIZE_MAX = 顶层）-> 子索引
         for (size_t k = 0; k < elems.size(); k++) {
             if (isNonVisualTag(elems[k].tag)) continue;
-            kids[elems[k].parentIdx].push_back(k);
+            CssElemCtx& c = elemCtx[k];
+            c.tag = elems[k].tag;
+            c.cls = elems[k].attrs.count("class") ? elems[k].attrs.at("class") : "";
+            c.id  = elems[k].attrs.count("id")    ? elems[k].attrs.at("id")    : "";
+            c.attrs = &elems[k].attrs;
+            c.isRoot = (hasHtmlElem ? elems[k].tag == "html"
+                                    : (elems[k].tag == "body" && elems[k].parentIdx == SIZE_MAX));
         }
-        for (auto& kv : kids) {
+        for (size_t p = 0; p < cssKids.size(); p++) {
+            const auto& kv = cssKids[p];
+            if (kv.empty()) continue;
             std::unordered_map<std::string, int> typeCnt;
-            for (size_t k : kv.second) typeCnt[elems[k].tag]++;
+            for (size_t k : kv) typeCnt[elems[k].tag]++;
             std::unordered_map<std::string, int> seen;
-            for (size_t n = 0; n < kv.second.size(); n++) {
-                const size_t k = kv.second[n];
+            for (size_t n = 0; n < kv.size(); n++) {
+                const size_t k = kv[n];
                 CssElemCtx& c = elemCtx[k];
-                c.tag = elems[k].tag;
-                c.cls = elems[k].attrs.count("class") ? elems[k].attrs.at("class") : "";
-                c.id  = elems[k].attrs.count("id")    ? elems[k].attrs.at("id")    : "";
                 c.idx = (int)n;
-                c.cnt = (int)kv.second.size();
+                c.cnt = (int)kv.size();
                 c.typeIdx = seen[elems[k].tag]++;
                 c.typeCnt = typeCnt[elems[k].tag];
-                c.isRoot = (hasHtmlElem ? elems[k].tag == "html"
-                                        : (elems[k].tag == "body" && elems[k].parentIdx == SIZE_MAX));
             }
         }
     }
     // 无结构信息的元素（伪元素合成节点等）：只匹配 tag/class/id
     auto ctxOf = [&](size_t ei, const HNode& e) -> CssElemCtx {
-        if (ei < elemCtx.size()) {
-            CssElemCtx c = elemCtx[ei];
-            if (c.tag.empty() && c.cls.empty() && c.id.empty()) {
-                c.tag = e.tag;
-                c.cls = e.attrs.count("class") ? e.attrs.at("class") : "";
-                c.id  = e.attrs.count("id")    ? e.attrs.at("id")    : "";
-            }
-            return c;
-        }
         CssElemCtx c;
-        c.tag = e.tag;
-        c.cls = e.attrs.count("class") ? e.attrs.at("class") : "";
-        c.id  = e.attrs.count("id")    ? e.attrs.at("id")    : "";
+        if (ei < elemCtx.size()) c = elemCtx[ei];
+        if (c.tag.empty() && c.cls.empty() && c.id.empty()) {
+            c.tag = e.tag;
+            c.cls = e.attrs.count("class") ? e.attrs.at("class") : "";
+            c.id  = e.attrs.count("id")    ? e.attrs.at("id")    : "";
+        }
+        c.attrs = &e.attrs;   // 属性选择器要读实元素（合成节点也有属性表）
         return c;
     };
 
@@ -2600,11 +2891,16 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     auto styleOf = [&](const HNode& e, size_t ei = SIZE_MAX) -> std::unordered_map<std::string, std::string> {
         std::unordered_map<std::string, std::string> out;
         if (!cssRules.empty() && !e.attrs.count("_pseudo")) {
-            const CssElemCtx ctx = ctxOf(ei, e);
             std::unordered_map<std::string, int> specOf;   // 每个属性当前生效的特异性
             for (const auto& r : cssRules) {               // 文档顺序：同权重后者覆盖
                 if (!r.pseudoEl.empty()) continue;          // 伪元素规则见 ExpandPseudo 合成
-                if (!CssRuleMatches(r, ctx)) continue;
+                if (ei >= elems.size()) {
+                    // 无树位置的合成节点：只有单段规则能匹配
+                    if (r.parts.size() != 1) continue;
+                    if (!CssSimpleMatches(r.parts.front().sel, ctxOf(ei, e))) continue;
+                } else if (!CssRuleMatchesDom(r, elems, cssKids, elemCtx, ei)) {
+                    continue;
+                }
                 for (const auto& kv : r.decls) {
                     auto sit = specOf.find(kv.first);
                     if (sit != specOf.end() && r.spec < sit->second) continue;
@@ -2662,6 +2958,239 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         return out;
     };
 
+    // ---- v13 扩展绘制：边框 / 渐变 / 字重 / 行高 / 文字装饰 ----
+    // CSS 值切词：空白分隔，但括号内的空格不切（rgb(0 0 0) / linear-gradient(...) 要整块保留）
+    auto splitCssTokens = [](const std::string& v) -> std::vector<std::string> {
+        std::vector<std::string> out;
+        std::string cur;
+        int depth = 0;
+        for (char c : v) {
+            if (c == '(') depth++;
+            else if (c == ')' && depth > 0) depth--;
+            if ((c == ' ' || c == '\t') && depth == 0) {
+                if (!cur.empty()) { out.push_back(cur); cur.clear(); }
+                continue;
+            }
+            cur += c;
+        }
+        if (!cur.empty()) out.push_back(cur);
+        return out;
+    };
+
+    // 解析一个"边框简写"（"1px solid #444" / "2px #f00" / "none" / "thin"）
+    struct BorderSide { uint8_t w = 0; bool hasColor = false; uint32_t color = 0; };
+    auto parseBorderSide = [&](const std::string& v, const char* what) -> BorderSide {
+        BorderSide out;
+        const std::string s = LowerCopy(TrimCopy(v));
+        if (s.empty() || s == "none" || s == "0") return out;
+        for (const auto& tok : splitCssTokens(s)) {
+            if (tok == "solid" || tok == "dashed" || tok == "dotted" || tok == "double" ||
+                tok == "groove" || tok == "ridge" || tok == "inset" || tok == "outset") {
+                if (tok != "solid") Warn(std::string("CSS ") + what + " 只支持 solid，\"" + tok + "\" 按 solid 绘制");
+                continue;
+            }
+            if (tok == "thin")   { out.w = 1; continue; }
+            if (tok == "medium") { out.w = 3; continue; }
+            if (tok == "thick")  { out.w = 5; continue; }
+            const char c0 = tok.empty() ? ' ' : tok[0];
+            if (c0 == '#' || std::isalpha((unsigned char)c0)) {
+                uint32_t c = 0;
+                if (ParseColorValue(tok, &c, "边框颜色")) { out.color = c; out.hasColor = true; }
+                continue;
+            }
+            auto p = parseLen(tok, 0, what);
+            if (p > 0) out.w = (uint8_t)std::min(64.0f, p);
+        }
+        return out;
+    };
+
+    // 边框解析：四边宽 + 四边色（CSS 的 border/border-width/border-color 简写
+    // 按 1~4 值展开，border-<side> 再单边覆盖；颜色与宽度独立设置）
+    struct BorderSpec {
+        uint8_t  w[4] = { 0, 0, 0, 0 };                    // 上右下左
+        uint32_t color[4] = { 0xFF3A3A46, 0xFF3A3A46, 0xFF3A3A46, 0xFF3A3A46 };
+        bool any = false;
+    };
+    auto parseBorderSpec = [&](const HNode& e,
+                               const std::unordered_map<std::string, std::string>& style) -> BorderSpec {
+        BorderSpec bs;
+        auto setAllColor = [&](uint32_t c) { for (int k = 0; k < 4; k++) bs.color[k] = c; };
+
+        // 全局简写：border: <width> <style> <color>（任意顺序）
+        std::string bord = pick(e.attrs, style, "border", "border", "");
+        if (!bord.empty()) {
+            BorderSide g = parseBorderSide(bord, "border");
+            for (int k = 0; k < 4; k++) bs.w[k] = g.w;
+            if (g.hasColor) setAllColor(g.color);
+        }
+        // border-width：1~4 值展开（与 CSS 一致）
+        std::string bwv = style.count("border-width") ? style.at("border-width") : "";
+        if (!bwv.empty()) {
+            const auto toks = splitCssTokens(bwv);
+            uint8_t ww[4] = { 0, 0, 0, 0 };
+            if (toks.size() == 1) ww[0] = ww[1] = ww[2] = ww[3] = (uint8_t)parseLen(toks[0], 0);
+            else if (toks.size() == 2) {
+                ww[0] = ww[2] = (uint8_t)parseLen(toks[0], 0);
+                ww[1] = ww[3] = (uint8_t)parseLen(toks[1], 0);
+            } else if (toks.size() == 3) {
+                ww[0] = (uint8_t)parseLen(toks[0], 0);
+                ww[1] = ww[3] = (uint8_t)parseLen(toks[1], 0);
+                ww[2] = (uint8_t)parseLen(toks[2], 0);
+            } else if (toks.size() >= 4) {
+                for (int k = 0; k < 4; k++) ww[k] = (uint8_t)parseLen(toks[k], 0);
+            }
+            for (int k = 0; k < 4; k++) bs.w[k] = ww[k];
+        }
+        // border-color：1~4 值展开
+        std::string bcv = style.count("border-color") ? style.at("border-color") : "";
+        if (!bcv.empty()) {
+            const auto toks = splitCssTokens(bcv);
+            uint32_t cc[4] = { 0, 0, 0, 0 };
+            bool ok[4] = { false, false, false, false };
+            if (toks.size() == 1) {
+                uint32_t c = 0;
+                if (ParseColorValue(toks[0], &c, "border-color")) {
+                    for (int k = 0; k < 4; k++) { cc[k] = c; ok[k] = true; }
+                }
+            } else if (toks.size() >= 2) {
+                for (size_t k = 0; k < toks.size() && k < 4; k++)
+                    ok[k] = ParseColorValue(toks[k], &cc[k], "border-color");
+                if (toks.size() == 2) { cc[2] = cc[0]; ok[2] = ok[0]; cc[3] = cc[1]; ok[3] = ok[1]; }
+                else if (toks.size() == 3) { cc[3] = cc[1]; ok[3] = ok[1]; }
+            }
+            for (int k = 0; k < 4; k++) if (ok[k]) bs.color[k] = cc[k];
+        }
+        // border-<side>：宽度与颜色单边覆盖
+        static const char* kSide[4] = { "top", "right", "bottom", "left" };
+        for (int k = 0; k < 4; k++) {
+            const std::string key = std::string("border-") + kSide[k];
+            auto it = style.find(key);
+            if (it == style.end()) continue;
+            BorderSide s = parseBorderSide(it->second, key.c_str());
+            bs.w[k] = s.w;
+            if (s.hasColor) bs.color[k] = s.color;
+        }
+        for (int k = 0; k < 4; k++) if (bs.w[k]) bs.any = true;
+        return bs;
+    };
+
+    // 文字宽度估算（编译期没有字体度量）：CJK/全角按 1.0×字号，其余按 0.52×字号。
+    // 只用于"未声明高度的文本节点该占多高"，宁可按偏宽估（多一行总比压字好）。
+    auto estTextWidth = [](const std::string& text, float fontSize) -> float {
+        float w = 0.0f;
+        for (size_t i = 0; i < text.size(); ) {
+            const unsigned char c = (unsigned char)text[i];
+            uint32_t cp = c;
+            size_t len = 1;
+            if (c >= 0xF0) len = 4;
+            else if (c >= 0xE0) len = 3;
+            else if (c >= 0xC0) len = 2;
+            if (len > 1 && i + len <= text.size()) {
+                cp = (len == 2) ? (uint32_t)(c & 0x1F)
+                   : (len == 3) ? (uint32_t)(c & 0x0F) : (uint32_t)(c & 0x07);
+                for (size_t k = 1; k < len; k++)
+                    cp = (cp << 6) | (uint32_t)((unsigned char)text[i + k] & 0x3F);
+            }
+            i += len;
+            if (cp == '\t') { w += fontSize * 2.0f; continue; }
+            const bool wide = cp >= 0x1100 && (cp <= 0x115F || (cp >= 0x2E80 && cp <= 0xA4CF) ||
+                               (cp >= 0xAC00 && cp <= 0xD7A3) || (cp >= 0xF900 && cp <= 0xFAFF) ||
+                               (cp >= 0xFE30 && cp <= 0xFE6F) || (cp >= 0xFF00 && cp <= 0xFF60) ||
+                               (cp >= 0xFFE0 && cp <= 0xFFE6) || (cp >= 0x1F300 && cp <= 0x1FAFF));
+            w += wide ? fontSize : fontSize * 0.52f;
+        }
+        return w;
+    };
+    // 行距（像素）：line-height 支持无单位倍数 / % / px；未声明按 1.35×字号
+    auto estLineStep = [](const std::unordered_map<std::string, std::string>& style,
+                          float fontSize) -> float {
+        auto it = style.find("line-height");
+        if (it == style.end()) return fontSize * 1.35f;
+        const std::string v = TrimCopy(it->second);
+        if (v.empty() || LowerCopy(v) == "normal") return fontSize * 1.35f;
+        const bool pct = v.back() == '%';
+        const bool unitless = v.find_first_not_of("0123456789.+-") == std::string::npos;
+        float num = 0;
+        try { num = std::stof(v); } catch (...) { return fontSize * 1.35f; }
+        if (unitless) return num > 0.1f ? num * fontSize : fontSize * 1.35f;
+        if (pct) return num > 10.0f ? fontSize * num / 100.0f : fontSize * 1.35f;
+        return num > 0.5f ? num : fontSize * 1.35f;   // px
+    };
+
+
+    // 渐变底色：linear-gradient(方向, 起色, 止色[, ...])  只取首尾两色
+    struct GradSpec { bool ok = false; uint32_t from = 0, to = 0; uint8_t dir = BINUI_GRAD_V; };
+    auto parseLinearGradient = [&](const std::string& raw) -> GradSpec {
+        GradSpec gs;
+        std::string s = TrimCopy(raw);
+        if (s.empty()) return gs;
+        const std::string low = LowerCopy(s);
+        if (low.find("radial-gradient") != std::string::npos) {
+            Warn("CSS radial-gradient 暂不支持，已忽略（只支持 linear-gradient）");
+            return gs;
+        }
+        const size_t at = low.find("linear-gradient(");
+        if (at == std::string::npos) {
+            if (low.rfind("url(", 0) == 0 || low.find("image-set(") != std::string::npos)
+                Warn("CSS background-image: url(...) 暂不支持，已忽略（用 <img> 或 background:linear-gradient）");
+            return gs;
+        }
+        const size_t open = at + std::string("linear-gradient").size();
+        int depth = 0;
+        size_t close = std::string::npos;
+        for (size_t i = open; i < s.size(); i++) {
+            if (s[i] == '(') depth++;
+            else if (s[i] == ')') { if (--depth == 0) { close = i; break; } }
+        }
+        if (close == std::string::npos) { Warn("CSS linear-gradient(...) 括号不匹配，已忽略"); return gs; }
+        const std::string inner = s.substr(open + 1, close - open - 1);
+
+        // 顶层逗号切分
+        std::vector<std::string> parts;
+        {
+            std::string cur;
+            int d2 = 0;
+            for (char c : inner) {
+                if (c == '(') d2++;
+                else if (c == ')' && d2 > 0) d2--;
+                if (c == ',' && d2 == 0) { parts.push_back(TrimCopy(cur)); cur.clear(); continue; }
+                cur += c;
+            }
+            if (!TrimCopy(cur).empty()) parts.push_back(TrimCopy(cur));
+        }
+        if (parts.size() < 2) { Warn("CSS linear-gradient 至少需要两个颜色，已忽略"); return gs; }
+
+        // 首项若是方向/角度就吃掉
+        size_t cs = 0;
+        {
+            const std::string first = LowerCopy(parts[0]);
+            const bool looksDir = first.rfind("to ", 0) == 0 || first.find("deg") != std::string::npos ||
+                                  first.find("turn") != std::string::npos ||
+                                  first.find("rad") != std::string::npos;
+            if (looksDir) {
+                cs = 1;
+                if (first.find("right") != std::string::npos && first.find("bottom") != std::string::npos)
+                    gs.dir = BINUI_GRAD_D;
+                else if (first.find("right") != std::string::npos) gs.dir = BINUI_GRAD_H;
+                else if (first.find("top") != std::string::npos)   gs.dir = BINUI_GRAD_V;
+                else if (first.find("left") != std::string::npos)  gs.dir = BINUI_GRAD_H;
+                else gs.dir = BINUI_GRAD_V;
+            }
+        }
+        if (parts.size() - cs < 2) { Warn("CSS linear-gradient 至少需要两个颜色，已忽略"); return gs; }
+        // 颜色项可能带位置（"#fff 20%"），只取前面那段颜色
+        auto colorOf = [&](const std::string& item, uint32_t* out) -> bool {
+            auto toks = splitCssTokens(item);
+            if (toks.empty()) return false;
+            return ParseColorValue(toks.front(), out, "渐变色");
+        };
+        uint32_t c1 = 0, c2 = 0;
+        if (!colorOf(parts[cs], &c1)) return gs;
+        if (!colorOf(parts.back(), &c2)) return gs;
+        gs.from = c1; gs.to = c2; gs.ok = true;
+        return gs;
+    };
+
     // ---- 2.5 伪元素 ::before/::after —— 编译期合成 ----
     // binUI 没有行内盒模型，只有"节点"和"节点的文本"，所以按声明的属性选择两种语义：
     //   · 内联模式：声明里没有任何盒属性 → 内容字符串前插/后附到宿主自身文本，不新增节点
@@ -2713,8 +3242,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 std::unordered_map<std::string, int> specOf;
                 for (const auto& r : cssRules) {
                     if (r.pseudoEl != which) continue;
-                    if (!r.pseudos.empty()) continue;   // 伪元素规则不参与运行时状态
-                    if (!CssSelMatches(r.tag, r.cls, r.id, hctx)) continue;
+                    if (!CssRuleMatchesDom(r, elems, cssKids, elemCtx, oi)) continue;
                     for (const auto& kv : r.decls) {
                         auto sit = specOf.find(kv.first);
                         if (sit != specOf.end() && r.spec < sit->second) continue;
@@ -2834,6 +3362,11 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (expanded.size() != elems.size()) elems = std::move(expanded);
         elemCtx.swap(expandedCtx);
     }
+    // 伪元素展开换过元素表：兄弟索引重建，属性指针重绑（旧指针已随缓冲区失效）。
+    // 结构伪类的 idx/cnt 沿用展开前的口径（合成盒不算元素），不在这里重算。
+    cssKids = BuildKidIndex(elems);
+    for (size_t k = 0; k < elemCtx.size() && k < elems.size(); k++)
+        elemCtx[k].attrs = &elems[k].attrs;
 
     // ---- 3. 根尺寸 ----
     // <app_window>：编译期窗口包裹层（不进节点树），其属性定义窗口描述
@@ -2937,6 +3470,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::vector<std::pair<uint32_t, uint32_t>> nodeNames; // v8 名称表 {nodeId, 字符串索引}
     std::vector<BinUIVideoDesc> videoDescs;    // v9 视频描述段（<video> 节点）
     std::vector<BinUIStateStyle> stateStyles;  // v11 状态样式段（:hover/:active/:focus/:checked）
+    std::vector<BinUIPaintNode> paintNodes;    // v13 扩展绘制段（文字色/边框/渐变/字重/行高/装饰）
     std::vector<std::string> strings;
     strings.push_back(""); // 字符串表首位 = 空串：无文本节点的 textOffset=0 指向空串
     std::unordered_map<uint32_t, std::string> textMap;
@@ -2955,6 +3489,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         float    cursorY;     // 本容器流式光标（相对 oy）
         float    contentW;    // 内容宽度（节点宽 - 2*padding）
         size_t   nodeIdx;     // 对应 nodes 下标（用于自动扩展高度）
+        uint32_t textColor;   // 生效文字色（CSS color 的继承值）
+        bool     hasText;     // 祖先是否显式给过文字色
+        bool     flow;        // 这个容器是被父级流光标摆进去的（不是显式 y / flex）
     };
 
     // 根节点固定 id 0，位于坐标原点。画布默认白色；<app_window bg>/<html bg> 覆盖
@@ -2967,7 +3504,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     id = 1; // 根已占用 id 0
 
     std::vector<Ctx> stack;
-    stack.push_back({ 0, 0, 0, 0, rootW, 0 });
+    stack.push_back({ 0, 0, 0, 0, rootW, 0, 0xFFFFFFFFu, false, false });
 
     // 容器高度不足时自动扩展到容纳流式内容（滚动容器保持固定视口）
     auto growToContent = [&](Ctx& c) {
@@ -2975,6 +3512,20 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (cn.flags & BINUI_SCROLLABLE) return;
         float need = c.cursorY + cn.padding * 2;
         if (need > cn.height) cn.height = need;
+    };
+
+    // 弹出一个容器，并把它"被内容撑高"的增量补到父容器的流光标上。
+    // 不补的话：后声明的兄弟会按旧高度接着排，直接压在这个容器身上
+    // （卡片里放几行字，后面的元素就盖上来 —— 以前只能手写死高度绕开）。
+    auto popAndPropagate = [&]() {
+        const size_t top = stack.size() - 1;
+        const float before = nodes[stack[top].nodeIdx].height;
+        growToContent(stack[top]);
+        const float grew = nodes[stack[top].nodeIdx].height - before;
+        const bool flow = stack[top].flow;
+        stack.pop_back();
+        if (grew > 0.5f && flow && !stack.empty())
+            stack.back().cursorY += grew;
     };
 
     // elems 索引 -> 节点 id（被跳过的元素为 0xFFFF）
@@ -3155,14 +3706,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         uint8_t type = tagToType(e.tag);
 
         // 认识但不生效的常见 CSS 属性：明确警告（同一属性全文档只报一条），
-        // 避免"写了没效果"这种最耗时间的困惑
+        // 避免"写了没效果"这种最耗时间的困惑。
+        // v13 起 border*/font-weight/line-height/text-decoration 已经实现，从清单里移除。
         {
             static const char* kIgnoredCss[] = {
-                "border", "border-width", "border-color", "border-style",
-                "box-shadow", "letter-spacing", "line-height", "white-space",
-                "font-weight", "font-style", "text-decoration", "visibility",
-                "float", "flex-wrap", "align-self", "order", "outline",
-                "cursor", "word-break", "grid-template-columns",
+                "box-shadow", "text-shadow", "letter-spacing", "white-space",
+                "font-style", "word-break", "visibility", "float", "flex-wrap",
+                "flex-shrink", "align-self", "align-content", "order", "outline",
+                "cursor", "grid-template-columns", "text-overflow", "object-fit",
+                "right", "bottom", "inset", "transform", "filter", "aspect-ratio",
             };
             for (const char* k : kIgnoredCss)
                 if (style.count(k))
@@ -3189,6 +3741,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 if (bg.empty()) bg = pick(e.attrs, style, "color", "background-color", "");
                 if (!bg.empty()) nodes[0].color = parseColor(bg);
             }
+            // 根元素的 CSS color 是整棵树的默认文字色（继承的起点）。
+            // 以前这里直接 continue，导致 body{color:#333} 完全没用。
+            {
+                std::string tc = pick(e.attrs, style, "text-color", "color", "");
+                if (!tc.empty()) {
+                    stack.back().textColor = parseColorWith(tc, 0xFFFFFFFFu, "文字颜色");
+                    stack.back().hasText = true;
+                }
+            }
             continue;
         }
 
@@ -3196,10 +3757,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (pnodeId == 0xFFFF) pnodeId = 0; // 顶层挂根
 
         // 收缩上下文栈到父容器
-        while (stack.size() > 1 && stack.back().nodeId != pnodeId) {
-            growToContent(stack.back());
-            stack.pop_back();
-        }
+        while (stack.size() > 1 && stack.back().nodeId != pnodeId)
+            popAndPropagate();
         Ctx& pc = stack.back();
 
         // <polyline points="x,y x,y ..."> / <polygon>：展开成若干 BINUI_LINE 子节点
@@ -3275,13 +3834,35 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             curCtx.fontSize = nodeFontSize;
         }
 
-        // 多行文本（<br> → '\n'）：未声明高度时按行数撑开默认高度，
-        // 否则节点矩形会把后面几行裁掉（各后端都按节点矩形 pushClip）
-        if (sh.empty() && e.text.find('\n') != std::string::npos) {
-            size_t lines = 1;
-            for (char c : e.text) if (c == '\n') lines++;
-            if (lines > 1)
-                lh += static_cast<float>(lines - 1) * std::ceil(nodeFontSize * 1.35f);
+        // 文本节点未声明高度时估算行数并撑开高度。
+        // 没有这一步，段落按单行高排布：换行后的第二行会压到下一个元素身上
+        // （三个后端都按节点矩形绘制，谁也没办法把节点撑高）。估算口径：
+        //   · CJK/全角按 1.0×字号，其余按 0.52×字号（拉丁小写平均宽度），宁可高一点
+        //   · 行距取 line-height（未声明则 1.35×字号）
+        //   · 显式写了 height 的不动（作者说了算）
+        if (sh.empty() && !e.text.empty() &&
+            (type == BINUI_LABEL || type == BINUI_LIST || type == BINUI_BUTTON)) {
+            const float step = estLineStep(style, nodeFontSize);
+            float avail = pc.contentW;
+            if (!sw.empty()) {   // sw 已在上面的几何区里解析过（'auto' 被清空）
+                auto sp = ParseLenPct(sw, 0, curCtx, "width");
+                avail = sp.pct ? sp.value / 100.0f * pc.contentW : sp.value;
+            }
+            avail -= type == BINUI_LIST ? 24.0f : 0.0f;   // LIST 文字左右各有 12px 内缩
+            if (avail < 8.0f) avail = 8.0f;
+            size_t lines = 0;
+            size_t p0 = 0;
+            while (true) {
+                const size_t nl = e.text.find('\n', p0);
+                const std::string seg = e.text.substr(
+                    p0, (nl == std::string::npos) ? std::string::npos : nl - p0);
+                lines += (size_t)std::max(1.0f, std::ceil(estTextWidth(seg, nodeFontSize) / avail));
+                if (nl == std::string::npos) break;
+                p0 = nl + 1;
+            }
+            if (lines < 1) lines = 1;
+            const float needH = (float)lines * step;
+            if (needH > lh) lh = needH;
         }
 
         // SVG 图形属性 -> 通用定位：<line> 用 x1/y1/x2/y2 端点，<circle> 用 cx/cy/r
@@ -3392,14 +3973,21 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             if (effMxW >= 0 && w > effMxW) w = effMxW;
         }
 
-        // padding：取 padding 简写首值（无简写则取 padding-top）
+        // padding：节点只有一个 padding 字段（内缩 + 子元素基准都用它），
+        // 四值简写只取首值；四边确实不同时明确告警，别让作者以为生效了。
         uint16_t pad = 0;
         auto padIt = style.find("padding");
         if (padIt != style.end()) {
-            std::string pv = padIt->second;
-            size_t psp = pv.find_first_of(" \t");
-            if (psp != std::string::npos) pv = pv.substr(0, psp);
-            pad = (uint16_t)parseLen(pv, 0);
+            const auto toks = splitCssTokens(padIt->second);
+            if (!toks.empty()) pad = (uint16_t)parseLen(toks[0], 0);
+            if (toks.size() > 1) {
+                bool differ = false;
+                for (const auto& t : toks)
+                    if (parseLen(t, 0) != (float)pad) differ = true;
+                if (differ)
+                    Warn("CSS padding 四值简写只取第一个值（节点只有单一 padding 字段）；"
+                         "需要四边不等请用嵌套容器");
+            }
         } else {
             auto padT = style.find("padding-top");
             if (padT != style.end()) pad = (uint16_t)parseLen(padT->second, 0);
@@ -3425,10 +4013,14 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         }
         if (type == BINUI_BUTTON || type == BINUI_INPUT || type == BINUI_VIDEO)
             n.flags |= BINUI_INTERACTIVE;
-        // overflow:auto/scroll/hidden -> 滚动容器（必须可交互：滚轮/悬停/滚动条拖动）
+        // overflow：auto/scroll = 可滚动容器；hidden = 只裁剪（不给滚动条，也不响应滚轮）。
+        // 两者都要标 SCROLLABLE —— 后端按它决定"高度固定、内容可溢出"，绘制时按祖先矩形裁剪。
         std::string ov = lowerStr(pick(e.attrs, style, "overflow", "overflow", ""));
-        if (ov == "auto" || ov == "scroll" || ov == "hidden")
-            n.flags |= BINUI_SCROLLABLE | BINUI_INTERACTIVE;
+        const bool clipOnly = (ov == "hidden");
+        if (ov == "auto" || ov == "scroll" || clipOnly) {
+            n.flags |= BINUI_SCROLLABLE;
+            if (!clipOnly) n.flags |= BINUI_INTERACTIVE;
+        }
         // text-align：借 flags 的两个空闲位编码（不新增节点字段，旧布局两位为 0 = 左对齐）
         {
             std::string ta = lowerStr(pick(e.attrs, style, "align", "text-align", ""));
@@ -3440,18 +4032,119 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         n.x = x; n.y = y; n.width = w; n.height = lh;
         n.padding = pad;
 
-        std::string bg = pick(e.attrs, style, "bg", "background", "");
-        if (bg.empty()) bg = pick(e.attrs, style, "color", "background-color", "");
-        if (type == BINUI_LABEL && bg.empty()) {
-            std::string tc = pick(e.attrs, style, "text-color", "color", "");
-            n.color = parseColorWith(tc, 0xFFFFFFFF, "文字颜色");
-        } else {
-            // svg/canvas 容器默认透明（子图形/回调自行绘制）；video 默认深色底
-            n.color = bg.empty() ? (type == BINUI_LABEL ? 0xFFFFFFFF
-                                  : (type == BINUI_SVG || type == BINUI_CANVAS) ? 0x00000000
-                                  : type == BINUI_VIDEO ? 0xFF101010
-                                  : 0xFF222222) : parseColorWith(bg, 0xFF222222, "背景色");
+        // ---- 底色 / 文字色（v13 正式分家）----
+        //   底色   = XML bg → CSS background → CSS background-color；XML 传统用 color 指容器底色
+        //   文字色 = XML text-color → CSS color；XML 传统用 color 指文本颜色（仅 LABEL）
+        // LABEL 且没写底色时沿用旧约定：node.color 存文字色（旧二进制/旧后端行为不变）；
+        // 一旦写了底色，文字色就改走扩展绘制段的 textColor。
+        std::string bgRaw = pick(e.attrs, style, "bg", "background", "");
+        if (bgRaw.empty() && style.count("background-color")) bgRaw = style.at("background-color");
+        const std::string xmlColor = e.attrs.count("color") ? e.attrs.at("color") : "";
+        if (bgRaw.empty() && type != BINUI_LABEL) bgRaw = xmlColor;
+        std::string txtRaw = pick(e.attrs, style, "text-color", "color", "");
+        if (txtRaw.empty() && type == BINUI_LABEL) txtRaw = xmlColor;
+
+        // 渐变：background / background-image 里的 linear-gradient()
+        BinUIPaintNode paint = {};
+        uint16_t pflags = 0;
+        GradSpec gs = parseLinearGradient(bgRaw);
+        if (!gs.ok && style.count("background-image")) gs = parseLinearGradient(style.at("background-image"));
+
+        uint32_t defBg = (type == BINUI_LABEL)  ? 0xFFFFFFFFu
+                       : (type == BINUI_SVG || type == BINUI_CANVAS) ? 0x00000000u
+                       : (type == BINUI_VIDEO) ? 0xFF101010u
+                       : (type == BINUI_BUTTON || type == BINUI_INPUT) ? 0xFF222222u
+                       : 0x00000000u;   // v13：容器默认透明（以前是 #222222，浅色主题直接被吃掉）
+        if (bgRaw.empty()) n.color = defBg;
+        else if (gs.ok) n.color = gs.from;   // 渐变：底色兜底用起点色（免得被当颜色解析刷警告）
+        else n.color = parseColorWith(bgRaw, defBg, "背景色");
+        if (gs.ok) {
+            paint.gradFrom = gs.from; paint.gradTo = gs.to; paint.gradDir = gs.dir;
+            pflags |= PAINT_GRADIENT;
+            n.color = gs.from;   // 不支持渐变的后端/旧布局退回起点色，不至于变黑
         }
+
+        // 文字色：显式声明 > 从父容器继承 > 白色
+        uint32_t textCol = 0xFFFFFFFFu;
+        bool hasOwnText = false;
+        if (!txtRaw.empty()) { textCol = parseColorWith(txtRaw, 0xFFFFFFFFu, "文字颜色"); hasOwnText = true; }
+        else if (pc.hasText) { textCol = pc.textColor; }
+        const bool labelLegacy = (type == BINUI_LABEL && bgRaw.empty());
+        if (labelLegacy) {
+            n.color = textCol;               // 旧约定：LABEL 的 color 就是文字色
+        } else if (type == BINUI_LABEL) {
+            paint.textColor = textCol;       // 有底色 → 文字色必须显式给（否则后端会用底色画字）
+            pflags |= PAINT_TEXT_COLOR;
+        } else if (textCol != 0xFFFFFFFFu) {
+            paint.textColor = textCol;
+            pflags |= PAINT_TEXT_COLOR;
+        }
+        (void)hasOwnText;
+
+        // 边框（画在节点内侧，不参与布局；四边可不同宽）
+        {
+            BorderSpec bs = parseBorderSpec(e, style);
+            if (bs.any) {
+                for (int k = 0; k < 4; k++) {
+                    paint.borderW[k] = bs.w[k];
+                    paint.borderColor[k] = bs.color[k];
+                }
+                pflags |= PAINT_BORDER;
+                if (bs.w[0]) pflags |= PAINT_BORDER_TOP;
+                if (bs.w[1]) pflags |= PAINT_BORDER_RIGHT;
+                if (bs.w[2]) pflags |= PAINT_BORDER_BOTTOM;
+                if (bs.w[3]) pflags |= PAINT_BORDER_LEFT;
+            }
+        }
+
+        // 字重 / 行高 / 文字装饰
+        {
+            std::string fw = lowerStr(pick(e.attrs, style, "weight", "font-weight", ""));
+            if (!fw.empty() && fw != "normal" && fw != "400") {
+                uint8_t w8 = 4;   // 归一化成"百位"：4 = 常规，7 = 粗体
+                if (fw == "bold" || fw == "bolder" || fw == "700") w8 = 7;
+                else {
+                    try {
+                        const int num = std::stoi(fw);
+                        w8 = (num >= 600) ? 7 : 4;
+                    } catch (...) {
+                        Warn("CSS font-weight: 无法解析 \"" + fw + "\"，按 normal 处理");
+                    }
+                }
+                if (w8 != 4) { paint.weight = w8; pflags |= PAINT_WEIGHT; }
+            }
+            std::string lhv = TrimCopy(pick(e.attrs, style, "line-height", "line-height", ""));
+            if (!lhv.empty() && lowerStr(lhv) != "normal") {
+                int pct = 0;
+                if (lhv.back() == '%') {
+                    pct = (int)std::lround(parseLen(lhv.substr(0, lhv.size() - 1), 0, "line-height"));
+                } else if (lhv.find_first_of("0123456789") == 0) {
+                    const float num = parseLen(lhv, 0, "line-height");
+                    // 无单位 = 倍数（CSS 语义），带 px = 绝对行高
+                    const bool unitless = lhv.find_first_not_of("0123456789.+-") == std::string::npos;
+                    pct = unitless ? (int)std::lround(num * 100.0f)
+                                   : (nodeFontSize > 0.5f ? (int)std::lround(num / nodeFontSize * 100.0f) : 0);
+                }
+                if (pct > 0) {
+                    if (pct < 100) pct = 100;
+                    if (pct > 255) pct = 255;
+                    paint.lineHeight = (uint8_t)pct;
+                    pflags |= PAINT_LINE_HEIGHT;
+                }
+            }
+            std::string td = pick(e.attrs, style, "decoration", "text-decoration", "");
+            if (td.empty() && style.count("text-decoration-line")) td = style.at("text-decoration-line");
+            const std::string tdl = lowerStr(td);
+            if (tdl.find("underline") != std::string::npos)    pflags |= PAINT_UNDERLINE;
+            if (tdl.find("line-through") != std::string::npos) pflags |= PAINT_STRIKE;
+            if (tdl.find("overline") != std::string::npos)     pflags |= PAINT_OVERLINE;
+            // 装饰线颜色跟随文字色；LABEL 走旧约定时 textColor 没置位，
+            // 这里显式填上（否则下划线会画成透明，看不见）
+            if (pflags & (PAINT_UNDERLINE | PAINT_STRIKE | PAINT_OVERLINE))
+                paint.textColor = textCol;
+        }
+
+        if (clipOnly) pflags |= PAINT_CLIP_ONLY;
 
         // 静态 opacity：编译期折进节点颜色 alpha（binUI 没有合成组，子节点不受影响；
         // 动画里的 opacity 仍走 v7 动画系统）。必须在 n.color 赋值之后处理。
@@ -3461,10 +4154,23 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 float op = parseLen(oit->second, 1.0f, "opacity");
                 if (op < 0.0f) op = 0.0f;
                 if (op > 1.0f) op = 1.0f;
-                uint32_t a = (n.color >> 24) & 0xFFu;
-                a = (uint32_t)(a * op + 0.5f);
-                n.color = (a << 24) | (n.color & 0x00FFFFFFu);
+                auto fade = [&](uint32_t c) {
+                    uint32_t a = (uint32_t)(((c >> 24) & 0xFFu) * op + 0.5f);
+                    return (a << 24) | (c & 0x00FFFFFFu);
+                };
+                n.color = fade(n.color);
+                // 扩展绘制段里的颜色同一个语义：整块淡出时文字/边框/渐变都要跟着淡
+                if (pflags & PAINT_TEXT_COLOR)  paint.textColor = fade(paint.textColor);
+                if (pflags & PAINT_BORDER)      for (int k = 0; k < 4; k++) paint.borderColor[k] = fade(paint.borderColor[k]);
+                if (pflags & PAINT_GRADIENT) { paint.gradFrom = fade(paint.gradFrom);
+                                               paint.gradTo = fade(paint.gradTo); }
             }
+        }
+
+        if (pflags) {
+            paint.nodeId = n.id;
+            paint.flags = pflags;
+            paintNodes.push_back(paint);
         }
 
         // 字号已在元素开头算好（供 em 换算用），这里直接落库
@@ -3624,16 +4330,13 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (!cssRules.empty() && !e.attrs.count("_pseudo")) {
             static const uint8_t kStateBits[4] = { BINUI_ST_HOVER, BINUI_ST_ACTIVE,
                                                    BINUI_ST_FOCUS, BINUI_ST_CHECKED };
-            const CssElemCtx baseCtx = elemCtx[ei];
             for (uint8_t sb : kStateBits) {
-                CssElemCtx sctx = baseCtx;
-                sctx.stateMask = sb;
                 std::unordered_map<std::string, std::string> merged;
                 std::unordered_map<std::string, int> specOf;
                 for (const auto& r : cssRules) {
                     if (!r.pseudoEl.empty()) continue;
                     if (!CssHasStatePseudo(r, sb)) continue;   // 只看声明了该状态的规则
-                    if (!CssRuleMatches(r, sctx)) continue;
+                    if (!CssRuleMatchesDom(r, elems, cssKids, elemCtx, ei, sb)) continue;
                     for (const auto& kv : r.decls) {
                         auto sit = specOf.find(kv.first);
                         if (sit != specOf.end() && r.spec < sit->second) continue;
@@ -3653,6 +4356,13 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 if (col.empty() && type == BINUI_LABEL) {
                     if (merged.count("text-color")) col = merged["text-color"];
                     else if (merged.count("color")) col = merged["color"];
+                    // LABEL 已经有底色时，文字色固化在扩展绘制段的 textColor 上，
+                    // 状态段只能改"节点颜色"（即底色）—— 别让作者以为改了文字色
+                    if (!labelLegacy && !col.empty() &&
+                        !merged.count("background") && !merged.count("background-color") &&
+                        !merged.count("bg"))
+                        Warn("LABEL 同时有底色与文字色时，状态伪类里的 color 改的是底色"
+                             "（文字色已固化在扩展绘制段）；要改文字色请给该状态声明 background 或改用其它元素");
                 }
                 if (!col.empty()) {
                     uint32_t c = 0;
@@ -3765,14 +4475,13 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             specFlex.push_back(fs);
         }
 
-        stack.push_back({ n.id, x + pad, y + pad, 0, w - 2 * pad, nodes.size() - 1 });
+        stack.push_back({ n.id, x + pad, y + pad, 0, w - 2 * pad, nodes.size() - 1,
+                          textCol, hasOwnText || pc.hasText, !hasY && !flexPlaced });
     }
 
     // 收尾：弹出剩余容器并自动扩展，最后扩展根
-    while (stack.size() > 1) {
-        growToContent(stack.back());
-        stack.pop_back();
-    }
+    while (stack.size() > 1)
+        popAndPropagate();
     growToContent(stack[0]);
 
     if (nodes.empty()) return {};
@@ -3872,6 +4581,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         }
         AppendComponentSection(buf, refs);
     }
+    AppendPaintSection(buf, paintNodes);
     AppendNameSection(buf, nodeNames, offsets);
 
     // ---- 6. 二进制组件：编译期离线合并 ----
@@ -4063,6 +4773,7 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     // 手写布局没有规格/动画/视频/状态段，但 v12 的两段恒定写出，保证解析链一致
     AppendImageSection(buf, {});
     AppendComponentSection(buf, {});
+    AppendPaintSection(buf, {});
 
     return buf;
 }

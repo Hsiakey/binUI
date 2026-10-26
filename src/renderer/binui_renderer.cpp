@@ -522,8 +522,35 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         }
     }
 
+    // ---- 扩展绘制段（v13）：paintBytes + paintCount + BinUIPaintNode[] ----
+    // 段序（v13）：窗口描述 / 动画 / 视频 / 状态样式 / 资源 / 组件引用 / 扩展绘制 / 名称，
+    // 除名称段外都恒定写出，所以按游标顺序跳段即可。
+    paints_.clear();
+    paintIdx_.clear();
+    clipOnly_.clear();
+    if (const uint8_t* pp = sectionAt(6)) {
+        uint32_t pb = 0;
+        memcpy(&pb, pp, sizeof(pb));
+        if (pb >= sizeof(uint32_t) && size - static_cast<size_t>(pp - data) >= sizeof(uint32_t) + pb) {
+            const uint8_t* q = pp + sizeof(uint32_t);
+            uint32_t pc = 0;
+            memcpy(&pc, q, sizeof(pc));
+            q += sizeof(pc);
+            const uint8_t* qend = pp + sizeof(uint32_t) + pb;
+            for (uint32_t i = 0; i < pc && q + sizeof(BinUIPaintNode) <= qend; i++) {
+                BinUIPaintNode pn;
+                memcpy(&pn, q, sizeof(pn));
+                q += sizeof(pn);
+                if (!nodeIndexById_.count(pn.nodeId)) continue;   // 悬空条目防御
+                paintIdx_[pn.nodeId] = paints_.size();
+                if (pn.flags & PAINT_CLIP_ONLY) clipOnly_.insert(pn.nodeId);
+                paints_.push_back(pn);
+            }
+        }
+    }
+
     nameToId_.clear();
-    if (const uint8_t* np = sectionAt(6)) {
+    if (const uint8_t* np = sectionAt(7)) {
         uint32_t nbytes = 0;
         memcpy(&nbytes, np, sizeof(uint32_t));
         if (nbytes > 0 && size - static_cast<size_t>(np - data) >= sizeof(uint32_t) + nbytes) {
@@ -1111,6 +1138,20 @@ bool BinUIRenderer::isScrollable(uint16_t nodeId) const {
     return it != nodeIndexById_.end() && (nodes_[it->second].flags & BINUI_SCROLLABLE);
 }
 
+// 用户可滚动 = SCROLLABLE 且不是 overflow:hidden 的"只裁剪"容器
+bool BinUIRenderer::isUserScrollable(uint16_t nodeId) const {
+    return isScrollable(nodeId) && clipOnly_.count(nodeId) == 0;
+}
+
+// 节点文字色：扩展绘制段优先，否则回退节点自带颜色（LABEL 的旧约定）
+uint32_t BinUIRenderer::textColorOf(uint16_t nodeId) const {
+    if (const BinUIPaintNode* p = paintOf(nodeId))
+        if (p->flags & PAINT_TEXT_COLOR) return p->textColor;
+    auto it = nodeIndexById_.find(nodeId);
+    if (it == nodeIndexById_.end()) return 0xFFFFFFFFu;
+    return nodes_[it->second].color;
+}
+
 float BinUIRenderer::contentHeight(uint16_t nodeId) const {
     auto it = nodeIndexById_.find(nodeId);
     if (it == nodeIndexById_.end()) return 0;
@@ -1129,7 +1170,7 @@ int BinUIRenderer::scrollAt(float x, float y, float dy) {
     if (id < 0) {
         for (size_t i = nodes_.size(); i-- > 0;) {
             const auto& n = nodes_[i];
-            if (!(n.flags & BINUI_SCROLLABLE) || !(n.flags & BINUI_VISIBLE)) continue;
+            if (!isUserScrollable(n.id) || !(n.flags & BINUI_VISIBLE)) continue;
             if (x >= n.x && x <= n.x + n.width && y >= n.y && y <= n.y + n.height) {
                 id = n.id;
                 break;
@@ -1142,7 +1183,7 @@ int BinUIRenderer::scrollAt(float x, float y, float dy) {
             auto pit = nodeIndexById_.find(nodes_[idx].parentId);
             if (pit == nodeIndexById_.end()) break;
             idx = pit->second;
-            if (nodes_[idx].flags & BINUI_SCROLLABLE) { id = nodes_[idx].id; break; }
+            if (isUserScrollable(nodes_[idx].id)) { id = nodes_[idx].id; break; }
         }
     }
     scrollBy(static_cast<uint16_t>(id), 0, -dy);
@@ -1207,7 +1248,7 @@ static bool ScrollThumbRect(const BinUIRenderer::NodeInfo& c, float contentH,
 int BinUIRenderer::hitScrollBar(float x, float y, bool& vertical) const {
     for (size_t i = nodes_.size(); i-- > 0;) {
         const auto& n = nodes_[i];
-        if (!(n.flags & BINUI_SCROLLABLE) || !(n.flags & BINUI_VISIBLE)) continue;
+        if (!isUserScrollable(n.id) || !(n.flags & BINUI_VISIBLE)) continue;
         float ch = contentHeight(n.id);
         const ScrollState* s = scrollState(n.id);
         float sy = s ? s->y : 0;

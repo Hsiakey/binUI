@@ -1,6 +1,6 @@
 <!DOCTYPE html>
-<app_window width="720" height="520" bg="#0E0E13" title="CSS 伪类 / 伪元素">
-<html width="720" height="520" bg="#0E0E13">
+<app_window width="720" height="640" bg="#0E0E13" title="CSS 伪类 / 伪元素">
+<html width="720" height="640" bg="#0E0E13">
 <head>
     <meta charset="UTF-8">
     <title>CSS 伪类 / 伪元素演示</title>
@@ -42,6 +42,21 @@
         .bullet { height: 24px; width: 276px; color: #D4D4D8; font-size: 13px; }
         .bullet::before { content: "\25B8  "; }
         .bullet:last-child { color: #F5F5F7; }
+
+        /* ---- v13 扩展绘制：边框 / 渐变 / 字重 / 行高 / 文字装饰 ---- */
+        .grad {
+            width: 200px; height: 64px; border-radius: 10;
+            background: linear-gradient(to right, #5B5BF0, #B14BF0);
+            border: 1px solid #4A4AE0;
+        }
+        .sheet {
+            width: 432px; height: 64px; border-radius: 10;
+            background: #F7F7FA; border: 1px solid #D8D8E0;
+        }
+        /* 后代选择器：容器上的规则直接命中内部元素（v13 起支持） */
+        .sheet .sheet-title { font-size: 13px; font-weight: 700; color: #16161C; }
+        .sheet .sheet-desc  { font-size: 11px; line-height: 170%; color: #62626E; }
+        .sheet .sheet-link  { font-size: 11px; color: #4F46E5; text-decoration: underline; }
 
         .tag::before { content: attr(data-tag); }
         .rule { margin-top: 8px; background: transparent; }
@@ -92,6 +107,18 @@
             <div class="rule" style="margin-top:8px"></div>
         </div>
         <span style="position:absolute; left:16; top:196; width:640; height:16; color:#6E6E78; font-size:11">盒模式 ::after（带 width/height/background）会合成独立子节点：上方的 2px 分隔线</span>
+    </div>
+    <!-- 卡片 4：v13 扩展绘制（边框 / 渐变 / 字重 / 行高 / 下划线 + 后代选择器） -->
+    <div style="position:absolute; left:16; top:512; width:680; height:112; background:#16161D; border-radius:14">
+        <span style="position:absolute; left:16; top:10; width:600; height:18; color:#F5F5F7; font-size:13">扩展绘制（v13）：border · linear-gradient · font-weight · line-height · text-decoration</span>
+        <div class="grad" style="position:absolute; left:16; top:36">
+            <span style="position:absolute; left:12; top:20; width:180; height:20; color:#FFFFFF; font-size:13; font-weight:700">渐变 + 边框 + 加粗</span>
+        </div>
+        <div class="sheet" style="position:absolute; left:232; top:36">
+            <span class="sheet-title" style="position:absolute; left:14; top:8; width:400; height:16">浅色卡片：底色白、文字深（以前只有一个颜色字段，做不到）</span>
+            <span class="sheet-desc" style="position:absolute; left:14; top:26; width:400; height:16">说明文字走后代选择器 .sheet .sheet-desc，行高 170%</span>
+            <span class="sheet-link" style="position:absolute; left:14; top:44; width:400; height:16">text-decoration: underline</span>
+        </div>
     </div>
 </body>
 </html>

@@ -25,6 +25,9 @@
 #include <algorithm>
 
 #include "binui_font_renderer.h"
+// v13 扩展绘制段的共用几何（渐变色带 / 四边边框 / 文字装饰线 / 行高）：
+// 与 GDI、GL 后端共用同一份数学，三端像素表现才一致
+#include "binui_paint.h"
 
 using namespace binui;
 
@@ -35,6 +38,13 @@ static const IID IID_XDXGIFactory2 = { 0x50C83A1C, 0xE072, 0x4C48, { 0x87,0xB0,0
 static const IID IID_XTexture2D    = { 0x6F15AAF2, 0xD208, 0x4E89, { 0x9A,0xB4,0x48,0x95,0x35,0xD3,0x4F,0x9C } };
 
 namespace {
+
+// v13 行高（CSS line-height）：drawTextWrapped 的公开声明在 binui_d3d11.h 里只有 8 个
+// 参数，本次改动只允许动 .cpp —— 参数加不进签名，就用这个文件级"当前行距"把它带进去。
+// 只有 LABEL 多行那一处会在调用前设置、调用后立刻复位 0（0 = 沿用 fontMetrics 给出的
+// 字体行高），其余调用点（列表、视频控制条……）永远是旧行为；后端是单线程立即模式，
+// 设置与调用紧邻，不会被别的节点踩到。
+float gWrappedLineStep = 0.0f;
 
 // ---------- 小工具 ----------
 // 按透明度缩放 alpha（0xAARRGGBB；RGB 保持直线色，Premult 时统一缩放）
@@ -605,7 +615,10 @@ struct BinUID3D::Impl {
         int total = a->cols * (a->sizePx / a->cellH);
         if (a->next >= total) return; // 图集已满（调用方兜底：跳过绘制）
         binui_font::GrayGlyph g;
-        bool ok = font.renderGlyph(a->face, a->size, cp, g);
+        // 字重必须真的进光栅化：以前 weight 只参与图集 key（同一字号被画成同一份
+        // 常规字形），CSS 的 font-weight:700 因此完全不生效。bold=true 走 FreeType
+        // 的合成加粗（FT_GlyphSlot_Embolden），图集 key 已含 weight，不会串档。
+        bool ok = font.renderGlyph(a->face, a->size, cp, a->weight >= 600, g);
         if (!ok || !g.alpha || g.height <= 0) {
             // 空白字形（如空格）：无像素但有有效 advance —— 仍占一格并缓存，
             // 否则 glyphFor 返回 null，测宽/绘制都不推进，单词会挤在一起
@@ -1397,6 +1410,7 @@ void BinUID3D::drawText(float x, float y, float size, int weight,
     impl_->curSrv = impl_->whiteSrv;
 }
 
+// 行距取 gWrappedLineStep（0 = 字体自身的行高），由 LABEL 多行绘制按 line-height 设置
 void BinUID3D::drawTextWrapped(float x, float y, float maxW, float size, int weight,
                                const std::string& utf8, uint32_t color, int align) {
     if (!impl_->ready || utf8.empty()) return;
@@ -1447,7 +1461,7 @@ void BinUID3D::drawTextWrapped(float x, float y, float maxW, float size, int wei
             if (lx < x) lx = x; // 超长行不向左溢出
             drawText(lx, ly + ascent, size, weight, seg, color);
         }
-        ly += lineH;
+        ly += (gWrappedLineStep > 0.0f) ? gWrappedLineStep : static_cast<float>(lineH);
         pos = newline ? end + 1 : end;
     }
 }
@@ -1519,6 +1533,7 @@ static void DrawVideoControlsTmpl(Gfx& gfx, const BinUIRenderer& renderer,
                                   float x, float y, float nw, float opacity) {
     BinUIRenderer::VideoBarGeo g;
     if (!BinUIRenderer::VideoBarLayout(node, g)) return;
+    (void)y; // 控制条几何全部由 VideoBarLayout 按节点自身坐标给出，y 仅为与 GL 后端同构的签名
     const auto* v = renderer.findVideo(node.id);
     if (!v) return;
 
@@ -1697,6 +1712,13 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
 
         // v7 动画：颜色（含 hover/按下 tint 与过渡）、透明度、平移、缩放、圆角
         uint32_t dc = renderer.drawColor(node.id);
+        // v13 扩展绘制段：文字色 / 四边边框 / 渐变底色 / 字重 / 行高 / 文字装饰。
+        // 注意这里**不做**"全透明节点跳过"：GPU 本来就有 alpha 混合，alpha==0 的底画了
+        // 也看不见；而透明底 + 不透明文字色的 LABEL、透明底 + 边框的卡片都必须照画
+        // （GDI 那边跳过是因为它没有合成，会画成一整块黑）。
+        const BinUIPaintNode* pt = renderer.paintOf(node.id);
+        const bool hasBorder = pt && (pt->flags & PAINT_BORDER);
+        const bool hasGrad = pt && (pt->flags & PAINT_GRADIENT);
         float opacity = renderer.drawOpacity(node.id);
         float dx = renderer.drawOffsetX(node.id);
         float dy = renderer.drawOffsetY(node.id);
@@ -1742,58 +1764,130 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
             int pad = node.padding;
             int fs = node.fontSize ? node.fontSize : 14;
 
+            // ---- v13 扩展绘制：底色/边框的统一入口 ----
+            // 底色可能是渐变（切成一批条带），也可能就是原来那一个矩形；
+            // 圆角走 fillRounded，方角走 fillRect（GPU 有 alpha 混合，直接画即可）。
+            auto fillNodeBg = [&](uint32_t color, float radius) {
+                binui::PaintBand bands[binui::kMaxPaintBands];
+                const int bn = binui::BuildFillBands(pt, static_cast<float>(x), static_cast<float>(y),
+                                                     static_cast<float>(nw), static_cast<float>(nh),
+                                                     radius, color, bands);
+                for (int k = 0; k < bn; k++) {
+                    const binui::PaintBand& b = bands[k];
+                    if (b.w <= 0.0f || b.h <= 0.0f) continue;
+                    if (b.round && b.radius > 0.0f)
+                        gfx.fillRounded(b.x, b.y, b.w, b.h, b.radius, b.color);
+                    else
+                        gfx.fillRect(b.x, b.y, b.w, b.h, b.color);
+                }
+            };
+            // 边框画在节点内侧，四边可不同宽（几何在 binui_paint.h 里算）
+            auto drawNodeBorder = [&]() {
+                if (!hasBorder) return;
+                binui::PaintBand bb[4];
+                const int bn = binui::BuildBorderBands(pt, static_cast<float>(x), static_cast<float>(y),
+                                                       static_cast<float>(nw), static_cast<float>(nh), bb);
+                for (int k = 0; k < bn; k++)
+                    if (bb[k].w > 0.0f && bb[k].h > 0.0f)
+                        gfx.fillRect(bb[k].x, bb[k].y, bb[k].w, bb[k].h, bb[k].color);
+            };
+
             switch (node.type) {
                 case BINUI_LABEL: {
+                    // v13 扩展绘制段：文字色 / 字重 / 行高 / 下划线（与 drawNodesGDI 同语义）
+                    const bool paintText = pt && (pt->flags & PAINT_TEXT_COLOR);
+                    // 文字色：扩展绘制段给了 textColor 就按作者的，否则沿用 cc ——
+                    // drawColor 已经把 hover/过渡/动画和 opacity 都算进去了，与改动前一致
+                    const uint32_t tcol = paintText ? ScaleAlpha(pt->textColor, opacity) : cc;
+                    const int wt = binui::PaintWeightOf(pt);
+                    // LABEL 也可以有底色了：给了渐变，或扩展绘制段显式给了文字色
+                    // （此时 node.color 存的是底色）且底色不透明 —— 都说明作者要一块底
+                    if (hasGrad || (paintText && ((node.color >> 24) & 0xFF)))
+                        fillNodeBg(dc, static_cast<float>(node.radius));
+                    if (node.text.empty()) break;
+
                     int asc = 0, lh = 0;
-                    gfx.fontMetrics(static_cast<float>(fs), 400, asc, lh);
-                    const float availW = static_cast<float>(nw - 2 * pad);
+                    gfx.fontMetrics(static_cast<float>(fs), wt, asc, lh);
+                    const float boxW = static_cast<float>(nw - 2 * pad);
+                    const float availW = boxW > 1.0f ? boxW : 1.0f;
                     const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
                                     : (node.flags & BINUI_TEXT_RIGHT) ? 2 : 0;
+                    // line-height：只有作者声明了才覆盖行距，0 让后端用字体自身的行高
+                    const float lineStep = (pt && (pt->flags & PAINT_LINE_HEIGHT))
+                                         ? binui::PaintLineHeight(pt, static_cast<float>(fs)) : 0.0f;
+                    const float step = lineStep > 0.0f ? lineStep : static_cast<float>(lh);
+                    const bool hasRule = pt && (pt->flags & (PAINT_UNDERLINE | PAINT_STRIKE | PAINT_OVERLINE));
+                    // 装饰线：几何在 binui_paint.h 里算，这里只负责填矩形；
+                    // 颜色跟文字一起吃 opacity，否则淡出时只剩一条实心线
+                    auto drawRules = [&](float rx, float ry, float rw) {
+                        binui::PaintBand rules[3];
+                        const int rn = binui::BuildTextRuleBands(pt, rx, ry, rw,
+                                                                static_cast<float>(fs), rules);
+                        for (int k = 0; k < rn; k++)
+                            if (rules[k].w > 0.0f)
+                                gfx.fillRect(rules[k].x, rules[k].y, rules[k].w, rules[k].h,
+                                             ScaleAlpha(rules[k].color, opacity));
+                    };
+
                     if (node.text.find('\n') != std::string::npos) {
                         // 多行文本（<br> / '\n'）：整块垂直居中，逐行换行绘制（按 align 对齐）
                         size_t lines = 1;
                         for (char c : node.text) if (c == '\n') lines++;
-                        float blockH = static_cast<float>(lines) * lh;
+                        const float blockH = static_cast<float>(lines - 1) * step + static_cast<float>(lh);
                         float top = static_cast<float>(y) + (nh - blockH) / 2.0f;
                         if (top < static_cast<float>(y)) top = static_cast<float>(y);
-                        gfx.drawTextWrapped(static_cast<float>(x + pad), top,
-                                            availW > 1.0f ? availW : 1.0f,
-                                            static_cast<float>(fs), 400, node.text, cc, align);
+                        // 行距交给 drawTextWrapped（见 gWrappedLineStep 的说明）
+                        gWrappedLineStep = lineStep;
+                        gfx.drawTextWrapped(static_cast<float>(x + pad), top, availW,
+                                            static_cast<float>(fs), wt, node.text, tcol, align);
+                        gWrappedLineStep = 0.0f;
+
+                        // 文字装饰线：逐 '\n' 段补画细条（段内自动换行出的子行不追，
+                        // 近似即可 —— 宽度取内容盒宽度）；超出节点的部分由本节点的 scissor 裁掉
+                        if (hasRule) {
+                            float ly = top;
+                            for (size_t p0 = 0;;) {
+                                drawRules(static_cast<float>(x + pad), ly, availW);
+                                const size_t nl = node.text.find('\n', p0);
+                                if (nl == std::string::npos) break;
+                                p0 = nl + 1;
+                                ly += step;
+                            }
+                        }
                     } else {
-                        float base = static_cast<float>(y) + (nh - lh) / 2.0f + asc;
+                        const float tw = gfx.textWidth(static_cast<float>(fs), wt, node.text);
                         float tx = static_cast<float>(x + pad);
                         if (align != 0) {
-                            const float tw = gfx.textWidth(static_cast<float>(fs), 400, node.text);
                             tx += (align == 1) ? (availW - tw) / 2.0f : (availW - tw);
                             if (tx < static_cast<float>(x + pad)) tx = static_cast<float>(x + pad);
                         }
-                        gfx.drawText(tx, base, static_cast<float>(fs), 400, node.text, cc);
+                        const float textTop = static_cast<float>(y) + (nh - lh) / 2.0f;
+                        gfx.drawText(tx, textTop + asc, static_cast<float>(fs), wt, node.text, tcol);
+
+                        // 单行装饰线：用上面算好的文字起点与实测宽度（居中/右对齐后的位置）
+                        if (hasRule) drawRules(tx, textTop, tw);
                     }
                     break;
                 }
                 case BINUI_BUTTON: {
-                    int radius = effRadius;
-                    if (radius > 0)
-                        gfx.fillRounded(static_cast<float>(x), static_cast<float>(y),
-                                        static_cast<float>(nw), static_cast<float>(nh),
-                                        static_cast<float>(radius), cc);
-                    else
-                        gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
-                                     static_cast<float>(nw), static_cast<float>(nh), cc);
+                    fillNodeBg(dc, static_cast<float>(effRadius));
                     if (!node.text.empty()) {
+                        // 文字色：扩展绘制段给了就按作者的，否则按钮文字默认白色
+                        const uint32_t bcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
+                                            ? ScaleAlpha(pt->textColor, opacity) : textCol;
                         int bs = node.fontSize ? node.fontSize : 14;
                         float tw = gfx.textWidth(static_cast<float>(bs), 700, node.text);
                         int asc = 0, lh = 0;
                         gfx.fontMetrics(static_cast<float>(bs), 700, asc, lh);
                         float tx = x + pad + (nw - 2 * pad - tw) / 2.0f;
                         float base = y + (nh - lh) / 2.0f + asc;
-                        gfx.drawText(tx, base, static_cast<float>(bs), 700, node.text, textCol);
+                        gfx.drawText(tx, base, static_cast<float>(bs), 700, node.text, bcol);
                     }
                     break;
                 }
                 case BINUI_INPUT: {
-                    gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
-                                 static_cast<float>(nw), static_cast<float>(nh), cc);
+                    // 输入框背景（style 里的 background / 渐变）
+                    fillNodeBg(dc, static_cast<float>(node.radius));
                     gfx.fillRect(static_cast<float>(x), static_cast<float>(y + nh - 2),
                                  static_cast<float>(nw), 2, accentCol);
 
@@ -1833,21 +1927,18 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                     break;
                 }
                 case BINUI_LIST: {
-                    int radius = effRadius;
-                    if (radius > 0)
-                        gfx.fillRounded(static_cast<float>(x), static_cast<float>(y),
-                                        static_cast<float>(nw), static_cast<float>(nh),
-                                        static_cast<float>(radius), cc);
-                    else
-                        gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
-                                     static_cast<float>(nw), static_cast<float>(nh), cc);
+                    fillNodeBg(dc, static_cast<float>(effRadius));
                     if (!node.text.empty()) {
                         const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
                                         : (node.flags & BINUI_TEXT_RIGHT) ? 2 : 0;
+                        // 文字色/字重同样走扩展绘制段（原来是写死的白色 + 400）
+                        const uint32_t lcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
+                                            ? ScaleAlpha(pt->textColor, opacity) : textCol;
                         gfx.drawTextWrapped(static_cast<float>(x + pad + 12),
                                             static_cast<float>(y + pad + 8),
                                             static_cast<float>(nw - 2 * pad - 24),
-                                            static_cast<float>(fs), 400, node.text, textCol, align);
+                                            static_cast<float>(fs), binui::PaintWeightOf(pt),
+                                            node.text, lcol, align);
                     }
                     break;
                 }
@@ -1872,13 +1963,9 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                         }
                     }
                     if (!drawn) {
-                        if (effRadius > 0)
-                            gfx.fillRounded(static_cast<float>(x), static_cast<float>(y),
-                                            static_cast<float>(nw), static_cast<float>(nh),
-                                            static_cast<float>(effRadius), cc);
-                        else
-                            gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
-                                         static_cast<float>(nw), static_cast<float>(nh), cc);
+                        // 有真实图片资源时底色不画（图片自己盖住整个盒子）；
+                        // 回退时支持渐变/圆角动画，所以半径仍用动画后的 effRadius
+                        fillNodeBg(dc, static_cast<float>(effRadius));
                         if (!node.text.empty()) {
                             int asc = 0, lh = 0;
                             gfx.fontMetrics(24.0f, 300, asc, lh);
@@ -1889,14 +1976,8 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                     break;
                 }
                 case BINUI_VIDEO: {
-                    // 底色：无解码帧时显示（深色海报底）
-                    if (effRadius > 0)
-                        gfx.fillRounded(static_cast<float>(x), static_cast<float>(y),
-                                        static_cast<float>(nw), static_cast<float>(nh),
-                                        static_cast<float>(effRadius), cc);
-                    else
-                        gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
-                                     static_cast<float>(nw), static_cast<float>(nh), cc);
+                    // 底色：无解码帧时显示（深色海报底），有渐变/圆角动画时同样走这条路
+                    fillNodeBg(dc, static_cast<float>(effRadius));
 
                     // 解码帧（伪图片槽，rawPixels）：contain-fit letterbox
                     const ImageResource* img = renderer.getImage(node.imageIndex);
@@ -1940,6 +2021,10 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                 default:
                     break;
             }
+
+            // 边框最后画（盖在底色/文字之上），位置在键盘焦点环之前 ——
+            // 与 drawNodesGDI 的叠放顺序一致
+            drawNodeBorder();
 
             if (renderer.isKeyboardFocused(node.id)) {
                 gfx.strokeRounded(static_cast<float>(x + 2), static_cast<float>(y + 2),

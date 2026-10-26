@@ -63,6 +63,9 @@ public:
 
     // 灰度渲染单个码点；false = 无字形（advance 置 0，调用方兜底）
     bool renderGlyph(const std::string& face, float size, uint32_t cp, GrayGlyph& out);
+    // 同上，bold=true 时用 FreeType 的合成加粗（FT_GlyphSlot_Embolden）：
+    // 加粗笔画并同步加宽 advance，所以"测宽"与"绘制"始终一致。
+    bool renderGlyph(const std::string& face, float size, uint32_t cp, bool bold, GrayGlyph& out);
 
     // 彩色渲染整个簇（内部经 HarfBuzz 做 GSUB 合体/旗帜/肤色等）；
     // false = 该簇无 COLR 层（调用方降级灰度）

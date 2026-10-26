@@ -15,6 +15,8 @@
 #include <unordered_map>
 #include <chrono>
 
+#include "binui_paint.h"
+
 using namespace binui;
 
 namespace {
@@ -558,8 +560,47 @@ static void FormatVideoTime(double sec, char* buf, size_t n) {
     snprintf(buf, n, "%d:%02d", s / 60, s % 60);
 }
 
-void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipRect) {
-    HDC hdc = static_cast<HDC>(hdcCtx);
+// v13 扩展绘制：把"底色/边框"的条带画到 GDI 画布上。
+// GDI 画布没有 alpha 合成，半透明色按"与节点自身底色混合"近似（边框通常压在
+// 节点底色上，这样最接近正确结果）；渐变端点一般是不透明的，直接画即可。
+static uint32_t BlendOver(uint32_t fg, uint32_t bg) {
+    const uint32_t a = (fg >> 24) & 0xFF;
+    if (a >= 255) return fg;
+    if (a == 0) return bg;
+    auto mix = [&](int sh) {
+        const uint32_t f = (fg >> sh) & 0xFF, b = (bg >> sh) & 0xFF;
+        return ((f * a + b * (255 - a)) / 255) & 0xFF;
+    };
+    return (0xFFu << 24) | (mix(16) << 16) | (mix(8) << 8) | mix(0);
+}
+
+static void FillPaintBands(HDC hdc, const binui::PaintBand* bands, int n, uint32_t over) {
+    for (int i = 0; i < n; i++) {
+        const binui::PaintBand& b = bands[i];
+        if (b.w <= 0.0f || b.h <= 0.0f) continue;
+        const uint32_t c = BlendOver(b.color, over);
+        if (((c >> 24) & 0xFF) == 0) continue;
+        HBRUSH br = CreateSolidBrush(RGB((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF));
+        if (b.round && b.radius > 0.0f) {
+            HPEN pen = CreatePen(PS_SOLID, 1, RGB((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF));
+            HGDIOBJ oldBr = SelectObject(hdc, br);
+            HGDIOBJ oldPen = SelectObject(hdc, pen);
+            const int rr = (int)std::lround(b.radius * 2.0f);
+            RoundRect(hdc, (int)std::lround(b.x), (int)std::lround(b.y),
+                      (int)std::lround(b.x + b.w), (int)std::lround(b.y + b.h), rr, rr);
+            SelectObject(hdc, oldPen);
+            SelectObject(hdc, oldBr);
+            DeleteObject(pen);
+        } else {
+            RECT r = { (int)std::lround(b.x), (int)std::lround(b.y),
+                       (int)std::lround(b.x + b.w), (int)std::lround(b.y + b.h) };
+            FillRect(hdc, &r, br);
+        }
+        DeleteObject(br);
+    }
+}
+
+void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipRect) {    HDC hdc = static_cast<HDC>(hdcCtx);
     const auto& nodes = renderer.getNodes();
 
     // 绘制范围：脏矩形（局部重绘）或窗口客户区（全量）
@@ -628,8 +669,10 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
     }
 
     // 根节点背景（外层已把 hdc 裁剪到脏矩形，只填充脏区）
+    uint32_t pageBg = 0xFF000000u;
     for (const auto& node : nodes) {
         if (node.type == BINUI_ROOT && (node.flags & BINUI_VISIBLE)) {
+            pageBg = node.color | 0xFF000000u;
             HBRUSH bg = CreateSolidBrush(RGB(
                 (node.color >> 16) & 0xFF,
                 (node.color >> 8) & 0xFF,
@@ -657,17 +700,18 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         // transition 过渡与 @keyframes 动画都在渲染器里算好（与 GL/D3D11 后端一致）。
         // 以前这里自己按 hover/按下做 tint —— 作者写的颜色被无视，动画也不生效。
         const uint32_t dc = renderer.drawColor(node.id);
-        if (((dc >> 24) & 0xFF) == 0) {
+        // v13 扩展绘制段：文字色 / 边框 / 渐变 / 字重 / 行高 / 文字装饰
+        const BinUIPaintNode* pt = renderer.paintOf(node.id);
+        const bool hasBorder = pt && (pt->flags & PAINT_BORDER);
+        const bool hasGrad = pt && (pt->flags & PAINT_GRADIENT);
+        if (((dc >> 24) & 0xFF) == 0 && !hasBorder && !hasGrad) {
             // GDI 没有 alpha 合成：全透明节点画出来是一块黑。图片/视频帧例外（只看自身像素）
             const bool drawsOwnPixels =
                 (node.type == BINUI_IMAGE && renderer.getImage(node.imageIndex) != nullptr) ||
                 node.type == BINUI_VIDEO;
             if (!drawsOwnPixels) continue;
         }
-        uint8_t r = static_cast<uint8_t>((dc >> 16) & 0xFF);
-        uint8_t g = static_cast<uint8_t>((dc >> 8) & 0xFF);
-        uint8_t b = static_cast<uint8_t>(dc & 0xFF);
-        COLORREF cr = RGB(r, g, b);
+
 
         // 与脏矩形不相交的节点快速跳过（GDI 裁剪链较贵，仅在相交节点上做）
         if (x + nw <= clip.left || x >= clip.right ||
@@ -679,6 +723,28 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             continue;
         RECT rc = { x, y, x + nw, y + nh };
         int pad = node.padding;
+
+        // ---- v13 扩展绘制：底色/边框的统一入口 ----
+        const float nfx = (float)x, nfy = (float)y, nfw = (float)nw, nfh = (float)nh;
+        uint32_t underBg = pageBg;
+        {
+            auto pit = byId.find(node.parentId);
+            if (pit != byId.end()) {
+                const uint32_t pbg = renderer.drawColor(nodes[pit->second].id);
+                if ((pbg >> 24) & 0xFF) underBg = pbg | 0xFF000000u;
+            }
+        }
+        auto fillNodeBg = [&](uint32_t color, float radius) {
+            binui::PaintBand bands[binui::kMaxPaintBands];
+            const int bn = binui::BuildFillBands(pt, nfx, nfy, nfw, nfh, radius, color, bands);
+            FillPaintBands(hdc, bands, bn, underBg);
+        };
+        auto drawNodeBorder = [&]() {
+            if (!hasBorder) return;
+            binui::PaintBand bb[4];
+            const int bn = binui::BuildBorderBands(pt, nfx, nfy, nfw, nfh, bb);
+            FillPaintBands(hdc, bb, bn, dc | 0xFF000000u);
+        };
 
         // 层级裁剪：先把裁剪区设为自身（滚动后）范围，再逐层与祖先求交；
         // 任一祖先不可见或交集为空则跳过绘制
@@ -707,9 +773,18 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         if (draw) {
         switch (node.type) {
             case BINUI_LABEL: {
-                SetTextColor(hdc, cr);
+                // 文字色 / 字重 / 行高 / 下划线（v13 扩展绘制段）
+                const bool paintText = pt && (pt->flags & PAINT_TEXT_COLOR);
+                const uint32_t tcol = paintText ? pt->textColor : node.color;
+                const int fw = binui::PaintWeightOf(pt);
+                // LABEL 也可以有底色了（作者显式给底色时 node.color 存的是底色）
+                if (hasGrad || (paintText && ((node.color >> 24) & 0xFF)))
+                    fillNodeBg(dc, (float)node.radius);
+                if (node.text.empty()) break;
+                const int fs = node.fontSize ? node.fontSize : 14;
+                SetTextColor(hdc, RGB((tcol >> 16) & 0xFF, (tcol >> 8) & 0xFF, tcol & 0xFF));
                 HFONT font = CreateFontA(
-                    node.fontSize ? node.fontSize : 14, 0, 0, 0, FW_NORMAL,
+                    fs, 0, 0, 0, fw >= 600 ? FW_BOLD : FW_NORMAL,
                     FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                     OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                     DEFAULT_QUALITY, DEFAULT_PITCH, gGdiFontName.c_str());
@@ -718,34 +793,68 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 std::wstring wtext = Utf8ToWide(node.text);
                 const UINT halign = (node.flags & BINUI_TEXT_CENTER) ? DT_CENTER
                                   : (node.flags & BINUI_TEXT_RIGHT) ? DT_RIGHT : DT_LEFT;
-                // 含 '\n'（<br>）：GDI 的 DT_VCENTER 只能配 SINGLELINE，多行改为顶部对齐逐行
+                // 含 '\n'（<br>）：GDI 的 DT_VCENTER 只能配 SINGLELINE，多行改为顶部对齐逐行；
+                // 单行但比内容盒宽时同样走 WORDBREAK —— GPU 后端的 drawTextWrapped 一直会换行，
+                // GDI 以前硬套 SINGLELINE，长段落会被直接裁掉（两端表现不一致）。
                 if (node.text.find('\n') != std::string::npos) {
                     DrawTextW(hdc, wtext.c_str(), -1, &tr, halign | DT_WORDBREAK);
                 } else {
-                    DrawTextW(hdc, wtext.c_str(), -1, &tr,
-                        halign | DT_VCENTER | DT_SINGLELINE);
+                    RECT mr = { 0, 0, 0, 10 };
+                    DrawTextW(hdc, wtext.c_str(), -1, &mr, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
+                    if (mr.right > nw - 2 * pad)
+                        DrawTextW(hdc, wtext.c_str(), -1, &tr, halign | DT_WORDBREAK);
+                    else
+                        DrawTextW(hdc, wtext.c_str(), -1, &tr, halign | DT_VCENTER | DT_SINGLELINE);
+                }
+
+                // 文字装饰线（下划线/删除线/上划线）：测量文字块位置后补画细条
+                if (pt && (pt->flags & (PAINT_UNDERLINE | PAINT_STRIKE | PAINT_OVERLINE))) {
+                    TEXTMETRICW tm = {};
+                    GetTextMetricsW(hdc, &tm);
+                    const float lh = (float)tm.tmHeight;
+                    auto measure = [&](const std::wstring& s) -> float {
+                        RECT mr = { 0, 0, 0, 10 };
+                        DrawTextW(hdc, s.c_str(), -1, &mr, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
+                        return (float)mr.right;
+                    };
+                    binui::PaintBand rules[3];
+                    if (node.text.find('\n') == std::string::npos) {
+                        const float tw = measure(wtext);
+                        float tx = (float)(x + pad);
+                        if (halign == DT_CENTER) tx += ((float)(nw - 2 * pad) - tw) * 0.5f;
+                        else if (halign == DT_RIGHT) tx += (float)(nw - 2 * pad) - tw;
+                        const float top = (float)y + ((float)nh - lh) * 0.5f;
+                        const int rn = binui::BuildTextRuleBands(pt, tx, top, tw, (float)fs, rules);
+                        FillPaintBands(hdc, rules, rn, dc | 0xFF000000u);
+                    } else {
+                        // 多行：逐行（按 '\n' 切分）画，行距按 line-height（未声明用字体行高）
+                        const float step = binui::PaintLineHeight(pt, (float)fs);
+                        float ly = (float)y + pad;
+                        size_t p0 = 0;
+                        while (p0 <= node.text.size()) {
+                            const size_t nl = node.text.find('\n', p0);
+                            const std::string seg = node.text.substr(
+                                p0, (nl == std::string::npos) ? std::string::npos : nl - p0);
+                            const std::wstring ws = Utf8ToWide(seg);
+                            const float tw = measure(ws);
+                            const int rn = binui::BuildTextRuleBands(pt, (float)(x + pad), ly, tw, (float)fs, rules);
+                            FillPaintBands(hdc, rules, rn, dc | 0xFF000000u);
+                            if (nl == std::string::npos) break;
+                            p0 = nl + 1;
+                            ly += std::max(step, lh);
+                        }
+                    }
                 }
                 SelectObject(hdc, oldFont);
                 DeleteObject(font);
                 break;
             }
             case BINUI_BUTTON: {
-                HBRUSH fill = CreateSolidBrush(cr);
-                HGDIOBJ oldFill = SelectObject(hdc, fill);
-                HPEN pen = CreatePen(PS_SOLID, 1, cr);
-                HGDIOBJ oldPen = SelectObject(hdc, pen);
-                int radius = node.radius;
-                if (radius > 0)
-                    RoundRect(hdc, x, y, x + nw, y + nh, radius * 2, radius * 2);
-                else
-                    FillRect(hdc, &rc, fill);
-                SelectObject(hdc, oldPen);
-                SelectObject(hdc, oldFill);
-                DeleteObject(pen);
-                DeleteObject(fill);
-
+                fillNodeBg(dc, (float)node.radius);
                 if (!node.text.empty()) {
-                    SetTextColor(hdc, RGB(255, 255, 255));
+                    const uint32_t tcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
+                                              ? pt->textColor : 0xFFFFFFFFu;
+                    SetTextColor(hdc, RGB((tcol >> 16) & 0xFF, (tcol >> 8) & 0xFF, tcol & 0xFF));
                     HFONT font = CreateFontA(
                         node.fontSize ? node.fontSize : 14, 0, 0, 0, FW_BOLD,
                         FALSE, FALSE, FALSE, DEFAULT_CHARSET,
@@ -764,10 +873,8 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 break;
             }
             case BINUI_INPUT: {
-                // 输入框背景（style 里的 background）
-                HBRUSH bgBrush = CreateSolidBrush(cr);
-                FillRect(hdc, &rc, bgBrush);
-                DeleteObject(bgBrush);
+                // 输入框背景（style 里的 background / 渐变）
+                fillNodeBg(dc, (float)node.radius);
 
                 HPEN underlinePen = CreatePen(PS_SOLID, 2, RGB(0xBB, 0x86, 0xFC));
                 HGDIOBJ oldPen = SelectObject(hdc, underlinePen);
@@ -831,23 +938,15 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 break;
             }
             case BINUI_LIST: {
-                HBRUSH fill = CreateSolidBrush(cr);
-                HGDIOBJ oldFill = SelectObject(hdc, fill);
-                HPEN pen = CreatePen(PS_SOLID, 0, cr);
-                HGDIOBJ oldPen = SelectObject(hdc, pen);
-                int radius = node.radius;
-                if (radius > 0)
-                    RoundRect(hdc, x, y, x + nw, y + nh, radius * 2, radius * 2);
-                else
-                    FillRect(hdc, &rc, fill);
-                SelectObject(hdc, oldPen);
-                SelectObject(hdc, oldFill);
-                DeleteObject(pen);
-                DeleteObject(fill);
+                fillNodeBg(dc, (float)node.radius);
 
                 if (!node.text.empty()) {
-                    SetTextColor(hdc, RGB(0xFF, 0xFF, 0xFF));
-                    HFONT font = CreateFontA(node.fontSize ? node.fontSize : 14, 0, 0, 0, FW_NORMAL,
+                    const uint32_t tcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
+                                              ? pt->textColor : 0xFFFFFFFFu;
+                    SetTextColor(hdc, RGB((tcol >> 16) & 0xFF, (tcol >> 8) & 0xFF, tcol & 0xFF));
+                    const int fw = binui::PaintWeightOf(pt);
+                    HFONT font = CreateFontA(node.fontSize ? node.fontSize : 14, 0, 0, 0,
+                        fw >= 600 ? FW_BOLD : FW_NORMAL,
                         FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                         DEFAULT_QUALITY, DEFAULT_PITCH, gGdiFontName.c_str());
@@ -878,19 +977,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                     }
                 }
 
-                HBRUSH fill = CreateSolidBrush(cr);
-                HGDIOBJ oldFill = SelectObject(hdc, fill);
-                HPEN pen = CreatePen(PS_SOLID, 0, cr);
-                HGDIOBJ oldPen = SelectObject(hdc, pen);
-                int radius = node.radius;
-                if (radius > 0)
-                    RoundRect(hdc, x, y, x + nw, y + nh, radius * 2, radius * 2);
-                else
-                    FillRect(hdc, &rc, fill);
-                SelectObject(hdc, oldPen);
-                SelectObject(hdc, oldFill);
-                DeleteObject(pen);
-                DeleteObject(fill);
+                fillNodeBg(dc, (float)node.radius);
 
                 if (!node.text.empty()) {
                     SetTextColor(hdc, RGB(0xFF, 0xFF, 0xFF));
@@ -909,20 +996,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             }
             case BINUI_VIDEO: {
                 // 底色（无解码帧时的海报底）
-                {
-                    HBRUSH fill = CreateSolidBrush(cr);
-                    HGDIOBJ oldFill = SelectObject(hdc, fill);
-                    HPEN pen = CreatePen(PS_SOLID, 0, cr);
-                    HGDIOBJ oldPen = SelectObject(hdc, pen);
-                    if (node.radius > 0)
-                        RoundRect(hdc, x, y, x + nw, y + nh, node.radius * 2, node.radius * 2);
-                    else
-                        FillRect(hdc, &rc, fill);
-                    SelectObject(hdc, oldPen);
-                    SelectObject(hdc, oldFill);
-                    DeleteObject(pen);
-                    DeleteObject(fill);
-                }
+                fillNodeBg(dc, (float)node.radius);
 
                 // 解码帧（rawPixels RGBA）：GDI 需转成 BGRA 再包 Bitmap，contain-fit 绘制
                 const ImageResource* img = renderer.getImage(node.imageIndex);
@@ -1030,6 +1104,9 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 break;
         }
 
+        // 边框（v13）：画在节点内侧，四边可不同宽，压在底色之上
+        drawNodeBorder();
+
         // 键盘焦点高亮边框（内缩绘制，避免超出裁剪区）
         if (draw && renderer.isKeyboardFocused(node.id)) {
             HPEN fp = CreatePen(PS_SOLID, 2, RGB(0xFF, 0xFF, 0xFF));
@@ -1045,9 +1122,9 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         RestoreDC(hdc, savedDC);
     }
 
-    // 滚动条（轨道 + 滑块）
+    // 滚动条（轨道 + 滑块）；overflow:hidden 的只裁剪容器不出滚动条
     for (const auto& node : nodes) {
-        if (!(node.flags & BINUI_SCROLLABLE) || !(node.flags & BINUI_VISIBLE)) continue;
+        if (!renderer.isUserScrollable(node.id) || !(node.flags & BINUI_VISIBLE)) continue;
         float ch = renderer.contentHeight(node.id);
         auto sit = scrolls.find(node.id);
         float sy = sit != scrolls.end() ? sit->second.y : 0;

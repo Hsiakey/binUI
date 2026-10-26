@@ -930,18 +930,28 @@ int main() {
         TEST("li: ol gets numbering", textOf("o1") == "1. first" && textOf("o2") == "2. second");
     }
     {
+        // v13 起 border 与 font-weight 已实现：不再告警，而是落到扩展绘制段
         auto res = CompileBinUIEx(
-            "<html><body><div style=\"height:20px;border:1px solid red\">a</div>"
-            "<div style=\"height:20px;border:2px solid blue\">b</div>"
-            "<p style=\"font-weight:bold\">c</p></body></html>");
+            "<html><body><div id=\"d1\" style=\"height:20px;border:1px solid red\">a</div>"
+            "<div id=\"d2\" style=\"height:20px;border:2px solid blue\">b</div>"
+            "<p id=\"pw\" style=\"font-weight:bold\">c</p></body></html>");
         int borderWarns = 0, weightWarns = 0;
         for (const auto& w : res.warnings) {
             if (w.find("border") != std::string::npos) borderWarns++;
             if (w.find("font-weight") != std::string::npos) weightWarns++;
         }
-        TEST("unsupported css: border warns", borderWarns >= 1);
-        TEST("unsupported css: warning deduped per property", borderWarns == 1);
-        TEST("unsupported css: font-weight warns", weightWarns == 1);
+        TEST("css v13: border 不再告警", borderWarns == 0);
+        TEST("css v13: font-weight 不再告警", weightWarns == 0);
+        BinUIRenderer r;
+        r.loadLayout(res.layout.data(), res.layout.size());
+        const BinUIPaintNode* p1 = r.paintOf(r.findNodeByName("d1"));
+        const BinUIPaintNode* p2 = r.paintOf(r.findNodeByName("d2"));
+        TEST("css v13: 两个节点的边框宽度各自生效",
+             p1 && p2 && p1->borderW[0] == 1 && p2->borderW[0] == 2 &&
+             p1->borderColor[0] == 0xFFFF0000u && p2->borderColor[0] == 0xFF0000FFu);
+        const BinUIPaintNode* pw = r.paintOf(r.findNodeByName("pw"));
+        TEST("css v13: font-weight:bold -> 700",
+             pw && (pw->flags & PAINT_WEIGHT) && pw->weight == 7);
     }
 
     // 21. <style> 普通 CSS 规则 + 级联（内联 > #id > .class > tag > 同权重后写胜）
@@ -1009,12 +1019,12 @@ int main() {
     {
         auto res = CompileBinUIEx(
             "<html><head><style>"
-            "div .x { color: red; }"
+            "div .x { color: red; }"                       // v13 起支持：不该再告警
             ".y:visited { color: blue; }"
             "p::first-line { color: green; }"
-            ".a.b { color: green; }"
+            ".a.b { color: green; }"                       // v13 起支持：不该再告警
             "@media (max-width: 600px) { .z { color: green; } }"
-            "</style></head><body><div style=\"height:20px\"><span class=\"a b\">x</span></div>"
+            "</style></head><body><div style=\"height:20px\"><span class=\"a b x\">x</span></div>"
             "</body></html>");
         int descendant = 0, pseudo = 0, pelem = 0, compound = 0, media = 0;
         for (const auto& w : res.warnings) {
@@ -1024,10 +1034,10 @@ int main() {
             if (w.find(".a.b") != std::string::npos) compound++;
             if (w.find("@media") != std::string::npos) media++;
         }
-        TEST("css warn: descendant selector", descendant == 1);
+        TEST("css warn: 后代组合子不再告警（v13）", descendant == 0);
         TEST("css warn: unsupported pseudo class", pseudo == 1);
         TEST("css warn: unsupported pseudo element", pelem == 1);
-        TEST("css warn: compound selector", compound == 1);
+        TEST("css warn: 复合类不再告警（v13）", compound == 0);
         TEST("css warn: @media", media == 1);
     }
     {
@@ -1318,6 +1328,168 @@ int main() {
             if (n.text.find("<use") != std::string::npos) textWithMarkup = 1;
         TEST("component: param value injected as text, not markup", textWithMarkup == 1);
         TEST("component: injection adds no extra nodes", r2.getNodes().size() == 3);
+    }
+
+    // ---- v13：扩展绘制段（文字色/边框/渐变/字重/行高/装饰）+ 底色与文字色分家 ----
+    {
+        const char* html =
+            "<html><body style=\"background:#FFFFFF; color:#333333\">\n"
+            "  <div class=\"card\" id=\"card\">\n"
+            "    <span class=\"title\" id=\"title\">标题</span>\n"
+            "    <span id=\"plain\">继承父色</span>\n"
+            "  </div>\n"
+            "  <a class=\"link\" id=\"link\">链接</a>\n"
+            "  <button class=\"btn\" id=\"btn\">确定</button>\n"
+            "  <span class=\"badge\" id=\"badge\">徽标</span>\n"
+            "  <div class=\"grad\" id=\"grad\"></div>\n"
+            "  <div class=\"clip\" id=\"clip\"></div>\n"
+            "  <div class=\"scroll\" id=\"scroll\"></div>\n"
+            "</body></html>\n"
+            "<style>\n"
+            "  .card { padding:8px; background:#FFFFFF; border:1px solid #DDDDDD;"
+            "          border-bottom:2px solid #FF0000; border-radius:8px; }\n"
+            "  .title { font-size:18px; font-weight:700; line-height:160%; color:#111111; }\n"
+            "  .link { font-size:14px; text-decoration:underline; color:#0055FF; }\n"
+            "  .btn  { width:100px; height:36px; background:#8B5CF6; color:#101010; }\n"
+            "  .badge { background:#FFEEDD; color:#884400; border-radius:4px; }\n"
+            "  .grad { width:200px; height:60px; background:linear-gradient(to right, #202020, #404040); }\n"
+            "  .clip { width:200px; height:40px; overflow:hidden; }\n"
+            "  .scroll { width:200px; height:40px; overflow:auto; }\n"
+            "</style>\n";
+        auto res = CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("v13: 布局可解析", ParseInto(r, res.layout));
+        TEST("v13: 版本号 13", BINUI_VERSION == 13);
+
+        auto byId = [&](const char* name) -> uint16_t { return r.findNodeByName(name); };
+        auto nodeOf = [&](uint16_t id) -> const BinUIRenderer::NodeInfo* {
+            for (const auto& n : r.getNodes()) if (n.id == id) return &n;
+            return nullptr;
+        };
+
+        // 容器默认透明（v13 起不再默认 #222222），底色只来自作者声明
+        const uint16_t cardId = byId("card");
+        const auto* card = nodeOf(cardId);
+        TEST("v13: 卡片找到", card != nullptr);
+        if (card) {
+            TEST("v13: 卡片底色 = 声明的白色", card->color == 0xFFFFFFFFu);
+            const BinUIPaintNode* p = r.paintOf(cardId);
+            TEST("v13: 卡片有边框绘制段", p != nullptr && (p->flags & PAINT_BORDER));
+            if (p && (p->flags & PAINT_BORDER)) {
+                TEST("v13: 边框四边宽 1/1/2/1",
+                     p->borderW[0] == 1 && p->borderW[2] == 2 &&
+                     p->borderW[1] == 1 && p->borderW[3] == 1);
+                TEST("v13: 边框颜色按边生效（上灰下红）",
+                     p->borderColor[0] == 0xFFDDDDDDu && p->borderColor[2] == 0xFFFF0000u);
+            }
+        }
+
+        // 文字色与底色分家：LABEL 有底色时文字色走 textColor，不再吃掉背景
+        const uint16_t titleId = byId("title");
+        const auto* title = nodeOf(titleId);
+        const BinUIPaintNode* tp = r.paintOf(titleId);
+        // LABEL 没有底色时沿用旧约定（node.color 存文字色），textColorOf 两条路径都通
+        TEST("v13: 标题文字色取到 #111111", r.textColorOf(titleId) == 0xFF111111u);
+        // 有底色的 LABEL：底色与文字色必须分家
+        const uint16_t badgeId = byId("badge");
+        const auto* badge = nodeOf(badgeId);
+        const BinUIPaintNode* bd = r.paintOf(badgeId);
+        TEST("v13: 有底色的 LABEL 底色正确", badge && badge->color == 0xFFFFEEDDu);
+        TEST("v13: 有底色的 LABEL 文字色走 textColor",
+             bd && (bd->flags & PAINT_TEXT_COLOR) && bd->textColor == 0xFF884400u);
+        (void)title;
+        TEST("v13: 字重 700", tp && (tp->flags & PAINT_WEIGHT) && tp->weight == 7);
+        TEST("v13: 行高 160%", tp && (tp->flags & PAINT_LINE_HEIGHT) && tp->lineHeight == 160);
+        TEST("v13: 字号 18", title && title->fontSize == 18);
+
+        // CSS color 继承：没写颜色的子元素取祖先的 color
+        TEST("v13: 文字色可继承", r.textColorOf(byId("plain")) == 0xFF333333u);
+
+        // 下划线
+        const BinUIPaintNode* lp = r.paintOf(byId("link"));
+        TEST("v13: text-decoration:underline", lp && (lp->flags & PAINT_UNDERLINE) &&
+             lp->textColor == 0xFF0055FFu);
+
+        // 按钮文字色（以前恒白，无法指定）
+        const BinUIPaintNode* bp = r.paintOf(byId("btn"));
+        TEST("v13: 按钮文字色可指定", bp && (bp->flags & PAINT_TEXT_COLOR) &&
+             bp->textColor == 0xFF101010u);
+
+        // 渐变
+        const BinUIPaintNode* gp = r.paintOf(byId("grad"));
+        TEST("v13: 渐变段写出", gp && (gp->flags & PAINT_GRADIENT) &&
+             gp->gradFrom == 0xFF202020u && gp->gradTo == 0xFF404040u &&
+             gp->gradDir == BINUI_GRAD_H);
+        {
+            bool colorWarn = false;
+            for (const auto& w : res.warnings)
+                if (w.find("无法识别的颜色") != std::string::npos) colorWarn = true;
+            TEST("v13: 渐变不被当成颜色解析（无假警告）", !colorWarn);
+        }
+
+        // overflow：hidden = 只裁剪（不可滚），auto = 可滚
+        const uint16_t clipId = byId("clip"), scrollId = byId("scroll");
+        TEST("v13: overflow:hidden 仍是裁剪容器", r.isScrollable(clipId));
+        TEST("v13: overflow:hidden 不可滚动", !r.isUserScrollable(clipId));
+        TEST("v13: overflow:auto 可滚动", r.isUserScrollable(scrollId));
+        TEST("v13: overflow:hidden 滚轮无效",
+             r.scrollAt(20.0f, nodeOf(clipId) ? nodeOf(clipId)->y + 5.0f : 0.0f, -30.0f) < 0);
+    }
+
+    // ---- v13：选择器组合子 / 复合类 / 属性选择器 ----
+    {
+        const char* html =
+            "<html><body>\n"
+            "  <div class=\"card\">\n"
+            "    <span class=\"title\">A</span>\n"
+            "    <span class=\"body\">B</span>\n"
+            "  </div>\n"
+            "  <div class=\"box\"><span class=\"deep\">C</span></div>\n"
+            "  <button class=\"btn primary\">D</button>\n"
+            "  <button class=\"btn\">E</button>\n"
+            "  <input type=\"text\" value=\"F\">\n"
+            "  <input type=\"button\" value=\"G\">\n"
+            "  <ul class=\"adj\"><li>H</li><li>I</li></ul>\n"
+            "  <ul class=\"gen\"><li>J</li><li>K</li><li>L</li></ul>\n"
+            "</body></html>\n"
+            "<style>\n"
+            "  .card > .title   { color:#AA0000; }\n"          // 子代
+            "  .card .body     { color:#00AA00; }\n"           // 后代
+            "  .box .deep      { color:#0000AA; }\n"           // 后代（跨层）
+            "  .btn.primary    { color:#00AAAA; }\n"           // 复合类
+            "  input[type=text]{ color:#AA00AA; }\n"           // 属性选择器
+            "  .adj li + li    { color:#AAAA00; }\n"           // 相邻兄弟
+            "  .gen li ~ li    { color:#00AA00; }\n"           // 后续兄弟
+            "  .body:not(.x)  { background:#111111; }\n"       // :not
+            "</style>\n";
+        auto res = CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("sel: 布局可解析", ParseInto(r, res.layout));
+
+        auto textColor = [&](const std::string& text) -> uint32_t {
+            for (const auto& n : r.getNodes()) {
+                // <li> 会自动加 "• " / "1. " 前缀，这里按后缀匹配
+                if (n.text.size() < text.size()) continue;
+                if (n.text.compare(n.text.size() - text.size(), text.size(), text) != 0) continue;
+                if (const BinUIPaintNode* p = r.paintOf(n.id))
+                    if (p->flags & PAINT_TEXT_COLOR) return p->textColor;
+                return n.color;   // LABEL 旧约定
+            }
+            return 0;
+        };
+        TEST("sel: 子代组合子 .card > .title", textColor("A") == 0xFFAA0000u);
+        TEST("sel: 后代组合子 .card .body", textColor("B") == 0xFF00AA00u);
+        TEST("sel: 后代组合子跨层 .box .deep", textColor("C") == 0xFF0000AAu);
+        TEST("sel: 复合类 .btn.primary", textColor("D") == 0xFF00AAAAu);
+        TEST("sel: 复合类未命中时回落", textColor("E") != 0xFF00AAAAu);
+        TEST("sel: 属性选择器 input[type=text]", textColor("F") == 0xFFAA00AAu);
+        TEST("sel: 属性选择器不误伤 input[type=button]", textColor("G") != 0xFFAA00AAu);
+        TEST("sel: 相邻兄弟 li + li", textColor("I") == 0xFFAAAA00u);
+        TEST("sel: 相邻兄弟不命中首项", textColor("H") != 0xFFAAAA00u);
+        TEST("sel: 后续兄弟 li ~ li", textColor("K") == 0xFF00AA00u);
+        TEST("sel: 后续兄弟同样命中第三项", textColor("L") == 0xFF00AA00u);
+        TEST("sel: 后续兄弟不命中首项", textColor("J") != 0xFF00AA00u);
+        TEST("sel: :not() 内层复合类", textColor("B") == 0xFF00AA00u);
     }
     printf("\n=== Results: %d tests failed ===\n", failed);
     return failed > 0 ? 1 : 0;

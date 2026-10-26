@@ -10,7 +10,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v10: 节点 zIndex（CSS z-index 简化实现：数值越大越靠上，同值下 absolute 高于流式）
 // v11: 状态样式段（CSS :hover/:active/:focus/:checked 的运行时切换目标）
 // v12: 资源段（imageIndex -> 图片路径，布局自描述）+ 组件引用段（外挂 .bum 的锚点与路径）
-constexpr uint32_t BINUI_VERSION    = 12;
+// v13: 扩展绘制段（文字色/四边边框/渐变底色/字重/行高/下划线），见 BinUIPaintNode
+constexpr uint32_t BINUI_VERSION    = 13;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -316,5 +317,79 @@ struct BinUIComponentRef {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIComponentRef) == 8, "BinUIComponentRef must be 8 bytes");
+
+// ============================================================
+// 扩展绘制段（v13，恒定写出，位于组件引用段之后、名称段之前）
+// 布局：uint32 paintBytes（0 = 无扩展绘制）+ uint32 paintCount + BinUIPaintNode[paintCount]
+//
+// 为什么单独开一段，而不往 BinUINode 里加字段：
+//   · BinUINode 是 40 字节定长（节点数组按它整体序列化），加字段会改所有节点、
+//     破坏"手写 BINU 布局"和已发布二进制；
+//   · 这些属性只出现在少数节点上（文字色/边框/渐变/字重/行高/下划线），
+//     稀疏存储比给每个节点都留 20+ 字节便宜得多；
+//   · 与 spec/state/anim 段同一套路：旧布局没有这段 = 全部取节点自有默认值。
+//
+// 关键语义 —— **底色与文字色分家**：
+//   BinUINode.color 仍然只表示"底色"（LABEL 例外：历史上它表示文字色，
+//   为向后兼容，LABEL 且无 TEXT_COLOR 时沿用 color 作文字色）。
+//   有了 textColor，容器/按钮/列表的文字色终于可以和底色分别指定。
+//
+// 节点自身的底色（node.color）与本段的渐变互斥：渐变存在时以渐变填底。
+// 边框画在节点**内侧**（不参与布局）：borderW 为像素宽，四边可取不同值。
+// ============================================================
+enum BinUIPaintFlag : uint16_t {
+    PAINT_TEXT_COLOR  = 1 << 0, // textColor 有效（AARRGGBB）
+    PAINT_BORDER      = 1 << 1, // borderW / borderColor 有效
+    PAINT_BORDER_TOP    = 1 << 2, // 四边各自可关（缺省用 borderW 的四边）
+    PAINT_BORDER_RIGHT  = 1 << 3,
+    PAINT_BORDER_BOTTOM = 1 << 4,
+    PAINT_BORDER_LEFT   = 1 << 5,
+    PAINT_GRADIENT    = 1 << 6, // gradFrom / gradTo / gradDir 有效
+    PAINT_GRAD_RADIAL = 1 << 7, // 径向渐变（否则线性）
+    PAINT_WEIGHT      = 1 << 8, // weight 有效（CSS font-weight）
+    PAINT_LINE_HEIGHT = 1 << 9, // lineHeight 有效（百分数，150 = 1.5 倍字号）
+    PAINT_UNDERLINE   = 1 << 10, // 文字下划线
+    PAINT_STRIKE      = 1 << 11, // 文字删除线
+    PAINT_OVERLINE    = 1 << 12, // 文字上划线
+    PAINT_CLIP_ONLY   = 1 << 13, // 只裁剪不滚动（CSS overflow:hidden 与 auto/scroll 的区别）
+};
+
+// 渐变方向（PAINT_GRADIENT 且非 RADIAL 时有效）
+enum BinUIGradDir : uint8_t {
+    BINUI_GRAD_V = 0, // to bottom（默认，CSS 180deg）
+    BINUI_GRAD_H = 1, // to right（CSS 90deg）
+    BINUI_GRAD_D = 2, // to bottom right（CSS 135deg）
+};
+
+#pragma pack(push, 1)
+struct BinUIPaintNode {
+    uint16_t nodeId;
+    uint16_t flags;        // BinUIPaintFlag
+    uint8_t  borderW[4];   // 上右下左，像素（0 = 该边不画）
+    uint8_t  gradDir;      // BinUIGradDir
+    uint8_t  weight;       // CSS font-weight / 100（4 = 常规，7 = 粗体；0 = 未声明）
+    uint8_t  lineHeight;   // 行高百分数：0 = 默认（135），150 = 1.5 倍字号
+    uint8_t  borderStyle;  // 0 = solid（预留 dashed/dotted）
+    uint32_t textColor;    // AARRGGBB
+    uint32_t borderColor[4]; // 上右下左各自的颜色（AARRGGBB）
+    uint32_t gradFrom;     // AARRGGBB（渐变起点色）
+    uint32_t gradTo;       // AARRGGBB（渐变终点色）
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUIPaintNode) == 40, "BinUIPaintNode must be 40 bytes");
+
+// 文字装饰线（下划线/删除线/上划线）在节点文字盒中的位置：
+// 后端只需按 (x, y, w, h) 画一条 height 高的实心条；返回值 0 = 该装饰线不需要画。
+//   fontSize  节点字号；textTop 文字块顶部 y；textH 文字块高度
+//   which     0=下划线 1=删除线 2=上划线
+struct BinUITextRule { float off; float thickness; };
+inline BinUITextRule BinUITextRuleOf(int which, float fontSize) {
+    const float th = fontSize >= 20.0f ? 2.0f : 1.0f;
+    switch (which) {
+        case 1: return { fontSize * 0.55f, th };  // 删除线：大致穿过字符中腰
+        case 2: return { fontSize * 0.12f, th };  // 上划线：贴近字形顶部
+        default: return { fontSize * 0.98f, th }; // 下划线：基线下方
+    }
+}
 
 } // namespace binui

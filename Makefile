@@ -287,9 +287,14 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 # 自动头文件依赖（-MMD -MP 生成 .d，头文件变更时正确重编对应 .o）
+# 注意：每个输出子目录都要列进来，漏一个就会出现"改了头文件但这个目录不重编"
 -include $(wildcard $(BUILD_DIR)/*.d) \
          $(wildcard $(BUILD_DIR)/compiler/*.d) \
          $(wildcard $(BUILD_DIR)/renderer/*.d) \
          $(wildcard $(BUILD_DIR)/font/*.d) \
+         $(wildcard $(BUILD_DIR)/backends/*.d) \
+         $(wildcard $(BUILD_DIR)/platform/*.d) \
+         $(wildcard $(BUILD_DIR)/common/*.d) \
+         $(wildcard $(BUILD_DIR)/bin/*.d) \
          $(wildcard $(BUILD_DIR)/examples/*.d) \
          $(wildcard $(BUILD_DIR)/examples/*/*.d)

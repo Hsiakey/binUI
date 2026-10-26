@@ -292,6 +292,7 @@ install(FILES
     include/binui_component.h
     include/binui_paths.h
     include/binui_hot_reload.h
+    include/binui_paint.h
     DESTINATION include/binui
 )
 

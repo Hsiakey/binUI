@@ -4,6 +4,7 @@
 #include <ft2build.h>
 #include FT_FREETYPE_H
 #include FT_COLOR_H
+#include <freetype/ftsynth.h>   // FT_GlyphSlot_Embolden（合成加粗）
 #include FT_TRUETYPE_TABLES_H
 
 #include <hb.h>
@@ -202,13 +203,24 @@ FontMetrics FontEngine::metrics(const std::string& face, float size) {
 }
 
 bool FontEngine::renderGlyph(const std::string& face, float size, uint32_t cp, GrayGlyph& out) {
+    return renderGlyph(face, size, cp, false, out);
+}
+
+// bold=true：先按轮廓加载（FT_LOAD_NO_BITMAP），再用 FT_GlyphSlot_Embolden 合成加粗。
+// 该 API 会同时加粗轮廓、加宽 advance、调整 bearing —— 测宽/换行/绘制用同一份度量，
+// 不会出现"字形加粗了但排不下"的错位。
+bool FontEngine::renderGlyph(const std::string& face, float size, uint32_t cp, bool bold,
+                             GrayGlyph& out) {
     auto* s = Impl::getSession(impl_, face, size);
     if (!s || !s->face) return false;
     FT_Face f = s->face;
 
     FT_UInt gid = FT_Get_Char_Index(f, cp);
     if (gid == 0) return false;
-    if (FT_Load_Glyph(f, gid, loadFlagsFor(size)) != 0) return false;
+    FT_Int32 flags = loadFlagsFor(size);
+    if (bold) flags |= FT_LOAD_NO_BITMAP;   // Embolden 只作用于矢量轮廓
+    if (FT_Load_Glyph(f, gid, flags) != 0) return false;
+    if (bold && f->glyph->format == FT_GLYPH_FORMAT_OUTLINE) FT_GlyphSlot_Embolden(f->glyph);
     if (FT_Render_Glyph(f->glyph, FT_RENDER_MODE_NORMAL) != 0) return false;
 
     const FT_Bitmap& bm = f->glyph->bitmap;
