@@ -5,7 +5,10 @@
 
 #include "binui_charts.h"
 #include "binui_format.h"
+#ifdef _WIN32
+// 后端头只在 Windows 下存在（核心库的其他部分不依赖它）
 #include "backends/binui_gl-gdi.h"
+#endif
 
 namespace binui {
 
@@ -169,6 +172,7 @@ bool LineChart::tick(float) {
     return changed;
 }
 
+#ifdef _WIN32
 void LineChart::draw(BinUIGLGdi& gfx) {
     if (cols_ == 0) return;
     float hw = lineWidth_ * 0.5f;
@@ -182,6 +186,11 @@ void LineChart::draw(BinUIGLGdi& gfx) {
         }
     }
 }
+#else
+// 非 Windows 构建：核心库不链接任何绘制后端，折线图只提供数据/节点布局，
+// 绘制由应用侧用自己后端的同类实现完成（vtable 仍需这个符号，故给个空实现）。
+void LineChart::draw(BinUIGLGdi&) {}
+#endif
 
 // ============ 环形进度 ============
 RingGauge::RingGauge(BinUIRenderer& r, uint16_t cid, int ticks, uint32_t color)
