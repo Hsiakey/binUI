@@ -289,6 +289,16 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 // 光标闪烁（500ms 周期），绘制与脏矩形刷新共用同一相位
 static std::string gGdiFontName = "Segoe UI";
 
+// 字体的抗锯齿质量。**不能再用 DEFAULT_QUALITY**：那等于"跟随系统设置"，
+// 系统开着 ClearType 时 GDI 会做次像素（RGB 分量各自覆盖）渲染，把字画到
+// 有色背景的离屏 DIB 上就会渗出红/蓝/黄的毛边 —— 放大看就是"像素没对齐"。
+// 两个 GPU 后端走的是 FreeType 灰度字形（单通道 alpha），不会这样；
+// 这里用 ANTIALIASED_QUALITY 强制灰度抗锯齿，三端观感一致。
+#ifndef BINUI_GDI_FONT_QUALITY
+#define BINUI_GDI_FONT_QUALITY ANTIALIASED_QUALITY
+#endif
+static const int gGdiFontQuality = BINUI_GDI_FONT_QUALITY;
+
 void setGdiFontName(const char* name) { if (name && *name) gGdiFontName = name; }
 
 bool caretBlinkOn() {
@@ -801,7 +811,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                     fs, 0, 0, 0, fw >= 600 ? FW_BOLD : FW_NORMAL,
                     FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                     OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                    DEFAULT_QUALITY, DEFAULT_PITCH, gGdiFontName.c_str());
+                    gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                 HGDIOBJ oldFont = SelectObject(hdc, font);
                 RECT tr = { x + pad, y, x + nw - pad, y + nh };
                 std::wstring wtext = Utf8ToWide(node.text);
@@ -873,7 +883,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                         node.fontSize ? node.fontSize : 14, 0, 0, 0, FW_BOLD,
                         FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                        DEFAULT_QUALITY, DEFAULT_PITCH, gGdiFontName.c_str());
+                        gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                     HGDIOBJ oldFont = SelectObject(hdc, font);
                     RECT tr = { x + pad, y, x + nw - pad, y + nh };
                     // 文本是 UTF-8：必须转宽字符用 DrawTextW。早先用 DrawTextA，
@@ -911,7 +921,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                         node.fontSize ? node.fontSize : 14, 0, 0, 0, FW_NORMAL,
                         FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                        DEFAULT_QUALITY, DEFAULT_PITCH, gGdiFontName.c_str());
+                        gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                     HGDIOBJ oldFont = SelectObject(hdc, font);
                     RECT tr = { x + pad + 4, y, x + nw - pad - 4, y + nh };
 
@@ -963,7 +973,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                         fw >= 600 ? FW_BOLD : FW_NORMAL,
                         FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                        DEFAULT_QUALITY, DEFAULT_PITCH, gGdiFontName.c_str());
+                        gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                     HGDIOBJ oldFont = SelectObject(hdc, font);
                     RECT tr = { x + pad + 12, y + pad + 8, x + nw - pad - 12, y + nh - pad - 8 };
                     const UINT halign = (node.flags & BINUI_TEXT_CENTER) ? DT_CENTER
@@ -998,7 +1008,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                     HFONT font = CreateFontA(24, 0, 0, 0, FW_LIGHT,
                         FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                        DEFAULT_QUALITY, DEFAULT_PITCH, gGdiFontName.c_str());
+                        gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                     HGDIOBJ oldFont = SelectObject(hdc, font);
                     std::wstring wtext = Utf8ToWide(node.text);
                     DrawTextW(hdc, wtext.c_str(), -1, &rc,
@@ -1103,7 +1113,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                             SetBkMode(hdc, TRANSPARENT);
                             HFONT font = CreateFontA(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                DEFAULT_QUALITY, DEFAULT_PITCH, gGdiFontName.c_str());
+                                gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                             HGDIOBJ oldFont = SelectObject(hdc, font);
                             RECT timeR = { x + nw - 76, barTop, x + nw - 8, barTop + (int)BinUIRenderer::kVideoBarH };
                             DrawTextA(hdc, label, -1, &timeR, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
@@ -1183,7 +1193,7 @@ void placeCaretAtClick(binui::BinUIRenderer& renderer, float cx, float cy) {
         node->fontSize ? node->fontSize : 14, 0, 0, 0, FW_NORMAL,
         FALSE, FALSE, FALSE, DEFAULT_CHARSET,
         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH, gGdiFontName.c_str());
+        gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
     HGDIOBJ oldFont = SelectObject(hdc, font);
 
     std::wstring wtext = Utf8ToWide(edit.value);
