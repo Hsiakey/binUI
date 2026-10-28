@@ -96,7 +96,7 @@ int main() {
         BinUIRenderer r3;
         auto vision = CompileBinUIFile("examples/vision_monitor/main.binui.xml");
         TEST("Compile examples/vision_monitor/main.binui.xml", ParseInto(r3, vision));
-        TEST("vision_monitor node count == 21", !vision.empty() && r3.getNodes().size() == 21);
+        TEST("vision_monitor node count == 72", !vision.empty() && r3.getNodes().size() == 72);
     }
 
     // 4.5 真实父子层级

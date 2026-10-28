@@ -760,6 +760,64 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         if (hasVp[i] && (x + nw <= vpL[i] || x >= vpR[i] ||
                          y + nh <= vpT[i] || y >= vpB[i]))
             continue;
+        // BINUI_LINE：x,y = 起点；width,height = 终点；radius = 线宽。
+        // 这条分支以前在 GDI 后端是缺的 —— SVG 的 line / polyline / polygon 在 GDI
+        // 画布上一根都画不出来（GL/D3D 正常），三端表现不一致。另外线段的包围盒
+        // 不是 (x,y,w,h)，必须按端点自己算，否则斜线会被节点矩形整条裁掉。
+        if (node.type == BINUI_LINE) {
+            const float ddx = renderer.drawOffsetX(node.id);
+            const float ddy = renderer.drawOffsetY(node.id);
+            const float x1 = node.x - offX[i] + ddx, y1 = node.y - offY[i] + ddy;
+            const float x2 = node.width - offX[i] + ddx, y2 = node.height - offY[i] + ddy;
+            const int lw = node.radius > 0 ? (int)node.radius : 1;
+            const float mnx = std::min(x1, x2) - lw, mxx = std::max(x1, x2) + lw;
+            const float mny = std::min(y1, y2) - lw, mxy = std::max(y1, y2) + lw;
+            if (mxx <= clip.left || mnx >= clip.right || mxy <= clip.top || mny >= clip.bottom)
+                continue;
+            if (hasVp[i] && (mxx <= vpL[i] || mnx >= vpR[i] || mxy <= vpT[i] || mny >= vpB[i]))
+                continue;
+            uint32_t lc = renderer.drawColor(node.id);
+            float lop = renderer.drawOpacity(node.id);
+            if (renderer.isDisabled(node.id)) lop *= 0.55f;
+            // GDI 画布没有 alpha 合成：半透明线段按与页面底色混合近似
+            const uint32_t la = (lc >> 24) & 0xFFu;
+            if (la < 255u || lop < 1.0f) {
+                float a = (float)la * (lop < 1.0f ? lop : 1.0f);
+                lc = BlendOver((lc & 0x00FFFFFFu) | ((uint32_t)(a + 0.5f) << 24), pageBg);
+            }
+            int lSaved = SaveDC(hdc);
+            RECT lr = { (LONG)std::floor(mnx), (LONG)std::floor(mny),
+                        (LONG)std::ceil(mxx), (LONG)std::ceil(mxy) };
+            bool lDraw = IntersectClipRect(hdc, lr.left, lr.top, lr.right, lr.bottom) != NULLREGION;
+            size_t lcur = i;
+            while (lDraw) {
+                const auto& anc = nodes[lcur];
+                if (anc.parentId == 0xFFFF) break;
+                auto pit = byId.find(anc.parentId);
+                if (pit == byId.end()) break;
+                lcur = pit->second;
+                const auto& par = nodes[lcur];
+                if (!(par.flags & BINUI_VISIBLE)) { lDraw = false; break; }
+                RECT pr = { (LONG)par.x, (LONG)par.y,
+                            (LONG)(par.x + par.width), (LONG)(par.y + par.height) };
+                if (IntersectClipRect(hdc, pr.left, pr.top, pr.right, pr.bottom) == NULLREGION) {
+                    lDraw = false;
+                    break;
+                }
+            }
+            if (lDraw) {
+                HPEN pen = CreatePen(PS_SOLID, lw,
+                                     RGB((lc >> 16) & 0xFF, (lc >> 8) & 0xFF, lc & 0xFF));
+                HGDIOBJ oldPen = SelectObject(hdc, pen);
+                MoveToEx(hdc, (int)std::lround(x1), (int)std::lround(y1), nullptr);
+                LineTo(hdc, (int)std::lround(x2), (int)std::lround(y2));
+                SelectObject(hdc, oldPen);
+                DeleteObject(pen);
+            }
+            RestoreDC(hdc, lSaved);
+            continue;
+        }
+
         RECT rc = { x, y, x + nw, y + nh };
         int pad = node.padding;
 
@@ -926,7 +984,14 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 // 输入框背景（style 里的 background / 渐变）
                 fillNodeBg(dc, (float)node.radius);
 
-                HPEN underlinePen = CreatePen(PS_SOLID, 2, RGB(0xBB, 0x86, 0xFC));
+                // 输入框的强调色：作者给了 textColor 就用它，否则回退内置紫
+                //（以前写死 #BB86FC，浅色主题下没法跟着配色走）
+                const uint32_t inAccent = (pt && (pt->flags & PAINT_TEXT_COLOR))
+                                              ? pt->textColor : 0xFFBB86FCu;
+                // 底部强调线压到 35%（GDI 无 alpha，按与底色混合近似）
+                const uint32_t inLineCol = fadeOver(inAccent, 90);
+                HPEN underlinePen = CreatePen(PS_SOLID, 2,
+                                              RGB((inLineCol >> 16) & 0xFF, (inLineCol >> 8) & 0xFF, inLineCol & 0xFF));
                 HGDIOBJ oldPen = SelectObject(hdc, underlinePen);
                 MoveToEx(hdc, x, y + nh - 2, nullptr);
                 LineTo(hdc, x + nw, y + nh - 2);
@@ -953,7 +1018,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
 
                     std::wstring wtext = Utf8ToWide(text);
                     // 占位符画 45% 淡、禁用再压到 55%（GDI 无 alpha，按与底色混合近似）
-                    uint32_t inCol = 0xFFBB86FCu;
+                    uint32_t inCol = inAccent;
                     if (placeholder && !editing) inCol = fadeOver(inCol, 140);
                     if (disabled) inCol = fadeOver(inCol, 140);
                     SetTextColor(hdc, RGB((inCol >> 16) & 0xFF, (inCol >> 8) & 0xFF, inCol & 0xFF));
@@ -996,7 +1061,8 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
 
                 if (!node.text.empty()) {
                     uint32_t tcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
-                                              ? pt->textColor : 0xFFFFFFFFu;
+                                              ? pt->textColor
+                                              : binui::PaintContrastText(dc | 0xFF000000u);
                     if (disabled) tcol = fadeOver(tcol, 140);
                     SetTextColor(hdc, RGB((tcol >> 16) & 0xFF, (tcol >> 8) & 0xFF, tcol & 0xFF));
                     const int fw = binui::PaintWeightOf(pt);

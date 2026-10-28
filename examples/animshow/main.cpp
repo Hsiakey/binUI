@@ -74,7 +74,7 @@ int main(int argc, char* argv[]) {
             break;
         }
     const uint32_t palette[] = {
-        0xFF8B5CF6, 0xFFEC4899, 0xFF06B6D4, 0xFFF59E0B, 0xFF10B981, 0xFFEF4444,
+        0xFF3E8BFF, 0xFF2FBF9A, 0xFF38BDF8, 0xFFF2B544, 0xFFFF8A65, 0xFFFF6B6B,
     };
     int palIdx = 0;
 

@@ -68,6 +68,12 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `examples/multiwindow` | 独立窗口模式：多进程·多窗口（stage/hero/dialog 各自进程），立绘为透明分层窗口 |
 | `examples/galgamechat` | Galgame 式 Agent 前端原型：逐字打字机 + 上滚 backlog + 输入回合 + 后端钩子 |
 
+> 所有示例统一使用一套**清新浅色主题**（页面底 `#F4F7FC` / 白卡片 + 1px 边框 / 主字 `#1F2A37` /
+> 次字 `#66768C` / 主色 `#3E8BFF` / 薄荷 `#2FBF9A`）。这套令牌没有引擎级实现（`box-shadow`
+> 这类合成效果仍不支持），就是各示例 `<style>` 里的一段约定 —— 改配色照抄 `examples/cssshow`
+> 开头的令牌注释即可。
+
+
 ## 第三方依赖
 
 字体渲染使用 **FreeType**（字形解析/光栅化）与 **HarfBuzz**（文本整形），源码置于 `third_party/`。
@@ -238,6 +244,9 @@ HTML5 编译规则：
 - **GDI 画布后端的文字抗锯齿**：强制 `ANTIALIASED_QUALITY`（灰度抗锯齿），不用 `DEFAULT_QUALITY`。原因是后者"跟随系统设置"——系统开着 ClearType 时，字被画到有色背景的离屏 DIB 上会渗出红/蓝/黄毛边，放大看就是"像素没对齐"；两个 GPU 后端本来就是 FreeType 灰度字形（单通道 alpha），没有这个问题。要换回去可在编译期定义 `-DBINUI_GDI_FONT_QUALITY=DEFAULT_QUALITY`。
 - **GDI 字号与 GPU 后端对齐（v14）**：`CreateFontA` 的高度改成**负值**（`-fontSize`）。正值是"字符单元高度"（含内部行距），比 em 小约 15%，导致同一份 UI 在 GDI 后端比 GL/D3D 小一号 —— 三个后端的字号/换行位置对不上。负值 = em 高度，与 FreeType 的 `FT_Set_Pixel_Sizes` 同口径。
   代价：`ANTIALIASED_QUALITY` 没有字号 hinting，**浅底深字的 CJK 小字（≤13px）偏软**；GPU 后端在 ≤16px 走 `FT_LOAD_TARGET_LIGHT`，笔画更实。要更清晰需要把 GDI 后端也换成 FreeType 光栅 + 位图拷贝（尚未做）。
+- **容器文字色的兜底（v14 起）**：`BINUI_LIST` 上的文字在作者没声明 `color` 时，按**节点自身底色的亮度**选深/浅（`PaintContrastText`）—— 以前一律白字，浅底容器里（尤其是运行期 `addNode` 造出来的列表行）文字直接看不见。底色近乎透明时仍沿用白字。
+- **输入框的强调色可主题化（v14 起）**：输入框的文字/光标/底部 2px 强调线以前写死 `#BB86FC`（紫），现在优先用作者声明的文字色（`paint.textColor`），没声明才回退紫；强调线压到 35% 免得在浅底上成一道黑杠。
+- **GDI 后端补上 SVG 线段**：`BINUI_LINE`（`<line>`/`<polyline>`/`<polygon>`）以前在 GDI 画布后端**没有绘制分支**，一根都画不出来（GL/D3D 正常）。现在按端点包围盒单独裁剪后 `MoveToEx/LineTo`，三端一致。
 - **GDI 单行文本的换行阈值**：GPU 后端画单行文本从不换行（放不下就裁掉），GDI 以前"只要超宽就 `DT_WORDBREAK`"，窄盒子里的短标签会被折成两行。v14 起只有**超宽 20% 以上**才换行 —— 长段落不至于被裁，短标签也不会莫名折行。
 - **已知不生效的 CSS 属性会打编译警告**（每条属性全文档只提示一次）：`box-shadow`、`text-shadow`、`letter-spacing`、`visibility`、`float`、`flex-wrap`、`flex-shrink`、`align-self`、`order`、`outline`、`cursor`、`grid-template-columns`、`text-overflow`、`object-fit`、**`right` / `bottom` / `inset`**（定位只认 `left`/`top`）、静态 `transform`（只有状态伪类里的 `transform:scale()` 生效）、`filter`、`aspect-ratio`。`border` / `font-weight` / `line-height` / `text-decoration` 自 v13、`font-style` / `white-space` 自 v14 起已实现，不再告警。
 - **HTML 标签/属性也会体检**（只查不改，HTML 模式生效，XML 允许自定义标签）：未识别的标签按容器处理并警告一次；**没有对应实现**的属性（`name`/`for`/`required`/`maxlength`/`pattern`/`tabindex`/`target`/`rel`… ）同样警告一次。认得但只能糊弄过去的标签会说明白它会变成什么（`<table>` 行列堆叠、`<select>` 选项竖排、`<textarea>` 不可编辑、`<details>` 不折叠、`<progress>` 无外观）。`data-*` / `aria-*` 不告警。

@@ -1,48 +1,59 @@
 <!DOCTYPE html>
-<app_window width="1000" height="680" bg="#0E1020" title="BinUI MW Stage">
-<html width="1000" height="680" bg="#0E1020">
+<app_window width="1000" height="680" bg="#F4F7FC" title="BinUI MW Stage">
+<html width="1000" height="680" bg="#F4F7FC">
 <head>
     <meta charset="UTF-8">
     <title>binUI 独立窗口模式 · 舞台</title>
     <style>
-        body { font-family: "Microsoft YaHei UI"; }
+        /* 浅色主题：底 #F4F7FC / 面 #FFFFFF / 次级面 #EEF3FA / 线 #E6EDF7 / #DCE5F2
+           主字 #1F2A37 / 次字 #66768C / 弱字 #94A3B8 / 主色 #3E8BFF / 薄荷 #2FBF9A */
+        body { font-family: "Microsoft YaHei UI"; font-size: 13px; color: #1F2A37; }
         @keyframes glowPulse {
-            0%, 100% { opacity: 0.35; }
+            0%, 100% { opacity: 0.30; }
             50%      { opacity: 0.70; }
         }
         button { transition: background-color 0.18s ease, transform 0.18s ease; }
+
+        #btnMin { background: #EEF3FA; color: #66768C; border-radius: 8; font-size: 12; }
+        #btnMin:hover  { background: #DCE5F2; transform: scale(1.04); }
+        #btnMin:active { background: #C7D8EE; transform: scale(0.96); }
+
+        #btnClose { background: #FFE9EC; color: #FF6B6B; border-radius: 8; font-size: 12; }
+        #btnClose:hover  { background: #FFD9DE; transform: scale(1.04); }
+        #btnClose:active { background: #FFC6CE; transform: scale(0.96); }
     </style>
 </head>
 <body>
     <!-- 标题栏（可拖动本窗口） -->
-    <titlebar style="position:absolute; left:0; top:0; width:1000; height:44; background:#0A0A14; z-index:100">
-        <span style="position:absolute; left:14; top:12; width:520; height:20; color:#E9E4F5; font-size:14">独立窗口模式 · 舞台窗口（进程 #1 / 共 3 个）</span>
-        <span style="position:absolute; left:648; top:15; width:250; height:16; color:#6E6E78; font-size:11">ESC 退出 · 每块 UI 各自独立进程与窗口</span>
-        <button id="btnMin"   style="position:absolute; left:912; top:8; width:28; height:28; background:#23232E; border-radius:6; z-index:110">─</button>
-        <button id="btnClose" style="position:absolute; left:948; top:8; width:28; height:28; background:#E5484D; border-radius:6; z-index:110">✕</button>
+    <titlebar style="position:absolute; left:0; top:0; width:1000; height:44; background:#FFFFFF; border-bottom:1px solid #E6EDF7; z-index:100">
+        <span style="position:absolute; left:14; top:12; width:520; height:20; color:#1F2A37; font-size:14; font-weight:700">独立窗口模式 · 舞台窗口（进程 #1 / 共 3 个）</span>
+        <span style="position:absolute; left:648; top:15; width:250; height:16; color:#94A3B8; font-size:11">ESC 退出 · 每块 UI 各自独立进程与窗口</span>
+        <button id="btnMin"   style="position:absolute; left:912; top:8; width:28; height:28; z-index:110">─</button>
+        <button id="btnClose" style="position:absolute; left:948; top:8; width:28; height:28; z-index:110">✕</button>
     </titlebar>
 
-    <!-- 背景背光（呼吸动画） -->
-    <div style="position:absolute; left:210; top:120; width:580; height:440; background:rgba(96,74,196,0.12); border-radius:290; z-index:1; animation:glowPulse 4s ease-in-out 0s infinite"></div>
-    <div style="position:absolute; left:320; top:170; width:360; height:360; background:rgba(150,120,240,0.12); border-radius:180; z-index:1; animation:glowPulse 4s ease-in-out 0s infinite"></div>
+    <!-- 舞台天光：浅蓝渐变 + 两团呼吸光斑 -->
+    <div style="position:absolute; left:0; top:44; width:1000; height:636; background:linear-gradient(to bottom, #F6FAFF, #E7F0FD); z-index:0"></div>
+    <div style="position:absolute; left:210; top:120; width:580; height:440; background:#EDF4FE; border-radius:290; z-index:1; animation:glowPulse 4s ease-in-out 0s infinite"></div>
+    <div style="position:absolute; left:320; top:170; width:360; height:360; background:#E3EEFC; border-radius:180; z-index:1; animation:glowPulse 4s ease-in-out 0s infinite"></div>
 
     <!-- 地面 -->
-    <div style="position:absolute; left:0; top:520; width:1000; height:160; background:#141230; z-index:2"></div>
-    <div style="position:absolute; left:0; top:520; width:1000; height:2; background:rgba(167,139,250,0.40); z-index:3"></div>
+    <div style="position:absolute; left:0; top:520; width:1000; height:160; background:#DEEAF9; z-index:2"></div>
+    <div style="position:absolute; left:0; top:520; width:1000; height:2; background:#D2DFF2; z-index:3"></div>
 
     <!-- HUD：说明本窗口与另两个窗口 -->
-    <div style="position:absolute; left:24; top:64; width:300; height:88; background:rgba(16,14,26,0.85); border-radius:12; z-index:8">
-        <span style="position:absolute; left:14; top:12; width:280; height:20; color:#C4B5FD; font-size:13">舞台窗口 · 进程 A</span>
-        <span style="position:absolute; left:14; top:36; width:280; height:18; color:#9A9AA6; font-size:11">只画背景/地面/这个 HUD，无立绘</span>
-        <span style="position:absolute; left:14; top:56; width:280; height:18; color:#9A9AA6; font-size:11">立绘与对话各在另一个进程窗口中</span>
+    <div style="position:absolute; left:24; top:64; width:300; height:88; background:#FFFFFF; border:1px solid #E6EDF7; border-radius:16; z-index:8">
+        <span style="position:absolute; left:16; top:12; width:270; height:20; color:#1F2A37; font-size:13; font-weight:700">舞台窗口 · 进程 A</span>
+        <span style="position:absolute; left:16; top:38; width:270; height:18; color:#66768C; font-size:11">只画背景/地面/这个 HUD，无立绘</span>
+        <span style="position:absolute; left:16; top:58; width:270; height:18; color:#66768C; font-size:11">立绘与对话各在另一个进程窗口中</span>
     </div>
 
-    <div style="position:absolute; left:672; top:64; width:304; height:64; background:rgba(16,14,26,0.85); border-radius:12; z-index:8">
-        <span style="position:absolute; left:14; top:12; width:280; height:20; color:#7BE0B0; font-size:13">进程拓扑</span>
-        <span style="position:absolute; left:14; top:36; width:280; height:18; color:#9A9AA6; font-size:11">multiwindow.exe --win=stage / hero / dialog</span>
+    <div style="position:absolute; left:672; top:64; width:304; height:64; background:#FFFFFF; border:1px solid #E6EDF7; border-radius:16; z-index:8">
+        <span style="position:absolute; left:16; top:10; width:272; height:20; color:#148A6C; font-size:13; font-weight:700">进程拓扑</span>
+        <span style="position:absolute; left:16; top:34; width:272; height:18; color:#66768C; font-size:11">multiwindow.exe --win=stage / hero / dialog</span>
     </div>
 
     <!-- 中心站位提示 -->
-    <span style="position:absolute; left:360; top:496; width:280; height:18; color:#6E6E78; font-size:12; z-index:4">（立绘窗口浮在这里 · 可拖动）</span>
+    <span style="position:absolute; left:360; top:496; width:280; height:18; color:#66768C; font-size:12; z-index:4">（立绘窗口浮在这里 · 可拖动）</span>
 </body>
 </html>

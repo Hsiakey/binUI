@@ -1,32 +1,52 @@
 <!DOCTYPE html>
-<app_window width="920" height="210" bg="#12101A" title="BinUI MW Dialog">
-<html width="920" height="210" bg="#12101A">
+<app_window width="920" height="210" bg="#F4F7FC" title="BinUI MW Dialog">
+<html width="920" height="210" bg="#F4F7FC">
 <head>
     <meta charset="UTF-8">
     <title>binUI 独立窗口模式 · 对话</title>
     <style>
-        body { font-family: "Microsoft YaHei UI"; }
+        /* 浅色主题：底 #F4F7FC / 面 #FFFFFF / 次级面 #EEF3FA / 线 #E6EDF7 / #DCE5F2
+           主字 #1F2A37 / 次字 #66768C / 弱字 #94A3B8 / 主色 #3E8BFF / 薄荷 #2FBF9A */
+        body { font-family: "Microsoft YaHei UI"; font-size: 13px; color: #1F2A37; }
         button { transition: background-color 0.18s ease, transform 0.18s ease; }
+
+        #btnMin { background: #EEF3FA; color: #66768C; border-radius: 8; font-size: 12; }
+        #btnMin:hover  { background: #DCE5F2; transform: scale(1.04); }
+        #btnMin:active { background: #C7D8EE; transform: scale(0.96); }
+
+        #btnClose { background: #FFE9EC; color: #FF6B6B; border-radius: 8; font-size: 12; }
+        #btnClose:hover  { background: #FFD9DE; transform: scale(1.04); }
+        #btnClose:active { background: #FFC6CE; transform: scale(0.96); }
+
+        /* 主按钮：主色填充 + 白字；次按钮：浅蓝底 + 主色字。
+           状态样式只改底色，字色不变 —— 老老实实保持白字/主色字才一直看得清 */
+        #btnAuto { background: #3E8BFF; color: #FFFFFF; border-radius: 8; font-size: 12; font-weight: 700; }
+        #btnAuto:hover  { background: #5DA0FF; transform: scale(1.04); }
+        #btnAuto:active { background: #2F79E8; transform: scale(0.96); }
+
+        #btnSkip, #btnSave, #btnLoad { background: #EEF3FA; color: #2F79E8; border-radius: 8; font-size: 12; }
+        #btnSkip:hover, #btnSave:hover, #btnLoad:hover   { background: #DCE5F2; transform: scale(1.04); }
+        #btnSkip:active, #btnSave:active, #btnLoad:active { background: #C7D8EE; transform: scale(0.96); }
     </style>
 </head>
 <body>
     <!-- 标题栏（可拖动本窗口） -->
-    <titlebar style="position:absolute; left:0; top:0; width:920; height:40; background:#0A0A14; z-index:100">
-        <span style="position:absolute; left:14; top:10; width:520; height:20; color:#E9E4F5; font-size:13">对话窗口（进程 #3 / 共 3 个）</span>
-        <button id="btnMin"   style="position:absolute; left:852; top:6; width:28; height:28; background:#23232E; border-radius:6; z-index:110">─</button>
-        <button id="btnClose" style="position:absolute; left:888; top:6; width:28; height:28; background:#E5484D; border-radius:6; z-index:110">✕</button>
+    <titlebar style="position:absolute; left:0; top:0; width:920; height:40; background:#FFFFFF; border-bottom:1px solid #E6EDF7; z-index:100">
+        <span style="position:absolute; left:14; top:10; width:520; height:20; color:#1F2A37; font-size:14; font-weight:700">对话窗口（进程 #3 / 共 3 个）</span>
+        <button id="btnMin"   style="position:absolute; left:852; top:6; width:28; height:28; z-index:110">─</button>
+        <button id="btnClose" style="position:absolute; left:888; top:6; width:28; height:28; z-index:110">✕</button>
     </titlebar>
 
-    <!-- 对话框主体 -->
-    <div style="position:absolute; left:16; top:50; width:888; height:146; background:rgba(28,24,44,0.96); border-radius:14; z-index:10">
-        <span style="position:absolute; left:18; top:12; width:220; height:26; color:#C4B5FD; font-size:18; z-index:11">诺艾拉</span>
-        <div style="position:absolute; left:18; top:44; width:852; height:88; color:#F5F5F7; font-size:15; z-index:11">这句台词、这块文本框，运行在与舞台/立绘完全不同的进程里。三个窗口都是独立的顶窗口：可分别拖动、最小化、关闭；立绘窗口是分层透明窗口（UpdateLayeredWindow 预乘 alpha），PNG 之外的区域直接透出舞台窗口。</div>
+    <!-- 对话框主体：白卡片 + 角色名胶囊 + 正文 -->
+    <div style="position:absolute; left:16; top:50; width:888; height:146; background:#FFFFFF; border:1px solid #E6EDF7; border-radius:16; z-index:10">
+        <span style="position:absolute; left:18; top:12; width:72; height:28; background:#EEF3FA; color:#2F79E8; border-radius:14; font-size:16; font-weight:700; padding:6; z-index:11">诺艾拉</span>
+        <div style="position:absolute; left:18; top:48; width:852; height:84; color:#1F2A37; font-size:15; line-height:24px; z-index:11">这句台词、这块文本框，运行在与舞台/立绘完全不同的进程里。三个窗口都是独立的顶窗口：可分别拖动、最小化、关闭；立绘窗口是分层透明窗口（UpdateLayeredWindow 预乘 alpha），PNG 之外的区域直接透出舞台窗口。</div>
     </div>
 
     <!-- 快捷按钮行（各自独立点击） -->
-    <button id="btnAuto" style="position:absolute; left:600; top:166; width:64; height:26; background:#23232E; border-radius:6; color:#E9E4F5; font-size:12; z-index:20">自动</button>
-    <button id="btnSkip" style="position:absolute; left:672; top:166; width:64; height:26; background:#23232E; border-radius:6; color:#E9E4F5; font-size:12; z-index:20">快进</button>
-    <button id="btnSave" style="position:absolute; left:744; top:166; width:64; height:26; background:#23232E; border-radius:6; color:#E9E4F5; font-size:12; z-index:20">存档</button>
-    <button id="btnLoad" style="position:absolute; left:816; top:166; width:64; height:26; background:#23232E; border-radius:6; color:#E9E4F5; font-size:12; z-index:20">读档</button>
+    <button id="btnAuto" style="position:absolute; left:600; top:166; width:64; height:26; z-index:20">自动</button>
+    <button id="btnSkip" style="position:absolute; left:672; top:166; width:64; height:26; z-index:20">快进</button>
+    <button id="btnSave" style="position:absolute; left:744; top:166; width:64; height:26; z-index:20">存档</button>
+    <button id="btnLoad" style="position:absolute; left:816; top:166; width:64; height:26; z-index:20">读档</button>
 </body>
 </html>

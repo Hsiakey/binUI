@@ -1,12 +1,15 @@
 <!DOCTYPE html>
-<app_window width="1000" height="700" bg="#171223" title="binUI 单窗口模式 — NOELA"
+<app_window width="1000" height="700" bg="#F4F7FC" title="binUI 单窗口模式 — NOELA"
             window_resize="aspect" ui_scale="proportional">
-<html width="1000" height="700" bg="#171223">
+<html width="1000" height="700" bg="#F4F7FC">
 <head>
     <meta charset="UTF-8">
     <title>binUI 单窗口模式</title>
     <style>
-        body { font-family: "Microsoft YaHei UI"; }
+        /* 浅色主题令牌：页面底 #F4F7FC / 卡片面 #FFFFFF / 次级面 #EEF3FA /
+           边框 #E6EDF7 · 更浅 #DCE5F2 / 主字 #1F2A37 / 次字 #66768C / 弱字 #94A3B8 /
+           主色 #3E8BFF（悬停 #5DA0FF · 按下 #2F79E8） */
+        body { font-family: "Microsoft YaHei UI"; font-size: 13px; color: #1F2A37; }
         /* 立绘轻微上下浮动 */
         @keyframes idleBob {
             0%, 100% { transform: translateY(0); }
@@ -19,20 +22,42 @@
         }
         /* 按钮：悬停/按下由内核内建 tint + scale 驱动，这里只声明过渡曲线 */
         button { transition: background-color 0.18s ease, transform 0.18s ease; }
+
+        .ibtn { background: #EEF3FA; color: #66768C; border: 1px solid #DCE5F2;
+                border-radius: 8; font-size: 13px; }
+        .ibtn:hover  { background: #E1EBFA; }
+        .ibtn:active { background: #DCE5F2; }
+
+        .ibtn-x { background: #FFE9EC; color: #FF6B6B; border: 1px solid #FFD8DE;
+                  border-radius: 8; font-size: 13px; }
+        .ibtn-x:hover  { background: #FFDCE2; }
+        .ibtn-x:active { background: #FF6B6B; color: #FFFFFF; border: 1px solid #FF6B6B; }
+
+        /* 主按钮：主色填充 + 白字 */
+        .btn-p { background: #3E8BFF; color: #FFFFFF; border: 1px solid #3E8BFF;
+                 border-radius: 10; font-size: 13px; }
+        .btn-p:hover  { background: #5DA0FF; border: 1px solid #5DA0FF; }
+        .btn-p:active { background: #2F79E8; border: 1px solid #2F79E8; }
+
+        /* 次按钮：浅蓝底 + 主色字 */
+        .btn-g { background: #EEF3FA; color: #3E8BFF; border: 1px solid #DCE5F2;
+                 border-radius: 10; font-size: 13px; }
+        .btn-g:hover  { background: #E1EBFA; border: 1px solid #C9DBF5; }
+        .btn-g:active { background: #3E8BFF; color: #FFFFFF; border: 1px solid #3E8BFF; }
     </style>
 </head>
 <body>
     <!-- 标题栏（可拖动窗口）：三键用 id 区分，不再靠文字匹配 -->
-    <titlebar style="position:absolute; left:0; top:0; width:1000; height:44; background:#100C1A; z-index:100">
-        <span style="position:absolute; left:14; top:12; width:400; height:20; color:#E9E4F5; font-size:14">单窗口模式 · NOELA_N001（1227×1227 PNG → GPU 纹理）</span>
-        <span style="position:absolute; left:672; top:15; width:220; height:16; color:#6E6E78; font-size:11">ESC 退出 · 拖标题栏移动 · 窗口等比缩放</span>
-        <button id="btnMin"   style="position:absolute; left:912; top:8; width:28; height:28; background:#23232E; border-radius:6; z-index:110">─</button>
-        <button id="btnClose" style="position:absolute; left:948; top:8; width:28; height:28; background:#E5484D; border-radius:6; z-index:110">✕</button>
+    <titlebar style="position:absolute; left:0; top:0; width:1000; height:44; background:#FFFFFF; border-bottom:1px solid #E6EDF7; z-index:100">
+        <span style="position:absolute; left:14; top:12; width:400; height:20; color:#1F2A37; font-size:14; font-weight:700">单窗口模式 · NOELA_N001（1227×1227 PNG → GPU 纹理）</span>
+        <span style="position:absolute; left:672; top:15; width:220; height:16; color:#94A3B8; font-size:11">ESC 退出 · 拖标题栏移动 · 窗口等比缩放</span>
+        <button id="btnMin" class="ibtn" style="position:absolute; left:912; top:8; width:28; height:28; z-index:110">─</button>
+        <button id="btnClose" class="ibtn-x" style="position:absolute; left:948; top:8; width:28; height:28; z-index:110">✕</button>
     </titlebar>
 
-    <!-- 舞台背光（圆角矩形，z-index 1，呼吸动画） -->
-    <div style="position:absolute; left:210; top:96; width:580; height:580; background:rgba(139,92,246,0.10); border-radius:290; z-index:1; animation:glowPulse 4s ease-in-out 0s infinite"></div>
-    <div style="position:absolute; left:300; top:156; width:400; height:400; background:rgba(167,139,250,0.10); border-radius:200; z-index:1; animation:glowPulse 4s ease-in-out 0s infinite"></div>
+    <!-- 舞台背光（圆角矩形，z-index 1，呼吸动画）：浅色底上改用淡蓝呼吸 -->
+    <div style="position:absolute; left:210; top:96; width:580; height:580; background:rgba(62,139,255,0.10); border-radius:290; z-index:1; animation:glowPulse 4s ease-in-out 0s infinite"></div>
+    <div style="position:absolute; left:300; top:156; width:400; height:400; background:rgba(56,189,248,0.12); border-radius:200; z-index:1; animation:glowPulse 4s ease-in-out 0s infinite"></div>
 
     <!-- 立绘（z-index 2，高于背光） -->
     <img id="hero" src="NOELA_N001_1227x1227.png"
@@ -40,28 +65,28 @@
          style="position:absolute; left:235; top:110; width:530; height:530; z-index:2"></img>
 
     <!-- 前景遮挡（半透明色块，z-index 5：盖在立绘上、对话框之下，演示 alpha 合成） -->
-    <div id="scrim" style="position:absolute; left:40; top:96; width:640; height:404; background:rgba(12,10,20,0.34); border-radius:12; z-index:5"></div>
+    <div id="scrim" style="position:absolute; left:40; top:96; width:640; height:404; background:rgba(255,255,255,0.32); border:1px solid rgba(214,226,242,0.90); border-radius:12; z-index:5"></div>
 
     <!-- HUD 徽标（z-index 8：位于前景遮挡之上） -->
-    <div style="position:absolute; left:40; top:96; width:180; height:64; background:rgba(18,14,26,0.86); border-radius:12; z-index:8">
-        <span style="position:absolute; left:14; top:10; width:160; height:20; color:#C4B5FD; font-size:13">立绘 · 透明通道</span>
-        <span style="position:absolute; left:14; top:34; width:160; height:20; color:#8A8A95; font-size:11">z-index 分层采样</span>
+    <div style="position:absolute; left:40; top:96; width:180; height:64; background:rgba(255,255,255,0.92); border:1px solid #E6EDF7; border-radius:12; z-index:8">
+        <span style="position:absolute; left:14; top:10; width:160; height:20; color:#3E8BFF; font-size:13; font-weight:700">立绘 · 透明通道</span>
+        <span style="position:absolute; left:14; top:34; width:160; height:20; color:#94A3B8; font-size:11">z-index 分层采样</span>
     </div>
 
     <!-- 对话框（z-index 10，盖住立绘） -->
-    <div id="dialog" style="position:absolute; left:40; top:520; width:920; height:150; background:rgba(18,14,26,0.93); border-radius:16; z-index:10">
+    <div id="dialog" style="position:absolute; left:40; top:520; width:920; height:150; background:rgba(255,255,255,0.95); border:1px solid #E6EDF7; border-radius:16; z-index:10">
         <!-- 头像：第二张图片图层，叠在对话框之上（z-index 12） -->
-        <div style="position:absolute; left:14; top:14; width:126; height:126; background:#2A2440; border-radius:14; z-index:11"></div>
+        <div style="position:absolute; left:14; top:14; width:126; height:126; background:#EEF3FA; border:1px solid #DCE5F2; border-radius:14; z-index:11"></div>
         <img id="avatar" src="NOELA_N001_1227x1227.png" style="position:absolute; left:22; top:22; width:110; height:110; z-index:12"></img>
-        <span style="position:absolute; left:152; top:16; width:300; height:28; color:#C4B5FD; font-size:18; z-index:13">诺艾拉</span>
-        <div style="position:absolute; left:152; top:52; width:748; height:80; color:#F5F5F7; font-size:16; z-index:13">同屏合成多个图层：立绘(z2) < 半透明前景遮挡(z5) < HUD(z8) < 对话框(z10) < 头像框(z11) < 头像(z12)。图片经 Gdiplus 解码为 BGRA、上传为 GPU 纹理后按节点矩形绘制，z-index 决定覆盖顺序。窗口改为等比缩放，拖动边框时整棵 UI 保持 1000×700 比例不变形。</div>
+        <span style="position:absolute; left:152; top:16; width:300; height:28; color:#1F2A37; font-size:18; font-weight:700; z-index:13">诺艾拉</span>
+        <div style="position:absolute; left:152; top:52; width:748; height:80; color:#38445A; font-size:16; z-index:13">同屏合成多个图层：立绘(z2) < 半透明前景遮挡(z5) < HUD(z8) < 对话框(z10) < 头像框(z11) < 头像(z12)。图片经 Gdiplus 解码为 BGRA、上传为 GPU 纹理后按节点矩形绘制，z-index 决定覆盖顺序。窗口改为等比缩放，拖动边框时整棵 UI 保持 1000×700 比例不变形。</div>
     </div>
 
     <!-- 操作按钮（z-index 20，最上层） -->
-    <button id="btnToggle" style="position:absolute; left:40;  top:480; width:130; height:32; background:#8B5CF6; border-radius:8; color:#FFFFFF; font-size:13; z-index:20">隐藏立绘</button>
-    <button id="btnScrim"  style="position:absolute; left:180; top:480; width:130; height:32; background:#23232E; border-radius:8; color:#E9E4F5; font-size:13; z-index:20">前景遮挡</button>
-    <button id="btnShake"  style="position:absolute; left:320; top:480; width:130; height:32; background:#23232E; border-radius:8; color:#E9E4F5; font-size:13; z-index:20">重新入场</button>
-    <button id="btnBg"     style="position:absolute; left:460; top:480; width:130; height:32; background:#23232E; border-radius:8; color:#E9E4F5; font-size:13; z-index:20">换背景色</button>
-    <button id="btnReload" style="position:absolute; left:600; top:480; width:130; height:32; background:#23232E; border-radius:8; color:#E9E4F5; font-size:13; z-index:20">重载图片</button>
+    <button id="btnToggle" class="btn-p" style="position:absolute; left:40;  top:480; width:130; height:32; z-index:20">隐藏立绘</button>
+    <button id="btnScrim"  class="btn-g" style="position:absolute; left:180; top:480; width:130; height:32; z-index:20">前景遮挡</button>
+    <button id="btnShake"  class="btn-g" style="position:absolute; left:320; top:480; width:130; height:32; z-index:20">重新入场</button>
+    <button id="btnBg"     class="btn-g" style="position:absolute; left:460; top:480; width:130; height:32; z-index:20">换背景色</button>
+    <button id="btnReload" class="btn-g" style="position:absolute; left:600; top:480; width:130; height:32; z-index:20">重载图片</button>
 </body>
 </html>

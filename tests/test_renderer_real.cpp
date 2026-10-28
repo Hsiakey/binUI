@@ -35,7 +35,7 @@ int main() {
         if (!ufl.empty()) {
             TEST("vision: layout loads", r.loadLayout(ufl.data(), ufl.size()));
             const auto& n = r.getNodes();
-            TEST("vision: 21 nodes", n.size() == 21);
+            TEST("vision: 72 nodes", n.size() == 72);
             TEST("vision: root 900x680", n[0].width == 900 && n[0].height == 680);
 
             // 标题栏三个窗口按钮 ─ □ ✕

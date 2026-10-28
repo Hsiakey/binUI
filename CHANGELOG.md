@@ -6,6 +6,37 @@
 
 ## [Unreleased]
 
+### 变更 — 示例 UI 全面换成清新浅色主题
+
+9 个示例（animshow / cssshow / components / svgdemo / videodemo / singlewindow /
+multiwindow / galgamechat / vision_monitor）与引擎内置默认布局，从"深色赛博"统一改成
+**浅色清爽风**：页面底 `#F4F7FC`、白卡片 + 1px `#E6EDF7` 边框、主字 `#1F2A37` /
+次字 `#66768C` / 弱字 `#94A3B8`、主色 `#3E8BFF`、薄荷 `#2FBF9A`。层次只靠 1px 边框与
+色差（`box-shadow` 引擎不支持），令牌约定写在每个示例 `<style>` 开头的注释里。
+
+- 按钮拆成"主色填充 + 白字 / 浅蓝底 + 主色字"两套，各自带悬停/按下；把 `background`
+  从行内 `style` 搬进 class —— 行内样式会压掉 `:hover`，这是浅色改造最容易踩的坑。
+- 几何布局基本不动（只有 svgdemo 收掉多余的窗口高度、animshow 的"方向·次数"卡片
+  第 4 行原本就溢出卡片、videodemo 的装饰圆原本悬在卡片外，一并修正）。
+- 示例里硬编码的颜色同步换新（animshow 的色块调色板、svgdemo 的频谱条、singlewindow
+  的换背景色循环）。
+- `docs/img/{default-layout,cssshow,components}.png` 全部重渲染。
+
+### 修复
+
+- **GDI 后端不画 `BINUI_LINE`**：`<line>`/`<polyline>`/`<polygon>` 在 GDI 画布上一根都
+  没有（GL/D3D 正常），三端不一致。现在按端点包围盒单独裁剪后画线。
+- **容器文字恒为白字**：`BINUI_LIST` 没声明文字色时一律白 —— 浅底容器里（尤其运行期
+  `addNode` 出来的列表行）文字看不见。改为按节点自身底色亮度选深浅（`PaintContrastText`）。
+- **输入框强调色写死紫色**：文字/光标/底部强调线都是 `#BB86FC`，浅色主题没法配色。
+  改为优先用作者声明的文字色，强调线压到 35%。
+- **内置默认布局的文字全是错乱的**：`GenerateDefaultBinUI()` 的字符串偏移是手写魔数
+  （0/5/18/29/66/95/106/115/130/135），文案一改就整体错位，渲染出来的标题、按钮、
+  底部导航全部串到别的节点上；而且容器的 `textOffset = 0` 现在指向 "9:41"（应为空串）。
+  改成按字符串长度累加算出偏移，并在表首放空串。默认布局同时换成浅色。
+- `tools/offscreen_render` 新增 `--default`：直接渲染内置默认布局，这张 docs 图终于
+  可以一条命令重现（以前只能手工截图，所以一直和代码对不上）。
+
 ### 新增 — 元素语义与默认样式：UA 样式表、行内标签、表单属性（【格式 v14】）
 
 > 上一轮把"格式"和"CSS 表达力"补完了；这一轮补的是**元素这一侧**。体检时发现的共同

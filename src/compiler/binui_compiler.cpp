@@ -4907,21 +4907,27 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 // 默认布局
 // ============================================================
 std::vector<uint8_t> GenerateDefaultBinUI() {
-    const char strings[] =
-        "9:41\0"
-        "Material Demo\0"
-        "Card Title\0"
-        "This is a Material Design card\0"
-        "with a dark theme and rounded\0"
-        "corners.\0"
-        "CLICK ME\0"
-        "Enter text...\0"
-        "+\0"
-        "HOME\0"
-        "FAV\0"
-        "SETTINGS\0";
+    // 字符串表：多段文字按顺序拼接，偏移由长度累加得到。
+    // 以前这里把偏移写成了魔数（0/5/18/29/66/95/106/115/130/135），文案一改
+    // 就整体错位 —— 默认布局渲染出来的文字会串到别的节点上。改成算出来。
+    static const char* kTexts[] = {
+        // 第 0 项必须是空串：容器的 textOffset 恒为 0，靠它表示"没有文字"
+        "", "9:41", "binUI Demo", "Card Title",
+        "Default layout from the core renderer", "no UI file, no compiler pass:",
+        "light surface + rounded corners.",
+        "CLICK ME", "Enter text...", "Same palette as the examples", "+",
+    };
+    const uint32_t kTextCount = (uint32_t)(sizeof(kTexts) / sizeof(kTexts[0]));
+    std::string blob;
+    uint32_t textOff[sizeof(kTexts) / sizeof(kTexts[0])] = {};
+    for (uint32_t i = 0; i < kTextCount; i++) {
+        textOff[i] = (uint32_t)blob.size();
+        blob.append(kTexts[i]);
+        blob.push_back('\0');
+    }
+    const char* strings = blob.data();
     const uint32_t nodeCount = 17;
-    const uint32_t strSize = sizeof(strings);
+    const uint32_t strSize = (uint32_t)blob.size();
 
     std::vector<uint8_t> buf(sizeof(BinUIHeader) + nodeCount * sizeof(BinUINode) + strSize);
     uint8_t* ptr = buf.data();
@@ -4939,119 +4945,119 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     // 0: Root container - dark background
     memset(&n, 0, sizeof(n));
     n.id = 0; n.parentId = 0xFFFF; n.type = BINUI_ROOT; n.flags = 1;
-    n.width = 480; n.height = 800; n.color = 0xFF121212;
+    n.width = 480; n.height = 800; n.color = 0xFFF4F7FC;
     add(n);
 
     // 1: Status bar background
     memset(&n, 0, sizeof(n));
     n.id = 1; n.parentId = 0; n.type = BINUI_LIST; n.flags = 1;
     n.x = 0; n.y = 0; n.width = 480; n.height = 36;
-    n.color = 0xFF000000;
+    n.color = 0xFFFFFFFF;
     add(n);
 
     // 2: Status bar time
     memset(&n, 0, sizeof(n));
     n.id = 2; n.parentId = 0; n.type = BINUI_LABEL; n.flags = 1;
     n.x = 420; n.y = 6; n.width = 50; n.height = 24;
-    n.color = 0xFFFFFFFF; n.textOffset = 0; n.fontSize = 13;
+    n.color = 0xFF1F2A37; n.textOffset = textOff[1]; n.fontSize = 13;
     add(n);
 
     // 3: App bar background
     memset(&n, 0, sizeof(n));
     n.id = 3; n.parentId = 0; n.type = BINUI_LIST; n.flags = 1;
     n.x = 0; n.y = 36; n.width = 480; n.height = 56;
-    n.color = 0xFF1976D2;
+    n.color = 0xFF3E8BFF;
     add(n);
 
     // 4: App bar title
     memset(&n, 0, sizeof(n));
     n.id = 4; n.parentId = 0; n.type = BINUI_LABEL; n.flags = 1;
     n.x = 16; n.y = 46; n.width = 300; n.height = 36;
-    n.color = 0xFFFFFFFF; n.textOffset = 5; n.fontSize = 20;
+    n.color = 0xFFFFFFFF; n.textOffset = textOff[2]; n.fontSize = 20;
     add(n);
 
     // 5: Card 1 surface
     memset(&n, 0, sizeof(n));
     n.id = 5; n.parentId = 0; n.type = BINUI_LIST; n.flags = 1;
     n.x = 16; n.y = 112; n.width = 448; n.height = 140;
-    n.color = 0xFF1E1E1E; n.radius = 12;
+    n.color = 0xFFFFFFFF; n.radius = 12;
     add(n);
 
     // 6: Card 1 title
     memset(&n, 0, sizeof(n));
     n.id = 6; n.parentId = 0; n.type = BINUI_LABEL; n.flags = 1;
     n.x = 32; n.y = 124; n.width = 200; n.height = 28;
-    n.color = 0xFFFFFFFF; n.textOffset = 18; n.fontSize = 18;
+    n.color = 0xFF1F2A37; n.textOffset = textOff[3]; n.fontSize = 18;
     add(n);
 
     // 7: Card 1 body line 1
     memset(&n, 0, sizeof(n));
     n.id = 7; n.parentId = 0; n.type = BINUI_LABEL; n.flags = 1;
     n.x = 32; n.y = 156; n.width = 416; n.height = 20;
-    n.color = 0xFF9E9E9E; n.textOffset = 29; n.fontSize = 13;
+    n.color = 0xFF66768C; n.textOffset = textOff[4]; n.fontSize = 13;
     add(n);
 
     // 8: Card 1 body line 2
     memset(&n, 0, sizeof(n));
     n.id = 8; n.parentId = 0; n.type = BINUI_LABEL; n.flags = 1;
     n.x = 32; n.y = 178; n.width = 416; n.height = 20;
-    n.color = 0xFF9E9E9E; n.textOffset = 66; n.fontSize = 13;
+    n.color = 0xFF66768C; n.textOffset = textOff[5]; n.fontSize = 13;
     add(n);
 
     // 9: Card 1 body line 3
     memset(&n, 0, sizeof(n));
     n.id = 9; n.parentId = 0; n.type = BINUI_LABEL; n.flags = 1;
     n.x = 32; n.y = 200; n.width = 416; n.height = 20;
-    n.color = 0xFF9E9E9E; n.textOffset = 95; n.fontSize = 13;
+    n.color = 0xFF66768C; n.textOffset = textOff[6]; n.fontSize = 13;
     add(n);
 
     // 10: Material button (purple accent)
     memset(&n, 0, sizeof(n));
     n.id = 10; n.parentId = 0; n.type = BINUI_BUTTON; n.flags = 5;
     n.x = 32; n.y = 276; n.width = 416; n.height = 48;
-    n.color = 0xFFBB86FC; n.textOffset = 106; n.fontSize = 14; n.radius = 8;
+    n.color = 0xFF3E8BFF; n.textOffset = textOff[7]; n.fontSize = 14; n.radius = 8;
     add(n);
 
     // 11: Outlined input field (underline style)
     memset(&n, 0, sizeof(n));
     n.id = 11; n.parentId = 0; n.type = BINUI_INPUT; n.flags = 5;
     n.x = 32; n.y = 348; n.width = 416; n.height = 48;
-    n.color = 0xFF1E1E1E; n.textOffset = 115; n.fontSize = 14;
+    n.color = 0xFFF7FAFF; n.textOffset = textOff[8]; n.fontSize = 14;
     add(n);
 
     // 12: Divider line
     memset(&n, 0, sizeof(n));
     n.id = 12; n.parentId = 0; n.type = BINUI_LIST; n.flags = 1;
     n.x = 32; n.y = 420; n.width = 416; n.height = 1;
-    n.color = 0xFF2E2E2E;
+    n.color = 0xFFDCE5F2;
     add(n);
 
     // 13: Card 2 surface
     memset(&n, 0, sizeof(n));
     n.id = 13; n.parentId = 0; n.type = BINUI_LIST; n.flags = 1;
     n.x = 16; n.y = 440; n.width = 448; n.height = 80;
-    n.color = 0xFF1E1E1E; n.radius = 12;
+    n.color = 0xFFFFFFFF; n.radius = 12;
     add(n);
 
     // 14: Card 2 text
     memset(&n, 0, sizeof(n));
     n.id = 14; n.parentId = 0; n.type = BINUI_LABEL; n.flags = 1;
     n.x = 32; n.y = 460; n.width = 416; n.height = 24;
-    n.color = 0xFFFFFFFF; n.textOffset = 130; n.fontSize = 15;
+    n.color = 0xFF1F2A37; n.textOffset = textOff[9]; n.fontSize = 15;
     add(n);
 
     // 15: Bottom nav background
     memset(&n, 0, sizeof(n));
     n.id = 15; n.parentId = 0; n.type = BINUI_LIST; n.flags = 1;
     n.x = 0; n.y = 752; n.width = 480; n.height = 48;
-    n.color = 0xFF1E1E1E;
+    n.color = 0xFFFFFFFF;
     add(n);
 
     // 16: Floating action button (purple circle)
     memset(&n, 0, sizeof(n));
     n.id = 16; n.parentId = 0; n.type = BINUI_IMAGE; n.flags = 5;
     n.x = 400; n.y = 690; n.width = 56; n.height = 56;
-    n.color = 0xFFBB86FC; n.textOffset = 135; n.fontSize = 14; n.radius = 28;
+    n.color = 0xFF2FBF9A; n.textOffset = textOff[10]; n.fontSize = 14; n.radius = 28;
     add(n);
 
     memcpy(ptr, strings, strSize);
@@ -5059,7 +5065,7 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     WinDesc wdesc;
     wdesc.present = true;
     wdesc.width = 480; wdesc.height = 800;
-    wdesc.bgColor = 0xFF121212;
+    wdesc.bgColor = 0xFFF4F7FC;
     wdesc.title = "binUI Demo";
     AppendWindowDesc(buf, wdesc);
     // 手写布局没有规格/动画/视频/状态段，但 v12 的两段恒定写出，保证解析链一致

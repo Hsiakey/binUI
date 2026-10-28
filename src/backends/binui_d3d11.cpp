@@ -1902,8 +1902,12 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                 case BINUI_INPUT: {
                     // 输入框背景（style 里的 background / 渐变）
                     fillNodeBg(dc, static_cast<float>(node.radius));
+                    // 输入框的强调色：作者给了 textColor 就用它，否则回退内置紫
+                    const uint32_t inAccent = (pt && (pt->flags & PAINT_TEXT_COLOR))
+                                                  ? ScaleAlpha(pt->textColor, opacity) : accentCol;
+                    // 底部强调线是"控件可供性"，不是正文：压到 35% 免得在浅底上成一道黑杠
                     gfx.fillRect(static_cast<float>(x), static_cast<float>(y + nh - 2),
-                                 static_cast<float>(nw), 2, accentCol);
+                                 static_cast<float>(nw), 2, ScaleAlpha(inAccent, 0.35f));
 
                     bool editing = renderer.isFocused(node.id);
                     std::string text = node.text;
@@ -1921,7 +1925,7 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                         float tx = static_cast<float>(x + pad + 4);
                         // 占位符按 45% 色画（不是真实内容，视觉上要和已输入文本区分开）
                         const uint32_t inCol = (placeholder && !editing)
-                                                   ? ScaleAlpha(accentCol, 0.55f) : accentCol;
+                                                   ? ScaleAlpha(inAccent, 0.55f) : inAccent;
                         gfx.drawText(tx, base, static_cast<float>(fs), 400, text, inCol,
                                      false, false, italic);
 
@@ -1933,12 +1937,12 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                                 float wb = gfx.textWidth(static_cast<float>(fs), 400, text.substr(0, b));
                                 gfx.fillRect(tx + wa, static_cast<float>(y + 2),
                                              wb - wa, static_cast<float>(nh - 4),
-                                             ScaleAlpha(0x66BB86FC, opacity));
+                                             (inAccent & 0x00FFFFFFu) | 0x66000000u);
                             }
                             if (caretBlinkOn()) {
                                 float wc = gfx.textWidth(static_cast<float>(fs), 400, text.substr(0, caret));
                                 gfx.fillRect(tx + wc, static_cast<float>(y + 2),
-                                             2, static_cast<float>(nh - 4), accentCol);
+                                             2, static_cast<float>(nh - 4), inAccent);
                             }
                         }
                     }
@@ -1950,8 +1954,10 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                         const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
                                         : (node.flags & BINUI_TEXT_RIGHT) ? 2 : 0;
                         // 文字色/字重同样走扩展绘制段（原来是写死的白色 + 400）
+                        // 文字色：显式优先；否则按自身底色亮度选深浅（以前一律白字）
                         const uint32_t lcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
-                                            ? ScaleAlpha(pt->textColor, opacity) : textCol;
+                                            ? ScaleAlpha(pt->textColor, opacity)
+                                            : ScaleAlpha(binui::PaintContrastText(dc), opacity);
                         gfx.drawTextWrapped(static_cast<float>(x + pad + 12),
                                             static_cast<float>(y + pad + 8),
                                             static_cast<float>(nw - 2 * pad - 24),

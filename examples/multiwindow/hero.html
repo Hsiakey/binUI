@@ -5,6 +5,8 @@
     <meta charset="UTF-8">
     <title>binUI 独立窗口模式 · 立绘</title>
     <style>
+        /* 分层透明窗口：整窗底色保持 rgba(0,0,0,0)（PNG 之外必须透出舞台），
+           所以这里只调整标签文字色 —— 浅色舞台上用深灰字，原来那层淡紫在浅底上糊成一片 */
         body { font-family: "Microsoft YaHei UI"; }
         @keyframes idleBob {
             0%, 100% { transform: translateY(0); }
@@ -20,7 +22,7 @@
 
     <!-- 覆盖整窗的透明标题栏：在立绘上按住即可拖动整个窗口（PNG 之外区域透出舞台） -->
     <titlebar style="position:absolute; left:0; top:0; width:560; height:600; background:rgba(0,0,0,0); z-index:10">
-        <span style="position:absolute; left:12; top:8; width:420; height:18; color:rgba(196,181,253,0.75); font-size:11">立绘窗口 · 进程 B（透明 · 拖动移动）</span>
+        <span style="position:absolute; left:12; top:8; width:420; height:18; color:rgba(31,42,55,0.62); font-size:11">立绘窗口 · 进程 B（透明 · 拖动移动）</span>
     </titlebar>
 </body>
 </html>

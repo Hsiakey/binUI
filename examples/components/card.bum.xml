@@ -6,9 +6,9 @@
     body     正文
     action   按钮文字（透传给嵌套的 button 组件）
 -->
-<div style="position:absolute; background:#1A1A22; border-radius:12; padding:14">
-    <span style="height:18; color:#F5F5F7; font-size:13">{{heading=卡片组件}}</span>
-    <span style="height:18; color:#8A8A95; font-size:11">{{body=编译成 .bum 后参数已固化}}</span>
+<div style="position:absolute; background:#F7FAFF; border:1px solid #DFE9F7; border-radius:14; padding:14">
+    <span style="height:18; color:#1F2A37; font-size:13; font-weight:700">{{heading=卡片组件}}</span>
+    <span style="height:18; color:#66768C; font-size:11">{{body=编译成 .bum 后参数已固化}}</span>
     <span style="height:8"></span>
     <use src="button.bum.xml" w="120" label="{{action=确定}}"/>
 </div>

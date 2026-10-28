@@ -31,21 +31,30 @@ static int GetEncoderClsid(const WCHAR* format, CLSID* clsid) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::printf("usage: offscreen_render <ui file> <out.png> [--scrollTo y] [--setText id=text]\n");
+        std::printf("usage: offscreen_render <ui file>|--default <out.png> [--scrollTo y] [--setText id=text]\n");
         return 1;
     }
     GdiplusStartupInput in;
     ULONG_PTR token = 0;
     GdiplusStartup(&token, &in, nullptr);
 
-    auto res = CompileBinUIFileEx(argv[1]);
-    if (res.layout.empty()) { std::printf("compile failed\n"); return 1; }
+    // --default：渲染引擎内置的默认布局（GenerateDefaultBinUI，无 UI 文件时的兜底界面）。
+    // 以前这张图只能手工截，现在 CI/README 都能一条命令重出。
+    const bool useDefault = (std::string(argv[1]) == "--default");
+    std::vector<uint8_t> layout;
+    if (useDefault) {
+        layout = binui::GenerateDefaultBinUI();
+    } else {
+        auto res = CompileBinUIFileEx(argv[1]);
+        layout = res.layout;
+    }
+    if (layout.empty()) { std::printf("compile failed\n"); return 1; }
 
     BinUIRenderer r;
-    if (!r.loadLayout(res.layout.data(), res.layout.size())) { std::printf("load failed\n"); return 1; }
+    if (!r.loadLayout(layout.data(), layout.size())) { std::printf("load failed\n"); return 1; }
 
     // 外挂组件（<use ... external>）：与运行时一样现场挂载，预览才完整
-    const std::string uiDir = binui::ex::DirOf(argv[1]);
+    const std::string uiDir = useDefault ? std::string() : binui::ex::DirOf(argv[1]);
     if (!r.componentRefs().empty()) {
         const binui::ex::MountReport rep = binui::ex::MountAll(r, uiDir, r.layoutBytes());
         std::printf("mounted %d external component(s), %d failed\n", rep.mounted, rep.failed);

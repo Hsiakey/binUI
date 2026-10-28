@@ -4,7 +4,7 @@
   参数：
     label  按钮文字（可选，默认「按钮」）
     w      宽度（可选，默认 132）
-    bg     底色（可选，默认 #23232E）
+    bg     底色（可选，默认 #3E8BFF）
 
   参数都带默认值：内联时由 <use> 属性覆盖；单独编成 button.bum 时取默认值。
 
@@ -13,14 +13,14 @@
 -->
 <style>
     .cmp-btn {
-        color: #F5F5F7;
+        color: #FFFFFF;
         border-radius: 10;
         font-size: 13px;
         transition: background-color 0.18s ease, transform 0.18s ease;
     }
-    .cmp-btn:hover  { background: #3B2F63; transform: scale(1.04); }
-    .cmp-btn:active { background: #7C6FF0; transform: scale(0.97); }
+    .cmp-btn:hover  { background: #5DA0FF; transform: scale(1.04); }
+    .cmp-btn:active { background: #2F79E8; transform: scale(0.97); }
 </style>
 <div class="cmp-wrap" style="height:40">
-    <button class="cmp-btn" style="position:absolute; left:0; top:0; width:{{w=132}}; height:40; background:{{bg=#23232E}}">{{label=按钮}}</button>
+    <button class="cmp-btn" style="position:absolute; left:0; top:0; width:{{w=132}}; height:40; background:{{bg=#3E8BFF}}">{{label=按钮}}</button>
 </div>

@@ -1,80 +1,124 @@
 <!DOCTYPE html>
-<app_window width="920" height="600" bg="#0E0E13" title="binUI Showcase">
-<html width="920" height="600" bg="#0E0E13">
+<app_window width="920" height="600" bg="#F4F7FC" title="binUI Showcase">
+<html width="920" height="600" bg="#F4F7FC">
 <head>
     <meta charset="UTF-8">
     <title>binUI Showcase</title>
     <style>
-        body { font-family: Segoe UI; }
+        /* 浅色主题令牌：页面底 #F4F7FC / 卡片面 #FFFFFF / 次级面 #EEF3FA /
+           边框 #E6EDF7 · 更浅 #DCE5F2 / 主字 #1F2A37 / 次字 #66768C / 弱字 #94A3B8 /
+           主色 #3E8BFF（悬停 #5DA0FF · 按下 #2F79E8）/ 薄荷 #2FBF9A */
+        body { font-family: Segoe UI; font-size: 13px; color: #1F2A37; }
         @keyframes fadeUp {
             from { opacity: 0; transform: translateY(18px); }
             to   { opacity: 1; transform: translateY(0); }
         }
+
+        .card   { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16; }
+        .cap    { font-size: 11px; font-weight: 700; color: #94A3B8; }
+        .accent { font-size: 11px; font-weight: 700; color: #3E8BFF; }
+        .nav    { font-size: 12px; color: #66768C; }
+        .nav-on { font-size: 12px; font-weight: 700; color: #3E8BFF; }
+        .stat-k { font-size: 12px; color: #66768C; }
+        .stat-v { font-size: 12px; font-weight: 700; color: #1F2A37; }
+        .note   { font-size: 11px; color: #94A3B8; }
+        .axis   { font-size: 10px; color: #94A3B8; }
+        .rule   { background: #E6EDF7; }
+
+        /* 主按钮：主色填充 + 白字 */
+        .btn-p { background: #3E8BFF; color: #FFFFFF; border: 1px solid #3E8BFF;
+                 border-radius: 17; font-size: 13px;
+                 transition: background-color 0.18s ease, transform 0.18s ease; }
+        .btn-p:hover  { background: #5DA0FF; border: 1px solid #5DA0FF; transform: scale(1.04); }
+        .btn-p:active { background: #2F79E8; border: 1px solid #2F79E8; transform: scale(0.97); }
+
+        /* 次按钮：浅蓝底 + 主色字 */
+        .btn-g { background: #EEF3FA; color: #3E8BFF; border: 1px solid #DCE5F2;
+                 border-radius: 17; font-size: 13px;
+                 transition: background-color 0.18s ease; }
+        .btn-g:hover  { background: #E1EBFA; }
+        .btn-g:active { background: #3E8BFF; color: #FFFFFF; border: 1px solid #3E8BFF; }
+
+        /* 标题栏图标按钮 */
+        .ibtn { background: #EEF3FA; color: #66768C; border: 1px solid #DCE5F2;
+                border-radius: 8; font-size: 13px; transition: background-color 0.15s ease; }
+        .ibtn:hover  { background: #E1EBFA; }
+        .ibtn:active { background: #DCE5F2; }
+
+        .ibtn-x { background: #FFE9EC; color: #FF6B6B; border: 1px solid #FFD8DE;
+                  border-radius: 8; font-size: 13px; transition: background-color 0.15s ease; }
+        .ibtn-x:hover  { background: #FFDCE2; }
+        .ibtn-x:active { background: #FF6B6B; color: #FFFFFF; border: 1px solid #FF6B6B; }
+
+        .search { background: #F7FAFF; color: #66768C; border: 1px solid #E1E9F5;
+                  border-radius: 10; padding: 7; font-size: 12px;
+                  transition: background-color 0.15s ease; }
+        .search:focus { background: #FFFFFF; }
     </style>
 </head>
 <body>
     <!-- 标题栏 -->
-    <titlebar style="position:absolute; left:0; top:0; width:920; height:44; background:#16161D">
-        <span style="position:absolute; left:16; top:9; width:26; height:26; color:#8B5CF6; font-size:19">◆</span>
-        <span style="position:absolute; left:46; top:14; width:150; height:20; color:#F5F5F7; font-size:13">binUI Showcase</span>
-        <span style="position:absolute; left:230; top:14; width:70; height:20; color:#A78BFA; font-size:12">Overview</span>
-        <span style="position:absolute; left:300; top:14; width:90; height:20; color:#8A8A95; font-size:12">Components</span>
-        <span style="position:absolute; left:390; top:14; width:60; height:20; color:#8A8A95; font-size:12">Media</span>
-        <input type="text" value="Search..." style="position:absolute; left:600; top:8; width:180; height:28; background:#0E0E13; color:#8A8A95; font-size:12">
-        <button style="position:absolute; left:850; top:8; width:28; height:28; background:#23232E; border-radius:6">─</button>
-        <button style="position:absolute; left:884; top:8; width:28; height:28; background:#E5484D; border-radius:6">✕</button>
+    <titlebar style="position:absolute; left:0; top:0; width:920; height:44; background:#FFFFFF; border-bottom:1px solid #E6EDF7">
+        <span style="position:absolute; left:16; top:9; width:26; height:26; color:#3E8BFF; font-size:19">◆</span>
+        <span style="position:absolute; left:46; top:14; width:150; height:20; color:#1F2A37; font-size:14; font-weight:700">binUI Showcase</span>
+        <span class="nav-on" style="position:absolute; left:230; top:14; width:70; height:20">Overview</span>
+        <span class="nav" style="position:absolute; left:300; top:14; width:90; height:20">Components</span>
+        <span class="nav" style="position:absolute; left:390; top:14; width:60; height:20">Media</span>
+        <input class="search" type="text" value="Search..." style="position:absolute; left:600; top:8; width:180; height:28"/>
+        <button class="ibtn" style="position:absolute; left:850; top:8; width:28; height:28">─</button>
+        <button class="ibtn-x" style="position:absolute; left:884; top:8; width:28; height:28">✕</button>
     </titlebar>
 
     <!-- Hero 卡片 -->
-    <div animation="fadeUp 0.5s ease 0.05s 1 normal both" style="position:absolute; left:24; top:60; width:568; height:140; background:#16161D; border-radius:18">
-        <span style="position:absolute; left:400; top:-30; width:160; height:160; background:rgba(139,92,246,0.10); border-radius:80"></span>
-        <span style="position:absolute; left:480; top:40; width:100; height:100; background:rgba(167,139,250,0.08); border-radius:50"></span>
-        <span style="position:absolute; left:24; top:22; width:420; height:28; color:#F5F5F7; font-size:20">Build UI in plain HTML</span>
-        <span style="position:absolute; left:24; top:54; width:500; height:18; color:#9A9AA5; font-size:12">HTML → binary layout → GPU renderer · zero dependencies · v9 format</span>
-        <button style="position:absolute; left:24; top:88; width:120; height:34; background:#8B5CF6; border-radius:17; color:#FFFFFF; font-size:13">▶ Run demo</button>
-        <button style="position:absolute; left:154; top:88; width:80; height:34; background:#23232E; border-radius:17; color:#C9C9D4; font-size:13">Docs</button>
+    <div class="card" animation="fadeUp 0.5s ease 0.05s 1 normal both" style="position:absolute; left:24; top:60; width:568; height:140">
+        <span style="position:absolute; left:462; top:20; width:72; height:72; background:#E8F1FF; border-radius:36"></span>
+        <span style="position:absolute; left:24; top:22; width:420; height:28; color:#1F2A37; font-size:20; font-weight:700">Build UI in plain HTML</span>
+        <span style="position:absolute; left:24; top:54; width:500; height:18; color:#66768C; font-size:12">HTML → binary layout → GPU renderer · zero dependencies · v9 format</span>
+        <button class="btn-p" style="position:absolute; left:24; top:88; width:120; height:34">▶ Run demo</button>
+        <button class="btn-g" style="position:absolute; left:154; top:88; width:80; height:34">Docs</button>
     </div>
 
     <!-- 视频卡片（原生 <video> + 浏览器式控制条） -->
-    <div animation="fadeUp 0.5s ease 0.15s 1 normal both" style="position:absolute; left:24; top:216; width:568; height:360; background:#16161D; border-radius:18">
-        <span style="position:absolute; left:24; top:16; width:200; height:16; color:#A78BFA; font-size:11">NATIVE VIDEO · v9 FORMAT</span>
-        <video id="vid" src="media/sample.mp4" controls loop muted style="position:absolute; left:24; top:42; width:520; height:270; background:#000000"></video>
-        <span id="state" style="position:absolute; left:24; top:326; width:520; height:16; color:#6E6E78; font-size:11">engine: ...</span>
+    <div class="card" animation="fadeUp 0.5s ease 0.15s 1 normal both" style="position:absolute; left:24; top:216; width:568; height:360">
+        <span class="accent" style="position:absolute; left:24; top:16; width:200; height:16">NATIVE VIDEO · v9 FORMAT</span>
+        <video id="vid" src="media/sample.mp4" controls loop muted style="position:absolute; left:24; top:42; width:520; height:270; background:#EEF3FA; border:1px solid #DCE5F2; border-radius:10"></video>
+        <div class="rule" style="position:absolute; left:24; top:320; width:520; height:1"></div>
+        <span id="state" class="note" style="position:absolute; left:24; top:328; width:520; height:16">engine: ...</span>
     </div>
 
     <!-- 统计卡片 -->
-    <div animation="fadeUp 0.5s ease 0.25s 1 normal both" style="position:absolute; left:616; top:60; width:280; height:170; background:#16161D; border-radius:18">
-        <span style="position:absolute; left:20; top:16; width:160; height:16; color:#A78BFA; font-size:11">THIS BUILD</span>
-        <span style="position:absolute; left:20; top:48;  width:150; height:18; color:#8A8A95; font-size:12">Binary format</span>
-        <span style="position:absolute; left:190; top:48; width:70; height:18; color:#F5F5F7; font-size:12">v9</span>
-        <span style="position:absolute; left:20; top:82;  width:150; height:18; color:#8A8A95; font-size:12">Video events</span>
-        <span style="position:absolute; left:190; top:82; width:70; height:18; color:#F5F5F7; font-size:12">4 types</span>
-        <span style="position:absolute; left:20; top:116; width:150; height:18; color:#8A8A95; font-size:12">Backend deps</span>
-        <span style="position:absolute; left:190; top:116; width:70; height:18; color:#F5F5F7; font-size:12">0</span>
-        <div style="position:absolute; left:20; top:74;  width:240; height:1; background:#23232E"></div>
-        <div style="position:absolute; left:20; top:108; width:240; height:1; background:#23232E"></div>
-        <div style="position:absolute; left:20; top:142; width:240; height:1; background:#23232E"></div>
+    <div class="card" animation="fadeUp 0.5s ease 0.25s 1 normal both" style="position:absolute; left:616; top:60; width:280; height:170">
+        <span class="cap" style="position:absolute; left:20; top:16; width:160; height:16">THIS BUILD</span>
+        <span class="stat-k" style="position:absolute; left:20; top:48;  width:150; height:18">Binary format</span>
+        <span class="stat-v" style="position:absolute; left:190; top:48; width:70; height:18">v9</span>
+        <span class="stat-k" style="position:absolute; left:20; top:82;  width:150; height:18">Video events</span>
+        <span class="stat-v" style="position:absolute; left:190; top:82; width:70; height:18">4 types</span>
+        <span class="stat-k" style="position:absolute; left:20; top:116; width:150; height:18">Backend deps</span>
+        <span class="stat-v" style="position:absolute; left:190; top:116; width:70; height:18">0</span>
+        <div class="rule" style="position:absolute; left:20; top:74;  width:240; height:1"></div>
+        <div class="rule" style="position:absolute; left:20; top:108; width:240; height:1"></div>
+        <div class="rule" style="position:absolute; left:20; top:142; width:240; height:1"></div>
     </div>
 
     <!-- 图表卡片：入场逐条升起动画 -->
-    <div animation="fadeUp 0.5s ease 0.35s 1 normal both" style="position:absolute; left:616; top:246; width:280; height:330; background:#16161D; border-radius:18">
-        <span style="position:absolute; left:20; top:16; width:180; height:20; color:#F5F5F7; font-size:13">Weekly activity</span>
-        <div animation="fadeUp 0.45s ease 0.45s 1 normal both" style="position:absolute; left:24;  top:140; width:22; height:110; background:#A78BFA; border-radius:4"></div>
-        <div animation="fadeUp 0.45s ease 0.51s 1 normal both" style="position:absolute; left:60;  top:90;  width:22; height:160; background:#8B5CF6; border-radius:4"></div>
-        <div animation="fadeUp 0.45s ease 0.57s 1 normal both" style="position:absolute; left:96;  top:170; width:22; height:80;  background:#7C3AED; border-radius:4"></div>
-        <div animation="fadeUp 0.45s ease 0.63s 1 normal both" style="position:absolute; left:132; top:70;  width:22; height:180; background:#A78BFA; border-radius:4"></div>
-        <div animation="fadeUp 0.45s ease 0.69s 1 normal both" style="position:absolute; left:168; top:110; width:22; height:140; background:#8B5CF6; border-radius:4"></div>
-        <div animation="fadeUp 0.45s ease 0.75s 1 normal both" style="position:absolute; left:204; top:40;  width:22; height:210; background:#C4B5FD; border-radius:4"></div>
-        <div animation="fadeUp 0.45s ease 0.81s 1 normal both" style="position:absolute; left:240; top:90;  width:22; height:160; background:#8B5CF6; border-radius:4"></div>
-        <div style="position:absolute; left:20; top:252; width:244; height:1; background:#23232E"></div>
-        <span style="position:absolute; left:27;  top:262; width:16; height:14; color:#6E6E78; font-size:10">M</span>
-        <span style="position:absolute; left:63;  top:262; width:16; height:14; color:#6E6E78; font-size:10">T</span>
-        <span style="position:absolute; left:99;  top:262; width:16; height:14; color:#6E6E78; font-size:10">W</span>
-        <span style="position:absolute; left:135; top:262; width:16; height:14; color:#6E6E78; font-size:10">T</span>
-        <span style="position:absolute; left:171; top:262; width:16; height:14; color:#6E6E78; font-size:10">F</span>
-        <span style="position:absolute; left:207; top:262; width:16; height:14; color:#C4B5FD; font-size:10">S</span>
-        <span style="position:absolute; left:243; top:262; width:16; height:14; color:#6E6E78; font-size:10">S</span>
-        <span style="position:absolute; left:20; top:294; width:120; height:14; color:#6E6E78; font-size:10">▲ 23% vs last week</span>
+    <div class="card" animation="fadeUp 0.5s ease 0.35s 1 normal both" style="position:absolute; left:616; top:246; width:280; height:330">
+        <span style="position:absolute; left:20; top:16; width:180; height:20; color:#1F2A37; font-size:13; font-weight:700">Weekly activity</span>
+        <div animation="fadeUp 0.45s ease 0.45s 1 normal both" style="position:absolute; left:24;  top:140; width:22; height:110; background:#A8CCFF; border-radius:5"></div>
+        <div animation="fadeUp 0.45s ease 0.51s 1 normal both" style="position:absolute; left:60;  top:90;  width:22; height:160; background:#7FB6FF; border-radius:5"></div>
+        <div animation="fadeUp 0.45s ease 0.57s 1 normal both" style="position:absolute; left:96;  top:170; width:22; height:80;  background:#5DA0FF; border-radius:5"></div>
+        <div animation="fadeUp 0.45s ease 0.63s 1 normal both" style="position:absolute; left:132; top:70;  width:22; height:180; background:#93C2FF; border-radius:5"></div>
+        <div animation="fadeUp 0.45s ease 0.69s 1 normal both" style="position:absolute; left:168; top:110; width:22; height:140; background:#5DA0FF; border-radius:5"></div>
+        <div animation="fadeUp 0.45s ease 0.75s 1 normal both" style="position:absolute; left:204; top:40;  width:22; height:210; background:#3E8BFF; border-radius:5"></div>
+        <div animation="fadeUp 0.45s ease 0.81s 1 normal both" style="position:absolute; left:240; top:90;  width:22; height:160; background:#38BDF8; border-radius:5"></div>
+        <div class="rule" style="position:absolute; left:20; top:252; width:244; height:1"></div>
+        <span class="axis" style="position:absolute; left:27;  top:262; width:16; height:14">M</span>
+        <span class="axis" style="position:absolute; left:63;  top:262; width:16; height:14">T</span>
+        <span class="axis" style="position:absolute; left:99;  top:262; width:16; height:14">W</span>
+        <span class="axis" style="position:absolute; left:135; top:262; width:16; height:14">T</span>
+        <span class="axis" style="position:absolute; left:171; top:262; width:16; height:14">F</span>
+        <span class="axis" style="position:absolute; left:207; top:262; width:16; height:14; color:#3E8BFF; font-weight:700">S</span>
+        <span class="axis" style="position:absolute; left:243; top:262; width:16; height:14">S</span>
+        <span class="note" style="position:absolute; left:20; top:294; width:160; height:14; color:#2FBF9A">▲ 23% vs last week</span>
     </div>
 </body>
 </html>

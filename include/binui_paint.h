@@ -232,6 +232,18 @@ inline float PaintLineHeight(const BinUIPaintNode* p, float fontSize) {
     return fontSize * 1.35f;
 }
 
+// 容器（BINUI_LIST）文字色的兜底：按节点自身底色的亮度选深/浅。
+// 作者显式给了 PAINT_TEXT_COLOR 时不用它。以前一律白字 —— 浅底容器里
+// （尤其是运行期 addNode 出来的列表行）文字直接看不见。
+// 底色近乎透明时无从判断，沿用白字（旧行为）。
+inline uint32_t PaintContrastText(uint32_t bg) {
+    if (((bg >> 24) & 0xFFu) < 0x80u) return 0xFFFFFFFFu;
+    const float lum = (0.2126f * static_cast<float>((bg >> 16) & 0xFFu) +
+                       0.7152f * static_cast<float>((bg >> 8) & 0xFFu) +
+                       0.0722f * static_cast<float>(bg & 0xFFu)) / 255.0f;
+    return lum > 0.5f ? 0xFF1A1A1Au : 0xFFFFFFFFu;
+}
+
 // 文字装饰线条（下划线/删除线/上划线）：返回要画的条数，最多 3
 inline int BuildTextRuleBands(const BinUIPaintNode* p, float x, float textTop, float w,
                               float fontSize, PaintBand* out, int cap = 3) {

@@ -1,14 +1,16 @@
 <!DOCTYPE html>
-<app_window width="720" height="500" bg="#0E0E13" title="组件化：.bui / .bum / .bum.xml">
-<html width="720" height="500" bg="#0E0E13">
+<app_window width="720" height="500" bg="#F4F7FC" title="组件化：.bui / .bum / .bum.xml">
+<html width="720" height="500" bg="#F4F7FC">
 <head>
     <meta charset="UTF-8">
     <title>组件化：二进制内联 / 源码内联 / 运行期外挂</title>
     <style>
-        body { font-size: 13px; }
-        .panel { background: #16161D; border-radius: 14; }
-        .label { color: #F5F5F7; font-size: 13px; }
-        .note  { color: #8A8A95; font-size: 11px; }
+        /* 浅色主题令牌：底 #F4F7FC / 面 #FFFFFF / 线 #E6EDF7 / 主字 #1F2A37 /
+           次字 #66768C / 弱字 #94A3B8 / 主色 #3E8BFF / 薄荷 #2FBF9A */
+        body { font-size: 13px; color: #1F2A37; }
+        .panel { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16; }
+        .label { color: #1F2A37; font-size: 13px; font-weight: 700; }
+        .note  { color: #66768C; font-size: 11px; }
     </style>
 </head>
 <body>
@@ -24,7 +26,7 @@
         <use src="button.bum.xml" x="170" y="36" w="148" label="第二个实例"/>
         <use src="button.bum.xml" x="14" y="86"  w="148" label="第三份"/>
         <use src="button.bum.xml" x="170" y="86" w="148" label="第四份"/>
-        <use src="button.bum.xml" x="14" y="136" w="200" label="宿主改底色（bg 参数）" bg="#2A2350"/>
+        <use src="button.bum.xml" x="14" y="136" w="200" label="宿主改底色（bg 参数）" bg="#2FBF9A"/>
         <span class="note" style="position:absolute; left:14; top:186; width:304; height:44">
             文本/颜色走 label / bg 参数；自带 :hover 过渡。
         </span>

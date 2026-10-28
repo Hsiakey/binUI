@@ -1,31 +1,111 @@
-<binui width="900" height="680" bg="#0A0A0A">
-    <!-- 左面板背景 -->
-    <card x="0" y="30" w="180" h="390" color="#001100" radius="0"/>
+<binui width="900" height="680" bg="#F4F7FC">
+    <!-- 浅色控制台主题：
+         页面底 #F4F7FC（工作区与日志区之间的缝）/ 卡片面 #FFFFFF / 次级面 #EEF3FA
+         分隔线 #E6EDF7 · #DCE5F2 / 主字 #1F2A37 / 次字 #66768C / 弱字 #94A3B8
+         主色 #3E8BFF · 薄荷 #2FBF9A · 琥珀 #F2B544 · 天蓝 #38BDF8 · 危险红 #FF6B6B
+         圆角：画面面板 12 / 识别面板 14 / 按钮 9~10 / 胶囊 9 -->
+    <!-- 说明：XML 侧只认 color / bg / size / radius，
+         文字色写在 <label> 的 color 上，<button> 的 color 是底色（字固定白色加粗） -->
+    <!-- 左面板背景（工作区白面） -->
+    <card x="0" y="30" w="180" h="390" color="#FFFFFF" radius="0"/>
     <!-- 中面板背景 -->
-    <card x="180" y="30" w="450" h="390" color="#001100" radius="0"/>
+    <card x="180" y="30" w="450" h="390" color="#FFFFFF" radius="0"/>
     <!-- 右面板背景 -->
-    <card x="630" y="30" w="270" h="390" color="#000800" radius="0"/>
+    <card x="630" y="30" w="270" h="390" color="#FFFFFF" radius="0"/>
     <!-- 自绘标题栏（可拖动窗口；─ 最小化，□ 最大化，✕ 关闭） -->
-    <titlebar x="0" y="0" w="900" h="30" color="#003300">
-        <label x="8" y="4" w="300" h="22" color="#00FF00" size="14">● 视觉监视器</label>
-        <button x="840" y="0" w="20" h="30" color="#003300" size="14">─</button>
-        <button x="860" y="0" w="20" h="30" color="#003300" size="14">□</button>
-        <button x="880" y="0" w="20" h="30" color="#003300" size="14">✕</button>
+    <titlebar x="0" y="0" w="900" h="30" color="#FFFFFF">
+        <label x="26" y="5" w="300" h="20" color="#1F2A37" size="14">视觉监视器</label>
+        <button x="840" y="6" w="18" h="18" color="#94A3B8" radius="9" size="12">─</button>
+        <button x="860" y="6" w="18" h="18" color="#94A3B8" radius="9" size="12">□</button>
+        <button x="880" y="6" w="18" h="18" color="#FF6B6B" radius="9" size="12">✕</button>
     </titlebar>
     <!-- 左侧内容 -->
-    <label x="6" y="34" w="80" h="20" color="#00FF00" size="13">原画</label>
-    <card x="10" y="56" w="160" h="90" color="#000000" radius="0"/>
-    <label x="6" y="156" w="80" h="20" color="#00FF00" size="13">目标</label>
-    <card x="10" y="176" w="160" h="90" color="#000000" radius="0"/>
+    <label x="6" y="36" w="80" h="18" color="#66768C" size="12">原画</label>
+    <card x="10" y="56" w="160" h="90" color="#DCE5F2" radius="12"/>
+    <label x="6" y="158" w="80" h="18" color="#66768C" size="12">目标</label>
+    <card x="10" y="176" w="160" h="90" color="#DCE5F2" radius="12"/>
     <!-- 识别面板 -->
-    <label x="186" y="34" w="80" h="20" color="#00FF00" size="13">识别</label>
-    <card x="190" y="60" w="430" h="340" color="#000000" radius="0"/>
+    <label x="186" y="36" w="80" h="18" color="#66768C" size="12">识别</label>
+    <card x="190" y="60" w="430" h="340" color="#DCE5F2" radius="14"/>
     <!-- 信息面板 -->
-    <label x="634" y="34" w="80" h="20" color="#00FF00" size="13">信息</label>
-    <label x="634" y="56" w="262" h="340" color="#B0B0B0" size="12">等待连接...</label>
-    <!-- 日志面板 -->
-    <card x="0" y="420" w="900" h="260" color="#000800" radius="0"/>
-    <label x="6" y="424" w="80" h="20" color="#00FF00" size="13">日志</label>
-    <label x="8" y="448" w="880" h="18" color="#00FF00" size="11">[系统] 视觉监视器已启动</label>
-    <label x="8" y="466" w="880" h="18" color="#00FF00" size="11">[系统] 等待 WebSocket 连接...</label>
+    <label x="634" y="36" w="80" h="18" color="#66768C" size="12">信息</label>
+    <label x="634" y="68" w="240" h="140" color="#66768C" size="12">等待连接...</label>
+    <!-- 日志面板：整条次级面 #EEF3FA，与上方白色工作区之间留页面底色缝 -->
+    <card x="0" y="428" w="900" h="252" color="#EEF3FA" radius="0"/>
+    <label x="22" y="438" w="80" h="18" color="#66768C" size="12">日志</label>
+    <label x="22" y="462" w="856" h="18" color="#66768C" size="11">[系统] 视觉监视器已启动</label>
+    <label x="22" y="480" w="856" h="18" color="#66768C" size="11">[系统] 等待 WebSocket 连接...</label>
+
+    <!-- ===== 浅色主题装饰层（绘制在最上层） ===== -->
+    <!-- 标题栏底部 1px 分隔线 + 品牌色圆点 + 副文案 -->
+    <card x="0" y="29" w="900" h="1" color="#E6EDF7" radius="0"/>
+    <card x="10" y="11" w="8" h="8" color="#3E8BFF" radius="4"/>
+    <label x="112" y="8" w="260" h="16" color="#94A3B8" size="11">实时识别 · WebSocket 在线</label>
+
+    <!-- 原画占位：1px 边框（外层）+ 淡灰蓝画面（内层）+ 状态点 -->
+    <card x="11" y="57" w="158" h="88" color="#EEF3FA" radius="11"/>
+    <card x="149" y="64" w="7" h="7" color="#2FBF9A" radius="3"/>
+    <label x="34" y="95" w="130" h="16" color="#66768C" size="11">1024 × 768 · 30fps</label>
+    <!-- 目标占位 -->
+    <card x="11" y="177" w="158" h="88" color="#EEF3FA" radius="11"/>
+    <card x="149" y="184" w="7" h="7" color="#F2B544" radius="3"/>
+    <label x="44" y="215" w="120" h="16" color="#66768C" size="11">模板 64 × 64</label>
+
+    <!-- 左栏底部：采集参数小字块 -->
+    <card x="10" y="286" w="160" h="1" color="#E6EDF7" radius="0"/>
+    <label x="10" y="296" w="160" h="100" color="#66768C" size="12">采集参数
+分辨率  1024 × 768
+帧率    30 fps
+延迟    8 ms
+丢帧    0</label>
+
+    <!-- 识别画面：淡灰蓝底 + 检测框（主 / 次）+ 尺寸说明 -->
+    <card x="191" y="61" w="428" h="338" color="#EEF3FA" radius="13"/>
+    <label x="206" y="72" w="200" h="16" color="#94A3B8" size="11">CAM-01 · 1024 × 768</label>
+    <card x="558" y="70" w="46" h="18" color="#FFE9EC" radius="9"/>
+    <card x="566" y="76" w="6" h="6" color="#FF6B6B" radius="3"/>
+    <label x="577" y="72" w="36" h="14" color="#FF6B6B" size="11">LIVE</label>
+    <card x="352" y="198" w="64" h="1" color="#3E8BFF" radius="0"/>
+    <card x="352" y="262" w="64" h="1" color="#3E8BFF" radius="0"/>
+    <card x="352" y="198" w="1" h="65" color="#3E8BFF" radius="0"/>
+    <card x="415" y="198" w="1" h="65" color="#3E8BFF" radius="0"/>
+    <label x="352" y="178" w="120" h="16" color="#3E8BFF" size="11">target 0.982</label>
+    <card x="494" y="286" w="52" h="1" color="#2FBF9A" radius="0"/>
+    <card x="494" y="326" w="52" h="1" color="#2FBF9A" radius="0"/>
+    <card x="494" y="286" w="1" h="41" color="#2FBF9A" radius="0"/>
+    <card x="545" y="286" w="1" h="41" color="#2FBF9A" radius="0"/>
+    <label x="494" y="266" w="90" h="16" color="#2FBF9A" size="11">ocr 0.914</label>
+    <card x="236" y="300" w="64" h="1" color="#38BDF8" radius="0"/>
+    <card x="236" y="350" w="64" h="1" color="#38BDF8" radius="0"/>
+    <card x="236" y="300" w="1" h="51" color="#38BDF8" radius="0"/>
+    <card x="299" y="300" w="1" h="51" color="#38BDF8" radius="0"/>
+    <label x="236" y="280" w="90" h="16" color="#38BDF8" size="11">face 0.872</label>
+    <label x="214" y="374" w="240" h="16" color="#94A3B8" size="11">识别画面 · 430 × 340</label>
+
+    <!-- 信息侧栏：竖分隔线 + 表头下分隔线 + 在线状态胶囊 -->
+    <card x="630" y="30" w="1" h="390" color="#E6EDF7" radius="0"/>
+    <card x="634" y="58" w="240" h="1" color="#E6EDF7" radius="0"/>
+    <card x="826" y="34" w="58" h="18" color="#E8F1FF" radius="9"/>
+    <card x="834" y="40" w="6" h="6" color="#2FBF9A" radius="3"/>
+    <label x="845" y="36" w="36" h="14" color="#2FBF9A" size="11">在线</label>
+
+    <!-- 信息侧栏下半：会话信息 + 主按钮 -->
+    <card x="634" y="196" w="240" h="1" color="#E6EDF7" radius="0"/>
+    <label x="634" y="204" w="120" h="16" color="#94A3B8" size="11">会话信息</label>
+    <label x="634" y="224" w="240" h="64" color="#66768C" size="11">来源  ws://127.0.0.1:9000
+模型  detect-v4.1
+设备  cam-01</label>
+    <button x="634" y="336" w="240" h="34" color="#3E8BFF" radius="10" size="12">断开连接</button>
+    <label x="634" y="378" w="240" h="16" color="#94A3B8" size="11">断开后自动重连</label>
+
+    <!-- 日志区：副标题 + 历史行（弱字） -->
+    <card x="0" y="428" w="900" h="1" color="#DCE5F2" radius="0"/>
+    <label x="64" y="440" w="240" h="16" color="#94A3B8" size="11">实时滚动 · 保留最近 200 条</label>
+    <card x="22" y="458" w="856" h="1" color="#DCE5F2" radius="0"/>
+    <label x="22" y="498" w="856" h="18" color="#94A3B8" size="11">[12:00:00] 视觉服务已就绪 · 模型 v4.1</label>
+    <label x="22" y="516" w="856" h="18" color="#94A3B8" size="11">[12:00:01] WebSocket 连接成功</label>
+    <label x="22" y="534" w="856" h="18" color="#94A3B8" size="11">[12:00:02] 帧数据接收中...</label>
+    <label x="22" y="552" w="856" h="18" color="#94A3B8" size="11">[12:00:03] 识别完成: score=0.9821</label>
+    <label x="22" y="570" w="856" h="18" color="#94A3B8" size="11">[12:00:04] 目标匹配: (320,240) 64x64</label>
+    <label x="22" y="588" w="856" h="18" color="#94A3B8" size="11">[12:00:06] 模板匹配耗时 8ms</label>
 </binui>

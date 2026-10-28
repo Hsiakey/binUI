@@ -43,6 +43,10 @@ g++ -std=c++17 -O2 -Iinclude -Isrc \
     -o build-mingw/bin/offscreen_render.exe
 
 # 用法
+# 内置默认布局（GenerateDefaultBinUI，无 UI 文件时的兜底界面）
+build-mingw/bin/offscreen_render --default docs/img/default-layout.png
+
+# 普通用法
 build-mingw/bin/offscreen_render examples/cssshow/main.html docs/img/cssshow.png
 build-mingw/bin/offscreen_render examples/singlewindow/main.html /tmp/a.png --scrollTo 120
 build-mingw/bin/offscreen_render examples/vision_monitor/main.binui.xml /tmp/b.png --setText log1="hello"

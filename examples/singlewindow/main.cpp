@@ -101,7 +101,7 @@ int main(int argc, char* argv[]) {
 
     bool heroVisible = true;
     bool scrimVisible = true;
-    const uint32_t bgCycle[] = { 0xFF171223, 0xFF0E1A17, 0xFF1A1210, 0xFF101A26 };
+    const uint32_t bgCycle[] = { 0xFFF4F7FC, 0xFFF1F7F4, 0xFFF7F3FA, 0xFFF1F6FC };
     int bgIdx = 0;
 
     app.setDrawFn([&](BinUIGLGdi& gfx, const void* clip) { drawNodesGLGdi(gfx, renderer, clip); });

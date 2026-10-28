@@ -91,7 +91,7 @@ int main(int argc, char* argv[]) {
         float bw = (w - (kN + 1) * gap) / kN;
         for (int k = 0; k < kN; k++) {
             float bh = std::max(4.0f, bars[k] * (h - 16));
-            uint32_t c = k % 3 == 0 ? 0xFF8B5CF6 : (k % 3 == 1 ? 0xFF06B6D4 : 0xFF10B981);
+            uint32_t c = k % 3 == 0 ? 0xFF3E8BFF : (k % 3 == 1 ? 0xFF38BDF8 : 0xFF2FBF9A);
             gfx.fillRounded(x + gap + k * (bw + gap), y + h - bh, bw, bh, bw / 2, c);
         }
     };

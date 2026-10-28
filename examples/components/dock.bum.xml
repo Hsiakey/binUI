@@ -4,16 +4,16 @@
   编译成 dock.bum 后，宿主用下面这行把它"外挂"上去，运行期由
   binui::ex::MountAll() 把 dock.bum 挂到占位节点下：
 
-    <use src="dock.bum" external x="0" y="412" w="720"/>
+    <use src="dock.bum" external x="0" y="452" w="720"/>
 
   好处：换皮肤/插件面板只替换 dock.bum，不用重编主 .bui；
   有 dock.bum.xml 源码时也能现场编译（开发期改源码 + 热重载直接生效）。
 -->
-<div style="height:48; background:#16161D">
-    <span style="position:absolute; left:16; top:15; width:460; height:18; color:#F5F5F7; font-size:12">
+<div style="height:48; background:#FFFFFF; border-top:1px solid #E6EDF7">
+    <span style="position:absolute; left:16; top:16; width:460; height:18; color:#66768C; font-size:12">
         状态栏组件：dock.bum 运行期挂载（external）
     </span>
-    <button style="position:absolute; left:492; top:10; width:86; height:28; background:#23232E; border-radius:8; color:#F5F5F7; font-size:12">设置</button>
-    <button style="position:absolute; left:586; top:10; width:86; height:28; background:#23232E; border-radius:8; color:#F5F5F7; font-size:12">日志</button>
-    <button style="position:absolute; left:680; top:10; width:24; height:28; background:#2A2350; border-radius:8; color:#F5F5F7; font-size:12">i</button>
+    <button style="position:absolute; left:492; top:10; width:86; height:28; background:#EEF3FA; border:1px solid #DFE9F7; border-radius:8; color:#3E8BFF; font-size:12">设置</button>
+    <button style="position:absolute; left:586; top:10; width:86; height:28; background:#EEF3FA; border:1px solid #DFE9F7; border-radius:8; color:#3E8BFF; font-size:12">日志</button>
+    <button style="position:absolute; left:680; top:10; width:24; height:28; background:#3E8BFF; border-radius:8; color:#FFFFFF; font-size:12">i</button>
 </div>
