@@ -99,7 +99,7 @@ int main(int argc, char* argv[]) {
         invalidateNode((uint16_t)id);
         const auto* n = findNode((uint16_t)id);
         if (!n) return;
-        if (n->text == "\xE2\x94\x80") { app.minimize();    return; }   // ─
+        if (n->text == "\xE2\x88\x92") { app.minimize();    return; }   // ─
         if (n->text == "\xE2\x96\xA1") { app.maximize();    return; }   // □
         if (n->text == "\xE2\x9C\x95") { app.requestExit(); return; }   // ✕
         // 勾选方块：外壳自己维护 :checked 状态（核心库没有勾选控件）

@@ -143,6 +143,33 @@ int main() {
         }
     }
 
+    // 7. UI 符号字形：标题栏三颗按钮 + 组件里的图标
+    //    GL/D3D 的字形图集按"非 ASCII -> 中文字体、emoji 范围 -> emoji 字体"分类，
+    //    分类错一颗字形，按钮就变成一块空白（GDI 那边有系统字体回退，看不出来）。
+    //    这里守住底线：每个符号至少要有一个候选面画得出笔画。
+    {
+        struct Sym { const char* name; uint32_t cp; };
+        const Sym syms[] = {
+            { "最小化 − U+2212", 0x2212 }, { "最大化 □ U+25A1", 0x25A1 },
+            { "关闭 ✕ U+2715",  0x2715 }, { "图标 ◆ U+25C6",   0x25C6 },
+        };
+        const char* faces[] = { "Microsoft YaHei", "Segoe UI Emoji", "Segoe UI" };
+        for (const auto& sy : syms) {
+            bool any = false;
+            const char* hit = "-";
+            int hitInk = 0;
+            for (const char* f : faces) {
+                const InkStat s = Measure(fe, f, 13.0f, sy.cp);
+                if (!s.ok || s.nonzero <= 0) continue;
+                if (s.ink > hitInk) { hitInk = static_cast<int>(s.ink); hit = f; }
+                any = true;
+            }
+            char msg[192];
+            std::snprintf(msg, sizeof(msg), "%s @13px：有字形（%s，ink=%d）", sy.name, hit, hitInk);
+            CHECK(any, msg);
+        }
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "PASSED", g_fail,
                 g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;

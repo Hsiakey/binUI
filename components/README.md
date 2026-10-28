@@ -27,7 +27,7 @@ build-mingw/bin/offscreen_render components/preview.html docs/img/std-components
 
 | 组件 | 根标签 | 主要参数 | 说明 |
 |---|---|---|---|
-| `titlebar.bum.xml` | `<titlebar>` | `title` `titlew` `sub` `icon` `iconw` `h` `pad` `padr` `bs` `gap` `idmin` `idmax` `idclose` | 窗口标题栏：**左**图标/标题/副标题，**右**最小化─ 最大化□ 关闭✕。flex 排版，多宽都不用算按钮坐标；根是 `<titlebar>`，所以拖动窗口照常生效 |
+| `titlebar.bum.xml` | `<titlebar>` | `title` `titlew`(默认 `content`) `sub` `icon` `iconw` `h` `pad` `padr` `bs` `bsym` `gap` `idmin` `idmax` `idclose` | 窗口标题栏：**左**图标/标题/副标题，**右**最小化─ 最大化□ 关闭✕。flex 排版，多宽都不用算按钮坐标；根是 `<titlebar>`，所以拖动窗口照常生效 |
 | `button.bum.xml` | `<button>` | `label` `kind`(primary/secondary/ghost/danger) `w` `h` `fs` `r` | 四套外观，自带 `:hover`/`:active` |
 | `field.bum.xml` | `<input>` | `ph` 占位符 `val` 初值 `w` `h` `fs` `pad` | 单行输入框，聚焦转白底 |
 | `badge.bum.xml` | `<span>` | `text` `kind`(blue/mint/amber/red/gray) `w` | 状态胶囊 |
@@ -47,7 +47,11 @@ build-mingw/bin/offscreen_render components/preview.html docs/img/std-components
 2. **组件的根标签就是节点的语义**。根写 `<button>` 才是可点击按钮、根写 `<input>` 才有
    占位符/编辑、根写 `<titlebar>` 才能拖动窗口 —— 编译器会把根标签原样搬过来
    （以前一律当成 `div`，组件里的按钮其实不可点）。
-3. **宿主子元素会落进组件根容器**。`panel` 就是靠这条工作的：
+3. **符号字形要挑系统字体覆盖得到的**。三颗窗口按钮用的是 `−`(U+2212) `□`(U+25A1) `✕`(U+2715)：
+   原来最小化用的是制表符 `─`(U+2500)，它只在中文字里有、Segoe UI 没有，GL/D3D 图集按
+   "非 ASCII→中文字体"分类时笔画极淡，看起来像一个空按钮。`tests/test_font.cpp` 里有一条
+   断言守着这件事（四个 UI 符号至少有一个候选字体画得出笔画）。
+4. **宿主子元素会落进组件根容器**。`panel` 就是靠这条工作的：
    ```html
    <use src="../../components/panel.bum.xml" x="16" y="56" w="320" title="统计">
        <span style="height:20">一行内容</span>

@@ -225,7 +225,12 @@ static LenPct ParseLenPct(const std::string& raw, float def,
     size_t digits = 0;
     while (p < s.size() && (std::isdigit((unsigned char)s[p]) || s[p] == '.')) { p++; digits++; }
     if (digits == 0) {
-        Warn(std::string(what) + "：无法解析长度值 \"" + s + "\"，已回退默认值");
+        // width:content 是"按文字宽度排"的 flex 关键字：flex 布局那一趟会算出来，
+        // 这里的通用解析直接当"没声明宽度"处理，别刷警告。
+        std::string low;
+        for (char c : s) low.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+        if (low != "content" && low != "auto")
+            Warn(std::string(what) + "：无法解析长度值 \"" + s + "\"，已回退默认值");
         return r;
     }
 
@@ -3715,6 +3720,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             }
             std::string sw = pick(e.attrs, st, "w", "width", "");
             if (sw.empty()) sw = pick(e.attrs, st, "width", "width", "");
+            // width:content = 按文字宽度排（flex 里没有"宽度自适应"，光靠固定像素
+            // 要么留一条大缝、要么把字裁掉）。用编译器自己的字宽估算，与换行同一套度量。
+            const bool wContent = lowerStr(sw) == "content";
+            if (wContent) sw.clear();
             auto sp = ParseLenPct(sw, 0, curCtx, "flex 子项 width");
             auto fit = st.find("flex");
             float fw = fit != st.end() ? parseLen(fit->second, 0, "flex 权重") : 0;
@@ -3729,14 +3738,20 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             else h[i] = !sh.empty() ? hp.value : defaultHeight(e.tag, tagToType(e.tag));
 
             if (row) {
-                if (sp.pct) fixedSum += w[i];                    // 百分比宽 = 固定比例（占位）
+                if (wContent) {                                   // 文字宽 = 固定宽
+                    // 估算偏小会把字裁掉（偏大只是多几像素间隙），所以往上留 8% + 4px
+                    w[i] = estTextWidth(e.text, curCtx.fontSize) * 1.08f + 4.0f;
+                    fixedSum += w[i];
+                }
+                else if (sp.pct) fixedSum += w[i];                // 百分比宽 = 固定比例（占位）
                 else if (fw > 0) { weights[k] = fw; weightSum += fw; }
                 else if (!sw.empty() && sp.value > 0) fixedSum += w[i];
                 else { weights[k] = 1.0f; weightSum += 1.0f; }  // 未声明宽 = 弹性
             } else {
                 if (fw > 0) { weights[k] = fw; weightSum += fw; }
                 else fixedSum += h[i];
-                if (sw.empty()) w[i] = cw;                      // 交叉轴拉伸（CSS stretch 默认）
+                if (wContent) w[i] = estTextWidth(e.text, curCtx.fontSize) * 1.08f + 4.0f;
+                else if (sw.empty()) w[i] = cw;                  // 交叉轴拉伸（CSS stretch 默认）
             }
 
             // 子项 min/max 尺寸约束

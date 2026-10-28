@@ -7,8 +7,8 @@
 
   参数                     默认          说明
     title      标题          标题          主标题 14px / 700 / #1F2A37
-    titlew     标题宽度      200           flex 里没有"宽度自适应"，标题占固定宽，
-                                           副标题从 titlew 之后开始（按标题字数给值）
+    titlew     标题宽度      content       content = 按标题文字宽度排（编译器估算，和换行同一套度量）；
+                                           也可以给具体像素值
     sub        副标题        （空）        11px / #94A3B8，左对齐紧跟标题
     icon       左侧图标      （空）        一个字形，例如 ◆ ♻ ✏；建议配 iconw
     iconw      图标宽度      1             不给就只是 1px 占位（不传图标时不用管）
@@ -16,6 +16,7 @@
     pad        左内边距      16
     padr       右内边距      12
     bs         按钮边长      28
+    bsym       按钮符号字号  13            三颗按钮的字形：− □ ✕
     gap        元素间距      6
     idmin      最小化按钮 id win-min
     idmax      最大化按钮 id win-max
@@ -46,10 +47,10 @@
 <titlebar class="bui-tb" style="height:{{h=44}}; display:flex; align-items:center; gap:{{gap=6}}">
     <div style="width:{{pad=16}}; height:1; background:transparent"></div>
     <span class="bui-tb-icon" style="width:{{iconw=1}}; height:22; animation:bui-tb-icon-pulse 2s ease-in-out 0s infinite">{{icon=}}</span>
-    <span class="bui-tb-title" style="width:{{titlew=200}}; height:20">{{title=标题}}</span>
+    <span class="bui-tb-title" style="width:{{titlew=content}}; height:20">{{title=标题}}</span>
     <span class="bui-tb-sub" style="flex:1; height:16">{{sub=}}</span>
-    <button id="{{idmin=win-min}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}">─</button>
-    <button id="{{idmax=win-max}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}">□</button>
-    <button id="{{idclose=win-close}}" class="bui-tb-close" style="width:{{bs=28}}; height:{{bs=28}}">✕</button>
+    <button id="{{idmin=win-min}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; font-size:{{bsym=13}}">−</button>
+    <button id="{{idmax=win-max}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; font-size:{{bsym=13}}">□</button>
+    <button id="{{idclose=win-close}}" class="bui-tb-close" style="width:{{bs=28}}; height:{{bs=28}}; font-size:{{bsym=13}}">✕</button>
     <div style="width:{{padr=12}}; height:1; background:transparent"></div>
 </titlebar>
