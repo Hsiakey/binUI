@@ -1,0 +1,43 @@
+<!--
+  preview.html —— 标准组件库总览页（也是冒烟测试：改动组件后先跑这一页）
+  用 binUI 的离屏渲染出图：
+      build-mingw/bin/offscreen_render components/preview.html docs/img/std-components.png
+-->
+<app_window width="780" height="600" bg="#F4F7FC" title="标准组件库"><html width="780" height="600" bg="#F4F7FC"><body>
+    <use src="titlebar.bum.xml" x="0" y="0" w="780" icon="◆" iconw="24" title="标准组件库 components/" hint="11 个通用组件 · 纯 HTML + CSS"/>
+
+    <!-- 按钮四态 -->
+    <use src="button.bum.xml" x="20"  y="64"  w="120" h="38" label="主按钮"/>
+    <use src="button.bum.xml" x="152" y="64"  w="120" h="38" kind="secondary" label="次按钮"/>
+    <use src="button.bum.xml" x="284" y="64"  w="120" h="38" kind="ghost" label="幽灵"/>
+    <use src="button.bum.xml" x="416" y="64"  w="120" h="38" kind="danger" label="危险"/>
+
+    <!-- 输入框 + 胶囊 + 开关 -->
+    <use src="field.bum.xml"  x="20"  y="118" w="240" h="38" ph="输入关键字…"/>
+    <use src="badge.bum.xml"  x="276" y="126" w="60" text="在线" kind="mint"/>
+    <use src="badge.bum.xml"  x="344" y="126" w="60" text="告警" kind="amber"/>
+    <use src="badge.bum.xml"  x="412" y="126" w="60" text="离线" kind="gray"/>
+    <use src="toggle.bum.xml" x="488" y="118" w="104" h="38" label="开关"/>
+
+    <!-- 面板（宿主子元素成为内容） -->
+    <use src="panel.bum.xml" x="20" y="176" w="352" title="panel：宿主子元素就是内容">
+        <span style="height:22; color:#66768C; font-size:12">面板根不写 height 时会自动撑高</span>
+        <span style="height:22; color:#66768C; font-size:12">内容按流式排在标题下面</span>
+        <span style="height:22; color:#94A3B8; font-size:11">圆角 / 边框 / 白面来自组件自己的样式表</span>
+    </use>
+
+    <!-- 对话气泡 -->
+    <use src="dialogue.bum.xml" x="392" y="176" w="368" h="176" name="诺艾拉"
+         text="dialogue：角色名胶囊 + 自动换行正文 + 右下两个按钮，位置由参数给。"/>
+
+    <!-- 指标 + 头像 + 分隔线 -->
+    <use src="stat.bum.xml" x="20"  y="376" w="150" k="识别帧率" v="30 fps"/>
+    <use src="stat.bum.xml" x="190" y="376" w="150" k="推理延迟" v="8 ms"/>
+    <use src="stat.bum.xml" x="360" y="376" w="150" k="在线设备" v="12"/>
+    <use src="avatar.bum.xml" x="20" y="428" size="56"/>
+    <span style="position:absolute; left:92; top:440; width:520; height:20; color:#94A3B8; font-size:11">avatar：圆形头像 + 1px 描边，缺图退化成浅色圆</span>
+    <use src="divider.bum.xml" x="20" y="500" len="740"/>
+
+    <!-- 底部状态栏 -->
+    <use src="statusbar.bum.xml" x="0" y="552" w="780" text="状态栏：左灰字 + 右两枚次要按钮"/>
+</body></html></app_window>

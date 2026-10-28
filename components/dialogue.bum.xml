@@ -1,17 +1,31 @@
 <!--
-  dialogue.bum.xml —— 对话气泡卡：角色名胶囊 + 正文 + 右下操作按钮
-  参数：name 角色名 / text 正文 / ok / cancel 按钮文案 / w 宽 / h 高
-  正文是单个 LABEL，会按卡片宽度自动换行；换行后的行高由 line-height 控制。
+  dialogue.bum.xml —— 对话气泡卡：角色名胶囊 + 正文 + 右下两个按钮
+  纵向 flex 排版，任意 w/h 都不会错位：
+      [角色名胶囊]
+      [正文 flex:1 —— 按卡片宽度自动换行]
+      [确定][取消]（justify-content: flex-end 贴右）
+  参数：name 角色名 / text 正文 / ok / cancel 按钮文案
+        w 宽 / h 高 / pad 内边距 / namew 名字胶囊宽度 / bw 按钮宽 / btnh 按钮高
 -->
 <style>
     .bui-dlg        { background:#FFFFFF; border:1px solid #E6EDF7; }
     .bui-dlg-name   { background:#E8F1FF; color:#2F79E8; border-radius:12; font-size:13px;
                       font-weight:700; }
     .bui-dlg-text   { color:#1F2A37; font-size:14px; line-height:170%; }
+    .bui-dlg-ok     { background:#3E8BFF; color:#FFFFFF; border-radius:10; font-size:13px;
+                      transition: background-color .18s ease; }
+    .bui-dlg-ok:hover  { background:#5DA0FF; }
+    .bui-dlg-ok:active { background:#2F79E8; }
+    .bui-dlg-cancel { background:#EEF3FA; color:#3E8BFF; border-radius:10; font-size:13px;
+                      transition: background-color .18s ease; }
+    .bui-dlg-cancel:hover  { background:#E1EBFA; }
+    .bui-dlg-cancel:active { background:#D2E2F8; }
 </style>
-<div class="bui-dlg" style="width:{{w=560}}; height:{{h=180}}; border-radius:16; padding:16">
-    <span class="bui-dlg-name" style="position:absolute; left:16; top:14; width:{{namew=84}}; height:24">{{name=角色}}</span>
-    <span class="bui-dlg-text" style="position:absolute; left:16; top:48; width:{{tw=520}}; height:{{th=88}}">{{text=正文}}</span>
-    <button class="bui-btn primary" style="position:absolute; left:{{okx=300}}; top:{{btny=144}}; width:{{bw=80}}; height:32; border-radius:10; font-size:13px">{{ok=确定}}</button>
-    <button class="bui-btn secondary" style="position:absolute; left:{{cx=392}}; top:{{btny=144}}; width:{{bw=80}}; height:32; border-radius:10; font-size:13px">{{cancel=取消}}</button>
+<div class="bui-dlg" style="width:{{w=560}}; height:{{h=176}}; border-radius:{{r=16}}; padding:{{pad=16}}; display:flex; flex-direction:column; gap:8">
+    <span class="bui-dlg-name" style="width:{{namew=84}}; height:24">{{name=角色}}</span>
+    <span class="bui-dlg-text" style="flex:1">{{text=正文}}</span>
+    <div style="height:{{btnh=32}}; display:flex; justify-content:flex-end; gap:8">
+        <button class="bui-dlg-ok" style="width:{{bw=80}}; height:{{btnh=32}}">{{ok=确定}}</button>
+        <button class="bui-dlg-cancel" style="width:{{bw=80}}; height:{{btnh=32}}">{{cancel=取消}}</button>
+    </div>
 </div>

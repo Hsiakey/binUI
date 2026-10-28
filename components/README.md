@@ -9,6 +9,15 @@
      title="我的应用" hint="按 ESC 退出" idmin="btnMin" idclose="btnClose"/>
 ```
 
+![全部组件](../docs/img/std-components.png)
+
+`preview.html` 就是这张图的源码（也是冒烟测试：改完组件先跑它）。
+渲染成图：
+
+```sh
+build-mingw/bin/offscreen_render components/preview.html docs/img/std-components.png
+```
+
 `src` 按**宿主 UI 文件所在目录**解析，所以从 `examples/<demo>/main.html` 引用就是
 `../../components/`。也可以把整个目录拷到你的工程里，或编成 `.bum` 二进制再分发
 （二进制优先、源码更新则优先源码，见 `docs/components.md`）。

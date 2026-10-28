@@ -66,6 +66,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `examples/svgdemo` | `<svg>` 声明式矢量 + `<canvas>` 命令式绘制面 |
 | `examples/cssshow` | **CSS 伪类/伪元素**：`:hover`/`:focus`/`:checked` + `:nth-child` + `::before`/`::after` |
 | `examples/components` | **组件化三形态**：`.bum` 二进制内联 / `.bum.xml` 源码内联（可传参）/ `external` 运行期挂载 |
+| `components/` | **标准组件库**：标题栏 / 按钮 / 输入框 / 胶囊 / 开关 / 面板 / 对话框 / 指标 / 头像 / 分隔线 / 状态栏（见 [`components/README.md`](components/README.md)） |
 | `examples/videodemo` | `<video>` 原生播放器：浏览器式控制条/进度拖动/键盘控制（解码取决于视频模块开关） |
 | `examples/singlewindow` | 单窗口模式：图片立绘 + z-index 分层 + 等比自适应，全部 UI 在同一窗口 |
 | `examples/multiwindow` | 独立窗口模式：多进程·多窗口（stage/hero/dialog 各自进程），立绘为透明分层窗口 |
