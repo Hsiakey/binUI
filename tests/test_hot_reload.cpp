@@ -85,9 +85,9 @@ int main() {
 
     // 只在源码树里存在的文件 -> 必须走第 6 级兜底（证明编译目录外也能跑）
     // 用 main_video_backup.html：它不会被 copy 到 build-mingw/bin/，只能从源码树找到
-    const std::string repoOnly = ex::ResolveUI(none, "videodemo", "main_video_backup.html");
-    std::printf("[info] ResolveUI(videodemo/main_video_backup.html) = \"%s\"\n", repoOnly.c_str());
-    CHECK(repoOnly == "examples/videodemo/main_video_backup.html", "源码树兜底命中 examples/<app>/<file>");
+    const std::string repoOnly = ex::ResolveUI(none, "features", "NOTES.md");
+    std::printf("[info] ResolveUI(features/NOTES.md) = \"%s\"\n", repoOnly.c_str());
+    CHECK(repoOnly == "examples/features/NOTES.md", "源码树兜底命中 examples/<app>/<file>");
 
     CHECK(ex::ResolveUI(none, "svgdemo", "no_such_file.html").empty(),
           "文件不存在时返回空（调用方回退默认布局）");

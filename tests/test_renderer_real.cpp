@@ -22,7 +22,7 @@ using namespace binui;
 int main() {
     printf("=== test_renderer_real: real app layouts end-to-end ===\n\n");
 
-    // ============ examples/vision_monitor（900x680 三面板监控） ============
+    // ============ tests/fixtures/vision.binui.xml（900x680 三面板监控，原 vision_monitor 示例） ============
     {
         BinUIRenderer r;
         int clicks = 0, lastClick = -1;
@@ -30,7 +30,7 @@ int main() {
             if (ev.type == EventType::CLICK) { lastClick = (int)ev.nodeId; clicks++; }
         });
 
-        auto ufl = CompileBinUIFile("examples/vision_monitor/main.binui.xml");
+        auto ufl = CompileBinUIFile("tests/fixtures/vision.binui.xml");
         TEST("vision: compile real xml", !ufl.empty());
         if (!ufl.empty()) {
             TEST("vision: layout loads", r.loadLayout(ufl.data(), ufl.size()));

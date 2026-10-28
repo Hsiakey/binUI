@@ -1,14 +1,17 @@
-// cssshow/main.cpp - CSS 伪类 / 伪元素演示（OpenGL 3.3 无边框窗口）
-// 覆盖 v11 的新能力：
-//   · 运行时伪类 :hover / :active / :focus / :checked —— 编译成状态样式段，
-//     渲染器按指针/焦点/勾选状态切换目标值（声明了 transition 就走过渡）
-//   · 结构伪类 :first-child / :nth-child() / :last-child —— 编译期按兄弟序号求值
-//   · 伪元素 ::before / ::after —— 内联模式并入宿主文本，盒模式合成子节点
+// features/main.cpp - 功能演示：样式 / 语义 / 组件化 / 数据驱动
+//
+// 把原来 cssshow + components + vision_monitor 三个示例压成一个,覆盖:
+//   · v11 运行时伪类 :hover / :active / :focus / :checked(状态样式段)
+//   · v13 扩展绘制: 边框 / 渐变 / 字重 / 行高 / 文字装饰
+//   · v14 HTML 元素默认语义(UA 样式表 / 占位符 / disabled / checkbox)
+//   · v12 组件链接三形态: 源码 .bum.xml 内联 / 二进制 .bum / external 运行期挂载
+//   · 数据驱动: 定时 setText + invalidateNode 局部重绘(不是整窗重画)
 #include <cstdio>
 #include <string>
 #include <vector>
 
 #include "binui_compiler.h"
+#include "binui_component.h"
 #include "binui_renderer.h"
 #include "backends/binui_gl-gdi.h"
 #include "binui_paths.h"
@@ -18,9 +21,9 @@
 using namespace binui;
 
 static void PrintUsage() {
-    std::printf("用法: cssshow [--watch] [--ui <main.html>]\n"
-                "  --watch  保存 UI 后自动重新编译并热重载（UI 开发用）\n"
-                "  --ui     显式指定 UI 文件（默认在 exe 同级目录查找）\n");
+    std::printf("用法: features [--watch] [--ui <main.html>]\n"
+                "  --watch  保存 UI 后自动重新编译并热重载(UI 开发用)\n"
+                "  --ui     显式指定 UI 文件(默认在 exe 同级目录查找)\n");
 }
 
 int main(int argc, char* argv[]) {
@@ -31,25 +34,38 @@ int main(int argc, char* argv[]) {
 #endif
 
     BinUIRenderer renderer;
-    const std::string uiPath = binui::ex::ResolveUI(args, "cssshow", "main.html");
+    const std::string uiPath = binui::ex::ResolveUI(args, "features", "main.html");
     CompileResult res;
     if (!uiPath.empty()) res = CompileBinUIFileEx(uiPath);
     if (res.layout.empty()) {
         if (uiPath.empty())
-            std::fprintf(stderr, "[cssshow] 未找到 UI 文件，使用默认布局（用 --ui <path> 指定）\n");
+            std::fprintf(stderr, "[features] 未找到 UI 文件，使用默认布局（用 --ui <path> 指定）\n");
         res.layout = GenerateDefaultBinUI();
     }
     for (const auto& w : res.warnings)
-        std::fprintf(stderr, "[cssshow] warning: %s\n", w.c_str());
+        std::fprintf(stderr, "[features] warning: %s\n", w.c_str());
     if (!renderer.loadLayout(res.layout.data(), res.layout.size())) {
-        std::fprintf(stderr, "[cssshow] Failed to load layout\n");
+        std::fprintf(stderr, "[features] Failed to load layout\n");
         return 1;
     }
 
+    // ---- 外挂组件（<use ... external>）：运行期挂载 ----
+    const std::string uiDir = binui::ex::DirOf(uiPath);
+    auto mountAll = [&]() {
+        const int nodesBefore = (int)renderer.getNodes().size();
+        const binui::ex::MountReport rep =
+            binui::ex::MountAll(renderer, uiDir, renderer.layoutBytes());
+        if (rep.mounted || rep.failed)
+            std::printf("[features] 外挂组件：挂载 %d，跳过 %d，失败 %d（新增节点 %d）\n",
+                        rep.mounted, rep.skipped, rep.failed,
+                        (int)renderer.getNodes().size() - nodesBefore);
+    };
+    mountAll();
+
     const auto& wd = renderer.windowDesc();
-    const auto& nodes = renderer.getNodes();
-    int width  = wd.present ? (int)wd.width  : (nodes.empty() ? 720 : (int)nodes[0].width);
-    int height = wd.present ? (int)wd.height : (nodes.empty() ? 520 : (int)nodes[0].height);
+    const auto& nodes0 = renderer.getNodes();
+    int width  = wd.present ? (int)wd.width  : (nodes0.empty() ? 900 : (int)nodes0[0].width);
+    int height = wd.present ? (int)wd.height : (nodes0.empty() ? 840 : (int)nodes0[0].height);
 
     BinUIAppGLGdi app(width, height);
     app.setWindowOptions(wd.present ? wd.resizable() : true,
@@ -62,13 +78,23 @@ int main(int argc, char* argv[]) {
             if (n.id == id) return &n;
         return nullptr;
     };
-        auto invalidateNode = [&](uint16_t id) {
+    auto invalidateNode = [&](uint16_t id) {
         // 失效矩形必须含动画后的包围盒：hover 放大时只按布局矩形失效，
         // 长出来的那一圈（边框/底色）不会被重绘，看上去就是"边框被削掉一半"
         float bx, by, bw, bh;
         if (renderer.invalidRect(id, bx, by, bw, bh))
             app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
     };
+
+    // ---- 数据驱动用到的节点 id（重编后要重新查） ----
+    uint16_t idState = 0, idCount = 0, idLog = 0, idToggle = 0;
+    auto reindexNodes = [&]() {
+        idState  = renderer.findNodeByName("dv-state");
+        idCount  = renderer.findNodeByName("dv-count");
+        idLog    = renderer.findNodeByName("dv-log");
+        idToggle = renderer.findNodeByName("tg");
+    };
+    reindexNodes();
 
     app.setDrawFn([&](BinUIGLGdi& gfx, const void* clip) {
         drawNodesGLGdi(gfx, renderer, clip, nullptr);
@@ -99,15 +125,15 @@ int main(int argc, char* argv[]) {
         invalidateNode((uint16_t)id);
         const auto* n = findNode((uint16_t)id);
         if (!n) return;
-        if (n->text == "\xE2\x88\x92") { app.minimize();    return; }   // ─
+        if (n->text == "\xE2\x88\x92") { app.minimize();    return; }   // −
         if (n->text == "\xE2\x96\xA1") { app.maximize();    return; }   // □
         if (n->text == "\xE2\x9C\x95") { app.requestExit(); return; }   // ✕
-        // 勾选方块：外壳自己维护 :checked 状态（核心库没有勾选控件）
-        static uint16_t toggleId = 0;
-        if (!toggleId) toggleId = renderer.findNodeByName("b4");
-        if ((uint16_t)id == toggleId) {
-            renderer.setNodeChecked(toggleId, !renderer.isNodeChecked(toggleId));
-            app.invalidateAll();
+        // 自定义开关：点一下切 :checked（渲染器只存状态，外观由作者 CSS 给）
+        if ((uint16_t)id == idToggle) {
+            static bool on = false;
+            on = !on;
+            renderer.setNodeChecked(idToggle, on);
+            invalidateNode(idToggle);
         }
     });
     app.setLeaveFn([&]() {
@@ -141,15 +167,43 @@ int main(int argc, char* argv[]) {
     hot.Init(args.watch, uiPath);
     int winW = width, winH = height;
 
+    // ---- 数据驱动：每 0.4s 改三行文字，只失效这三行 ----
+    int tick = 0;
+    float acc = 0.0f;
     app.setUpdateFn([&](float dt) {
-        (void)dt;
-        if (hot.Tick(renderer, "cssshow", winW, winH) == binui::ex::HotReload::Result::Reloaded)
+        if (hot.Tick(renderer, "features", winW, winH) == binui::ex::HotReload::Result::Reloaded) {
+            mountAll();          // 重编后外挂组件要重新挂（新布局里只剩占位节点）
+            reindexNodes();
             app.invalidateAll();
-        for (uint16_t id : renderer.stepAnimations())   // 过渡/关键帧重绘
-            invalidateNode(id);
+        }
+        const auto animated = renderer.stepAnimations();   // 过渡/关键帧重绘
+        for (uint16_t id : animated) invalidateNode(id);
+
+        acc += dt;
+        if (acc < 0.4f) return;
+        acc = 0.0f;
+        tick++;
+        char buf[192];
+        if (idState) {
+            std::snprintf(buf, sizeof(buf),
+                          "运行时状态：tick %d · 动画 %zu 条 · 尺寸 %dx%d · 渲染器只管算坐标",
+                          tick, animated.size(), winW, winH);
+            renderer.setText(idState, buf);
+            invalidateNode(idState);
+        }
+        if (idCount) {
+            std::snprintf(buf, sizeof(buf), "tick %d", tick);
+            renderer.setText(idCount, buf);
+            invalidateNode(idCount);
+        }
+        if (idLog && tick % 8 == 0) {
+            std::snprintf(buf, sizeof(buf), "setText + invalidateNode：只重画这一行的矩形（tick %d）", tick);
+            renderer.setText(idLog, buf);
+            invalidateNode(idLog);
+        }
     });
     app.setResizeFn([&](int w, int h) { winW = w; winH = h; renderer.setSize(w, h); });
 
-    std::printf("[cssshow] CSS 伪类/伪元素演示 (OpenGL 3.3)\n");
+    std::printf("[features] 功能演示 (OpenGL 3.3)\n");
     return app.run();
 }

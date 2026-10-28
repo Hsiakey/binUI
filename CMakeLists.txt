@@ -85,44 +85,17 @@ if(WIN32)
         )
     endfunction()
 
-    add_binui_demo(vision_monitor examples/vision_monitor main.binui.xml)
-
-    # OpenGL 渲染后端（WGL + GL 3.3 core）：无边框窗口 + 字形图集 + 顶点四边形
-    add_library(gl_shell STATIC src/backends/binui_gl-gdi.cpp)
-    target_include_directories(gl_shell PUBLIC ${CMAKE_SOURCE_DIR}/src)
-    target_link_libraries(gl_shell PUBLIC binui opengl32 gdiplus dwmapi)
-
-    # animshow：动画实验室，OpenGL 后端
-    add_executable(animshow examples/animshow/main.cpp)
-    target_link_libraries(animshow PRIVATE gl_shell)
-    add_custom_command(TARGET animshow POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:animshow>/animshow"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/animshow/main.html"
-            "$<TARGET_FILE_DIR:animshow>/animshow/main.html"
-    )
-
-    # svgdemo：<svg> 声明式矢量 + <canvas> 命令式绘制面
-    add_executable(svgdemo examples/svgdemo/main.cpp)
-    target_link_libraries(svgdemo PRIVATE gl_shell)
-    add_custom_command(TARGET svgdemo POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:svgdemo>/svgdemo"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/svgdemo/main.html"
-            "$<TARGET_FILE_DIR:svgdemo>/svgdemo/main.html"
-    )
-
-    # components：组件化三形态（.bum 二进制内联 / .bum.xml 源码内联 / external 运行期挂载）
+    # 6 个示例 = 6 组：功能 / 动画 / 字体 / 2D 渲染 / 3D 渲染 / 纹理
     # .bum 由 binui_compile 在构建期从 .bum.xml 生成，不进源码树
     set(BINUI_COMPONENT_BUMS "")
-    foreach(cname titlebar card dock)
+    foreach(cname card dock)
         set(bum_out "${CMAKE_BINARY_DIR}/assets/components/${cname}.bum")
         add_custom_command(
             OUTPUT "${bum_out}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/assets/components"
             COMMAND $<TARGET_FILE:binui_compile>
-                    "${CMAKE_SOURCE_DIR}/examples/components/${cname}.bum.xml" -o "${bum_out}"
-            DEPENDS binui_compile "${CMAKE_SOURCE_DIR}/examples/components/${cname}.bum.xml"
+                    "${CMAKE_SOURCE_DIR}/examples/features/${cname}.bum.xml" -o "${bum_out}"
+            DEPENDS binui_compile "${CMAKE_SOURCE_DIR}/examples/features/${cname}.bum.xml"
             COMMENT "binui: ${cname}.bum.xml -> ${cname}.bum"
             VERBATIM
         )
@@ -130,108 +103,35 @@ if(WIN32)
     endforeach()
     add_custom_target(components_bums ALL DEPENDS ${BINUI_COMPONENT_BUMS})
 
-    add_executable(components examples/components/main.cpp)
-    target_link_libraries(components PRIVATE gl_shell)
-    add_dependencies(components components_bums)
-    add_custom_command(TARGET components POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:components>/components"
+    # 通用 demo 目标：链接 gl_shell，构建后把 UI 文件拷到 <exe>/<name>/
+    function(add_gl_demo name)
+        add_executable(${name} examples/${name}/main.cpp)
+        target_link_libraries(${name} PRIVATE gl_shell)
+        add_custom_command(TARGET ${name} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${name}>/${name}"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/examples/${name}/main.html"
+                "$<TARGET_FILE_DIR:${name}>/${name}/main.html"
+        )
+    endfunction()
+
+    add_gl_demo(animshow)
+    add_gl_demo(fontshow)
+    add_gl_demo(svgdemo)
+    add_gl_demo(cubedemo)
+    add_gl_demo(texturedemo)
+
+    # features 额外需要组件文件（源码组件 + 两个 .bum）
+    add_gl_demo(features)
+    add_dependencies(features components_bums)
+    add_custom_command(TARGET features POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/components/main.html"
-            "${CMAKE_SOURCE_DIR}/examples/components/button.bum.xml"
-            "${CMAKE_BINARY_DIR}/assets/components/titlebar.bum"
+            "${CMAKE_SOURCE_DIR}/examples/features/button.bum.xml"
             "${CMAKE_BINARY_DIR}/assets/components/card.bum"
             "${CMAKE_BINARY_DIR}/assets/components/dock.bum"
-            "$<TARGET_FILE_DIR:components>/components/"
-    )
-    # cssshow：CSS 伪类（:hover/:active/:focus/:checked）+ 伪元素（::before/::after）
-    add_executable(cssshow examples/cssshow/main.cpp)
-    target_link_libraries(cssshow PRIVATE gl_shell)
-    add_custom_command(TARGET cssshow POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:cssshow>/cssshow"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/cssshow/main.html"
-            "$<TARGET_FILE_DIR:cssshow>/cssshow/main.html"
+            "$<TARGET_FILE_DIR:features>/features/"
     )
 
-    # singlewindow：单窗口模式（透明 PNG 立绘 + z-index 分层 + 运行时换图 + 等比自适应）
-    add_executable(singlewindow examples/singlewindow/main.cpp)
-    target_link_libraries(singlewindow PRIVATE gl_shell)
-    add_custom_command(TARGET singlewindow POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:singlewindow>/singlewindow"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/singlewindow/main.html"
-            "$<TARGET_FILE_DIR:singlewindow>/singlewindow/main.html"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/assets/noela.png"
-            "$<TARGET_FILE_DIR:singlewindow>/singlewindow/NOELA_N001_1227x1227.png"
-    )
-
-    # multiwindow：独立窗口模式（多进程·多窗口：stage/hero/dialog，立绘为透明分层窗口）
-    add_executable(multiwindow examples/multiwindow/main.cpp)
-    target_link_libraries(multiwindow PRIVATE gl_shell)
-    add_custom_command(TARGET multiwindow POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:multiwindow>/multiwindow"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/multiwindow/stage.html"
-            "$<TARGET_FILE_DIR:multiwindow>/multiwindow/stage.html"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/multiwindow/hero.html"
-            "$<TARGET_FILE_DIR:multiwindow>/multiwindow/hero.html"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/multiwindow/dialog.html"
-            "$<TARGET_FILE_DIR:multiwindow>/multiwindow/dialog.html"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/assets/noela.png"
-            "$<TARGET_FILE_DIR:multiwindow>/multiwindow/NOELA_N001_1227x1227.png"
-    )
-
-    # galgamechat：Galgame 式 Agent 前端原型（逐字打字机 + 上滚 backlog + 输入回合 + 后端钩子）
-    add_executable(galgamechat examples/galgamechat/main.cpp)
-    target_link_libraries(galgamechat PRIVATE gl_shell)
-    add_custom_command(TARGET galgamechat POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:galgamechat>/galgamechat"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/galgamechat/main.html"
-            "$<TARGET_FILE_DIR:galgamechat>/galgamechat/main.html"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/assets/noela.png"
-            "$<TARGET_FILE_DIR:galgamechat>/galgamechat/NOELA_N001_1227x1227.png"
-    )
-
-    # =============================================
-    # 可选视频编解码模块（<video> 原生支持）
-    # OFF（默认）：binui_video 为桩，视频节点仅绘制底色，核心库零依赖；
-    # ON：FFmpeg 解码 + WASAPI 音频（需 FFMPEG_ROOT 指向含 include/、lib/ 的开发目录）
-    # =============================================
-    option(BINUI_ENABLE_VIDEO "Enable FFmpeg video codec module (<video> playback)" OFF)
-    if(BINUI_ENABLE_VIDEO)
-        set(FFMPEG_ROOT "" CACHE PATH "FFmpeg dev prefix containing include/ and lib/")
-        if(NOT FFMPEG_ROOT)
-            message(FATAL_ERROR "BINUI_ENABLE_VIDEO=ON requires FFMPEG_ROOT (FFmpeg dev dir with include/ and lib/)")
-        endif()
-        add_library(binui_video STATIC src/binui_video_ffmpeg.cpp)
-        target_include_directories(binui_video PUBLIC "${FFMPEG_ROOT}/include")
-        target_link_directories(binui_video PUBLIC "${FFMPEG_ROOT}/lib")
-        target_link_libraries(binui_video PUBLIC binui
-            avformat avcodec swscale swresample avutil ole32)
-    else()
-        add_library(binui_video STATIC src/binui_video_stub.cpp)
-        target_link_libraries(binui_video PUBLIC binui)
-    endif()
-
-    # videodemo：<video> 播放器（GL 后端；控制条/交互始终可用，
-    # 实际解码与声音取决于 BINUI_ENABLE_VIDEO）
-    add_executable(videodemo examples/videodemo/main.cpp)
-    target_link_libraries(videodemo PRIVATE gl_shell binui_video)
-    add_custom_command(TARGET videodemo POST_BUILD
-        COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:videodemo>/videodemo"
-        COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/videodemo/main.html"
-            "$<TARGET_FILE_DIR:videodemo>/videodemo/main.html"
-        COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/examples/videodemo/media"
-            "$<TARGET_FILE_DIR:videodemo>/videodemo/media"
-    )
 else()
     message(STATUS "binUI: 仅实现了 Win32 演示外壳；核心库 binui 与测试仍可构建")
 endif()
@@ -299,7 +199,6 @@ install(FILES
 message(STATUS "binUI v${PROJECT_VERSION}")
 message(STATUS "  Core lib  -> binui")
 if(WIN32)
-    message(STATUS "  Demos     -> vision_monitor (GDI)")
-    message(STATUS "  GL demos  -> animshow, svgdemo, cssshow, videodemo, singlewindow, multiwindow, galgamechat (OpenGL 3.3 borderless)")
+    message(STATUS "  Demos     -> features / animshow / fontshow / svgdemo / cubedemo / texturedemo (OpenGL 3.3 borderless)")
 endif()
 message(STATUS "  Tests     -> test_binui, test_renderer, test_compiler")

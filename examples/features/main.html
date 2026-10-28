@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<app_window width="900" height="932" bg="#F4F7FC" title="功能演示">
+<html width="900" height="932" bg="#F4F7FC">
+<head>
+    <meta charset="UTF-8">
+    <title>功能：样式 / 语义 / 组件化 / 数据驱动</title>
+    <style>
+        /* 浅色主题令牌：底 #F4F7FC / 面 #FFFFFF / 线 #E6EDF7 / 主字 #1F2A37 /
+           次字 #66768C / 弱字 #94A3B8 / 主色 #3E8BFF / 薄荷 #2FBF9A */
+        body { font-size: 13px; color: #1F2A37; }
+
+        .card { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16; }
+        .card-title { font-size: 13px; font-weight: 700; color: #1F2A37; }
+        .note { font-size: 11px; color: #94A3B8; }
+        .body { font-size: 12px; color: #66768C; }
+
+        /* ---- 运行时伪类：:hover / :active / :focus / :checked ---- */
+        .btn { width: 190px; height: 40px; background: #3E8BFF; color: #FFFFFF;
+               border-radius: 10; font-size: 13px;
+               transition: background-color 0.18s ease, transform 0.18s ease; }
+        .btn:hover  { background: #5DA0FF; transform: scale(1.04); }
+        .btn:active { background: #2F79E8; transform: scale(0.97); }
+
+        .ghost { width: 190px; height: 40px; background: #EEF3FA; color: #3E8BFF;
+                 border: 1px solid #DFE9F7; border-radius: 10; font-size: 13px;
+                 transition: background-color 0.18s ease; }
+        .ghost:hover  { background: #E1EBFA; }
+        .ghost:active { background: #D2E2F8; }
+
+        .field { width: 396px; height: 40px; background: #F7FAFF; color: #38445A;
+                 border: 1px solid #E1E9F5; border-radius: 10; padding: 10; font-size: 13px;
+                 transition: background-color 0.15s ease; }
+        .field:focus { background: #FFFFFF; }
+
+        .toggle { width: 190px; height: 40px; background: #EEF3FA; color: #66768C;
+                  border: 1px solid #DFE9F7; border-radius: 20; font-size: 13px;
+                  transition: background-color 0.15s ease; }
+        .toggle:hover   { background: #E1EBFA; }
+        .toggle:checked { background: #2FBF9A; color: #FFFFFF; }
+
+        /* ---- 结构伪类：兄弟序号在编译期求值 ---- */
+        .row { height: 24px; width: 300px; font-size: 12px; color: #66768C; }
+        .row:nth-child(odd) { color: #3E8BFF; }
+        .row:first-child    { color: #1F2A37; }
+        .row:last-child     { color: #2FBF9A; }
+
+        /* ---- v13 扩展绘制：边框 / 渐变 / 字重 / 行高 / 文字装饰 ---- */
+        .grad { width: 200px; height: 64px; border-radius: 12;
+                background: linear-gradient(to right, #5DA0FF, #35C4A8);
+                border: 1px solid #4B98F5; }
+        .sheet { background: #F7FAFF; border: 1px solid #DFE9F7; border-radius: 12; }
+        .sheet-title { font-size: 12px; font-weight: 700; color: #1F2A37; }
+        .sheet-desc  { font-size: 11px; color: #66768C; }
+        .sheet-link  { font-size: 11px; color: #3E8BFF; text-decoration: underline; }
+
+        /* ---- v14：HTML 元素默认语义（内置 UA 样式表） ---- */
+        .chip { width: 70px; height: 22px; font-size: 12px; color: #38445A; }
+        input[type=checkbox] { width:18; height:18; border:2px solid #C8D6E8; border-radius:5;
+                               background: #FFFFFF; transition: background-color .15s ease; }
+        input[type=checkbox]:checked { background: #2FBF9A; border: 2px solid #2FBF9A; }
+        pre { color: #2F79E8; }
+        hr { background: #CBD9EC; }
+
+        .tag::before { content: attr(data-tag); }
+        .cmp-btn { color: #FFFFFF; border-radius: 10; font-size: 13px;
+                   transition: background-color 0.18s ease, transform 0.18s ease; }
+        .cmp-btn:hover  { background: #5DA0FF; transform: scale(1.04); }
+        .cmp-btn:active { background: #2F79E8; transform: scale(0.97); }
+    </style>
+</head>
+<body>
+    <use src="../../components/titlebar.bum.xml" x="0" y="0" w="900" icon="◆" iconw="22"
+         title="功能" sub="样式 · 语义 · 组件化 · 数据驱动"/>
+
+    <!-- ① 运行时伪类 -->
+    <div class="card" style="position:absolute; left:16; top:56; width:420; height:200">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:380; height:18">① 运行时伪类：:hover / :active / :focus / :checked</span>
+        <button class="btn"   style="position:absolute; left:16; top:40">悬停 / 按下</button>
+        <button class="ghost" style="position:absolute; left:214; top:40">:hover / :active</button>
+        <input class="field"  style="position:absolute; left:16; top:92" placeholder="点这里聚焦（:focus）"/>
+        <button id="tg" class="toggle" style="position:absolute; left:16; top:144">点我切换 :checked</button>
+        <span class="note" style="position:absolute; left:214; top:156; width:190; height:16">checked 由外壳调 setNodeChecked</span>
+    </div>
+
+    <!-- ② 扩展绘制 -->
+    <div class="card" style="position:absolute; left:452; top:56; width:432; height:200">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:400; height:18">② 扩展绘制：边框 / 渐变 / 字重 / 行高 / 文字装饰</span>
+        <div class="grad" style="position:absolute; left:16; top:40"></div>
+        <div class="sheet" style="position:absolute; left:16; top:116; width:400; height:70">
+            <span class="sheet-title" style="position:absolute; left:12; top:10; width:370; height:18">浅色卡片：底色白、文字深</span>
+            <span class="sheet-desc"  style="position:absolute; left:12; top:30; width:370; height:16">说明文字走 11px 次字，底色与文字色彻底分开</span>
+            <span class="sheet-link"  style="position:absolute; left:12; top:48; width:240; height:14">text-decoration: underline</span>
+        </div>
+        <span class="note" style="position:absolute; left:232; top:56; width:184; height:52">linear-gradient + 1px 边框；<br>组件自带的样式表是全局的</span>
+    </div>
+
+    <!-- ③ HTML 元素默认语义 -->
+    <div class="card" style="position:absolute; left:16; top:264; width:868; height:300">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:500; height:18">③ HTML 元素默认语义（v14 内置 UA 样式表，不用自己写 CSS）</span>
+        <b style="position:absolute; left:16; top:40; width:70; height:22; font-size:12">粗体 b</b>
+        <i style="position:absolute; left:96; top:40; width:70; height:22; font-size:12">斜体 i</i>
+        <u style="position:absolute; left:176; top:40; width:70; height:22; font-size:12">下划线 u</u>
+        <s style="position:absolute; left:256; top:40; width:70; height:22; font-size:12">删除线 s</s>
+        <mark style="position:absolute; left:336; top:40; width:70; height:22; font-size:12">高亮</mark>
+        <pre style="position:absolute; left:424; top:40; width:200; height:40; font-size:12">pre 保留空白
+  与换行</pre>
+        <span class="note" style="position:absolute; left:640; top:40; width:210; height:40">行内元素各占一行：binUI 没有行内格式化上下文，&lt;b&gt; 放进段落会单独换行</span>
+        <hr style="position:absolute; left:16; top:92; width:836; height:1"/>
+        <input class="field" style="position:absolute; left:16; top:106; width:260; height:32; padding:8; font-size:12" placeholder="placeholder 是占位符，不是真实值"/>
+        <button disabled style="position:absolute; left:288; top:106; width:100; height:32; border-radius:8; font-size:12; color:#64748B">禁用状态</button>
+        <input type="checkbox" style="position:absolute; left:404; top:114"/>
+        <input type="checkbox" checked style="position:absolute; left:434; top:114"/>
+        <span class="note" style="position:absolute; left:462; top:114; width:120; height:18">checkbox 由外壳切换</span>
+        <span class="body" style="position:absolute; left:600; top:106; width:250; height:36">disabled / readonly 会连带子节点一起变灰，并退出 Tab 焦点链</span>
+        <span class="card-title" style="position:absolute; left:16; top:152; width:300; height:18">结构伪类（:nth-child 编译期求值）</span>
+        <div style="position:absolute; left:16; top:174; width:300">
+            <span class="row">第 1 项：:first-child → 深</span>
+            <span class="row">第 2 项：even → 灰</span>
+            <span class="row">第 3 项：:nth-child(odd) → 蓝</span>
+            <span class="row">第 4 项：even → 灰</span>
+            <span class="row">第 5 项：:last-child → 薄荷</span>
+        </div>
+        <span class="note" style="position:absolute; left:340; top:180; width:520; height:20">同权重规则按文档序层叠；::before / ::after 的 content 会并入宿主文本</span>
+        <span class="tag" data-tag="attr(data-tag)" style="position:absolute; left:340; top:206; width:140; height:20; font-size:12; color:#3E8BFF"></span>
+        <span class="note" style="position:absolute; left:492; top:208; width:368; height:18">属性值直接当内容：content: attr(data-tag)，编译期取值</span>
+    </div>
+
+    <!-- ④ 组件化：源码组件 -->
+    <div class="card" style="position:absolute; left:16; top:572; width:428; height:180">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:390; height:18">④ 组件化：源码组件 .bum.xml（可传参）</span>
+        <use src="button.bum.xml" x="16"  y="40" w="190" label="普通按钮"/>
+        <use src="button.bum.xml" x="222" y="40" w="190" label="第二个实例"/>
+        <use src="button.bum.xml" x="16"  y="88" w="190" label="第三份"/>
+        <use src="button.bum.xml" x="222" y="88" w="190" label="宿主改底色（bg）" bg="#2FBF9A"/>
+        <span class="note" style="position:absolute; left:16; top:140; width:396; height:28">参数与 &lt;use&gt; 属性合并；组件自带的 :hover 过渡一并生效</span>
+    </div>
+
+    <!-- ⑤ 组件化：二进制组件 + 运行期外挂 -->
+    <div class="card" style="position:absolute; left:456; top:572; width:428; height:180">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:390; height:18">⑤ 二进制组件 .bum + 运行期外挂 external</span>
+        <use src="card.bum" x="16" y="40" w="396" action="确定"/>
+        <span class="note" style="position:absolute; left:16; top:150; width:396; height:28">card.bum 编译期内联、参数已固化；底部状态栏由 ex::MountAll() 运行期挂载</span>
+    </div>
+
+    <!-- ⑥ 数据驱动 -->
+    <div class="card" style="position:absolute; left:16; top:760; width:868; height:112">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:500; height:18">⑥ 数据驱动：setText + invalidateNode 局部重绘</span>
+        <span id="dv-state" style="position:absolute; left:16; top:38; width:820; height:20; font-size:12; color:#38445A">等待第一帧…</span>
+        <span id="dv-count" style="position:absolute; left:16; top:62; width:300; height:18; font-size:12; color:#3E8BFF">tick 0</span>
+        <span id="dv-log"   style="position:absolute; left:16; top:84; width:820; height:18; font-size:11; color:#94A3B8">只有这三行会失效重绘，整窗不重画</span>
+    </div>
+
+    <!-- 运行期外挂：dock.bum 不内联，由 main.cpp 调 binui::ex::MountAll() 挂载 -->
+    <use src="dock.bum" external x="0" y="884" w="900"/>
+</body>
+</html>
+</app_window>

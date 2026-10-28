@@ -94,8 +94,8 @@ int main() {
     // 4. 实际示例文件
     {
         BinUIRenderer r3;
-        auto vision = CompileBinUIFile("examples/vision_monitor/main.binui.xml");
-        TEST("Compile examples/vision_monitor/main.binui.xml", ParseInto(r3, vision));
+        auto vision = CompileBinUIFile("tests/fixtures/vision.binui.xml");
+        TEST("Compile tests/fixtures/vision.binui.xml", ParseInto(r3, vision));
         TEST("vision_monitor node count == 72", !vision.empty() && r3.getNodes().size() == 72);
     }
 

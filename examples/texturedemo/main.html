@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<app_window width="900" height="640" bg="#F4F7FC" title="纹理演示">
+<html width="900" height="640" bg="#F4F7FC">
+<head>
+    <meta charset="UTF-8">
+    <title>纹理：updateImageRaw 运行期上传</title>
+    <style>
+        body { font-size: 13px; color: #1F2A37; }
+        .card { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16; }
+        .card-title { font-size: 13px; font-weight: 700; color: #1F2A37; }
+        .note { font-size: 11px; color: #94A3B8; }
+        .lab { font-size: 11px; color: #66768C; }
+    </style>
+</head>
+<body>
+    <use src="../../components/titlebar.bum.xml" x="0" y="0" w="900" icon="▦" iconw="22"
+         title="纹理" sub="updateImageRaw · 运行期上传 · 同一张纹理多尺寸采样"/>
+
+    <!-- 同一张纹理，四种尺寸 -->
+    <div class="card" style="position:absolute; left:16; top:56; width:432; height:340">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:400; height:18">① 同一张纹理的四种尺寸（最近点采样）</span>
+        <img src="tex/proc.png" style="position:absolute; left:16;  top:40;  width:256; height:256; background:linear-gradient(135deg, #E8F1FF, #DDEBFB); border:1px solid #DCE5F2; border-radius:12"/>
+        <img src="tex/proc.png" style="position:absolute; left:288; top:40;  width:128; height:128; background:linear-gradient(135deg, #E8F1FF, #DDEBFB); border:1px solid #DCE5F2; border-radius:10"/>
+        <img src="tex/proc.png" style="position:absolute; left:288; top:176; width:64;  height:64;  background:linear-gradient(135deg, #E8F1FF, #DDEBFB); border:1px solid #DCE5F2; border-radius:8"/>
+        <span class="lab" style="position:absolute; left:360; top:196; width:60; height:16">64×64</span>
+        <span class="lab" style="position:absolute; left:288; top:246; width:128; height:16">128×128</span>
+        <span class="lab" style="position:absolute; left:16; top:296; width:200; height:16">256×256（源尺寸）</span>
+        <span class="note" style="position:absolute; left:16; top:314; width:400; height:16">纹理内容由 C++ 每帧生成，与 HTML 里写的路径无关</span>
+    </div>
+
+    <!-- 拉伸与说明 -->
+    <div class="card" style="position:absolute; left:452; top:56; width:432; height:340">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:400; height:18">② 拉伸到非等比矩形 / 与 UI 混排</span>
+        <img src="tex/proc.png" style="position:absolute; left:16; top:40; width:400; height:96; background:linear-gradient(135deg, #E8F1FF, #DDEBFB); border:1px solid #DCE5F2; border-radius:10"/>
+        <img src="tex/proc.png" style="position:absolute; left:16; top:148; width:88; height:88; background:linear-gradient(135deg, #E8F1FF, #DDEBFB); border:1px solid #DCE5F2; border-radius:44"/>
+        <span class="lab" style="position:absolute; left:116; top:152; width:300; height:18">圆形：靠 border-radius 裁</span>
+        <span class="note" style="position:absolute; left:116; top:172; width:300; height:32">图片节点本身不裁剪子节点，圆角/描边由节点自己的绘制负责；透明像素会透出底色。</span>
+        <div style="position:absolute; left:16; top:244; width:400; height:1; background:#E6EDF7"></div>
+        <span class="card-title" style="position:absolute; left:16; top:252; width:300; height:18">每帧只重画这两块矩形</span>
+        <span class="note" style="position:absolute; left:16; top:274; width:400; height:48">updateImageRaw 会自增该槽版本号，纹理缓存随之失效；外壳只 invalidate 图片矩形。</span>
+    </div>
+
+    <!-- 底部状态 -->
+    <div class="card" style="position:absolute; left:16; top:408; width:868; height:104">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:400; height:18">③ 运行期状态（C++ 每帧写入）</span>
+        <span id="tex-state" style="position:absolute; left:16; top:40; width:820; height:20; font-size:12; color:#38445A">等待第一帧…</span>
+        <span id="tex-note" style="position:absolute; left:16; top:64; width:820; height:18; font-size:11; color:#94A3B8">RGBA8 · 行序从上到下</span>
+    </div>
+
+    <div class="card" style="position:absolute; left:16; top:524; width:868; height:88">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:400; height:18">④ 和 &lt;video&gt; 共用一条通路</span>
+        <span class="note" style="position:absolute; left:16; top:36; width:820; height:40">视频帧走的也是 updateImageRaw：解码器只交付 RGBA 像素，上传与脏矩形由渲染器统一处理 —— 程序化纹理和视频帧在渲染器眼里是同一件事。</span>
+    </div>
+</body>
+</html>
+</app_window>

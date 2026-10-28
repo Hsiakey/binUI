@@ -12,7 +12,7 @@
 
 | 内置默认布局 | CSS 伪类 / 伪元素 | 组件化（`<use>`） |
 |---|---|---|
-| ![默认布局](docs/img/default-layout.png) | ![cssshow](docs/img/cssshow.png) | ![components](docs/img/components.png) |
+| ![默认布局](docs/img/default-layout.png) | ![功能](docs/img/features.png) | ![动画](docs/img/animshow.png) |
 
 > 三张图都是 `tools/offscreen_render` 离屏渲染出来的真实布局（GDI 后端），不是设计稿。
 
@@ -33,8 +33,7 @@ components/         **标准组件库**：titlebar / button / field / badge / to
                     panel / dialogue / stat / avatar / divider / statusbar
                     （纯 HTML+CSS，<use src="…"> 编译期内联，见 components/README.md）
 examples/           演示（每个子目录 = 一个 demo：main.cpp + main.html）
-  assets/           演示共用图片（noela.png；构建时拷到各 demo 目录、按原名引用）
-  components/       组件化示例：.bum 二进制（titlebar/card/dock）+ .bum.xml 源码（button）+ 宿 main.html
+                      （6 组示例里 features 就是组件化三形态的活示例）
 tests/              测试（轻量自写断言，7 个独立可执行文件）
 tools/              调试工具：离屏渲染 / 窗口抓取 / 窗口枚举 / 示例 UI 检查（见 tools/README.md）
 docs/               设计文档、图片、设计稿（见 docs/README.md；组件规范见 docs/components.md）
@@ -61,20 +60,17 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `include/binui_paths.h` | 跨平台路径解析：exe 真实路径（`GetModuleFileName`/`/proc/self/exe`）+ UI 查找顺序 + 图片资源加载（`--ui` / `$BINUI_UI`） |
 | `include/binui_hot_reload.h` | UI 热重载（`--watch`）：保存即重编译换树，保留窗口尺寸/滚动/焦点/输入内容 |
 | `src/backends/binui_gl-gdi.h/.cpp` | GPU 绘制后端：OpenGL 3.3 + 字形图集 + 顶点四边形（无边框窗口） |
-| `examples/vision_monitor` | 模拟数据流演示（GDI 外壳，运行时更新节点文本） |
-| `examples/animshow` | 动画实验室：缓动/方向/时长/fill/infinite/悬停过渡/运行时 API |
-| `examples/svgdemo` | `<svg>` 声明式矢量 + `<canvas>` 命令式绘制面 |
-| `examples/cssshow` | **CSS 伪类/伪元素**：`:hover`/`:focus`/`:checked` + `:nth-child` + `::before`/`::after` |
-| `examples/components` | **组件化三形态**：`.bum` 二进制内联 / `.bum.xml` 源码内联（可传参）/ `external` 运行期挂载 |
+| `examples/features` | **功能**：伪类/扩展绘制/HTML 语义/组件化三形态/数据驱动 setText |
+| `examples/animshow` | **动画**：缓动 / 方向 / 时长 / fill / infinite / 悬停过渡 / 运行时 API |
+| `examples/fontshow` | **字体**：字号阶梯 / 字重 400–800 / 斜体 / 行高 / 文字装饰 / 中英混排与符号 |
+| `examples/svgdemo` | **2D 渲染**：`<svg>` 声明式矢量（line/polyline/polygon/rect/circle）+ `<canvas>` 命令式绘制面 |
+| `examples/cubedemo` | **3D 渲染**：应用自己算顶点与透视，只用 `fillLine` 画线框立方体（引擎不做 3D） |
+| `examples/texturedemo` | **纹理**：`updateImageRaw` 运行期上传，同一张纹理多尺寸采样 |
 | `components/` | **标准组件库**：标题栏 / 按钮 / 输入框 / 胶囊 / 开关 / 面板 / 对话框 / 指标 / 头像 / 分隔线 / 状态栏（见 [`components/README.md`](components/README.md)） |
-| `examples/videodemo` | `<video>` 原生播放器：浏览器式控制条/进度拖动/键盘控制（解码取决于视频模块开关） |
-| `examples/singlewindow` | 单窗口模式：图片立绘 + z-index 分层 + 等比自适应，全部 UI 在同一窗口 |
-| `examples/multiwindow` | 独立窗口模式：多进程·多窗口（stage/hero/dialog 各自进程），立绘为透明分层窗口 |
-| `examples/galgamechat` | Galgame 式 Agent 前端原型：逐字打字机 + 上滚 backlog + 输入回合 + 后端钩子 |
 
 > 所有示例统一使用一套**清新浅色主题**（页面底 `#F4F7FC` / 白卡片 + 1px 边框 / 主字 `#1F2A37` /
 > 次字 `#66768C` / 主色 `#3E8BFF` / 薄荷 `#2FBF9A`）。这套令牌没有引擎级实现（`box-shadow`
-> 这类合成效果仍不支持），就是各示例 `<style>` 里的一段约定 —— 改配色照抄 `examples/cssshow`
+> 这类合成效果仍不支持），就是各示例 `<style>` 里的一段约定 —— 改配色照抄 `examples/features`
 > 开头的令牌注释即可。
 
 
@@ -140,16 +136,13 @@ sh scripts/fetch-deps.sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-# 运行演示
-build/bin/vision_monitor.exe   # 模拟数据流（GDI）
-build/bin/animshow.exe         # 动画实验室（OpenGL 3.3 无边框）
-build/bin/svgdemo.exe          # <svg> 声明式矢量 + <canvas> 命令式绘制面
-build/bin/cssshow.exe          # CSS 伪类/伪元素：hover/focus/checked + :nth-child + ::before
-build/bin/components.exe       # 组件化：二进制 .bum 内联 + 源码 .bum.xml 传参 + external 外挂
-build/bin/videodemo.exe        # <video> 播放器（解码需 BINUI_ENABLE_VIDEO=ON）
-build/bin/singlewindow.exe     # 单窗口模式：图片立绘 + z-index 分层 + 等比自适应
-build/bin/multiwindow.exe      # 独立窗口模式：多进程多窗口（自动拉起 stage/hero/dialog）
-build/bin/galgamechat.exe      # Galgame 式 Agent 前端原型（逐字/上滚 backlog/输入回合）
+# 运行演示（6 组各一个，OpenGL 3.3 无边框窗口）
+build/bin/features.exe         # 功能：伪类 / 扩展绘制 / HTML 语义 / 组件化三形态 / 数据驱动
+build/bin/animshow.exe         # 动画：缓动 / 方向 / 时长 / fill / infinite / 悬停过渡 / 运行时 API
+build/bin/fontshow.exe         # 字体：字号 / 字重 / 斜体 / 行高 / 文字装饰 / 中英混排与符号
+build/bin/svgdemo.exe          # 2D 渲染：<svg> 声明式矢量 + <canvas> 命令式绘制面
+build/bin/cubedemo.exe         # 3D 渲染：应用自己算顶点与透视，引擎只提供 fillLine
+build/bin/texturedemo.exe      # 纹理：updateImageRaw 运行期上传，多尺寸采样
 
 # 运行测试
 ctest --test-dir build
@@ -212,7 +205,7 @@ renderer.restartAnimations();                                   // 重播所有�
 
 | 源码格式 | 说明 |
 |----------|------|
-| `.xml`   | 手写 XML，节点标签映射为节点类型（见 `examples/vision_monitor/main.binui.xml`）；`.bui.xml` / `.bum.xml` 同样按 XML 解析 |
+| `.xml`   | 手写 XML，节点标签映射为节点类型（见 `tests/fixtures/vision.binui.xml`）；`.bui.xml` / `.bum.xml` 同样按 XML 解析 |
 | `.html`  | HTML5 语法，支持流式布局与 `style` 绝对定位（见 `examples/animshow/main.html`） |
 | `.bui` / `.bum` | 已编译好的 binUI 二进制（`loadLayout` 直接吃；`.bui` = 界面，`.bum` = 组件） |
 
@@ -351,7 +344,7 @@ bool ok = AttachVideoEngine(renderer, exeDir + "videodemo"); // 打开各 <video
 DetachVideoEngine();   // 进程退出前停止全部解码/输出线程
 ```
 
-未启用模块时 `AttachVideoEngine` 返回 false，应用据此显示降级提示（见 `examples/videodemo`）。
+未启用模块时 `AttachVideoEngine` 返回 false，应用据此显示降级提示。
 
 ## binUI 二进制布局
 

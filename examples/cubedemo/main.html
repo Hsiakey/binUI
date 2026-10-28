@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<app_window width="900" height="640" bg="#F4F7FC" title="3D 演示">
+<html width="900" height="640" bg="#F4F7FC">
+<head>
+    <meta charset="UTF-8">
+    <title>3D：应用自己画，binUI 只负责 UI</title>
+    <style>
+        body { font-size: 13px; color: #1F2A37; }
+        .card { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16; }
+        .card-title { font-size: 13px; font-weight: 700; color: #1F2A37; }
+        .note { font-size: 11px; color: #94A3B8; }
+    </style>
+</head>
+<body>
+    <use src="../../components/titlebar.bum.xml" x="0" y="0" w="900" icon="◈" iconw="22"
+         title="3D 渲染" sub="引擎只管 UI；线框立方体由应用自己在 canvas 回调里算"/>
+
+    <!-- 视口：立方体画在这块卡片上（应用在 drawFn 里用 gfx.fillLine 画） -->
+    <div class="card" style="position:absolute; left:16; top:56; width:868; height:520">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:400; height:18">线框立方体：12 条边，透视投影，逐边按深度调色</span>
+        <span class="note" style="position:absolute; left:16; top:34; width:520; height:16">binUI 没有 3D：顶点变换、投影、排序都在应用里做，引擎只提供 fillRect / fillRounded / fillLine</span>
+        <span class="note" style="position:absolute; left:640; top:12; width:212; height:16">拖动标题栏移动 · ESC 退出</span>
+        <!-- 视口底纹：地面网格 + 坐标轴，让空视口也能看出是 3D 场景 -->
+        <svg style="position:absolute; left:16; top:60; width:836; height:436">
+            <line x1="0" y1="330" x2="836" y2="330" stroke="#DCE5F2" stroke-width="1"/>
+            <line x1="0" y1="200" x2="836" y2="200" stroke="#EAF0F8" stroke-width="1"/>
+            <line x1="120" y1="330" x2="330" y2="430" stroke="#EAF0F8" stroke-width="1"/>
+            <line x1="716" y1="330" x2="506" y2="430" stroke="#EAF0F8" stroke-width="1"/>
+            <line x1="120" y1="330" x2="300" y2="250" stroke="#EAF0F8" stroke-width="1"/>
+            <line x1="716" y1="330" x2="536" y2="250" stroke="#EAF0F8" stroke-width="1"/>
+        </svg>
+        <span class="note" style="position:absolute; left:16; top:486; width:836; height:16">运行后这里有一个持续旋转的线框立方体；离屏截图跑不到应用的 drawFn，所以上面是空的</span>
+    </div>
+
+    <!-- 状态条 -->
+    <div class="card" style="position:absolute; left:16; top:588; width:868; height:40">
+        <span id="cube-state" style="position:absolute; left:16; top:12; width:840; height:18; font-size:12; color:#38445A">顶点变换 + 透视投影 + 逐边按深度调色，全部在应用里算；引擎只提供 fillLine / fillRect</span>
+    </div>
+</body>
+</html>
+</app_window>

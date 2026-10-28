@@ -6,6 +6,43 @@
 
 ## [Unreleased]
 
+### 变更 — 示例砍成 6 组：功能 / 动画 / 字体 / 2D 渲染 / 3D 渲染 / 纹理
+
+原来 9 个示例各演各的，彼此重叠又都不完整（cssshow 讲伪类、components 讲组件化、
+vision_monitor 讲数据更新，三套脚手架几乎一样）。现在收敛成 **6 组各一个示例**，
+一组只演示一件事，全部用标准标题栏 + 同一套浅色令牌：
+
+| 目录 | 组 | 来源 |
+|---|---|---|
+| `examples/features` | 功能 | **新合并**：cssshow + components + vision_monitor 的数据驱动 |
+| `examples/animshow` | 动画 | 保留 |
+| `examples/fontshow` | 字体 | **新建** |
+| `examples/svgdemo` | 2D 渲染 | 保留 |
+| `examples/cubedemo` | 3D 渲染 | **新建** |
+| `examples/texturedemo` | 纹理 | **新建** |
+
+删掉的：`videodemo` / `singlewindow` / `multiwindow` / `galgamechat`（git 历史里都在）。
+`examples/assets/noela.png` 一并删除（只有被删的立绘示例用）。
+
+三个新示例的看点：
+
+- **fontshow**：字号 12–32、字重 400–800、斜体、行高 100%/170%、三种文字装饰、
+  中英混排与 UI 符号。顺带把"字形图集怎么分类、缺字为什么是空白"写进卡片注释。
+- **cubedemo**：引擎里没有 3D —— 顶点变换、透视投影、逐边按深度调色全在应用里做，
+  最后只用 `gfx.fillLine` 画 12 条棱。这是"引擎只管 UI"这条边界的活示范。
+- **texturedemo**：布局里写一张不存在的图 `<img src="tex/proc.png">`（只为占一个图片槽），
+  运行期用 `updateImageRaw` 每帧生成 RGBA 塞进去；同一张纹理被四个尺寸采样。
+  和 `<video>` 帧走的是同一条通路。
+
+配套改动：
+
+- `examples/README.md` 新增：6 组对照表 + 写新示例的三条约定。
+- 原来 `examples/vision_monitor/main.binui.xml` 是唯一的 XML 源示例，随示例一起删掉；
+  它作为 **XML 解析的回归夹具** 移到 `tests/fixtures/vision.binui.xml`，
+  `test_compiler` / `test_renderer_real` 指过去（XML 的编译与运行时更新覆盖没丢）。
+- `test_hot_reload` 的"源码树兜底"改用 `examples/features/NOTES.md`。
+- Makefile / CMake 的 demo 目标改成 6 个（`add_gl_demo(name)` 统一处理拷贝）。
+
 ### 新增 — flex 支持 `width:content`（按文字宽度排）
 
 flex 里没有"宽度自适应"：声明像素要么留一条大缝、要么把字裁掉，`width:auto` 又会被

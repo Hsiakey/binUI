@@ -65,7 +65,6 @@ $(LIB_A): $(LIB_OBJS)
 # 组件二进制：.bum.xml -> .bum（产物落 build 目录，不污染源码树）
 # =============================================
 COMPONENT_BUMS := \
-    $(BUILD_DIR)/assets/components/titlebar.bum \
     $(BUILD_DIR)/assets/components/card.bum \
     $(BUILD_DIR)/assets/components/dock.bum
 
@@ -75,7 +74,7 @@ $(BIN_DIR)/binui_compile$(EXT): tools/binui_compile.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
 
-$(BUILD_DIR)/assets/components/%.bum: $(EXA_DIR)/components/%.bum.xml $(BIN_DIR)/binui_compile$(EXT)
+$(BUILD_DIR)/assets/components/%.bum: $(EXA_DIR)/features/%.bum.xml $(BIN_DIR)/binui_compile$(EXT)
 	@mkdir -p $(dir $@)
 	$(BIN_DIR)/binui_compile$(EXT) $< -o $@
 
@@ -158,16 +157,14 @@ ifdef ComSpec
 # OpenGL 后端（WGL + FreeType/HarfBuzz 静态库）
 GL_LIBS := -lopengl32 -ldwmapi -Lthird_party/freetype/build -lfreetype -Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
+# 6 个示例 = 6 组：功能 / 动画 / 字体 / 2D 渲染 / 3D 渲染 / 纹理
 DEMO_BINS := \
-    $(BIN_DIR)/vision_monitor$(EXT) \
+    $(BIN_DIR)/features$(EXT) \
     $(BIN_DIR)/animshow$(EXT) \
+    $(BIN_DIR)/fontshow$(EXT) \
     $(BIN_DIR)/svgdemo$(EXT) \
-    $(BIN_DIR)/cssshow$(EXT) \
-    $(BIN_DIR)/components$(EXT) \
-    $(BIN_DIR)/singlewindow$(EXT) \
-    $(BIN_DIR)/multiwindow$(EXT) \
-    $(BIN_DIR)/galgamechat$(EXT) \
-    $(BIN_DIR)/videodemo$(EXT)
+    $(BIN_DIR)/cubedemo$(EXT) \
+    $(BIN_DIR)/texturedemo$(EXT)
 
 # cmd 的 copy 不识别正斜杠路径，转成反斜杠
 # 资源拷贝一律用 cp + 正斜杠路径。
@@ -189,66 +186,38 @@ $(BUILD_DIR)/examples/%.o: $(EXA_DIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -I$(EXA_DIR) -c $< -o $@
 
-$(BIN_DIR)/vision_monitor$(EXT): $(BUILD_DIR)/examples/app_win32.o $(BUILD_DIR)/examples/vision_monitor/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/vision_monitor
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS)
-	cp -f $(EXA_DIR)/vision_monitor/main.binui.xml $(WIN_BIN)/vision_monitor/main.binui.xml
+$(BIN_DIR)/features$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(COMPONENT_BUMS)
+	@mkdir -p $(BIN_DIR)/features
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	cp -f $(EXA_DIR)/features/main.html $(WIN_BIN)/features/main.html
+	cp -f $(EXA_DIR)/features/button.bum.xml $(WIN_BIN)/features/button.bum.xml
+	cp -f $(BUILD_DIR)/assets/components/card.bum $(WIN_BIN)/features/card.bum
+	cp -f $(BUILD_DIR)/assets/components/dock.bum $(WIN_BIN)/features/dock.bum
 
 $(BIN_DIR)/animshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)/animshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/animshow/main.html $(WIN_BIN)/animshow/main.html
+
+$(BIN_DIR)/fontshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)/fontshow
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	cp -f $(EXA_DIR)/fontshow/main.html $(WIN_BIN)/fontshow/main.html
 
 $(BIN_DIR)/svgdemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)/svgdemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/svgdemo/main.html $(WIN_BIN)/svgdemo/main.html
 
-$(BIN_DIR)/components$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/components/main.o $(LIB_A) $(COMPONENT_BUMS)
-	@mkdir -p $(BIN_DIR)/components
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/components/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/components/main.html $(WIN_BIN)/components/main.html
-	# 二进制组件（编译期产物）+ 一个纯源码组件，演示"混放"
-	cp -f $(BUILD_DIR)/assets/components/titlebar.bum $(WIN_BIN)/components/titlebar.bum
-	cp -f $(BUILD_DIR)/assets/components/card.bum $(WIN_BIN)/components/card.bum
-	cp -f $(BUILD_DIR)/assets/components/dock.bum $(WIN_BIN)/components/dock.bum
-	cp -f $(EXA_DIR)/components/button.bum.xml $(WIN_BIN)/components/button.bum.xml
+$(BIN_DIR)/cubedemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)/cubedemo
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	cp -f $(EXA_DIR)/cubedemo/main.html $(WIN_BIN)/cubedemo/main.html
 
-$(BIN_DIR)/cssshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/cssshow/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/cssshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/cssshow/main.html $(WIN_BIN)/cssshow/main.html
-
-$(BIN_DIR)/singlewindow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/singlewindow/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/singlewindow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/singlewindow/main.html $(WIN_BIN)/singlewindow/main.html
-	cp -f examples/assets/noela.png $(WIN_BIN)/singlewindow/NOELA_N001_1227x1227.png
-
-$(BIN_DIR)/multiwindow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/multiwindow/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/multiwindow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/multiwindow/stage.html $(WIN_BIN)/multiwindow/stage.html
-	cp -f $(EXA_DIR)/multiwindow/hero.html $(WIN_BIN)/multiwindow/hero.html
-	cp -f $(EXA_DIR)/multiwindow/dialog.html $(WIN_BIN)/multiwindow/dialog.html
-	cp -f examples/assets/noela.png $(WIN_BIN)/multiwindow/NOELA_N001_1227x1227.png
-
-$(BIN_DIR)/galgamechat$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/galgamechat/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/galgamechat
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/galgamechat/main.html $(WIN_BIN)/galgamechat/main.html
-	cp -f examples/assets/noela.png $(WIN_BIN)/galgamechat/NOELA_N001_1227x1227.png
-
-# videodemo 使用桩视频模块（binui_video_stub），无 FFmpeg 依赖
-$(BUILD_DIR)/binui_video_stub.o: $(SRC_DIR)/binui_video_stub.cpp
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -c $< -o $@
-
-$(BIN_DIR)/videodemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/videodemo/main.o $(BUILD_DIR)/binui_video_stub.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/videodemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $^ $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/videodemo/main.html $(WIN_BIN)/videodemo/main.html
-	cp -rf $(EXA_DIR)/videodemo/media $(WIN_BIN)/videodemo/media
+$(BIN_DIR)/texturedemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)/texturedemo
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	cp -f $(EXA_DIR)/texturedemo/main.html $(WIN_BIN)/texturedemo/main.html
 
 all: $(LIB_A) $(TEST_BINS) $(DEMO_BINS) $(STD_LIB_STAMP)
 
