@@ -1,6 +1,6 @@
 <!DOCTYPE html>
-<app_window width="720" height="500" bg="#F4F7FC" title="组件化：.bui / .bum / .bum.xml">
-<html width="720" height="500" bg="#F4F7FC">
+<app_window width="720" height="620" bg="#F4F7FC" title="组件化：.bui / .bum / .bum.xml">
+<html width="720" height="620" bg="#F4F7FC">
 <head>
     <meta charset="UTF-8">
     <title>组件化：二进制内联 / 源码内联 / 运行期外挂</title>
@@ -52,7 +52,16 @@
         </span>
     </div>
 
+    <div class="panel" style="position:absolute; left:16; top:446; width:688; height:114">
+        <span class="label" style="position:absolute; left:14; top:10">④ 标准组件库（仓库根 components/，与具体界面无关）</span>
+        <use src="../../components/button.bum.xml" x="14"   y="40" w="104" h="34" label="主按钮"/>
+        <use src="../../components/button.bum.xml" x="126"  y="40" w="104" h="34" kind="secondary" label="次按钮"/>
+        <use src="../../components/field.bum.xml"  x="238"  y="40" w="200" h="34" ph="搜标准组件…"/>
+        <use src="../../components/badge.bum.xml"  x="446"  y="46" w="58" text="在线" kind="mint"/>
+        <use src="../../components/toggle.bum.xml" x="512"  y="40" w="96"  h="34" label="开关"/>
+        <span class="note" style="position:absolute; left:14; top:84; width:660; height:20">这些组件只用 HTML 标签 + CSS 令牌写成，不含任何 C++ 代码；&lt;use&gt; 会做参数替换与标签搬运（根是 button/input/titlebar 时语义也会跟着过来）。</span>
+    </div>
     <!-- ④ 运行期外挂：dock.bum 不内联，由 main.cpp 调 binui::ex::MountAll() 挂载 -->
-    <use src="dock.bum" external x="0" y="452" w="720"/>
+    <use src="dock.bum" external x="0" y="572" w="720"/>
 </body>
 </html>

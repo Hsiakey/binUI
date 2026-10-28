@@ -9,6 +9,35 @@
 标题栏 `titlebar.bum`（二进制）、按钮 `button.bum.xml`（源码 + 参数）、卡片 `card.bum`（二进制，
 内部又引用过源码组件）、状态栏 `dock.bum`（`external`，运行期挂载）。
 
+## 标准组件库（`components/`）
+
+`examples/` 里的组件是"组件机制"的演示；**通用组件**放在仓库根的 `components/`，
+不含任何 C++ 代码，用 `<use src="…/xxx.bum.xml" .../>` 编译期内联：
+
+| 组件 | 根标签 | 参数 |
+|---|---|---|
+| `titlebar` | `<titlebar>` | `title` `hint` `icon` `iconw` `h` `pad` `padr` `bs` `idmin` `idclose` |
+| `button` | `<button>` | `label` `kind`(primary/secondary/ghost/danger) `w` `h` `fs` `r` |
+| `field` | `<input>` | `ph` `val` `w` `h` `fs` `pad` |
+| `badge` | `<span>` | `text` `kind`(blue/mint/amber/red/gray) `w` |
+| `toggle` | `<button>` | `label` `w` `h` |
+| `panel` | `<div>` | `title` `pad` `w` `h`（宿主子元素成为面板内容） |
+| `dialogue` | `<div>` | `name` `text` `ok` `cancel` `w` `h` |
+| `stat` | `<div>` | `k` `v` `w` `h` |
+| `avatar` | `<img>` | `src` `size` |
+| `divider` | `<div>` | `len` `color` |
+| `statusbar` | `<div>` | `text` `b1` `b2` `h` `bw` |
+
+三条约定（细节见 [`components/README.md`](../components/README.md)）：
+
+1. **参数别写进组件的 `<style>`** —— 组件样式表会并入宿主且是全局的，多实例互相覆盖；
+   可调值一律走内联 `style`。
+2. **组件根标签决定节点语义** —— `<use>` 会把根标签搬过来：根写 `<button>` 才是真按钮，
+   根写 `<input>` 才有占位符/编辑，根写 `<titlebar>` 才能拖动窗口。以前替换节点一律当
+   `div`，组件里的"按钮"其实不可点击。
+3. **宿主子元素落进组件根容器**（流式末尾），`panel` 靠这条支持"带内容的卡片"。
+
+
 ## 一、命名与分发形态
 
 | 文件 | 含义 | 谁读 |

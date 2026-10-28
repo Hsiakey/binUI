@@ -23,15 +23,7 @@
         /* 按钮：悬停/按下由内核内建 tint + scale 驱动，这里只声明过渡曲线 */
         button { transition: background-color 0.18s ease, transform 0.18s ease; }
 
-        .ibtn { background: #EEF3FA; color: #66768C; border: 1px solid #DCE5F2;
-                border-radius: 8; font-size: 13px; }
-        .ibtn:hover  { background: #E1EBFA; }
-        .ibtn:active { background: #DCE5F2; }
 
-        .ibtn-x { background: #FFE9EC; color: #FF6B6B; border: 1px solid #FFD8DE;
-                  border-radius: 8; font-size: 13px; }
-        .ibtn-x:hover  { background: #FFDCE2; }
-        .ibtn-x:active { background: #FF6B6B; color: #FFFFFF; border: 1px solid #FF6B6B; }
 
         /* 主按钮：主色填充 + 白字 */
         .btn-p { background: #3E8BFF; color: #FFFFFF; border: 1px solid #3E8BFF;
@@ -48,12 +40,9 @@
 </head>
 <body>
     <!-- 标题栏（可拖动窗口）：三键用 id 区分，不再靠文字匹配 -->
-    <titlebar style="position:absolute; left:0; top:0; width:1000; height:44; background:#FFFFFF; border-bottom:1px solid #E6EDF7; z-index:100">
-        <span style="position:absolute; left:14; top:12; width:400; height:20; color:#1F2A37; font-size:14; font-weight:700">单窗口模式 · NOELA_N001（1227×1227 PNG → GPU 纹理）</span>
-        <span style="position:absolute; left:672; top:15; width:220; height:16; color:#94A3B8; font-size:11">ESC 退出 · 拖标题栏移动 · 窗口等比缩放</span>
-        <button id="btnMin" class="ibtn" style="position:absolute; left:912; top:8; width:28; height:28; z-index:110">─</button>
-        <button id="btnClose" class="ibtn-x" style="position:absolute; left:948; top:8; width:28; height:28; z-index:110">✕</button>
-    </titlebar>
+<use src="../../components/titlebar.bum.xml" x="0" y="0" w="1000" z="100"
+     title="单窗口模式 · NOELA_N001（1227×1227 PNG → GPU 纹理）" hint="ESC 退出 · 拖标题栏移动 · 窗口等比缩放" hintw="300"
+     idmin="btnMin" idclose="btnClose"/>
 
     <!-- 舞台背光（圆角矩形，z-index 1，呼吸动画）：浅色底上改用淡蓝呼吸 -->
     <div style="position:absolute; left:210; top:96; width:580; height:580; background:rgba(62,139,255,0.10); border-radius:290; z-index:1; animation:glowPulse 4s ease-in-out 0s infinite"></div>

@@ -175,6 +175,16 @@ DEMO_BINS := \
 # cmd 收到不存在的路径，只打印 banner 就退出 —— 演示 UI 其实从没被拷到 bin/ 下（静默失败）。
 WIN_BIN := $(BIN_DIR)
 
+# 标准组件库：demo 的 main.html 用 ../../components/xxx.bum.xml 引用，
+# 从 $(BIN_DIR)/<demo>/ 往上两级正好是 $(BUILD_DIR)/，所以拷到这里
+STD_LIB_SRCS  := $(wildcard components/*.bum.xml)
+STD_LIB_STAMP := $(BUILD_DIR)/components/.stamp
+
+$(STD_LIB_STAMP): $(STD_LIB_SRCS)
+	@mkdir -p $(BUILD_DIR)/components
+	@cp -f $(STD_LIB_SRCS) $(BUILD_DIR)/components/
+	@touch $@
+
 $(BUILD_DIR)/examples/%.o: $(EXA_DIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -I$(EXA_DIR) -c $< -o $@
@@ -240,7 +250,7 @@ $(BIN_DIR)/videodemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/vi
 	cp -f $(EXA_DIR)/videodemo/main.html $(WIN_BIN)/videodemo/main.html
 	cp -rf $(EXA_DIR)/videodemo/media $(WIN_BIN)/videodemo/media
 
-all: $(LIB_A) $(TEST_BINS) $(DEMO_BINS)
+all: $(LIB_A) $(TEST_BINS) $(DEMO_BINS) $(STD_LIB_STAMP)
 
 # 调试工具（可选，不入 all）：离屏渲染 / 窗口抓取 / 窗口枚举
 TOOL_BINS := \

@@ -1,0 +1,21 @@
+<!--
+  statusbar.bum.xml —— 底部状态栏：左侧一行灰字 + 右侧两枚次要按钮
+  参数：text 文案 / b1 / b2 按钮文案（传空则不占位）/ h 高度
+  flex 排版：文字占满剩余宽度，按钮贴右。
+-->
+<style>
+    .bui-sb       { background:#FFFFFF; border-top:1px solid #E6EDF7; }
+    .bui-sb-text  { color:#66768C; font-size:12px; }
+    .bui-sb-btn   { background:#EEF3FA; color:#3E8BFF; border:1px solid #DFE9F7;
+                    border-radius:8; font-size:12px;
+                    transition: background-color .15s ease; }
+    .bui-sb-btn:hover  { background:#E1EBFA; }
+    .bui-sb-btn:active { background:#D2E2F8; }
+</style>
+<div class="bui-sb" style="height:{{h=48}}; display:flex; align-items:center; gap:8">
+    <div style="width:16; height:1; background:transparent"></div>
+    <span class="bui-sb-text" style="flex:1; height:18">{{text=状态}}</span>
+    <button class="bui-sb-btn" style="width:{{bw=80}}; height:28">{{b1=设置}}</button>
+    <button class="bui-sb-btn" style="width:{{bw=80}}; height:28">{{b2=日志}}</button>
+    <div style="width:12; height:1; background:transparent"></div>
+</div>

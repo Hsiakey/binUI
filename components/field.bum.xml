@@ -1,0 +1,12 @@
+<!--
+  field.bum.xml —— 标准输入框（单行）
+  参数：ph 占位符 / val 初始值 / w 宽 / h 高 / fs 字号 / pad 内缩
+  占位符按 55% 色画，首次输入即清空（v14 语义），聚焦时底色转白。
+-->
+<style>
+    .bui-field { background:#F7FAFF; color:#38445A; border:1px solid #E1E9F5;
+                 transition: background-color .15s ease; }
+    .bui-field:focus { background:#FFFFFF; }
+</style>
+<input class="bui-field" style="width:{{w=260}}; height:{{h=40}}; border-radius:{{r=10}}; font-size:{{fs=13}}; padding:{{pad=10}}"
+       placeholder="{{ph=请输入}}" value="{{val=}}"/>

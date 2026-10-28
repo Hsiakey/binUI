@@ -29,6 +29,9 @@ src/
   platform/         app_win32.*：Win32 窗口外壳 + GDI 绘制（演示与工具共用）
   binui_charts.cpp  高层图表 API 实现
   binui_video_*.cpp 视频模块（FFmpeg 实现 / 无依赖桩）
+components/         **标准组件库**：titlebar / button / field / badge / toggle /
+                    panel / dialogue / stat / avatar / divider / statusbar
+                    （纯 HTML+CSS，<use src="…"> 编译期内联，见 components/README.md）
 examples/           演示（每个子目录 = 一个 demo：main.cpp + main.html）
   assets/           演示共用图片（noela.png；构建时拷到各 demo 目录、按原名引用）
   components/       组件化示例：.bum 二进制（titlebar/card/dock）+ .bum.xml 源码（button）+ 宿 main.html

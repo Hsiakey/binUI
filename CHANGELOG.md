@@ -6,6 +6,34 @@
 
 ## [Unreleased]
 
+### 新增 — 标准组件库 `components/`（标题栏、按钮、输入框……）
+
+`examples/` 里的组件是"组件机制"的演示；真正能拿来用的通用组件之前一个都没有 ——
+每个示例都手写一遍标题栏（6 份几乎一样的 8 行 span/button）。新增仓库根的
+`components/`，11 个纯 HTML+CSS 组件，`<use src="…">` 编译期内联、运行期零依赖：
+
+`titlebar` `button` `field` `badge` `toggle` `panel` `dialogue` `stat` `avatar`
+`divider` `statusbar`
+
+- `titlebar` 用 **flex 排版**，窗口多宽都不用宿主算按钮坐标（`[图标][标题 flex:1][说明][─][✕]`）。
+- `panel` 支持"带内容"：宿主的子元素会落进组件根容器，按流式排在标题下面。
+- 文档：`components/README.md`（参数表 + 三条使用约定 + 限制）、`docs/components.md` 新增一节。
+
+### 修复
+
+- **`<use>` 丢掉了组件根的标签**：替换节点恒为 `div`，于是
+  · 以 `<button>` 为根的组件实例变成普通容器（不可点击、文字不居中、不吃 `:hover`）；
+  · 以 `<input>` 为根的实例丢掉占位符与编辑语义（输入框只剩一个空盒子）；
+  · 以 `<span>` 为根的实例变成块级 `LIST`（文字带 12px 内缩、顶对齐，小胶囊里的字被裁）。
+  现在把根标签原样搬过来 —— 上面三种症状一次全消。标准组件库正是靠它才能成立。
+
+### 变更
+
+- 示例统一改用标准 `titlebar`（animshow / svgdemo / cssshow / galgamechat /
+  singlewindow / multiwindow·stage·dialog），并删掉各自那份手写的标题栏 CSS；
+  `examples/components` 新增第四张卡片展示标准组件库。
+- `examples/cssshow` 的主程序补上"─ 最小化"分支（以前只有 ✕）。
+
 ### 变更 — 示例 UI 全面换成清新浅色主题
 
 9 个示例（animshow / cssshow / components / svgdemo / videodemo / singlewindow /

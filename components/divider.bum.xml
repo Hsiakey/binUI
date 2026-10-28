@@ -1,0 +1,5 @@
+<!--
+  divider.bum.xml —— 1px 分隔线（水平/垂直）
+  参数：horizontal=true 横线（默认）/ 传 horizontal=false 变竖线；len 长度；color 颜色
+-->
+<div style="width:{{len=200}}; height:1; background:{{color=#E6EDF7}}"></div>

@@ -10,13 +10,7 @@
         body { font-family: "Microsoft YaHei UI"; font-size: 13px; color: #1F2A37; }
         button { transition: background-color 0.18s ease, transform 0.18s ease; }
 
-        #btnMin { background: #EEF3FA; color: #66768C; border-radius: 8; font-size: 12; }
-        #btnMin:hover  { background: #DCE5F2; transform: scale(1.04); }
-        #btnMin:active { background: #C7D8EE; transform: scale(0.96); }
 
-        #btnClose { background: #FFE9EC; color: #FF6B6B; border-radius: 8; font-size: 12; }
-        #btnClose:hover  { background: #FFD9DE; transform: scale(1.04); }
-        #btnClose:active { background: #FFC6CE; transform: scale(0.96); }
 
         /* 主按钮：主色填充 + 白字；次按钮：浅蓝底 + 主色字。
            状态样式只改底色，字色不变 —— 老老实实保持白字/主色字才一直看得清 */
@@ -31,11 +25,9 @@
 </head>
 <body>
     <!-- 标题栏（可拖动本窗口） -->
-    <titlebar style="position:absolute; left:0; top:0; width:920; height:40; background:#FFFFFF; border-bottom:1px solid #E6EDF7; z-index:100">
-        <span style="position:absolute; left:14; top:10; width:520; height:20; color:#1F2A37; font-size:14; font-weight:700">对话窗口（进程 #3 / 共 3 个）</span>
-        <button id="btnMin"   style="position:absolute; left:852; top:6; width:28; height:28; z-index:110">─</button>
-        <button id="btnClose" style="position:absolute; left:888; top:6; width:28; height:28; z-index:110">✕</button>
-    </titlebar>
+<use src="../../components/titlebar.bum.xml" x="0" y="0" w="920" h="40" bs="26" z="100"
+     title="对话窗口（进程 #3 / 共 3 个）" hintw="0"
+     idmin="btnMin" idclose="btnClose"/>
 
     <!-- 对话框主体：白卡片 + 角色名胶囊 + 正文 -->
     <div style="position:absolute; left:16; top:50; width:888; height:146; background:#FFFFFF; border:1px solid #E6EDF7; border-radius:16; z-index:10">

@@ -2733,6 +2733,10 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
             Warn("组件内联 " + label + "：" + failReason + "（已按空容器处理）");
 
         // ---- 替换节点：<use> 属性优先，其次是组件根属性 ----
+        // 组件根的**标签**必须跟着搬过来：以前这里恒为 "div"，于是
+        //   · 以 <button> 为根的组件实例变成普通容器（不可点击、文字不居中）；
+        //   · 以 <input> 为根的组件实例丢掉占位符/编辑语义；
+        //   · 以 <span> 为根的组件实例变成块级 LIST（文字带 12px 内缩且顶部对齐）。
         HNode root;
         root.tag = "div";
         size_t compRootIdx = SIZE_MAX;
@@ -2740,6 +2744,8 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
             for (size_t k = 0; k < compElems.size(); k++)
                 if (compElems[k].parentIdx == SIZE_MAX) { compRootIdx = k; break; }
             if (compRootIdx != SIZE_MAX) {
+                if (!compElems[compRootIdx].tag.empty())
+                    root.tag = compElems[compRootIdx].tag;
                 root.attrs = compElems[compRootIdx].attrs;
                 root.text = compElems[compRootIdx].text;
             }

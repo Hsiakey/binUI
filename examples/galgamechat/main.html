@@ -23,13 +23,7 @@
         button { transition: background-color 0.18s ease, transform 0.18s ease; }
 
         /* 窗口按钮：浅蓝底 + 次字色（悬停只加深底色，字色不变才能一直看清） */
-        #btnMin { background: #EEF3FA; color: #66768C; border-radius: 8; font-size: 12; }
-        #btnMin:hover  { background: #DCE5F2; transform: scale(1.04); }
-        #btnMin:active { background: #C7D8EE; transform: scale(0.96); }
 
-        #btnClose { background: #FFE9EC; color: #FF6B6B; border-radius: 8; font-size: 12; }
-        #btnClose:hover  { background: #FFD9DE; transform: scale(1.04); }
-        #btnClose:active { background: #FFC6CE; transform: scale(0.96); }
 
         /* 阅读面板：C++ 侧追加的正文是固定白字、角色名固定淡紫/薄荷，
            所以这一块留深墨蓝，白字与浅色名字都清晰（换成浅底会白成一片） */
@@ -44,12 +38,9 @@
 </head>
 <body>
     <!-- 标题栏 -->
-    <titlebar style="position:absolute; left:0; top:0; width:960; height:44; background:#FFFFFF; border-bottom:1px solid #E6EDF7; z-index:100">
-        <span style="position:absolute; left:16; top:13; width:420; height:20; color:#1F2A37; font-size:14; font-weight:700; z-index:101">binUI · Galgame Chat</span>
-        <span style="position:absolute; left:560; top:15; width:300; height:16; color:#94A3B8; font-size:11; z-index:101">Enter 推进 / 发送 · 拖动标题栏移动</span>
-        <button id="btnMin"   style="position:absolute; left:872; top:8; width:28; height:28; z-index:110">─</button>
-        <button id="btnClose" style="position:absolute; left:908; top:8; width:28; height:28; z-index:110">✕</button>
-    </titlebar>
+<use src="../../components/titlebar.bum.xml" x="0" y="0" w="960" z="100"
+     title="binUI · Galgame Chat" hint="Enter 推进 / 发送 · 拖动标题栏移动" hintw="320"
+     idmin="btnMin" idclose="btnClose"/>
 
     <!-- 舞台：浅色天光渐变 + 两团淡蓝呼吸光斑 -->
     <div style="position:absolute; left:0; top:44; width:960; height:676; background:linear-gradient(to bottom, #F7FAFF, #E3EEFC); z-index:0"></div>

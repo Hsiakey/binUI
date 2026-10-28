@@ -1,0 +1,25 @@
+<!--
+  button.bum.xml —— 标准按钮，四种外观由 kind 选：
+      primary    主色填充 + 白字（默认）
+      secondary  浅蓝底 + 主色字
+      ghost      透明底 + 主色字（描边）
+      danger     浅红底 + 红字
+  参数：label 文案 / kind 外观 / w 宽 / h 高 / fs 字号 / r 圆角
+  三态（:hover / :active）在组件的 <style> 里，挂在 .bui-btn 上。
+-->
+<style>
+    .bui-btn { transition: background-color .18s ease, transform .18s ease; }
+    .bui-btn.primary       { background:#3E8BFF; color:#FFFFFF; }
+    .bui-btn.primary:hover { background:#5DA0FF; transform:scale(1.04); }
+    .bui-btn.primary:active{ background:#2F79E8; transform:scale(.97); }
+    .bui-btn.secondary       { background:#EEF3FA; color:#3E8BFF; }
+    .bui-btn.secondary:hover { background:#E1EBFA; }
+    .bui-btn.secondary:active{ background:#D2E2F8; }
+    .bui-btn.ghost       { background:transparent; color:#3E8BFF; }
+    .bui-btn.ghost:hover { background:#EEF3FA; }
+    .bui-btn.ghost:active{ background:#E1EBFA; }
+    .bui-btn.danger       { background:#FFE9EC; color:#FF6B6B; }
+    .bui-btn.danger:hover { background:#FFD9DE; }
+    .bui-btn.danger:active{ background:#FFC6CE; }
+</style>
+<button class="bui-btn {{kind=primary}}" style="width:{{w=132}}; height:{{h=40}}; border-radius:{{r=10}}; font-size:{{fs=13}}">{{label=按钮}}</button>

@@ -1,0 +1,14 @@
+<!--
+  badge.bum.xml —— 小标签 / 状态胶囊
+  参数：text 文案 / kind 配色（blue 默认, mint, amber, red, gray）/ fs 字号
+  高度固定 22，宽度自适应内容（不传 w 就按文字估宽后再给一点内边距）。
+-->
+<style>
+    .bui-badge        { border-radius:11; font-size:12px; }
+    .bui-badge.blue   { background:#E8F1FF; color:#2F79E8; }
+    .bui-badge.mint   { background:#E3F7F1; color:#1E9C7C; }
+    .bui-badge.amber  { background:#FDF3DC; color:#B07811; }
+    .bui-badge.red    { background:#FFE9EC; color:#E24C55; }
+    .bui-badge.gray   { background:#EEF3FA; color:#66768C; }
+</style>
+<span class="bui-badge {{kind=blue}}" style="width:{{w=64}}; height:22; font-size:{{fs=12}}">{{text=标签}}</span>

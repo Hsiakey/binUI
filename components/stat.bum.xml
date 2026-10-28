@@ -1,0 +1,12 @@
+<!--
+  stat.bum.xml —— 指标单元：上面一行小写标签，下面一行加粗数值
+  参数：k 标签 / v 数值 / w 宽 / h 高（默认 40）
+-->
+<style>
+    .bui-stat-k { color:#94A3B8; font-size:11px; }
+    .bui-stat-v { color:#1F2A37; font-size:15px; font-weight:700; }
+</style>
+<div style="width:{{w=120}}; height:{{h=40}}">
+    <span class="bui-stat-k" style="position:absolute; left:0; top:0; width:{{w=120}}; height:16">{{k=标签}}</span>
+    <span class="bui-stat-v" style="position:absolute; left:0; top:18; width:{{w=120}}; height:20">{{v=0}}</span>
+</div>

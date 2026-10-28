@@ -1,0 +1,15 @@
+<!--
+  panel.bum.xml —— 卡片面板：白面 + 1px 边框 + 大圆角，可带标题
+  参数：title 标题（可空）/ pad 内边距 / w 宽 / h 高（不传就当自动高度）
+  用法（宿主子元素会成为面板内容，按流式排在标题下面）：
+      <use src="panel.bum.xml" x="16" y="56" w="320" title="统计">
+          <span style="height:20">内容一行</span>
+      </use>
+-->
+<style>
+    .bui-panel       { background:#FFFFFF; border:1px solid #E6EDF7; }
+    .bui-panel-title { color:#1F2A37; font-size:13px; font-weight:700; }
+</style>
+<div class="bui-panel" style="width:{{w=}}; height:{{h=}}; border-radius:{{r=16}}; padding:{{pad=16}}">
+    <span class="bui-panel-title" style="height:20">{{title=}}</span>
+</div>

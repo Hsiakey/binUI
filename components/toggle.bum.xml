@@ -1,0 +1,14 @@
+<!--
+  toggle.bum.xml —— 可勾选的开关胶囊（勾选态由 :checked 状态样式驱动）
+  参数：label 文案 / w 宽 / h 高
+  用法：外壳点它时调 renderer.setNodeChecked(id, on)，底色随之切换。
+  注意：binUI 的节点状态样式只能改底色/缩放/圆角，所以这里是"整块变色"，
+  不是 iOS 那种滑块位移（那需要子节点的独立状态，暂不支持）。
+-->
+<style>
+    .bui-toggle        { background:#EEF3FA; color:#66768C; border:1px solid #DFE9F7;
+                         transition: background-color .15s ease; }
+    .bui-toggle:hover  { background:#E1EBFA; }
+    .bui-toggle:checked{ background:#2FBF9A; color:#FFFFFF; }
+</style>
+<button class="bui-toggle" style="width:{{w=132}}; height:{{h=40}}; border-radius:{{r=20}}; font-size:{{fs=13}}">{{label=开关}}</button>

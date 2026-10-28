@@ -1601,6 +1601,80 @@ int main() {
         TEST("v14: 深底默认白色文字", tn && tn->color == 0xFFFFFFFFu);
     }
 
+    // ---- v15：标准组件库 components/（根标签搬运 / 参数替换 / 插槽）----
+    {
+        const char* html =
+            "<app_window width=\"760\" height=\"420\" bg=\"#F4F7FC\"><html><body>\n"
+            "  <use src=\"components/titlebar.bum.xml\" x=\"0\" y=\"0\" w=\"760\"\n"
+            "       title=\"标题A\" hint=\"提示B\" idmin=\"imin\" idclose=\"iclose\"/>\n"
+            "  <use id=\"btn\" src=\"components/button.bum.xml\" x=\"16\" y=\"60\"\n"
+            "       w=\"120\" h=\"36\" kind=\"secondary\" label=\"次按钮\"/>\n"
+            "  <use id=\"fld\" src=\"components/field.bum.xml\" x=\"16\" y=\"110\"\n"
+            "       w=\"240\" ph=\"请输入关键字\"/>\n"
+            "  <use id=\"bdg\" src=\"components/badge.bum.xml\" x=\"300\" y=\"118\"\n"
+            "       w=\"60\" text=\"在线\" kind=\"mint\"/>\n"
+            "  <use src=\"components/panel.bum.xml\" x=\"16\" y=\"170\" w=\"320\" title=\"面板标题\">\n"
+            "    <span id=\"inner\" style=\"height:20; color:#66768C; font-size:12\">面板内容</span>\n"
+            "  </use>\n"
+            "</body></html></app_window>\n";
+        auto res = CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("std: 标准组件库可编译加载", ParseInto(r, res.layout));
+
+        auto nodeOf = [&](uint16_t id) -> const BinUIRenderer::NodeInfo* {
+            for (const auto& n : r.getNodes()) if (n.id == id) return &n;
+            return nullptr;
+        };
+        auto byText = [&](const char* t) -> uint16_t {
+            for (const auto& n : r.getNodes()) if (n.text == t) return n.id;
+            return 0xFFFF;
+        };
+
+        // 1) titlebar：根标签是 <titlebar>（拖动窗口靠它），参数与按钮 id 都生效
+        const uint16_t titleId = byText("标题A");
+        const auto* titleNode = nodeOf(titleId);
+        TEST("std: titlebar 标题取到参数", titleNode != nullptr);
+        TEST("std: titlebar 说明文字取到参数", byText("提示B") != 0xFFFF);
+        if (titleNode) {
+            const auto* tb = nodeOf(titleNode->parentId);
+            TEST("std: titlebar 根带 BINUI_TITLEBAR（窗口拖动）",
+                 tb != nullptr && (tb->flags & BINUI_TITLEBAR));
+        }
+        TEST("std: titlebar 按钮 id 可定制",
+             r.findNodeByName("imin") != 0 && r.findNodeByName("iclose") != 0);
+        TEST("std: titlebar 关闭按钮文案是 ✕", byText("\xE2\x9C\x95") != 0xFFFF);
+
+        // 2) button：根标签搬过来 → 真的是 BINUI_BUTTON（可点击、居中、粗体）
+        const uint16_t btnId = r.findNodeByName("btn");
+        const auto* btn = nodeOf(btnId);
+        TEST("std: button 根是 BINUI_BUTTON", btn && btn->type == BINUI_BUTTON);
+        TEST("std: button 可交互（可点击）", btn && (btn->flags & BINUI_INTERACTIVE));
+        TEST("std: button kind=secondary 生效", btn && btn->color == 0xFFEEF3FAu);
+        TEST("std: button 文案取到参数", btn && btn->text == "次按钮");
+
+        // 3) field：根是 <input> → 保住占位符语义
+        const uint16_t fldId = r.findNodeByName("fld");
+        const auto* fld = nodeOf(fldId);
+        TEST("std: field 根是 BINUI_INPUT", fld && fld->type == BINUI_INPUT);
+        TEST("std: field 占位符是占位符而不是真实值", r.isPlaceholder(fldId));
+        TEST("std: field 占位符文案取到参数", fld && fld->text == "请输入关键字");
+
+        // 4) badge：根是 <span> → LABEL（居中、无 LIST 的 12px 内缩）
+        const uint16_t bdgId = r.findNodeByName("bdg");
+        const auto* bdg = nodeOf(bdgId);
+        TEST("std: badge 根是 BINUI_LABEL", bdg && bdg->type == BINUI_LABEL);
+        TEST("std: badge kind=mint 生效", bdg && bdg->color == 0xFFE3F7F1u);
+
+        // 5) panel：宿主子元素落进组件根容器（无插槽语法下的"内容"）
+        const uint16_t innerId = r.findNodeByName("inner");
+        const auto* inner = nodeOf(innerId);
+        const uint16_t panelTitleId = byText("面板标题");
+        const auto* panelTitle = nodeOf(panelTitleId);
+        TEST("std: panel 标题取到参数", panelTitle != nullptr);
+        TEST("std: panel 里的宿主子元素挂在同一父节点",
+             inner && panelTitle && inner->parentId == panelTitle->parentId);
+    }
+
     printf("\n=== Results: %d tests failed ===\n", failed);
     return failed > 0 ? 1 : 0;
 }
