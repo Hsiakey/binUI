@@ -66,6 +66,10 @@ public:
     // 同上，bold=true 时用 FreeType 的合成加粗（FT_GlyphSlot_Embolden）：
     // 加粗笔画并同步加宽 advance，所以"测宽"与"绘制"始终一致。
     bool renderGlyph(const std::string& face, float size, uint32_t cp, bool bold, GrayGlyph& out);
+    // italic=true 时用 FreeType 的合成倾斜（FT_GlyphSlot_Oblique）：只切变轮廓，
+    // 不改 advance —— 所以测宽不受影响，"测宽/绘制"仍然一致。
+    bool renderGlyph(const std::string& face, float size, uint32_t cp, bool bold, bool italic,
+                     GrayGlyph& out);
 
     // 彩色渲染整个簇（内部经 HarfBuzz 做 GSUB 合体/旗帜/肤色等）；
     // false = 该簇无 COLR 层（调用方降级灰度）

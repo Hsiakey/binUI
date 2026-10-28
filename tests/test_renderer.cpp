@@ -887,6 +887,64 @@ int main() {
         }
     }
 
-    printf("\n=== Results: %d tests failed ===\n", failed);
+        // ---- v14：disabled / readonly / placeholder 的运行时语义 ----
+    {
+        const char* ui =
+            "<app_window width=\"400\" height=\"300\" bg=\"#101010\"><html><body>\n"
+            "  <button id=\"on\" style=\"position:absolute;left:10;top:10;width:100;height:40\">ON</button>\n"
+            "  <button id=\"off\" disabled style=\"position:absolute;left:10;top:60;width:100;height:40\">OFF</button>\n"
+            "  <input id=\"ph\" type=\"text\" placeholder=\"提示\" style=\"position:absolute;left:10;top:110;width:200;height:40\">\n"
+            "  <input id=\"ro\" type=\"text\" readonly value=\"只读\" style=\"position:absolute;left:10;top:160;width:200;height:40\">\n"
+            "</body></html></app_window>\n";
+        auto res = CompileBinUIEx(ui);
+        BinUIRenderer r;
+        TEST("v14r: 布局可解析", r.loadLayout(res.layout.data(), res.layout.size()));
+        const uint16_t on = r.findNodeByName("on");
+        const uint16_t off = r.findNodeByName("off");
+        const uint16_t phNode = r.findNodeByName("ph");
+        const uint16_t ro = r.findNodeByName("ro");
+
+        auto rectOf = [&](uint16_t id, float& cx, float& cy) {
+            for (const auto& n : r.getNodes())
+                if (n.id == id) { cx = n.x + n.width * 0.5f; cy = n.y + n.height * 0.5f; return true; }
+            return false;
+        };
+        float cx = 0, cy = 0;
+        TEST("v14r: 正常按钮可命中", rectOf(on, cx, cy) && r.hitTest(cx, cy) == (int)on);
+        TEST("v14r: 禁用按钮不可命中", rectOf(off, cx, cy) && r.hitTest(cx, cy) == -1);
+        TEST("v14r: 点禁用按钮不产生按下", (r.press(cx, cy), r.pressedNode() < 0));
+        // Tab 链跳过禁用控件
+        int first = r.cycleKeyboardFocus(true);
+        int second = r.cycleKeyboardFocus(true);
+        TEST("v14r: Tab 链跳过禁用控件", first == (int)on && second != (int)off);
+
+        // placeholder：聚焦后编辑值是空串（而不是提示语）
+        r.setKeyboardFocus(0);
+        r.focus(phNode);
+        TEST("v14r: 占位符聚焦后编辑值为空", r.isEditing() && r.edit().value.empty());
+        TEST("v14r: 占位符输入后标记撤销", (r.insertText("hi"), r.edit().value == "hi"));
+        r.blur();
+        TEST("v14r: 输入后变成真实值", !r.isPlaceholder(phNode) && r.inputValue(phNode) == "hi");
+
+        // 失焦留空：占位符保留（换一份干净布局，上一段已经把标记消费掉了）
+        BinUIRenderer r2;
+        TEST("v14r: 第二份布局可解析", r2.loadLayout(res.layout.data(), res.layout.size()));
+        const uint16_t ph2 = r2.findNodeByName("ph");
+        r2.focus(ph2);
+        r2.blur();
+        TEST("v14r: 空输入失焦后仍是占位状态",
+             r2.isPlaceholder(ph2) && r2.inputValue(ph2).empty() &&
+             !r2.getNodes().empty());
+
+        // readonly：可聚焦，但不能改
+        r.focus(ro);
+        TEST("v14r: 只读可聚焦", r.isEditing() && r.edit().nodeId == ro);
+        TEST("v14r: 只读拒绝插入", !r.insertText("x"));
+        TEST("v14r: 只读拒绝退格", !r.backspace());
+        TEST("v14r: 只读不画光标", !r.isFocused(ro));
+        r.blur();
+    }
+
+printf("\n=== Results: %d tests failed ===\n", failed);
     return failed > 0 ? 1 : 0;
 }

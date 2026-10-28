@@ -65,6 +65,19 @@ std::wstring Utf8ToWide(const std::string& s) {
     return w;
 }
 
+// GDI 的 DrawTextW 只把 CRLF 当换行序列：裸 '\n' 会被当成空白吞掉
+// （<br> 与 <pre> 在布局里存的是单个 '\n'，不补 '\r' 就整段连成一行）。
+std::wstring LfToCrlf(const std::wstring& s) {
+    if (s.find(L'\n') == std::wstring::npos) return s;
+    std::wstring out;
+    out.reserve(s.size() + 8);
+    for (size_t i = 0; i < s.size(); i++) {
+        if (s[i] == L'\n' && (i == 0 || s[i - 1] != L'\r')) out += L'\r';
+        out += s[i];
+    }
+    return out;
+}
+
 std::string CodepointToUtf8(unsigned cp) {
     std::string s;
     if (cp < 0x80) {
@@ -728,7 +741,9 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         const BinUIPaintNode* pt = renderer.paintOf(node.id);
         const bool hasBorder = pt && (pt->flags & PAINT_BORDER);
         const bool hasGrad = pt && (pt->flags & PAINT_GRADIENT);
-        if (((dc >> 24) & 0xFF) == 0 && !hasBorder && !hasGrad) {
+        // 全透明：GDI 没有 alpha 合成，画出来是一块黑，所以整块跳过。
+        // 但有文字的节点必须画（<pre>/<div>文字</div> 这种没底色的容器否则整个消失）。
+        if (((dc >> 24) & 0xFF) == 0 && !hasBorder && !hasGrad && node.text.empty()) {
             // GDI 没有 alpha 合成：全透明节点画出来是一块黑。图片/视频帧例外（只看自身像素）
             const bool drawsOwnPixels =
                 (node.type == BINUI_IMAGE && renderer.getImage(node.imageIndex) != nullptr) ||
@@ -758,6 +773,13 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 if ((pbg >> 24) & 0xFF) underBg = pbg | 0xFF000000u;
             }
         }
+        // v14：禁用/斜体/占位符。GDI 画布没有 alpha 合成，所以"淡"用与底色混合近似。
+        const bool disabled = renderer.isDisabled(node.id);
+        const bool italic = pt && (pt->textFlags & TEXT_ITALIC) != 0;
+        const bool placeholder = pt && (pt->textFlags & TEXT_PLACEHOLDER) != 0;
+        auto fadeOver = [&](uint32_t c, int alpha) -> uint32_t {
+            return BlendOver((c & 0x00FFFFFFu) | ((uint32_t)alpha << 24), underBg);
+        };
         auto fillNodeBg = [&](uint32_t color, float radius) {
             binui::PaintBand bands[binui::kMaxPaintBands];
             const int bn = binui::BuildFillBands(pt, nfx, nfy, nfw, nfh, radius, color, bands);
@@ -799,7 +821,8 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             case BINUI_LABEL: {
                 // 文字色 / 字重 / 行高 / 下划线（v13 扩展绘制段）
                 const bool paintText = pt && (pt->flags & PAINT_TEXT_COLOR);
-                const uint32_t tcol = paintText ? pt->textColor : node.color;
+                uint32_t tcol = paintText ? pt->textColor : node.color;
+                if (disabled) tcol = fadeOver(tcol, 140);   // 55% 淡
                 const int fw = binui::PaintWeightOf(pt);
                 // LABEL 也可以有底色了（作者显式给底色时 node.color 存的是底色）
                 if (hasGrad || (paintText && ((node.color >> 24) & 0xFF)))
@@ -808,13 +831,13 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 const int fs = node.fontSize ? node.fontSize : 14;
                 SetTextColor(hdc, RGB((tcol >> 16) & 0xFF, (tcol >> 8) & 0xFF, tcol & 0xFF));
                 HFONT font = CreateFontA(
-                    fs, 0, 0, 0, fw >= 600 ? FW_BOLD : FW_NORMAL,
-                    FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                    -fs, 0, 0, 0, fw >= 600 ? FW_BOLD : FW_NORMAL,
+                    italic ? TRUE : FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                     OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                     gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                 HGDIOBJ oldFont = SelectObject(hdc, font);
                 RECT tr = { x + pad, y, x + nw - pad, y + nh };
-                std::wstring wtext = Utf8ToWide(node.text);
+                std::wstring wtext = LfToCrlf(Utf8ToWide(node.text));
                 const UINT halign = (node.flags & BINUI_TEXT_CENTER) ? DT_CENTER
                                   : (node.flags & BINUI_TEXT_RIGHT) ? DT_RIGHT : DT_LEFT;
                 // 含 '\n'（<br>）：GDI 的 DT_VCENTER 只能配 SINGLELINE，多行改为顶部对齐逐行；
@@ -825,7 +848,9 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 } else {
                     RECT mr = { 0, 0, 0, 10 };
                     DrawTextW(hdc, wtext.c_str(), -1, &mr, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
-                    if (mr.right > nw - 2 * pad)
+                    // 只有"明显放不下"（超宽 20% 以上）才换行：GPU 后端画单行文本从不换行，
+                    // 阈值取松一点可以兼顾"长段落别被裁掉"和"窄盒子里的短标签别乱折行"
+                    if (mr.right > (nw - 2 * pad) * 1.2f)
                         DrawTextW(hdc, wtext.c_str(), -1, &tr, halign | DT_WORDBREAK);
                     else
                         DrawTextW(hdc, wtext.c_str(), -1, &tr, halign | DT_VCENTER | DT_SINGLELINE);
@@ -874,21 +899,22 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 break;
             }
             case BINUI_BUTTON: {
-                fillNodeBg(dc, (float)node.radius);
+                fillNodeBg(disabled ? fadeOver(dc, 140) : dc, (float)node.radius);
                 if (!node.text.empty()) {
-                    const uint32_t tcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
-                                              ? pt->textColor : 0xFFFFFFFFu;
+                    uint32_t tcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
+                                          ? pt->textColor : 0xFFFFFFFFu;
+                    if (disabled) tcol = fadeOver(tcol, 140);
                     SetTextColor(hdc, RGB((tcol >> 16) & 0xFF, (tcol >> 8) & 0xFF, tcol & 0xFF));
                     HFONT font = CreateFontA(
-                        node.fontSize ? node.fontSize : 14, 0, 0, 0, FW_BOLD,
-                        FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                        -(node.fontSize ? node.fontSize : 14), 0, 0, 0, FW_BOLD,
+                        italic ? TRUE : FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                         gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                     HGDIOBJ oldFont = SelectObject(hdc, font);
                     RECT tr = { x + pad, y, x + nw - pad, y + nh };
                     // 文本是 UTF-8：必须转宽字符用 DrawTextW。早先用 DrawTextA，
                     // 中文会被按系统代码页解释成乱码（叠加成一团）。
-                    std::wstring wtext = Utf8ToWide(node.text);
+                    std::wstring wtext = LfToCrlf(Utf8ToWide(node.text));
                     DrawTextW(hdc, wtext.c_str(), -1, &tr,
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                     SelectObject(hdc, oldFont);
@@ -918,15 +944,19 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
 
                 if (!text.empty()) {
                     HFONT font = CreateFontA(
-                        node.fontSize ? node.fontSize : 14, 0, 0, 0, FW_NORMAL,
-                        FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                        -(node.fontSize ? node.fontSize : 14), 0, 0, 0, FW_NORMAL,
+                        italic ? TRUE : FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                         gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                     HGDIOBJ oldFont = SelectObject(hdc, font);
                     RECT tr = { x + pad + 4, y, x + nw - pad - 4, y + nh };
 
                     std::wstring wtext = Utf8ToWide(text);
-                    SetTextColor(hdc, RGB(0xBB, 0x86, 0xFC));
+                    // 占位符画 45% 淡、禁用再压到 55%（GDI 无 alpha，按与底色混合近似）
+                    uint32_t inCol = 0xFFBB86FCu;
+                    if (placeholder && !editing) inCol = fadeOver(inCol, 140);
+                    if (disabled) inCol = fadeOver(inCol, 140);
+                    SetTextColor(hdc, RGB((inCol >> 16) & 0xFF, (inCol >> 8) & 0xFF, inCol & 0xFF));
                     DrawTextW(hdc, wtext.c_str(), -1, &tr,
                         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
@@ -962,23 +992,24 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 break;
             }
             case BINUI_LIST: {
-                fillNodeBg(dc, (float)node.radius);
+                fillNodeBg(disabled ? fadeOver(dc, 140) : dc, (float)node.radius);
 
                 if (!node.text.empty()) {
-                    const uint32_t tcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
+                    uint32_t tcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
                                               ? pt->textColor : 0xFFFFFFFFu;
+                    if (disabled) tcol = fadeOver(tcol, 140);
                     SetTextColor(hdc, RGB((tcol >> 16) & 0xFF, (tcol >> 8) & 0xFF, tcol & 0xFF));
                     const int fw = binui::PaintWeightOf(pt);
-                    HFONT font = CreateFontA(node.fontSize ? node.fontSize : 14, 0, 0, 0,
+                    HFONT font = CreateFontA(-(node.fontSize ? node.fontSize : 14), 0, 0, 0,
                         fw >= 600 ? FW_BOLD : FW_NORMAL,
-                        FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                        italic ? TRUE : FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                         gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                     HGDIOBJ oldFont = SelectObject(hdc, font);
                     RECT tr = { x + pad + 12, y + pad + 8, x + nw - pad - 12, y + nh - pad - 8 };
                     const UINT halign = (node.flags & BINUI_TEXT_CENTER) ? DT_CENTER
                                       : (node.flags & BINUI_TEXT_RIGHT) ? DT_RIGHT : DT_LEFT;
-                    std::wstring wtext = Utf8ToWide(node.text);
+                    std::wstring wtext = LfToCrlf(Utf8ToWide(node.text));
                     DrawTextW(hdc, wtext.c_str(), -1, &tr,
                         halign | DT_WORDBREAK);   // '\n'（来自 <br>）同样断行
                     SelectObject(hdc, oldFont);
@@ -1010,7 +1041,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                         gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                     HGDIOBJ oldFont = SelectObject(hdc, font);
-                    std::wstring wtext = Utf8ToWide(node.text);
+                    std::wstring wtext = LfToCrlf(Utf8ToWide(node.text));
                     DrawTextW(hdc, wtext.c_str(), -1, &rc,
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                     SelectObject(hdc, oldFont);

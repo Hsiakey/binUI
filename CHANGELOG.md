@@ -6,6 +6,64 @@
 
 ## [Unreleased]
 
+### 新增 — 元素语义与默认样式：UA 样式表、行内标签、表单属性（【格式 v14】）
+
+> 上一轮把"格式"和"CSS 表达力"补完了；这一轮补的是**元素这一侧**。体检时发现的共同
+> 根因是两条：① 没有"元素 → 默认样式"这一层（浏览器 UA 样式表的等价物），于是 `<u>`
+> `<mark>` `<hr>` `<b>` 这些标签写了等于没写；② 表单属性（`placeholder` / `value` /
+> `disabled` / `readonly` / `checked` / `hidden`）被**静默忽略或错误消费**，而且整份 HTML
+> 编译下来一条警告都没有 —— 作者没有任何线索。
+
+- **【格式 v14】`BinUIPaintNode` 补 `textFlags`**（40 → 44 字节）：斜体、占位符、只读、
+  初始勾选。四个都是"少数节点才需要"的布尔量，跟着稀疏的扩展绘制段走，比往定长
+  `BinUINode` 里塞字段便宜；`flags` 的 16 位已经用满。
+- **内置 UA 默认样式表**（最低优先级的级联层，作者任何声明都覆盖它）：
+  `h1~h6` 加粗 + 字号梯度 28/24/20/18/16/14，`b/strong/th` 700，`i/em/cite/var/dfn` 斜体，
+  `u/ins` 下划线，`s/del/strike` 删除线，`mark` 浅黄底深字，`hr` 一条 2px 中灰线，
+  `a` 下划线，`pre` 保留原始换行与缩进，`sub/sup` 0.75em 行内小字（**无基线偏移**）。
+- **默认文字色随根底色自适应**：根底色亮度 > 0.5 取 `#1A1A1A`，否则白。之前默认写死白色，
+  而根底色默认也是白 —— **不写 `color` 的浅色页面整页白底白字**，只有到处写 `color`
+  才看得见；深色主题亮度低，观感不变。
+- **行内标签不再掉进块级分支**：`u/s/strike/del/ins/mark/code/kbd/samp/var/abbr/cite/q/`
+  `dfn/time/sub/sup/dt/dd/figcaption/summary/caption` 等补进 `BINUI_LABEL` 白名单
+  （以前默认落到 `BINUI_LIST`，把一句话里的几个字打成独立整行块）。
+- **`font-style: italic`**：FreeType `FT_GlyphSlot_Oblique` 合成倾斜（只切变轮廓、不改
+  advance，所以测宽/绘制仍一致），GDI 走 `CreateFontA` 的 italic 参数，三端一致。
+- **`white-space: pre|pre-wrap`**：解析阶段同时保留"折叠文本"与"原样文本"，按 CSS 取用；
+  `<pre>` 由 UA 样式给出 `white-space:pre`。以前代码块的缩进被当普通空白折叠掉。
+- **表单属性真生效**：
+  `placeholder` 列为占位符（55% 色绘制、首次输入清空、失焦留空恢复，
+  `renderer.inputValue()` 取真实值）；`value` 只在文本类 `input` 上是真实值；
+  `disabled` → `BINUI_DISABLED`（不进焦点链、不响应悬停/点击、拒绝编辑、三端 55% 淡）；
+  `readonly` → 可聚焦可选中但不显示光标、拒绝内容变更；
+  `<input type=hidden>` 不生成节点；`checkbox/radio` 编成 18×18 方块/圆点，
+  `checked` 播种为运行时勾选态；`<a href>` 变成可命中节点；`<img alt>` 写进文本，
+  图片加载失败时后端居中显示。
+- **HTML 标签/属性体检**：未识别的标签、"写得进去但没实现"的属性（`name`/`for`/
+  `required`/`maxlength`/`pattern`/`tabindex`/`target`/`rel`…）各警告一次；`<table>` /
+  `<select>` / `<textarea>` / `<details>` / `<progress>` 这类"认得但只能糊弄"的标签会
+  明说它会变成什么。HTML 模式生效，XML 允许自定义标签不查。
+
+### 修复
+
+- **GDI 后端的字号比 GPU 后端小一号**：`CreateFontA` 的高度传了正值（字符单元高度，
+  含内部行距），比 em 小约 15%，同一份 UI 在 GDI 里字号/换行位置和 GL/D3D 对不上。
+  改成负值（em 高度，与 `FT_Set_Pixel_Sizes` 同口径）。
+- **GDI 后端把窄盒子里的短标签折成两行**：单行文本只要超宽就走 `DT_WORDBREAK`，而 GPU
+  后端画单行文本从不换行。改成超宽 20% 以上才换行。
+- **GDI 后端的裸 `'\n'` 不换行**：`DrawTextW` 只认 CRLF，`<br>` / `<pre>` 存的都是单个
+  `'\n'`，整段会连成一行。绘制前统一补 `'\r'`。
+- **GDI 后端把"透明 + 有文字"的节点整块跳过**：`<pre>` / `<div>文字</div>`（没有底色）
+  直接消失。跳过条件补上"没有文本"。
+- **`<hr>` 从 v13 起完全不可见**：容器默认透明化的副作用 —— 既没高度也没颜色。
+- **`placeholder` 被当成真实文本**：点进去就能编辑提示语、退格删掉还触发 `INPUT`。
+- **`value` 在 `checkbox`/`radio` 上被画成可见文字**；`<input type=hidden>` 变成可见输入框。
+- **`examples/videodemo` 用 `name=` 取节点**（`findNodeByName` 只认 `id`），改 `id=`。
+- **`<use>` 的参数键被当成属性挂到替换节点上**：`<use label="…">` 会在结果里留下
+  一个无效的 `label` 属性。现在只挂"有语义的属性"（宽高/样式/类等）。
+- **`examples/components` / `cssshow` / `svgdemo` 的文字盒子按新字号重排**（正文变大后
+  几处说明文字被裁掉）。
+
 ### 新增 — 元素与 CSS：底色/文字色分家、边框、渐变、字重、行高（【格式 v13】）
 
 - **【格式 v13】扩展绘制段**：`BinUIPaintNode`（40 字节，稀疏）——文字色、四边边框

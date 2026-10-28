@@ -1359,7 +1359,7 @@ int main() {
         auto res = CompileBinUIEx(html);
         BinUIRenderer r;
         TEST("v13: 布局可解析", ParseInto(r, res.layout));
-        TEST("v13: 版本号 13", BINUI_VERSION == 13);
+        TEST("v13: 版本号 >= 13", BINUI_VERSION >= 13);
 
         auto byId = [&](const char* name) -> uint16_t { return r.findNodeByName(name); };
         auto nodeOf = [&](uint16_t id) -> const BinUIRenderer::NodeInfo* {
@@ -1491,6 +1491,116 @@ int main() {
         TEST("sel: 后续兄弟不命中首项", textColor("J") != 0xFF00AA00u);
         TEST("sel: :not() 内层复合类", textColor("B") == 0xFF00AA00u);
     }
+    // ---- v14：UA 默认样式 / 行内语义 / 表单属性 ----
+    {
+        const char* html =
+            "<app_window width=\"800\" height=\"600\" bg=\"#FFFFFF\"><html><body>\n"
+            "  <b id=\"b1\">粗体</b>\n"
+            "  <i id=\"i1\">斜体</i>\n"
+            "  <u id=\"u1\">下划线</u>\n"
+            "  <s id=\"s1\">删除</s>\n"
+            "  <mark id=\"m1\">高亮</mark>\n"
+            "  <h2 id=\"h2\">标题</h2>\n"
+            "  <hr id=\"hr1\">\n"
+            "  <pre id=\"pre1\">a\nb\nc</pre>\n"
+            "  <input id=\"ph\" type=\"text\" placeholder=\"请输入\">\n"
+            "  <input id=\"val\" type=\"text\" value=\"真实值\">\n"
+            "  <input id=\"cb\" type=\"checkbox\" checked>\n"
+            "  <input id=\"hid\" type=\"hidden\" value=\"x\">\n"
+            "  <button id=\"btn\" disabled>禁用</button>\n"
+            "  <input id=\"ro\" type=\"text\" readonly value=\"只读\">\n"
+            "  <a id=\"lnk\" href=\"https://example.com\">链接</a>\n"
+            "  <img id=\"im\" alt=\"替代文字\">\n"
+            "</body></html></app_window>\n";
+        auto res = CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("v14: 布局可解析", ParseInto(r, res.layout));
+        TEST("v14: 版本号 14", BINUI_VERSION == 14);
+
+        auto byId = [&](const char* name) -> uint16_t { return r.findNodeByName(name); };
+        auto nodeOf = [&](uint16_t id) -> const BinUIRenderer::NodeInfo* {
+            for (const auto& n : r.getNodes()) if (n.id == id) return &n;
+            return nullptr;
+        };
+        auto paintOf = [&](const char* name) -> const BinUIPaintNode* {
+            return r.paintOf(byId(name));
+        };
+
+        // <b> 加粗（以前只是普通文字）
+        const BinUIPaintNode* pb = paintOf("b1");
+        TEST("v14: <b> 走 700 字重", pb && (pb->flags & PAINT_WEIGHT) && pb->weight == 7);
+        // <i> 斜体
+        const BinUIPaintNode* pi = paintOf("i1");
+        TEST("v14: <i> 斜体标记", pi && (pi->textFlags & TEXT_ITALIC));
+        // <h2> 默认加粗
+        const BinUIPaintNode* ph2 = paintOf("h2");
+        TEST("v14: <h2> 默认加粗", ph2 && (ph2->flags & PAINT_WEIGHT) && ph2->weight == 7);
+        // <u>/<s> 是行内 LABEL（以前掉到 LIST 变块级），带装饰线
+        const auto* u1 = nodeOf(byId("u1"));
+        const auto* s1 = nodeOf(byId("s1"));
+        TEST("v14: <u> 是 LABEL 不是块级容器", u1 && u1->type == BINUI_LABEL);
+        TEST("v14: <u> 带下划线", paintOf("u1") && (paintOf("u1")->flags & PAINT_UNDERLINE));
+        TEST("v14: <s> 是 LABEL", s1 && s1->type == BINUI_LABEL);
+        TEST("v14: <s> 带删除线", paintOf("s1") && (paintOf("s1")->flags & PAINT_STRIKE));
+        // <mark> 黄底深字
+        const auto* m1 = nodeOf(byId("m1"));
+        TEST("v14: <mark> 有黄底", m1 && ((m1->color >> 24) & 0xFF) && m1->color != 0xFFFFFFFFu);
+        TEST("v14: <mark> 深色文字", paintOf("m1") &&
+             (paintOf("m1")->flags & PAINT_TEXT_COLOR) && paintOf("m1")->textColor == 0xFF1A1A1Au);
+        // <hr> 有高度和底色（v13 容器透明化后曾经完全不可见）
+        const auto* hr = nodeOf(byId("hr1"));
+        TEST("v14: <hr> 有可见高度", hr && hr->height >= 1.0f && hr->height <= 4.0f);
+        TEST("v14: <hr> 有不透明底色", hr && ((hr->color >> 24) & 0xFF) == 0xFF);
+        // <pre> 保留换行
+        const auto* pre = nodeOf(byId("pre1"));
+        TEST("v14: <pre> 保留原始换行", pre && pre->text.find('\n') != std::string::npos);
+
+        // placeholder 不再是真实值
+        const uint16_t phId = byId("ph");
+        const auto* ph = nodeOf(phId);
+        TEST("v14: placeholder 文本仍可显示", ph && ph->text == "请输入");
+        TEST("v14: placeholder 有占位标记", r.isPlaceholder(phId));
+        TEST("v14: placeholder 的真实值为空", r.inputValue(phId).empty());
+        // value 相反
+        const uint16_t valId = byId("val");
+        TEST("v14: value 是真实值", !r.isPlaceholder(valId) && r.inputValue(valId) == "真实值");
+
+        // checkbox：18x18 方块 + 初始勾选播种
+        const uint16_t cbId = byId("cb");
+        const auto* cb = nodeOf(cbId);
+        TEST("v14: checkbox 是小方块", cb && cb->width <= 20.0f && cb->height <= 20.0f);
+        TEST("v14: checkbox checked 播种进渲染器", r.isNodeChecked(cbId));
+        // hidden 不生成节点
+        TEST("v14: input type=hidden 不生成节点", byId("hid") == 0);
+        // disabled / readonly
+        TEST("v14: button disabled", r.isDisabled(byId("btn")));
+        TEST("v14: input readonly", r.isReadonly(byId("ro")));
+        TEST("v14: readonly 不是 disabled", !r.isDisabled(byId("ro")));
+        // <a href> 可点
+        const uint16_t lnkId = byId("lnk");
+        const auto* lnk = nodeOf(lnkId);
+        TEST("v14: <a href> 可命中", lnk &&
+             r.hitTest(lnk->x + lnk->width * 0.5f, lnk->y + lnk->height * 0.5f) == (int)lnkId);
+        // img alt 兜底
+        const auto* im = nodeOf(byId("im"));
+        TEST("v14: img alt 写进文本（资源缺失时显示）", im && im->text == "替代文字");
+
+        // 默认文字色随根底色自适应：白底 → 深字
+        const auto* bold1 = nodeOf(byId("b1"));
+        TEST("v14: 白底默认深色文字", bold1 && bold1->color == 0xFF1A1A1Au);
+
+        // 深底 → 白字（现有暗色主题观感不变）
+        auto darkRes = CompileBinUIEx(
+            "<app_window width=\"200\" height=\"100\" bg=\"#0E0E13\"><html><body>"
+            "<span id=\"t\">x</span></body></html></app_window>");
+        BinUIRenderer rd;
+        TEST("v14: 深底布局可解析", ParseInto(rd, darkRes.layout));
+        const uint16_t tid = rd.findNodeByName("t");
+        const BinUIRenderer::NodeInfo* tn = nullptr;
+        for (const auto& n : rd.getNodes()) if (n.id == tid) tn = &n;
+        TEST("v14: 深底默认白色文字", tn && tn->color == 0xFFFFFFFFu);
+    }
+
     printf("\n=== Results: %d tests failed ===\n", failed);
     return failed > 0 ? 1 : 0;
 }

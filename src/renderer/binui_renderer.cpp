@@ -549,6 +549,11 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         }
     }
 
+    // v14：<input checked> 编译期标记 → 播种运行时勾选状态（:checked 状态样式随之生效）
+    checkedNodes_.clear();
+    for (const auto& pn : paints_)
+        if (pn.textFlags & TEXT_CHECKED) checkedNodes_.insert(pn.nodeId);
+
     nameToId_.clear();
     if (const uint8_t* np = sectionAt(7)) {
         uint32_t nbytes = 0;
@@ -579,6 +584,19 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
     for (const auto& d : animDefs_)
         startKeyframeAnim(d.nodeId, d);
     stepAnimations(); // 预计算初始可视结果（首帧即从关键帧起点绘制）
+
+    // 初始状态样式：<input checked> 这类"加载时即成立"的状态直接把目标值落库
+    // （走 refreshNodeStyle 会启动过渡，变成开屏淡入；这里只写目标，不动过渡通道）
+    for (auto& kv : stateCSS_) {
+        const StateStyle* st = activeStateStyle(kv.first);
+        if (!st) continue;
+        auto nit = nodeIndexById_.find(kv.first);
+        if (nit == nodeIndexById_.end()) continue;
+        AnimRuntime& rt = animState_[kv.first];
+        if (st->fields & BINUI_STF_COLOR)  rt.colorTargets[ANIM_BG_COLOR] = st->color;
+        if (st->fields & BINUI_STF_SCALE)  rt.floatTargets[ANIM_SCALE] = st->scale;
+        if (st->fields & BINUI_STF_RADIUS) rt.floatTargets[ANIM_RADIUS] = st->radius;
+    }
 
     // ui_scale="proportional"：记录设计尺寸与坐标快照；relayout 改为等比缩放（不重排）
     proportionalScale_ = winDesc_.scaleProportional();
@@ -654,6 +672,9 @@ void BinUIRenderer::loadResources(const std::unordered_map<std::string, std::vec
 void BinUIRenderer::setText(uint16_t nodeId, const std::string& text) {
     auto it = nodeIndexById_.find(nodeId);
     if (it == nodeIndexById_.end()) return;
+    // 作者/setText 给的是真实值：占位符标记随之撤掉
+    auto pit = paintIdx_.find(nodeId);
+    if (pit != paintIdx_.end()) paints_[pit->second].textFlags &= ~TEXT_PLACEHOLDER;
     nodes_[it->second].text = text;
 }
 
@@ -1082,6 +1103,7 @@ int BinUIRenderer::hitTestEx(float x, float y, bool allowStyled, uint8_t state) 
         const size_t i = order[oi];
         const auto& node = nodes_[i];
         if (!(node.flags & BINUI_VISIBLE)) continue;
+        if (node.flags & BINUI_DISABLED) continue;   // v14：禁用节点不接受任何指针/焦点命中
         bool hittable = (node.flags & BINUI_INTERACTIVE) != 0;
         if (!hittable && allowStyled) hittable = stateStyle(node.id, state) != nullptr;
         if (!hittable) continue;
@@ -1141,6 +1163,19 @@ bool BinUIRenderer::isScrollable(uint16_t nodeId) const {
 // 用户可滚动 = SCROLLABLE 且不是 overflow:hidden 的"只裁剪"容器
 bool BinUIRenderer::isUserScrollable(uint16_t nodeId) const {
     return isScrollable(nodeId) && clipOnly_.count(nodeId) == 0;
+}
+
+// 禁用（v14）：不进焦点链、不响应悬停/点击/编辑，绘制时后端压到 55% 淡
+bool BinUIRenderer::isDisabled(uint16_t nodeId) const {
+    auto it = nodeIndexById_.find(nodeId);
+    return it != nodeIndexById_.end() && (nodes_[it->second].flags & BINUI_DISABLED) != 0;
+}
+
+// 输入框的真实值：占位符状态下为空串（此时 nodes()[i].text 存的是占位符文本）
+std::string BinUIRenderer::inputValue(uint16_t nodeId) const {
+    if (isPlaceholder(nodeId)) return std::string();
+    auto it = nodeIndexById_.find(nodeId);
+    return it == nodeIndexById_.end() ? std::string() : nodes_[it->second].text;
 }
 
 // 节点文字色：扩展绘制段优先，否则回退节点自带颜色（LABEL 的旧约定）
@@ -1283,7 +1318,10 @@ bool BinUIRenderer::scrollBarHitTest(float x, float y) const {
 void BinUIRenderer::applyFocus(int nodeId) {
     auto it = nodeIndexById_.find(static_cast<uint16_t>(nodeId));
     if (it != nodeIndexById_.end() && nodes_[it->second].type == BINUI_INPUT) {
-        if (!isFocused(static_cast<uint16_t>(nodeId))) focus(static_cast<uint16_t>(nodeId));
+        // 已在编辑/已聚焦同一节点就不要重复 focus（只读框 isFocused 恒为 false，
+        // 不能拿它当判断，否则每次按下都会重放 FOCUS 事件）
+        if (!(edit_.active && edit_.nodeId == static_cast<uint16_t>(nodeId)))
+            focus(static_cast<uint16_t>(nodeId));
     } else {
         blur();
     }
@@ -1453,6 +1491,7 @@ void BinUIRenderer::setKeyboardFocus(int nodeId) {
         commitFocus(-1);
         return;
     }
+    if (nodes_[it->second].flags & BINUI_DISABLED) { commitFocus(-1); return; }  // v14
     commitFocus(nodeId);
 }
 
@@ -1468,7 +1507,7 @@ int BinUIRenderer::moveKeyboardFocus(KeyDirection dir) {
     // 无焦点：选中第一个可交互节点
     if (!cur) {
         for (const auto& n : nodes_) {
-            if ((n.flags & BINUI_INTERACTIVE) && isNodeVisible(n.id)) {
+            if ((n.flags & BINUI_INTERACTIVE) && !(n.flags & BINUI_DISABLED) && isNodeVisible(n.id)) {
                 commitFocus(n.id);
                 return keyboardId_;
             }
@@ -1489,6 +1528,7 @@ int BinUIRenderer::moveKeyboardFocus(KeyDirection dir) {
     for (const auto& n : nodes_) {
         if (n.id == cur->id) continue;
         if (!(n.flags & BINUI_INTERACTIVE)) continue;
+        if (n.flags & BINUI_DISABLED) continue;
         if (!isNodeVisible(n.id)) continue;
 
         float dx = (n.x + n.width / 2.0f) - cx;
@@ -1531,6 +1571,7 @@ int BinUIRenderer::cycleKeyboardFocus(bool forward) {
     std::vector<uint16_t> order;
     for (const auto& n : nodes_) {
         if (!(n.flags & BINUI_INTERACTIVE)) continue;
+        if (n.flags & BINUI_DISABLED) continue;   // v14：禁用的控件不进 Tab 链
         if (!isNodeVisible(n.id)) continue;
         order.push_back(n.id);
     }
@@ -1793,11 +1834,16 @@ void BinUIRenderer::focus(uint16_t nodeId) {
         blur();
         return;
     }
+    if (nodes_[it->second].flags & BINUI_DISABLED) {   // v14：禁用控件不可聚焦
+        blur();
+        return;
+    }
     if (edit_.active && edit_.nodeId != nodeId) blur();
 
     edit_.active = true;
     edit_.nodeId = nodeId;
-    edit_.value = nodes_[it->second].text;
+    // 占位符不是真实值：进入编辑时从空串开始（否则用户会把提示语当内容改）
+    edit_.value = isPlaceholder(nodeId) ? std::string() : nodes_[it->second].text;
     edit_.caret = edit_.selStart = edit_.value.size();
     refreshNodeStyle(static_cast<int>(nodeId));   // :focus 状态样式（正在编辑也算聚焦）
 
@@ -1821,9 +1867,19 @@ void BinUIRenderer::blur() {
     refreshNodeStyle(static_cast<int>(nodeId));   // 结束编辑：:focus 状态样式回退
 
     auto it = nodeIndexById_.find(nodeId);
-    if (it != nodeIndexById_.end() && nodes_[it->second].text != finalValue) {
-        nodes_[it->second].text = finalValue;
-        changed = true;
+    if (it != nodeIndexById_.end()) {
+        if (isPlaceholder(nodeId)) {
+            // 占位符：留空就保留提示语（不算变更）；真正输入了内容才把提示语换掉
+            if (!finalValue.empty()) {
+                auto pit = paintIdx_.find(nodeId);
+                if (pit != paintIdx_.end()) paints_[pit->second].textFlags &= ~TEXT_PLACEHOLDER;
+                nodes_[it->second].text = finalValue;
+                changed = true;
+            }
+        } else if (nodes_[it->second].text != finalValue) {
+            nodes_[it->second].text = finalValue;
+            changed = true;
+        }
     }
 
     if (changed && eventCallback_) {
@@ -1852,6 +1908,7 @@ void BinUIRenderer::commitTextEvent() {
 
 bool BinUIRenderer::insertText(const std::string& utf8) {
     if (!edit_.active || utf8.empty()) return false;
+    if (isReadonly(edit_.nodeId)) return false;   // v14：只读框拒绝一切内容变更
     auto& v = edit_.value;
     size_t a = std::min(edit_.caret, edit_.selStart);
     size_t b = std::max(edit_.caret, edit_.selStart);
@@ -1864,6 +1921,7 @@ bool BinUIRenderer::insertText(const std::string& utf8) {
 
 bool BinUIRenderer::backspace() {
     if (!edit_.active) return false;
+    if (isReadonly(edit_.nodeId)) return false;
     auto& v = edit_.value;
     size_t a = std::min(edit_.caret, edit_.selStart);
     size_t b = std::max(edit_.caret, edit_.selStart);
@@ -1884,6 +1942,7 @@ bool BinUIRenderer::backspace() {
 
 bool BinUIRenderer::deleteForward() {
     if (!edit_.active) return false;
+    if (isReadonly(edit_.nodeId)) return false;
     auto& v = edit_.value;
     size_t a = std::min(edit_.caret, edit_.selStart);
     size_t b = std::max(edit_.caret, edit_.selStart);

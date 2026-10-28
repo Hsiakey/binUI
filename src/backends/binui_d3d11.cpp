@@ -173,6 +173,7 @@ struct Atlas {
     float size = 0;
     int weight = 400;
     bool cjk = false;
+    bool italic = false;
     std::string face;         // 字体面名（FontEngine 注册名）
     std::unordered_map<uint32_t, Glyph> glyphs;
 };
@@ -570,10 +571,11 @@ struct BinUID3D::Impl {
         return true;
     }
 
-    Atlas* getAtlas(float size, int weight, bool cjk, bool emoji = false) {
+    Atlas* getAtlas(float size, int weight, bool cjk, bool emoji = false, bool italic = false) {
+        // 斜体与粗体一样是"另一张图集"：合成倾斜发生在光栅化阶段，不能共用缓存
         uint64_t key = (static_cast<uint64_t>(std::lround(size)) << 32) |
-                       (static_cast<uint64_t>(weight & 0xFFFF) << 16) | (cjk ? 1 : 0) |
-                       (emoji ? 2u : 0u);
+                       (static_cast<uint64_t>((weight & 0x7FFF) | (italic ? 0x8000 : 0)) << 16) |
+                       (cjk ? 1u : 0u) | (emoji ? 2u : 0u);
         auto it = atlases.find(key);
         if (it != atlases.end()) return it->second;
 
@@ -581,6 +583,7 @@ struct BinUID3D::Impl {
         a->size = size;
         a->weight = weight;
         a->cjk = cjk;
+        a->italic = italic;
         a->cellH = static_cast<int>(std::ceil(size * 1.4f)) + 2;
         a->cellW = a->cellH;
         a->cols = a->sizePx / a->cellW;
@@ -618,7 +621,7 @@ struct BinUID3D::Impl {
         // 字重必须真的进光栅化：以前 weight 只参与图集 key（同一字号被画成同一份
         // 常规字形），CSS 的 font-weight:700 因此完全不生效。bold=true 走 FreeType
         // 的合成加粗（FT_GlyphSlot_Embolden），图集 key 已含 weight，不会串档。
-        bool ok = font.renderGlyph(a->face, a->size, cp, a->weight >= 600, g);
+        bool ok = font.renderGlyph(a->face, a->size, cp, a->weight >= 600, a->italic, g);
         if (!ok || !g.alpha || g.height <= 0) {
             // 空白字形（如空格）：无像素但有有效 advance —— 仍占一格并缓存，
             // 否则 glyphFor 返回 null，测宽/绘制都不推进，单词会挤在一起
@@ -762,12 +765,13 @@ struct BinUID3D::Impl {
         bool color = false;
     };
 
-    ClusterMetric clusterMetric(float size, int weight, const uint32_t* cps, size_t n) {
+    ClusterMetric clusterMetric(float size, int weight, const uint32_t* cps, size_t n,
+                                bool italic = false) {
         ClusterMetric m;
         m.len = EmojiClusterLen(cps, n);
         float fallback = std::ceil(size * 0.6f);
         if (!(m.len > 1 || IsEmojiCp(cps[0]))) {
-            Atlas* a = getAtlas(size, weight, cps[0] >= 0x80);
+            Atlas* a = getAtlas(size, weight, cps[0] >= 0x80, false, italic);
             const Glyph* g = a ? glyphFor(a, cps[0]) : nullptr;
             m.adv = g ? static_cast<float>(g->advW) : fallback;
             return m;
@@ -783,7 +787,7 @@ struct BinUID3D::Impl {
         }
         // 降级：逐码点走灰度图集（emoji 用 Segoe UI Emoji 单色字形）
         for (size_t i = 0; i < m.len; i++) {
-            Atlas* a = getAtlas(size, weight, cps[i] >= 0x80, IsEmojiCp(cps[i]));
+            Atlas* a = getAtlas(size, weight, cps[i] >= 0x80, IsEmojiCp(cps[i]), italic);
             const Glyph* g = a ? glyphFor(a, cps[i]) : nullptr;
             m.adv += g ? static_cast<float>(g->advW) : fallback;
         }
@@ -1321,7 +1325,7 @@ void BinUID3D::strokeRounded(float x, float y, float w, float h, float radius,
     impl_->curSrv = impl_->whiteSrv;
 }
 
-float BinUID3D::textWidth(float size, int weight, const std::string& utf8) {
+float BinUID3D::textWidth(float size, int weight, const std::string& utf8, bool italic) {
     if (!impl_->ready) return 0;
     std::vector<uint32_t> cps;
     Utf8Iter it{ utf8 };
@@ -1329,15 +1333,15 @@ float BinUID3D::textWidth(float size, int weight, const std::string& utf8) {
     float w = 0;
     size_t i = 0;
     while (i < cps.size()) {
-        auto m = impl_->clusterMetric(size, weight, cps.data() + i, cps.size() - i);
+        auto m = impl_->clusterMetric(size, weight, cps.data() + i, cps.size() - i, italic);
         w += m.adv;
         i += m.len;
     }
     return w;
 }
 
-void BinUID3D::fontMetrics(float size, int weight, int& ascent, int& lineHeight) {
-    Atlas* a = impl_->getAtlas(size, weight, false);
+void BinUID3D::fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic) {
+    Atlas* a = impl_->getAtlas(size, weight, false, false, italic);
     if (!a) { ascent = lineHeight = static_cast<int>(size); return; }
     ascent = a->ascent;
     lineHeight = a->ascent + a->descent;
@@ -1345,13 +1349,13 @@ void BinUID3D::fontMetrics(float size, int weight, int& ascent, int& lineHeight)
 
 void BinUID3D::drawText(float x, float y, float size, int weight,
                         const std::string& utf8, uint32_t color,
-                        bool centerH, bool centerV) {
+                        bool centerH, bool centerV, bool italic) {
     if (!impl_->ready || utf8.empty()) return;
-    float w = textWidth(size, weight, utf8);
+    float w = textWidth(size, weight, utf8, italic);
     if (centerH) x -= w / 2;
 
     int ascent = 0, lineH = 0;
-    fontMetrics(size, weight, ascent, lineH);
+    fontMetrics(size, weight, ascent, lineH, italic);
     if (centerV) y -= lineH / 2.0f;
     // 像素对齐：字形位图按整数像素设计，半像素定位会被双线性过滤糊掉；
     // advance 是整数，所以起点/基线取整后整行字形都落在整数像素上
@@ -1367,7 +1371,7 @@ void BinUID3D::drawText(float x, float y, float size, int weight,
     impl_->curSrv = impl_->whiteSrv;
     float cx = x;
     auto drawGray = [&](uint32_t cp) {
-        Atlas* a = impl_->getAtlas(size, weight, cp >= 0x80, IsEmojiCp(cp));
+        Atlas* a = impl_->getAtlas(size, weight, cp >= 0x80, IsEmojiCp(cp), italic);
         if (!a) return;
         const Glyph* g = impl_->glyphFor(a, cp);
         if (!g) return;
@@ -1412,10 +1416,11 @@ void BinUID3D::drawText(float x, float y, float size, int weight,
 
 // 行距取 gWrappedLineStep（0 = 字体自身的行高），由 LABEL 多行绘制按 line-height 设置
 void BinUID3D::drawTextWrapped(float x, float y, float maxW, float size, int weight,
-                               const std::string& utf8, uint32_t color, int align) {
+                               const std::string& utf8, uint32_t color, int align,
+                               bool italic) {
     if (!impl_->ready || utf8.empty()) return;
     int ascent = 0, lineH = 0;
-    fontMetrics(size, weight, ascent, lineH);
+    fontMetrics(size, weight, ascent, lineH, italic);
 
     std::vector<uint32_t> cps;
     Utf8Iter it{ utf8 };
@@ -1429,7 +1434,7 @@ void BinUID3D::drawTextWrapped(float x, float y, float maxW, float size, int wei
         while (end < cps.size()) {
             uint32_t c = cps[end];
             if (c == '\n') break;
-            auto m = impl_->clusterMetric(size, weight, cps.data() + end, cps.size() - end);
+            auto m = impl_->clusterMetric(size, weight, cps.data() + end, cps.size() - end, italic);
             if (end > pos && w + m.adv > maxW) break;
             w += m.adv;
             end += m.len;
@@ -1720,6 +1725,8 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
         const bool hasBorder = pt && (pt->flags & PAINT_BORDER);
         const bool hasGrad = pt && (pt->flags & PAINT_GRADIENT);
         float opacity = renderer.drawOpacity(node.id);
+        // v14 禁用：整块压到 55%（颜色/文字/图片一起淡）
+        if (renderer.isDisabled(node.id)) opacity *= 0.55f;
         float dx = renderer.drawOffsetX(node.id);
         float dy = renderer.drawOffsetY(node.id);
         float scale = renderer.drawScale(node.id);
@@ -1763,6 +1770,9 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
             uint32_t accentCol = ScaleAlpha(0xFFBB86FC, opacity);
             int pad = node.padding;
             int fs = node.fontSize ? node.fontSize : 14;
+            // v14：斜体 / 占位符（三端同一份 textFlags 语义）
+            const bool italic = pt && (pt->textFlags & TEXT_ITALIC) != 0;
+            const bool placeholder = pt && (pt->textFlags & TEXT_PLACEHOLDER) != 0;
 
             // ---- v13 扩展绘制：底色/边框的统一入口 ----
             // 底色可能是渐变（切成一批条带），也可能就是原来那一个矩形；
@@ -1808,7 +1818,7 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                     if (node.text.empty()) break;
 
                     int asc = 0, lh = 0;
-                    gfx.fontMetrics(static_cast<float>(fs), wt, asc, lh);
+                    gfx.fontMetrics(static_cast<float>(fs), wt, asc, lh, italic);
                     const float boxW = static_cast<float>(nw - 2 * pad);
                     const float availW = boxW > 1.0f ? boxW : 1.0f;
                     const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
@@ -1840,7 +1850,8 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                         // 行距交给 drawTextWrapped（见 gWrappedLineStep 的说明）
                         gWrappedLineStep = lineStep;
                         gfx.drawTextWrapped(static_cast<float>(x + pad), top, availW,
-                                            static_cast<float>(fs), wt, node.text, tcol, align);
+                                            static_cast<float>(fs), wt, node.text, tcol, align,
+                                            italic);
                         gWrappedLineStep = 0.0f;
 
                         // 文字装饰线：逐 '\n' 段补画细条（段内自动换行出的子行不追，
@@ -1856,14 +1867,15 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                             }
                         }
                     } else {
-                        const float tw = gfx.textWidth(static_cast<float>(fs), wt, node.text);
+                        const float tw = gfx.textWidth(static_cast<float>(fs), wt, node.text, italic);
                         float tx = static_cast<float>(x + pad);
                         if (align != 0) {
                             tx += (align == 1) ? (availW - tw) / 2.0f : (availW - tw);
                             if (tx < static_cast<float>(x + pad)) tx = static_cast<float>(x + pad);
                         }
                         const float textTop = static_cast<float>(y) + (nh - lh) / 2.0f;
-                        gfx.drawText(tx, textTop + asc, static_cast<float>(fs), wt, node.text, tcol);
+                        gfx.drawText(tx, textTop + asc, static_cast<float>(fs), wt, node.text, tcol,
+                                     false, false, italic);
 
                         // 单行装饰线：用上面算好的文字起点与实测宽度（居中/右对齐后的位置）
                         if (hasRule) drawRules(tx, textTop, tw);
@@ -1877,12 +1889,13 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                         const uint32_t bcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
                                             ? ScaleAlpha(pt->textColor, opacity) : textCol;
                         int bs = node.fontSize ? node.fontSize : 14;
-                        float tw = gfx.textWidth(static_cast<float>(bs), 700, node.text);
+                        float tw = gfx.textWidth(static_cast<float>(bs), 700, node.text, italic);
                         int asc = 0, lh = 0;
-                        gfx.fontMetrics(static_cast<float>(bs), 700, asc, lh);
+                        gfx.fontMetrics(static_cast<float>(bs), 700, asc, lh, italic);
                         float tx = x + pad + (nw - 2 * pad - tw) / 2.0f;
                         float base = y + (nh - lh) / 2.0f + asc;
-                        gfx.drawText(tx, base, static_cast<float>(bs), 700, node.text, bcol);
+                        gfx.drawText(tx, base, static_cast<float>(bs), 700, node.text, bcol,
+                                     false, false, italic);
                     }
                     break;
                 }
@@ -1903,10 +1916,14 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
 
                     if (!text.empty()) {
                         int asc = 0, lh = 0;
-                        gfx.fontMetrics(static_cast<float>(fs), 400, asc, lh);
+                        gfx.fontMetrics(static_cast<float>(fs), 400, asc, lh, italic);
                         float base = static_cast<float>(y) + (nh - lh) / 2.0f + asc;
                         float tx = static_cast<float>(x + pad + 4);
-                        gfx.drawText(tx, base, static_cast<float>(fs), 400, text, accentCol);
+                        // 占位符按 45% 色画（不是真实内容，视觉上要和已输入文本区分开）
+                        const uint32_t inCol = (placeholder && !editing)
+                                                   ? ScaleAlpha(accentCol, 0.55f) : accentCol;
+                        gfx.drawText(tx, base, static_cast<float>(fs), 400, text, inCol,
+                                     false, false, italic);
 
                         if (editing) {
                             size_t a = std::min(caret, selStart);
@@ -1939,7 +1956,7 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                                             static_cast<float>(y + pad + 8),
                                             static_cast<float>(nw - 2 * pad - 24),
                                             static_cast<float>(fs), binui::PaintWeightOf(pt),
-                                            node.text, lcol, align);
+                                            node.text, lcol, align, italic);
                     }
                     break;
                 }

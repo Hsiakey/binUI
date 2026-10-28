@@ -11,7 +11,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v11: 状态样式段（CSS :hover/:active/:focus/:checked 的运行时切换目标）
 // v12: 资源段（imageIndex -> 图片路径，布局自描述）+ 组件引用段（外挂 .bum 的锚点与路径）
 // v13: 扩展绘制段（文字色/四边边框/渐变底色/字重/行高/下划线），见 BinUIPaintNode
-constexpr uint32_t BINUI_VERSION    = 13;
+// v14: 扩展绘制段追加 textFlags（斜体/占位符/只读/初始勾选），BinUIPaintNode 40 -> 44 字节
+constexpr uint32_t BINUI_VERSION    = 14;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -361,6 +362,18 @@ enum BinUIGradDir : uint8_t {
     BINUI_GRAD_D = 2, // to bottom right（CSS 135deg）
 };
 
+// 文字/表单附加标记（v14，BinUIPaintNode::textFlags）。
+// 为什么单独一个字段：PAINT_* 的 16 位已经用满，而这些标记本身也是"少数节点才需要"，
+// 跟扩展绘制段一起做稀疏存储最省。textFlags 为 0 时与 v13 的行为完全一致。
+enum BinUITextFlag : uint32_t {
+    TEXT_ITALIC      = 1u << 0, // 斜体（FreeType 合成倾斜 / GDI CreateFontA italic）
+    // node.text 是**占位符**而不是真实值：输入框为空时显示（按 60% 文字色画），
+    // 首次输入即被清空，失去焦点且内容为空时恢复。getText() 返回真实值（此时为空串）。
+    TEXT_PLACEHOLDER = 1u << 1,
+    TEXT_READONLY    = 1u << 2, // 只读输入框：可聚焦/可选中，但拒绝编辑
+    TEXT_CHECKED     = 1u << 3, // 初始勾选（<input type=checkbox checked>），加载时播种进渲染器
+};
+
 #pragma pack(push, 1)
 struct BinUIPaintNode {
     uint16_t nodeId;
@@ -374,9 +387,10 @@ struct BinUIPaintNode {
     uint32_t borderColor[4]; // 上右下左各自的颜色（AARRGGBB）
     uint32_t gradFrom;     // AARRGGBB（渐变起点色）
     uint32_t gradTo;       // AARRGGBB（渐变终点色）
+    uint32_t textFlags;    // v14：BinUITextFlag（斜体/占位符/只读/初始勾选）
 };
 #pragma pack(pop)
-static_assert(sizeof(BinUIPaintNode) == 40, "BinUIPaintNode must be 40 bytes");
+static_assert(sizeof(BinUIPaintNode) == 44, "BinUIPaintNode must be 44 bytes");
 
 // 文字装饰线（下划线/删除线/上划线）在节点文字盒中的位置：
 // 后端只需按 (x, y, w, h) 画一条 height 高的实心条；返回值 0 = 该装饰线不需要画。

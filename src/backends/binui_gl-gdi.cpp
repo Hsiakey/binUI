@@ -297,6 +297,7 @@ struct Atlas {
     float size = 0;
     int weight = 400;
     bool cjk = false;
+    bool italic = false;
     std::string face;
     std::unordered_map<uint32_t, Glyph> glyphs;
 };
@@ -666,10 +667,11 @@ struct BinUIGLGdi::Impl {
         return true;
     }
 
-    Atlas* getAtlas(float size, int weight, bool cjk, bool emoji = false) {
+    Atlas* getAtlas(float size, int weight, bool cjk, bool emoji = false, bool italic = false) {
+        // 斜体与粗体一样是"另一张图集"：合成倾斜发生在光栅化阶段，不能共用缓存
         uint64_t key = (static_cast<uint64_t>(std::lround(size)) << 32) |
-                       (static_cast<uint64_t>(weight & 0xFFFF) << 16) | (cjk ? 1 : 0) |
-                       (emoji ? 2u : 0u);
+                       (static_cast<uint64_t>((weight & 0x7FFF) | (italic ? 0x8000 : 0)) << 16) |
+                       (cjk ? 1u : 0u) | (emoji ? 2u : 0u);
         auto it = atlases.find(key);
         if (it != atlases.end()) return it->second;
 
@@ -677,6 +679,7 @@ struct BinUIGLGdi::Impl {
         a->size = size;
         a->weight = weight;
         a->cjk = cjk;
+        a->italic = italic;
         a->cellH = static_cast<int>(std::ceil(size * 1.4f)) + 2;
         a->cellW = a->cellH;
         a->cols = a->sizePx / a->cellW;
@@ -702,7 +705,7 @@ struct BinUIGLGdi::Impl {
         binui_font::GrayGlyph g;
         // 粗体：atlas key 里带 weight，粗体是独立的一张图集；这里按新签名让 FreeType
         // 合成加粗（FT_GlyphSlot_Embolden），否则 font-weight:700 只是换个空图集重复光栅化
-        bool ok = font.renderGlyph(a->face, a->size, cp, a->weight >= 600, g);
+        bool ok = font.renderGlyph(a->face, a->size, cp, a->weight >= 600, a->italic, g);
         if (!ok || !g.alpha || g.height <= 0) {
             // 空白字形（如空格）：无像素但有有效 advance —— 仍占一格并缓存，
             // 否则 glyphFor 返回 null，测宽/绘制都不推进，单词会挤在一起
@@ -826,12 +829,13 @@ struct BinUIGLGdi::Impl {
         bool color = false;
     };
 
-    ClusterMetric clusterMetric(float size, int weight, const uint32_t* cps, size_t n) {
+    ClusterMetric clusterMetric(float size, int weight, const uint32_t* cps, size_t n,
+                                bool italic = false) {
         ClusterMetric m;
         m.len = EmojiClusterLen(cps, n);
         float fallback = std::ceil(size * 0.6f);
         if (!(m.len > 1 || IsEmojiCp(cps[0]))) {
-            Atlas* a = getAtlas(size, weight, cps[0] >= 0x80);
+            Atlas* a = getAtlas(size, weight, cps[0] >= 0x80, false, italic);
             const Glyph* g = a ? glyphFor(a, cps[0]) : nullptr;
             m.adv = g ? static_cast<float>(g->advW) : fallback;
             return m;
@@ -846,7 +850,7 @@ struct BinUIGLGdi::Impl {
             }
         }
         for (size_t i = 0; i < m.len; i++) {
-            Atlas* a = getAtlas(size, weight, cps[i] >= 0x80, IsEmojiCp(cps[i]));
+            Atlas* a = getAtlas(size, weight, cps[i] >= 0x80, IsEmojiCp(cps[i]), italic);
             const Glyph* g = a ? glyphFor(a, cps[i]) : nullptr;
             m.adv += g ? static_cast<float>(g->advW) : fallback;
         }
@@ -1382,7 +1386,7 @@ void BinUIGLGdi::strokeRounded(float x, float y, float w, float h, float radius,
     impl_->curTex = impl_->whiteTex;
 }
 
-float BinUIGLGdi::textWidth(float size, int weight, const std::string& utf8) {
+float BinUIGLGdi::textWidth(float size, int weight, const std::string& utf8, bool italic) {
     if (!impl_->ready) return 0;
     std::vector<uint32_t> cps;
     Utf8Iter it{ utf8 };
@@ -1390,15 +1394,15 @@ float BinUIGLGdi::textWidth(float size, int weight, const std::string& utf8) {
     float w = 0;
     size_t i = 0;
     while (i < cps.size()) {
-        auto m = impl_->clusterMetric(size, weight, cps.data() + i, cps.size() - i);
+        auto m = impl_->clusterMetric(size, weight, cps.data() + i, cps.size() - i, italic);
         w += m.adv;
         i += m.len;
     }
     return w;
 }
 
-void BinUIGLGdi::fontMetrics(float size, int weight, int& ascent, int& lineHeight) {
-    Atlas* a = impl_->getAtlas(size, weight, false);
+void BinUIGLGdi::fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic) {
+    Atlas* a = impl_->getAtlas(size, weight, false, false, italic);
     if (!a) { ascent = lineHeight = static_cast<int>(size); return; }
     ascent = a->ascent;
     lineHeight = a->ascent + a->descent;
@@ -1406,13 +1410,13 @@ void BinUIGLGdi::fontMetrics(float size, int weight, int& ascent, int& lineHeigh
 
 void BinUIGLGdi::drawText(float x, float y, float size, int weight,
                        const std::string& utf8, uint32_t color,
-                       bool centerH, bool centerV) {
+                       bool centerH, bool centerV, bool italic) {
     if (!impl_->ready || utf8.empty()) return;
-    float w = textWidth(size, weight, utf8);
+    float w = textWidth(size, weight, utf8, italic);
     if (centerH) x -= w / 2;
 
     int ascent = 0, lineH = 0;
-    fontMetrics(size, weight, ascent, lineH);
+    fontMetrics(size, weight, ascent, lineH, italic);
     if (centerV) y -= lineH / 2.0f;
     // 像素对齐：字形位图天生是整数像素设计，落在半像素上会被双线性过滤糊一层。
     // advance 本身是整数，所以只要把起点/基线取整，整行字形就都在整数像素上。
@@ -1427,7 +1431,7 @@ void BinUIGLGdi::drawText(float x, float y, float size, int weight,
     impl_->curTex = impl_->whiteTex;
     float cx = x;
     auto drawGray = [&](uint32_t cp) {
-        Atlas* a = impl_->getAtlas(size, weight, cp >= 0x80, IsEmojiCp(cp));
+        Atlas* a = impl_->getAtlas(size, weight, cp >= 0x80, IsEmojiCp(cp), italic);
         if (!a) return;
         const Glyph* g = impl_->glyphFor(a, cp);
         if (!g) return;
@@ -1471,10 +1475,10 @@ void BinUIGLGdi::drawText(float x, float y, float size, int weight,
 }
 
 void BinUIGLGdi::drawTextWrapped(float x, float y, float maxW, float size, int weight,
-                              const std::string& utf8, uint32_t color, int align) {
+                              const std::string& utf8, uint32_t color, int align, bool italic) {
     if (!impl_->ready || utf8.empty()) return;
     int ascent = 0, lineH = 0;
-    fontMetrics(size, weight, ascent, lineH);
+    fontMetrics(size, weight, ascent, lineH, italic);
 
     std::vector<uint32_t> cps;
     Utf8Iter it{ utf8 };
@@ -1488,7 +1492,7 @@ void BinUIGLGdi::drawTextWrapped(float x, float y, float maxW, float size, int w
         while (end < cps.size()) {
             uint32_t c = cps[end];
             if (c == '\n') break;
-            auto m = impl_->clusterMetric(size, weight, cps.data() + end, cps.size() - end);
+            auto m = impl_->clusterMetric(size, weight, cps.data() + end, cps.size() - end, italic);
             if (end > pos && w + m.adv > maxW) break;
             w += m.adv;
             end += m.len;
@@ -1518,7 +1522,7 @@ void BinUIGLGdi::drawTextWrapped(float x, float y, float maxW, float size, int w
             if (align == 1)      lx = x + (maxW - w) / 2.0f;
             else if (align == 2) lx = x + (maxW - w);
             if (lx < x) lx = x; // 超长行不向左溢出
-            drawText(lx, ly + ascent, size, weight, seg, color);
+            drawText(lx, ly + ascent, size, weight, seg, color, false, false, italic);
         }
         ly += lineH;
         pos = newline ? end + 1 : end;
@@ -1772,6 +1776,9 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
         const bool hasBorder = pt && (pt->flags & PAINT_BORDER);
         const bool hasGrad = pt && (pt->flags & PAINT_GRADIENT);
         float opacity = renderer.drawOpacity(node.id);
+        // v14 禁用：整块压到 55%（颜色/文字/图片一起淡，不引入额外合成通道）
+        const bool disabled = renderer.isDisabled(node.id);
+        if (disabled) opacity *= 0.55f;
         float dx = renderer.drawOffsetX(node.id);
         float dy = renderer.drawOffsetY(node.id);
         float scale = renderer.drawScale(node.id);
@@ -1815,6 +1822,9 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
             uint32_t accentCol = ScaleAlpha(0xFFBB86FC, opacity);
             int pad = node.padding;
             int fs = node.fontSize ? node.fontSize : 14;
+            // v14：斜体 / 占位符（同一份 textFlags 在三端语义一致）
+            const bool italic = pt && (pt->textFlags & TEXT_ITALIC) != 0;
+            const bool placeholder = pt && (pt->textFlags & TEXT_PLACEHOLDER) != 0;
 
             // ---- v13 扩展绘制：底色/边框的统一入口（几何来自 binui_paint.h） ----
             // GL/D3D11 有 alpha 混合，条带直接画即可，不需要像 GDI 那样自己先混合底色
@@ -1867,7 +1877,7 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
                     if (node.text.empty()) break;
 
                     int asc = 0, lh = 0;
-                    gfx.fontMetrics(static_cast<float>(fs), wt, asc, lh);
+                    gfx.fontMetrics(static_cast<float>(fs), wt, asc, lh, italic);
                     const float availW = static_cast<float>(nw - 2 * pad);
                     const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
                                     : (node.flags & BINUI_TEXT_RIGHT) ? 2 : 0;
@@ -1893,10 +1903,10 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
                             const std::string seg = node.text.substr(
                                 p0, (nl == std::string::npos) ? std::string::npos : nl - p0);
                             gfx.drawTextWrapped(lineLeft, ly, availW > 1.0f ? availW : 1.0f,
-                                                static_cast<float>(fs), wt, seg, lcol, align);
+                                                static_cast<float>(fs), wt, seg, lcol, align, italic);
                             // 装饰线逐行画：只画一条的话，多行文本就只有第一行有下划线
                             if (hasRule && !seg.empty()) {
-                                const float tw = gfx.textWidth(static_cast<float>(fs), wt, seg);
+                                const float tw = gfx.textWidth(static_cast<float>(fs), wt, seg, italic);
                                 float rx = lineLeft;
                                 if (align == 1) rx += (availW - tw) * 0.5f;
                                 else if (align == 2) rx += availW - tw;
@@ -1911,12 +1921,13 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
                         float tx = static_cast<float>(x + pad);
                         float tw = 0.0f;
                         if (align != 0 || hasRule)
-                            tw = gfx.textWidth(static_cast<float>(fs), wt, node.text);
+                            tw = gfx.textWidth(static_cast<float>(fs), wt, node.text, italic);
                         if (align != 0) {
                             tx += (align == 1) ? (availW - tw) / 2.0f : (availW - tw);
                             if (tx < static_cast<float>(x + pad)) tx = static_cast<float>(x + pad);
                         }
-                        gfx.drawText(tx, base, static_cast<float>(fs), wt, node.text, lcol);
+                        gfx.drawText(tx, base, static_cast<float>(fs), wt, node.text, lcol,
+                                     false, false, italic);
                         if (hasRule)
                             drawTextRules(tx, static_cast<float>(y) + (nh - lh) / 2.0f, tw);
                     }
@@ -1929,12 +1940,13 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
                         const uint32_t tcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
                                                   ? ScaleAlpha(pt->textColor, opacity) : textCol;
                         int bs = node.fontSize ? node.fontSize : 14;
-                        float tw = gfx.textWidth(static_cast<float>(bs), 700, node.text);
+                        float tw = gfx.textWidth(static_cast<float>(bs), 700, node.text, italic);
                         int asc = 0, lh = 0;
-                        gfx.fontMetrics(static_cast<float>(bs), 700, asc, lh);
+                        gfx.fontMetrics(static_cast<float>(bs), 700, asc, lh, italic);
                         float tx = x + pad + (nw - 2 * pad - tw) / 2.0f;
                         float base = y + (nh - lh) / 2.0f + asc;
-                        gfx.drawText(tx, base, static_cast<float>(bs), 700, node.text, tcol);
+                        gfx.drawText(tx, base, static_cast<float>(bs), 700, node.text, tcol,
+                                     false, false, italic);
                     }
                     break;
                 }
@@ -1954,10 +1966,14 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
 
                     if (!text.empty()) {
                         int asc = 0, lh = 0;
-                        gfx.fontMetrics(static_cast<float>(fs), 400, asc, lh);
+                        gfx.fontMetrics(static_cast<float>(fs), 400, asc, lh, italic);
                         float base = static_cast<float>(y) + (nh - lh) / 2.0f + asc;
                         float tx = static_cast<float>(x + pad + 4);
-                        gfx.drawText(tx, base, static_cast<float>(fs), 400, text, accentCol);
+                        // 占位符按 45% 色画（不是真实内容，视觉上要和已输入文本区分开）
+                        const uint32_t inCol = (placeholder && !editing)
+                                                   ? ScaleAlpha(accentCol, 0.55f) : accentCol;
+                        gfx.drawText(tx, base, static_cast<float>(fs), 400, text, inCol,
+                                     false, false, italic);
 
                         if (editing) {
                             size_t a = std::min(caret, selStart);
@@ -1990,7 +2006,7 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
                         gfx.drawTextWrapped(static_cast<float>(x + pad + 12),
                                             static_cast<float>(y + pad + 8),
                                             static_cast<float>(nw - 2 * pad - 24),
-                                            static_cast<float>(fs), wt, node.text, tcol, align);
+                                            static_cast<float>(fs), wt, node.text, tcol, align, italic);
                     }
                     break;
                 }

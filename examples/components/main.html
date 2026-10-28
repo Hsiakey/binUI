@@ -1,6 +1,6 @@
 <!DOCTYPE html>
-<app_window width="720" height="460" bg="#0E0E13" title="组件化：.bui / .bum / .bum.xml">
-<html width="720" height="460" bg="#0E0E13">
+<app_window width="720" height="500" bg="#0E0E13" title="组件化：.bui / .bum / .bum.xml">
+<html width="720" height="500" bg="#0E0E13">
 <head>
     <meta charset="UTF-8">
     <title>组件化：二进制内联 / 源码内联 / 运行期外挂</title>
@@ -18,20 +18,20 @@
          title="组件化：一个 .bui + 若干 .bum"/>
 
     <!-- ② 源码组件：button.bum.xml，支持 {{参数}}，同一文件引用多次 = 多个独立实例 -->
-    <div class="panel" style="position:absolute; left:16; top:56; width:332; height:224">
+    <div class="panel" style="position:absolute; left:16; top:56; width:332; height:236">
         <span class="label" style="position:absolute; left:14; top:10">① 源码组件（.bum.xml，可传参）</span>
         <use src="button.bum.xml" x="14" y="36"  w="148" label="普通按钮"/>
         <use src="button.bum.xml" x="170" y="36" w="148" label="第二个实例"/>
         <use src="button.bum.xml" x="14" y="86"  w="148" label="第三份"/>
         <use src="button.bum.xml" x="170" y="86" w="148" label="第四份"/>
         <use src="button.bum.xml" x="14" y="136" w="200" label="宿主改底色（bg 参数）" bg="#2A2350"/>
-        <span class="note" style="position:absolute; left:14; top:186; width:304; height:30">
-            文本/颜色走 {{label}} / {{bg}} 参数；自带 :hover 过渡与聚焦态。
+        <span class="note" style="position:absolute; left:14; top:186; width:304; height:44">
+            文本/颜色走 label / bg 参数；自带 :hover 过渡。
         </span>
     </div>
 
     <!-- ③ 二进制组件：card.bum（由 card.bum.xml 编译，内部还引用过 button.bum.xml） -->
-    <div class="panel" style="position:absolute; left:372; top:56; width:332; height:224">
+    <div class="panel" style="position:absolute; left:372; top:56; width:332; height:236">
         <span class="label" style="position:absolute; left:14; top:10">② 二进制组件（.bum，编译期内联）</span>
         <use src="card.bum" x="14" y="36" w="304"/>
         <span class="note" style="position:absolute; left:14; top:170; width:304; height:46">
@@ -40,17 +40,17 @@
         </span>
     </div>
 
-    <div class="panel" style="position:absolute; left:16; top:292; width:688; height:110">
+    <div class="panel" style="position:absolute; left:16; top:304; width:688; height:130">
         <span class="label" style="position:absolute; left:14; top:10">③ 三种形态，可以混放</span>
-        <span class="note" style="position:absolute; left:14; top:36; width:660; height:64">
-文件：main.html 编译成 main.bui（单个 UI 文件）；组件可以是 titlebar.bum（二进制）或 button.bum.xml（源码），也可以两种都放。<br>
-优先级：二进制优先；源码比二进制新（mtime）时自动改用源码并告警 —— 改源码保存即热重载，不会因为忘了重编 .bum 而"改了没反应"。<br>
-外挂：&lt;use src="dock.bum" external&gt; 只留占位节点，运行期 ex::MountAll() 挂上 —— 见底部状态栏（换它不用重编主 .bui）。<br>
+        <span class="note" style="position:absolute; left:14; top:36; width:660; height:88">
+文件：main.html → main.bui（单文件）；组件可放 titlebar.bum（二进制）或 button.bum.xml（源码），也可都放。<br>
+优先级：二进制优先；源码 mtime 更新则改用源码并告警 —— 改源码保存即热重载。<br>
+外挂：&lt;use src="dock.bum" external&gt; 只留占位，运行期 ex::MountAll() 挂上（见底部）。<br>
 详见 docs/components.md
         </span>
     </div>
 
     <!-- ④ 运行期外挂：dock.bum 不内联，由 main.cpp 调 binui::ex::MountAll() 挂载 -->
-    <use src="dock.bum" external x="0" y="412" w="720"/>
+    <use src="dock.bum" external x="0" y="452" w="720"/>
 </body>
 </html>

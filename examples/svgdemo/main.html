@@ -60,9 +60,9 @@
 
     <!-- 底部说明 -->
     <div style="position:absolute; left:16; top:348; width:928; height:72; background:#16161D; border-radius:16">
-        <span style="position:absolute; left:20; top:14; width:460; height:16; color:#C9C9D2; font-size:12">SVG 子图形 = 普通节点：line(x1/y1/x2/y2+stroke) · polyline/polygon(points) · circle(cx/cy/r+fill) · rect(x/y/width/height+rx)</span>
+        <span style="position:absolute; left:20; top:14; width:470; height:18; color:#C9C9D2; font-size:12">SVG 子图形 = 普通节点：line · polyline · polygon · circle · rect（支持 CSS 动画与命中）</span>
         <span style="position:absolute; left:20; top:36; width:460; height:16; color:#6E6E78; font-size:11">全部支持 CSS transition/animation（translate/opacity/颜色），坐标相对 &lt;svg&gt; 容器</span>
-        <span style="position:absolute; left:500; top:14; width:400; height:16; color:#C9C9D2; font-size:12">&lt;canvas id&gt; 空绘制面：drawNodesGL 遇节点时回调应用，已裁剪到画布矩形</span>
+        <span style="position:absolute; left:500; top:14; width:420; height:18; color:#C9C9D2; font-size:12">&lt;canvas&gt; 空绘制面：drawNodesGL 回调应用，已裁剪到画布矩形</span>
         <span style="position:absolute; left:500; top:36; width:400; height:16; color:#6E6E78; font-size:11">应用 updateFn 每帧更新数据 + invalidateRect → 帧内回调重绘（立即式）</span>
     </div>
 </body>

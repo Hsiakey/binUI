@@ -2140,6 +2140,90 @@ static std::unordered_map<std::string, std::string> ParseDeclBlock(const std::st
     return out;
 }
 
+// ============================================================
+// 内置 UA 默认样式（浏览器 UA stylesheet 的等价物）
+// ------------------------------------------------------------
+// 只管"作者什么都没写时该长什么样"：优先级低于任何作者声明（<style> 规则与内联
+// style 都会覆盖它），所以对已有界面零影响 —— 除非那个界面本来就是靠"没默认值"
+// 才成立的（v13 之前根底默认白、文字色默认白，于是白底白字；这就是要修的东西）。
+// 字号不放在这里：h1~h6/small 的基准字号由 defaultHeight/字号表统一给，
+// 放两处会出现 em 换算基准不一致。
+// ============================================================
+static const std::unordered_map<std::string, std::string>& UaDeclsOf(const std::string& tag) {
+    static const std::unordered_map<std::string, std::unordered_map<std::string, std::string>> table = [] {
+        static const std::pair<const char*, const char*> raw[] = {
+            // 标题：加粗（字号见字号表）
+            { "h1", "font-weight:700" }, { "h2", "font-weight:700" },
+            { "h3", "font-weight:700" }, { "h4", "font-weight:700" },
+            { "h5", "font-weight:700" }, { "h6", "font-weight:700" },
+            // 行内语义
+            { "b", "font-weight:700" },      { "strong", "font-weight:700" },
+            { "th", "font-weight:700;text-align:center" },
+            { "i", "font-style:italic" },    { "em", "font-style:italic" },
+            { "cite", "font-style:italic" }, { "var", "font-style:italic" },
+            { "dfn", "font-style:italic" },
+            { "u", "text-decoration:underline" },   { "ins", "text-decoration:underline" },
+            { "s", "text-decoration:line-through" },{ "del", "text-decoration:line-through" },
+            { "strike", "text-decoration:line-through" },
+            // 高亮：浅色底 + 深色字，深色主题下同样可读
+            { "mark", "background:#FFF59D;color:#1A1A1A" },
+            // 分隔线：v13 容器默认透明后 <hr> 变成隐形，这里给它一条 2px 中灰
+            { "hr", "height:2px;background:#8A8A94" },
+            // 链接：只加下划线；颜色跟随继承（深色主题里蓝字反而看不清）
+            { "a", "text-decoration:underline" },
+            // 上下标：没有基线偏移能力，至少按小字号行内排（见 README 已知限制）
+            { "sub", "font-size:0.75em" }, { "sup", "font-size:0.75em" },
+            // 预排版：保留原始换行与缩进（否则代码块被折叠成一行）
+            { "pre", "white-space:pre" },
+        };
+        std::unordered_map<std::string, std::unordered_map<std::string, std::string>> m;
+        for (const auto& r : raw) m[r.first] = ParseDeclBlock(r.second);
+        return m;
+    }();
+    static const std::unordered_map<std::string, std::string> empty;
+    auto it = table.find(tag);
+    return it == table.end() ? empty : it->second;
+}
+
+// HTML 属性白名单：真正被编译器消费的属性。其余一律视为"写了没效果"并告警。
+// 也是 <use> 参数过滤的依据：组件参数名是任意标识符，除了这些有语义的名字之外，
+// 都不该被当成属性挂到替换出来的节点上（否则会冒出一堆假属性）。
+static const std::unordered_set<std::string>& UsedHtmlAttrs() {
+    static const std::unordered_set<std::string> kSet = {
+        "id", "class", "style", "type", "value", "placeholder", "src", "image", "alt",
+        "checked", "disabled", "readonly", "href", "title",
+        "x", "y", "w", "h", "width", "height", "z", "z-index", "radius",
+        "bg", "background", "background-color", "color", "text-color",
+        "size", "font-size", "weight", "font-weight", "font-style", "line-height",
+        "text-decoration", "border-radius", "border", "border-width", "border-color",
+        "border-top", "border-right", "border-bottom", "border-left",
+        "padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
+        "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
+        "min-width", "max-width", "min-height", "max-height",
+        "display", "position", "left", "top", "overflow", "opacity", "align",
+        "flex", "flex-direction", "justify-content", "align-items", "gap",
+        "animation", "transition", "transform", "white-space",
+        "aspect", "resizable", "window_resize", "transparent", "ui_scale",
+        "volume", "autoplay", "loop", "muted", "controls",
+        "points", "stroke", "stroke-width", "fill", "rx", "cx", "cy", "r",
+        "x1", "y1", "x2", "y2",
+    };
+    return kSet;
+}
+
+// 标签的基准字号（HTML 标题梯度）。em 换算与"未声明 font-size"共用这一份口径 ——
+// 以前三处各写一遍，改一处忘两处就会出现"em 按 14 算、实际字号 20"的错位。
+static float DefaultFontSizeOf(const std::string& tag) {
+    if (tag == "h1") return 28.0f;
+    if (tag == "h2") return 24.0f;
+    if (tag == "h3") return 20.0f;
+    if (tag == "h4") return 18.0f;
+    if (tag == "h5") return 16.0f;
+    if (tag == "h6") return 14.0f;
+    if (tag == "small") return 12.0f;
+    return 14.0f;
+}
+
 static void ParseCssRules(const std::string& cssRaw, std::vector<CssRule>& out) {
     const std::string css = CssStripComments(cssRaw);
     auto startsWithNoCase = [](const std::string& s, const char* prefix) {
@@ -2208,7 +2292,8 @@ static void ParseCssRules(const std::string& cssRaw, std::vector<CssRule>& out) 
 struct HNode {
     std::string tag;
     std::unordered_map<std::string, std::string> attrs;
-    std::string text;
+    std::string text;      // 空白折叠后的文本（HTML 默认排版语义）
+    std::string rawText;   // 原样文本（含换行/缩进，供 white-space:pre / <pre> 使用）
     size_t parentIdx;   // SIZE_MAX = 无父（顶层）
 };
 
@@ -2241,6 +2326,9 @@ static std::vector<HNode> ParseElements(const std::string& html, std::string& st
         if (space) t += ' '; // 保留段尾空格：行内文本跨元素拼接不丢空格
         if (!t.empty() && !openStack.empty())
             elems[openStack.back()].text += DecodeEntities(t);
+        // 原样副本：<pre> / white-space:pre 的元素用这份（缩进与换行是排版的一部分）
+        if (!raw.empty() && !openStack.empty())
+            elems[openStack.back()].rawText += DecodeEntities(raw);
     };
 
     auto parseAttrs = [&](const std::string& s) -> std::unordered_map<std::string, std::string> {
@@ -2660,6 +2748,11 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
         // 否则给组件传 style 会把组件自己的背景/尺寸全抹掉
         for (const auto& kv : e.attrs) {
             if (kv.first == "src") continue;
+            // 只有"有语义的属性"（宽高/样式/类…）该落到替换节点上；其余键是组件参数，
+            // 已经在 SubstituteParams 里换进文本了，留成属性只会变成无效属性噪音
+            if (!UsedHtmlAttrs().count(kv.first) &&
+                kv.first.rfind("data-", 0) != 0 && kv.first.rfind("aria-", 0) != 0)
+                continue;
             auto rit = root.attrs.find(kv.first);
             if (rit != root.attrs.end() && !rit->second.empty() && !kv.second.empty() &&
                 (kv.first == "style" || kv.first == "class")) {
@@ -2827,16 +2920,23 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     };
 
     // ---- 2. HTML 语义 -> 节点 ----
-    auto tagToType = [](const std::string& tag) -> uint8_t {
+    // 行内文本标签：一律 BINUI_LABEL（单行文字 + 自动撑高）。
+    // 这里漏一个标签的后果不是"没样式"，而是掉到默认分支变 BINUI_LIST——块级容器，
+    // 会把同一段文字里的一小截打成独立整行块（<u>/<s>/<mark>/<code>/<sub>/<sup>
+    // 以前就是这样）。新增 HTML 标签时先想清楚它是行内还是块级。
+    static const std::unordered_set<std::string> kInlineTextTags = {
+        "h1", "h2", "h3", "h4", "h5", "h6", "p", "span", "label", "a",
+        "b", "i", "em", "strong", "small", "u", "s", "strike", "del", "ins",
+        "mark", "code", "kbd", "samp", "var", "abbr", "cite", "q", "dfn", "time",
+        "sub", "sup", "li", "td", "th", "dt", "dd", "title", "legend",
+        "figcaption", "summary", "caption",
+    };
+    auto tagToType = [&](const std::string& tag) -> uint8_t {
         if (tag == "html" || tag == "body") return BINUI_ROOT;
         if (tag == "button") return BINUI_BUTTON;
         if (tag == "input") return BINUI_INPUT;
         if (tag == "img") return BINUI_IMAGE;
-        if (tag=="h1"||tag=="h2"||tag=="h3"||tag=="h4"||tag=="h5"||tag=="h6"||
-            tag=="p"||tag=="span"||tag=="label"||tag=="a"||tag=="b"||tag=="i"||
-            tag=="em"||tag=="strong"||tag=="small"||tag=="li"||tag=="td"||
-            tag=="th"||tag=="title"||tag=="legend")
-            return BINUI_LABEL;
+        if (kInlineTextTags.count(tag)) return BINUI_LABEL;
         if (tag == "svg") return BINUI_SVG;
         if (tag == "canvas") return BINUI_CANVAS;
         if (tag == "line") return BINUI_LINE;
@@ -2889,7 +2989,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     // 元素生效样式 = <style> 里命中的规则（按特异性/文档序级联） + 内联 style（最高优先级）
     // ei = 元素下标（结构伪类求值用）；SIZE_MAX = 无结构信息（伪元素合成节点/包裹层）
     auto styleOf = [&](const HNode& e, size_t ei = SIZE_MAX) -> std::unordered_map<std::string, std::string> {
-        std::unordered_map<std::string, std::string> out;
+        // 最低层：内置 UA 默认样式（作者任何声明都会覆盖它）
+        std::unordered_map<std::string, std::string> out = UaDeclsOf(e.tag);
         if (!cssRules.empty() && !e.attrs.count("_pseudo")) {
             std::unordered_map<std::string, int> specOf;   // 每个属性当前生效的特异性
             for (const auto& r : cssRules) {               // 文档顺序：同权重后者覆盖
@@ -3316,8 +3417,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 }
                 // 继承宿主字号（CSS 伪元素默认继承）：转成绝对 px 落到合成节点上
                 if (!merged.count("font-size") && !merged.count("size")) {
-                    const float dfltFs = (host.tag == "h1") ? 28.0f : (host.tag == "h2") ? 24.0f
-                                       : (host.tag == "h3") ? 20.0f : (host.tag == "small") ? 12.0f : 14.0f;
+                    const float dfltFs = DefaultFontSizeOf(host.tag);
                     float hfs = dfltFs;
                     std::string fsv = host.attrs.count("font-size") ? host.attrs.at("font-size")
                                     : host.attrs.count("size") ? host.attrs.at("size")
@@ -3503,6 +3603,21 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     nodes.push_back(root);
     id = 1; // 根已占用 id 0
 
+    // 默认文字色：按根底色亮度自适应（浅底深字 / 深底浅字）。
+    // 以前这里硬编码白色 —— 而根底色默认是白，于是"没写 color 的页面"整页白底白字，
+    // 只有作者到处写 color 才看得见。深色主题亮度低仍取白字，现有界面观感不变；
+    // 根背景带 alpha（透明窗口）时不知道桌面是什么色，沿用白色。
+    uint32_t defaultTextCol = 0xFFFFFFFFu;
+    {
+        const uint32_t rootBg = root.color;
+        if (((rootBg >> 24) & 0xFFu) >= 0x80u) {
+            const float lum = (0.2126f * (float)((rootBg >> 16) & 0xFFu) +
+                               0.7152f * (float)((rootBg >> 8) & 0xFFu) +
+                               0.0722f * (float)(rootBg & 0xFFu)) / 255.0f;
+            defaultTextCol = (lum > 0.5f) ? 0xFF1A1A1Au : 0xFFFFFFFFu;
+        }
+    }
+
     std::vector<Ctx> stack;
     stack.push_back({ 0, 0, 0, 0, rootW, 0, 0xFFFFFFFFu, false, false });
 
@@ -3583,8 +3698,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             auto st = styleOf(e, k);
             // 子项字号（本项 em 的换算基准）
             {
-                const float dfltFs = (e.tag=="h1")?28.0f:(e.tag=="h2")?24.0f
-                                   : (e.tag=="h3")?20.0f:(e.tag=="small")?12.0f:14.0f;
+                const float dfltFs = DefaultFontSizeOf(e.tag);
                 std::string fsv = pick(e.attrs, st, "size", "font-size", "");
                 curCtx.fontSize = dfltFs;
                 if (!fsv.empty()) {
@@ -3699,6 +3813,83 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::unordered_map<size_t, std::unordered_map<size_t, float[4]>> flexLayouts;
     std::unordered_map<size_t, std::unordered_map<size_t, float>> flexWeights;
 
+    // ============================================================
+    // HTML 标签/属性体检（只在 HTML 模式跑；XML 允许自定义标签）
+    // ------------------------------------------------------------
+    // CSS 那边早就有 kIgnoredCss 这类"写了没效果就明说"的机制，HTML 这边一条都没有，
+    // 于是 <u>/<mark>/placeholder/disabled 这些东西默默编成别的东西也没人知道。
+    // 这里只做体检、不改行为：不改 HTML 的容错性（未知标签照样按容器处理）。
+    // 每个标签/属性全文档只报一次，避免刷屏。
+    // ============================================================
+    {
+        static const std::unordered_set<std::string> kKnownTags = {
+            // 结构/包裹
+            "app_window", "binui", "root", "html", "body", "head", "title", "meta", "link",
+            "script", "style", "div", "span", "section", "header", "footer", "nav", "aside",
+            "main", "article", "form", "fieldset", "template", "noscript",
+            // 文本
+            "h1", "h2", "h3", "h4", "h5", "h6", "p", "label", "a", "b", "i", "em", "strong",
+            "small", "u", "s", "strike", "del", "ins", "mark", "code", "kbd", "samp", "var",
+            "abbr", "cite", "q", "dfn", "time", "sub", "sup", "pre", "br", "hr", "blockquote",
+            "address", "dl", "dt", "dd", "figure", "figcaption", "ul", "ol", "li", "legend",
+            "caption", "td", "th", "colgroup", "col",
+            // 控件
+            "input", "button", "video", "img", "source", "track", "titlebar", "use", "component",
+            // 向量/画布
+            "svg", "canvas", "line", "circle", "rect", "polyline", "polygon",
+        };
+        // 认得但只能糊弄过去的标签：明确说清楚会变成什么，别让人以为生效了
+        static const std::unordered_map<std::string, const char*> kShimTags = {
+            { "select", "<select>/<option> 没有下拉控件，option 会按块级元素竖排铺开" },
+            { "option", "<select>/<option> 没有下拉控件，option 会按块级元素竖排铺开" },
+            { "optgroup", "<select>/<option> 没有下拉控件，option 会按块级元素竖排铺开" },
+            { "datalist", "<datalist> 不支持，内容按普通容器渲染" },
+            { "textarea", "<textarea> 不可编辑（渲染器只有单行文本编辑），按普通容器渲染" },
+            { "table", "<table> 没有表格算法，行列会按块级元素堆叠" },
+            { "thead", "<table> 没有表格算法，行列会按块级元素堆叠" },
+            { "tbody", "<table> 没有表格算法，行列会按块级元素堆叠" },
+            { "tfoot", "<table> 没有表格算法，行列会按块级元素堆叠" },
+            { "tr", "<table> 没有表格算法，行列会按块级元素堆叠" },
+            { "details", "<details> 不支持折叠，内容常显" },
+            { "summary", "<details> 不支持折叠，内容常显" },
+            { "progress", "<progress> 没有内置外观，建议用图表 API 的 ProgressBar" },
+            { "meter", "<meter> 没有内置外观，建议用图表 API 的 ProgressBar" },
+            { "dialog", "<dialog> 不支持模态，按普通容器渲染" },
+            { "output", "<output> 不支持，按普通容器渲染" },
+        };
+        // 真正被编译器消费的属性（其余一律视为"写了没效果"）
+        const auto& kUsedAttrs = UsedHtmlAttrs();
+        bool inlineNestedWarned = false;   // 行内嵌套警告全文档只报一次
+        for (const auto& e : elems) {
+            if (e.tag.empty() || e.tag == "head" || e.tag == "meta" || e.tag == "link" ||
+                e.tag == "script" || e.tag == "style")
+                continue;
+            // 行内元素套行内元素：binUI 没有 inline formatting context，子元素会独占一行。
+            // 不说清楚的话，作者会以为自己写错了（<p>正文 <b>强调</b></p> 一定会换行）。
+            if (!inlineNestedWarned && kInlineTextTags.count(e.tag) && e.parentIdx != SIZE_MAX &&
+                e.parentIdx < elems.size() && kInlineTextTags.count(elems[e.parentIdx].tag)) {
+                inlineNestedWarned = true;
+                Warn("HTML 行内元素（<" + e.tag + "> 套在 <" + elems[e.parentIdx].tag +
+                     "> 里）会各自独占一行：binUI 没有行内格式化上下文，"
+                     "同一行混排多种样式需要富文本段（暂未实现）");
+            }
+            if (!kKnownTags.count(e.tag)) {
+                auto shim = kShimTags.find(e.tag);
+                if (shim != kShimTags.end()) Warn(std::string("HTML 标签 <") + e.tag + ">：" + shim->second);
+                else Warn("未知 HTML 标签 <" + e.tag + ">，已按普通容器处理");
+            } else if (kShimTags.count(e.tag)) {
+                Warn(std::string("HTML 标签 <") + e.tag + ">：" + kShimTags.at(e.tag));
+            }
+            for (const auto& kv : e.attrs) {
+                const std::string& k = kv.first;
+                if (k.empty() || k[0] == '_') continue;                    // 编译器内部标记
+                if (k.rfind("data-", 0) == 0 || k.rfind("aria-", 0) == 0) continue;
+                if (kUsedAttrs.count(k)) continue;
+                Warn("HTML 属性 \"" + k + "\"（<" + e.tag + ">）未实现，已忽略");
+            }
+        }
+    }
+
     for (size_t ei = 0; ei < elems.size(); ei++) {
         if (id >= 0x10000) break; // 节点 id 为 uint16_t，超限停止生成
         const auto& e = elems[ei];
@@ -3708,10 +3899,11 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // 认识但不生效的常见 CSS 属性：明确警告（同一属性全文档只报一条），
         // 避免"写了没效果"这种最耗时间的困惑。
         // v13 起 border*/font-weight/line-height/text-decoration 已经实现，从清单里移除。
+        // v14 起 font-style（italic）/white-space（pre）也实现了，同样移除。
         {
             static const char* kIgnoredCss[] = {
-                "box-shadow", "text-shadow", "letter-spacing", "white-space",
-                "font-style", "word-break", "visibility", "float", "flex-wrap",
+                "box-shadow", "text-shadow", "letter-spacing",
+                "word-break", "visibility", "float", "flex-wrap",
                 "flex-shrink", "align-self", "align-content", "order", "outline",
                 "cursor", "grid-template-columns", "text-overflow", "object-fit",
                 "right", "bottom", "inset", "transform", "filter", "aspect-ratio",
@@ -3721,10 +3913,77 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                     Warn(std::string("CSS 属性 ") + k + " 暂不支持，已忽略");
         }
 
+        // ---- white-space / <pre>：文本是否保留原始换行与缩进 ----
+        // 解析阶段同时存了折叠版（text）与原样版（rawText），这里按 CSS 选择用哪一份。
+        // 以前 <pre> 的缩进被当普通空白折叠掉，代码块排版整个塌成一行。
+        const std::string wsVal = lowerStr(pick(e.attrs, style, "white-space", "white-space", ""));
+        bool keepWs = (wsVal == "pre" || wsVal == "pre-wrap" || wsVal == "break-spaces" ||
+                       wsVal == "pre-line");
+        if (!wsVal.empty() && !keepWs)
+            Warn("CSS white-space 只支持 pre/pre-wrap/pre-line，\"" + wsVal + "\" 按 normal 处理");
+        std::string preText;
+        if (keepWs) {
+            preText = e.rawText;
+            // HTML 规范：<pre> 紧跟开始标签的那个换行不算内容
+            if (!preText.empty() && preText[0] == '\n') preText.erase(0, 1);
+            else if (preText.size() >= 2 && preText[0] == '\r' && preText[1] == '\n') preText.erase(0, 2);
+        }
+        const std::string& srcText = keepWs ? preText : e.text;
+
+        // ---- <input>：按 type 决定节点语义 ----
+        //   button/submit/reset     → BUTTON（文案取 value）
+        //   checkbox/radio          → 18×18 方块/圆点（LIST + 可交互，勾选视觉交给 :checked）
+        //   hidden                  → 完全不生成节点（以前会画成一个 40px 高的可见输入框）
+        //   其余（text/password/…） → INPUT 单行文本框
+        std::string itype = "text";
+        bool isCheckbox = false;
+        std::string inputVal;        // 输入框真实值 / 按钮文案
+        bool inputPlaceholder = false; // inputVal 是 placeholder（真实值为空）
         if (e.tag == "input") {
-            std::string itype = lowerStr(pick(e.attrs, style, "type", "type", "text"));
-            type = (itype == "button" || itype == "submit" || itype == "reset")
-                       ? BINUI_BUTTON : BINUI_INPUT;
+            itype = lowerStr(pick(e.attrs, style, "type", "type", "text"));
+            if (itype == "hidden") {
+                continue;
+            } else if (itype == "button" || itype == "submit" || itype == "reset") {
+                type = BINUI_BUTTON;
+            } else if (itype == "checkbox" || itype == "radio") {
+                type = BINUI_LIST;
+                isCheckbox = true;
+                // 作者没写外观时给一个能看出来的默认样子（走既有边框/底色通道）
+                if (!style.count("border") && !style.count("border-width") &&
+                    !style.count("border-top") && !style.count("border-color"))
+                    style["border"] = "2px solid #8A8A94";
+                if (!style.count("border-radius")) style["border-radius"] = (itype == "radio") ? "9" : "3";
+                if (!style.count("background") && !style.count("background-color"))
+                    style["background"] = "transparent";
+            } else {
+                type = BINUI_INPUT;
+                // 只做了单行文本：其余 HTML 输入类型当文本框处理，但要说明白
+                static const std::unordered_set<std::string> kTextLike = {
+                    "text", "password", "search", "email", "number", "tel", "url",
+                    "date", "time", "datetime-local", "month", "week", "color", "range", "file",
+                };
+                if (!kTextLike.count(itype))
+                    Warn("input type=\"" + itype + "\" 不支持，已按普通文本框编译");
+                if (itype == "password")
+                    Warn("input type=password 不遮蔽显示（binUI 没有掩码渲染），按明文文本框编译");
+            }
+
+            // 文本来源：value 是真实值，placeholder 只占位（渲染成 60% 灰，首次输入即清空）。
+            // 以前 placeholder 被直接写进真实文本 —— 点进去就能编辑提示语，删掉还算一次 INPUT。
+            const std::string val = e.attrs.count("value") ? e.attrs.at("value") : "";
+            if (type == BINUI_BUTTON) {
+                inputVal = val;
+                if (inputVal.empty()) {   // 浏览器默认按钮文案
+                    if (itype == "submit") inputVal = "Submit";
+                    else if (itype == "reset") inputVal = "Reset";
+                    else if (itype == "button") inputVal = "Button";
+                }
+            } else if (type == BINUI_INPUT && !val.empty()) {
+                inputVal = val;
+            } else if (type == BINUI_INPUT && e.attrs.count("placeholder")) {
+                inputVal = e.attrs.at("placeholder");
+                inputPlaceholder = true;
+            }
         }
 
         std::string display = pick(e.attrs, style, "display", "display", "");
@@ -3822,8 +4081,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // （没有 CSS 级联，em 取元素自身字号；font-size 自身写 em 时按默认字号近似）
         float nodeFontSize = 14.0f;
         {
-            const float dfltFs = (e.tag == "h1") ? 28.0f : (e.tag == "h2") ? 24.0f
-                               : (e.tag == "h3") ? 20.0f : (e.tag == "small") ? 12.0f : 14.0f;
+            const float dfltFs = DefaultFontSizeOf(e.tag);
             std::string fsv = pick(e.attrs, style, "size", "font-size", "");
             nodeFontSize = dfltFs;
             if (!fsv.empty()) {
@@ -3840,7 +4098,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         //   · CJK/全角按 1.0×字号，其余按 0.52×字号（拉丁小写平均宽度），宁可高一点
         //   · 行距取 line-height（未声明则 1.35×字号）
         //   · 显式写了 height 的不动（作者说了算）
-        if (sh.empty() && !e.text.empty() &&
+        if (sh.empty() && !srcText.empty() &&
             (type == BINUI_LABEL || type == BINUI_LIST || type == BINUI_BUTTON)) {
             const float step = estLineStep(style, nodeFontSize);
             float avail = pc.contentW;
@@ -3853,8 +4111,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             size_t lines = 0;
             size_t p0 = 0;
             while (true) {
-                const size_t nl = e.text.find('\n', p0);
-                const std::string seg = e.text.substr(
+                const size_t nl = srcText.find('\n', p0);
+                const std::string seg = srcText.substr(
                     p0, (nl == std::string::npos) ? std::string::npos : nl - p0);
                 lines += (size_t)std::max(1.0f, std::ceil(estTextWidth(seg, nodeFontSize) / avail));
                 if (nl == std::string::npos) break;
@@ -3887,6 +4145,12 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 
         // <br>：换行占位——块式布局下每个元素已独占一行，br 只占零高度
         if (e.tag == "br") lh = 0;
+
+        // 复选框/单选框：没声明宽高时是 18×18 的小方块（以前是全宽 40px 高文本框）
+        if (isCheckbox) {
+            if (sw.empty()) sw = "18";
+            if (sh.empty()) sh = "18";
+        }
 
         if (!sx.empty()) { auto p = ParseLenPct(sx, 0, curCtx, "left"); lx = p.value; if (p.pct) pctX = p.value / 100.0f; hasX = true; }
         if (!sy.empty()) { auto p = ParseLenPct(sy, 0, curCtx, "top"); ly = p.value; if (p.pct) pctY = p.value / 100.0f; hasY = true; }
@@ -4013,6 +4277,20 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         }
         if (type == BINUI_BUTTON || type == BINUI_INPUT || type == BINUI_VIDEO)
             n.flags |= BINUI_INTERACTIVE;
+        // 复选框/单选框占位、带 href 的链接：都该能被点（CLICK 事件 + :hover/:focus）
+        if (isCheckbox) n.flags |= BINUI_INTERACTIVE;
+        if (e.tag == "a" && e.attrs.count("href")) n.flags |= BINUI_INTERACTIVE;
+        // v14 禁用：不进焦点链、不响应悬停/点击/编辑，后端按 55% 淡绘制
+        {
+            auto boolAttr = [&](const char* k) -> bool {
+                auto it2 = e.attrs.find(k);
+                if (it2 == e.attrs.end()) return false;
+                const std::string v = lowerStr(it2->second);
+                return v != "false" && v != "0" && v != "off";
+            };
+            if (boolAttr("disabled") || boolAttr("aria-disabled"))
+                n.flags |= BINUI_DISABLED;
+        }
         // overflow：auto/scroll = 可滚动容器；hidden = 只裁剪（不给滚动条，也不响应滚轮）。
         // 两者都要标 SCROLLABLE —— 后端按它决定"高度固定、内容可溢出"，绘制时按祖先矩形裁剪。
         std::string ov = lowerStr(pick(e.attrs, style, "overflow", "overflow", ""));
@@ -4064,10 +4342,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             n.color = gs.from;   // 不支持渐变的后端/旧布局退回起点色，不至于变黑
         }
 
-        // 文字色：显式声明 > 从父容器继承 > 白色
-        uint32_t textCol = 0xFFFFFFFFu;
+        // 文字色：显式声明 > 从父容器继承 > 默认色（按根底色亮度自适应）
+        uint32_t textCol = defaultTextCol;
         bool hasOwnText = false;
-        if (!txtRaw.empty()) { textCol = parseColorWith(txtRaw, 0xFFFFFFFFu, "文字颜色"); hasOwnText = true; }
+        if (!txtRaw.empty()) { textCol = parseColorWith(txtRaw, defaultTextCol, "文字颜色"); hasOwnText = true; }
         else if (pc.hasText) { textCol = pc.textColor; }
         const bool labelLegacy = (type == BINUI_LABEL && bgRaw.empty());
         if (labelLegacy) {
@@ -4075,7 +4353,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         } else if (type == BINUI_LABEL) {
             paint.textColor = textCol;       // 有底色 → 文字色必须显式给（否则后端会用底色画字）
             pflags |= PAINT_TEXT_COLOR;
-        } else if (textCol != 0xFFFFFFFFu) {
+        } else if (textCol != defaultTextCol) {
             paint.textColor = textCol;
             pflags |= PAINT_TEXT_COLOR;
         }
@@ -4144,6 +4422,25 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 paint.textColor = textCol;
         }
 
+        // v14 文字/表单附加标记（斜体 / 占位符 / 只读 / 初始勾选）
+        {
+            const std::string fst = lowerStr(pick(e.attrs, style, "font-style", "font-style", ""));
+            if (fst == "italic" || fst == "oblique") {
+                paint.textFlags |= TEXT_ITALIC;
+            } else if (!fst.empty() && fst != "normal") {
+                Warn("CSS font-style 只支持 normal/italic，\"" + fst + "\" 按 normal 处理");
+            }
+            if (inputPlaceholder) paint.textFlags |= TEXT_PLACEHOLDER;
+            if (isCheckbox && e.attrs.count("checked")) {
+                const std::string cv = lowerStr(e.attrs.at("checked"));
+                if (cv != "false" && cv != "0" && cv != "off") paint.textFlags |= TEXT_CHECKED;
+            }
+            if ((type == BINUI_INPUT || type == BINUI_BUTTON) && e.attrs.count("readonly")) {
+                const std::string rv = lowerStr(e.attrs.at("readonly"));
+                if (rv != "false" && rv != "0" && rv != "off") paint.textFlags |= TEXT_READONLY;
+            }
+        }
+
         if (clipOnly) pflags |= PAINT_CLIP_ONLY;
 
         // 静态 opacity：编译期折进节点颜色 alpha（binUI 没有合成组，子节点不受影响；
@@ -4167,7 +4464,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             }
         }
 
-        if (pflags) {
+        if (pflags || paint.textFlags) {
             paint.nodeId = n.id;
             paint.flags = pflags;
             paintNodes.push_back(paint);
@@ -4218,19 +4515,14 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             if (!rx.empty()) n.radius = (uint16_t)parseLen(rx, 0);
         }
 
-        if (!e.text.empty()) {
-            textMap[n.id] = e.text;
-        } else if (type == BINUI_INPUT || type == BINUI_BUTTON) {
-            std::string val = e.attrs.count("value") ? e.attrs.at("value") : "";
-            if (val.empty() && e.tag == "input") {
-                // 浏览器默认按钮文案：submit/reset 没写 value 时用内置标签
-                const std::string itype = lowerStr(e.attrs.count("type") ? e.attrs.at("type") : "text");
-                if (itype == "submit") val = "Submit";
-                else if (itype == "reset") val = "Reset";
-                else if (itype == "button") val = "Button";
-            }
-            if (val.empty() && e.attrs.count("placeholder")) val = e.attrs.at("placeholder");
-            if (!val.empty()) textMap[n.id] = val;
+        // 文本来源：元素自身文本 > 输入框/按钮的值 > 图片的 alt 兜底
+        if (!srcText.empty()) {
+            textMap[n.id] = srcText;
+        } else if (type == BINUI_INPUT || type == BINUI_BUTTON || isCheckbox) {
+            if (!inputVal.empty()) textMap[n.id] = inputVal;
+        } else if (type == BINUI_IMAGE && e.attrs.count("alt") && !e.attrs.at("alt").empty()) {
+            // 图片资源缺失时后端会把这行文字居中画出来（alt 兜底这条路早就有了，只是没人写进去）
+            textMap[n.id] = e.attrs.at("alt");
         }
 
         // <li>：无序列表加项目符号，有序列表（父 <ol>）加序号 —— 列表起码看得出来是列表

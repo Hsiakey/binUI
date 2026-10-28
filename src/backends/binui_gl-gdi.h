@@ -54,14 +54,16 @@ public:
     void strokeRounded(float x, float y, float w, float h, float radius,
                        float thickness, uint32_t color);
     // 文本：x/y 为基线（centerH/centerV 时 x/y 为矩形中心）
+    // italic：FreeType 合成倾斜（<i>/<em>/font-style:italic），与粗体一样占独立字形图集
     void drawText(float x, float y, float size, int weight,
                   const std::string& utf8, uint32_t color,
-                  bool centerH = false, bool centerV = false);
+                  bool centerH = false, bool centerV = false, bool italic = false);
     // 自动换行绘制；align：0=左 1=居中 2=右（相对 maxW 的可用宽度）
     void drawTextWrapped(float x, float y, float maxW, float size, int weight,
-                         const std::string& utf8, uint32_t color, int align = 0);
-    float textWidth(float size, int weight, const std::string& utf8);
-    void fontMetrics(float size, int weight, int& ascent, int& lineHeight);
+                         const std::string& utf8, uint32_t color, int align = 0,
+                         bool italic = false);
+    float textWidth(float size, int weight, const std::string& utf8, bool italic = false);
+    void fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic = false);
     // 图片：解码缓存 + 拉伸绘制（generation 换图版本号：不一致时重新上传纹理）
     bool prepareImage(uint16_t index, const uint8_t* data, size_t size, uint32_t generation);
     // 原始 RGBA 像素直传纹理（RGBA 字节序，无解码）

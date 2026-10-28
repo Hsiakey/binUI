@@ -101,6 +101,22 @@ public:
     // 该节点是否可被滚轮/拖动滚动（SCROLLABLE 且不是 clip-only）
     bool isUserScrollable(uint16_t nodeId) const;
 
+    // v14 表单/文字附加标记（BinUITextFlag；无扩展绘制条目返回 0）
+    uint32_t textFlagsOf(uint16_t nodeId) const {
+        const BinUIPaintNode* p = paintOf(nodeId);
+        return p ? p->textFlags : 0u;
+    }
+    // 禁用（<input disabled> / <button disabled>）：不进焦点链、不响应悬停/点击，绘制压到 55% 淡
+    bool isDisabled(uint16_t nodeId) const;
+    // 只读输入框：可聚焦、可选中，但拒绝编辑
+    bool isReadonly(uint16_t nodeId) const { return (textFlagsOf(nodeId) & TEXT_READONLY) != 0; }
+    // 该输入框当前的 text 是占位符（真实值为空）
+    bool isPlaceholder(uint16_t nodeId) const { return (textFlagsOf(nodeId) & TEXT_PLACEHOLDER) != 0; }
+    // 斜体（<i>/<em>/font-style:italic）
+    bool isItalic(uint16_t nodeId) const { return (textFlagsOf(nodeId) & TEXT_ITALIC) != 0; }
+    // 输入框的真实值（占位符状态下为空串；此时节点 text 存的是占位符提示语）
+    std::string inputValue(uint16_t nodeId) const;
+
     // 文字色：扩展绘制段有就用它，否则回退节点自带颜色（LABEL 的旧约定）
     uint32_t textColorOf(uint16_t nodeId) const;
 
@@ -220,7 +236,10 @@ public:
 
     // ============ 文本框编辑 ============
     bool isEditing() const { return edit_.active; }
-    bool isFocused(uint16_t nodeId) const { return edit_.active && edit_.nodeId == nodeId; }
+    // 是否在绘制光标（只读输入框可聚焦但不显示光标，所以这里排除 readonly）
+    bool isFocused(uint16_t nodeId) const {
+        return edit_.active && edit_.nodeId == nodeId && !isReadonly(nodeId);
+    }
     const EditState& edit() const { return edit_; }
 
     void focus(uint16_t nodeId);       // 开始编辑会话（仅 INPUT 节点，其他情况失焦）

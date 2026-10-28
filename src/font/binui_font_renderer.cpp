@@ -211,6 +211,13 @@ bool FontEngine::renderGlyph(const std::string& face, float size, uint32_t cp, G
 // 不会出现"字形加粗了但排不下"的错位。
 bool FontEngine::renderGlyph(const std::string& face, float size, uint32_t cp, bool bold,
                              GrayGlyph& out) {
+    return renderGlyph(face, size, cp, bold, false, out);
+}
+
+// italic=true：FT_GlyphSlot_Oblique 只做轮廓切变，advance/bearing 不变 ——
+// 所以斜体不会改变排版宽度，"测宽和绘制一致"这条性质仍然成立。
+bool FontEngine::renderGlyph(const std::string& face, float size, uint32_t cp, bool bold,
+                             bool italic, GrayGlyph& out) {
     auto* s = Impl::getSession(impl_, face, size);
     if (!s || !s->face) return false;
     FT_Face f = s->face;
@@ -218,9 +225,12 @@ bool FontEngine::renderGlyph(const std::string& face, float size, uint32_t cp, b
     FT_UInt gid = FT_Get_Char_Index(f, cp);
     if (gid == 0) return false;
     FT_Int32 flags = loadFlagsFor(size);
-    if (bold) flags |= FT_LOAD_NO_BITMAP;   // Embolden 只作用于矢量轮廓
+    if (bold || italic) flags |= FT_LOAD_NO_BITMAP;  // 两个合成变换都只作用于矢量轮廓
     if (FT_Load_Glyph(f, gid, flags) != 0) return false;
-    if (bold && f->glyph->format == FT_GLYPH_FORMAT_OUTLINE) FT_GlyphSlot_Embolden(f->glyph);
+    if (f->glyph->format == FT_GLYPH_FORMAT_OUTLINE) {
+        if (bold)   FT_GlyphSlot_Embolden(f->glyph);
+        if (italic) FT_GlyphSlot_Oblique(f->glyph);
+    }
     if (FT_Render_Glyph(f->glyph, FT_RENDER_MODE_NORMAL) != 0) return false;
 
     const FT_Bitmap& bm = f->glyph->bitmap;
