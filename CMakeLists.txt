@@ -70,6 +70,11 @@ if(WIN32)
     target_include_directories(app_shell PUBLIC ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(app_shell PUBLIC binui user32 gdi32 gdiplus ole32)
 
+    # OpenGL 渲染后端（WGL + GL 3.3 core）：无边框窗口 + 字形图集 + 顶点四边形
+    add_library(gl_shell STATIC src/backends/binui_gl-gdi.cpp)
+    target_include_directories(gl_shell PUBLIC ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(gl_shell PUBLIC binui opengl32 gdiplus dwmapi)
+
     function(add_binui_demo name src_dir ui_file)
         add_executable(${name} ${src_dir}/main.cpp)
         target_link_libraries(${name} PRIVATE app_shell binui)
