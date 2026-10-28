@@ -1,0 +1,23 @@
+<!--
+  tag.bum.html —— 标准组件库里的「HTML 写法」组件
+
+  组件源码有两种等价写法：
+      titlebar.bum.xml    XML 写法（注释写在 XML 注释里，长得更像配置）
+      tag.bum.html        这份，HTML 写法（和内联主 UI 完全一样）
+
+  能力没有任何区别 —— 组件源码本来就是交给 HTML 元素解析器处理的：
+  <style> 会并入宿主样式表、class / 伪类 / attr() 都能用、参数占位 一样替换、
+  <use> 嵌套一样生效。选哪个只看作者习惯：界面全是 HTML 的就用 .bum.html，
+  想强调"这是 XML 源"就用 .bum.xml。
+
+  <use src="tag.bum" .../> 两种都能找到（同一个候选表，.bum.xml 优先）。
+
+  参数：text 文案 / kind 配色（blue 默认, mint, amber, gray）/ w 宽 / fs 字号
+-->
+<style>
+    .bui-tag        { background: #EEF3FA; color: #66768C; border-radius: 9; font-size: 12px; }
+    .bui-tag.mint   { background: #E3F7F1; color: #1E9C7C; }
+    .bui-tag.amber  { background: #FDF3DC; color: #B07811; }
+    .bui-tag.gray   { background: #EEF3FA; color: #66768C; }
+</style>
+<span class="bui-tag {{kind=blue}}" style="width:{{w=72}}; height:20; font-size:{{fs=12}}; text-align:center">{{text=标签}}</span>

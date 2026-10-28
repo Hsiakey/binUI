@@ -26,6 +26,7 @@
 | `stat` | `<div>` | `k` `v` `w` `h` |
 | `avatar` | `<img>` | `src` `size` |
 | `divider` | `<div>` | `len` `color` |
+| `tag` | `<span>` | `text` `kind`(blue/mint/amber/gray) `w` `fs`（`.bum.html` 写法样板） |
 | `statusbar` | `<div>` | `text` `b1` `b2` `h` `bw` |
 
 三条约定（细节见 [`components/README.md`](../components/README.md)）：

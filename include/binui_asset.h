@@ -81,13 +81,19 @@ inline AssetFile ProbeAsset(const std::string& dir, const std::string& src) {
     const std::string low = AssetLower(src);
     std::vector<std::string> binCands, srcCands;
     if (AssetEndsWith(low, ".bum") || AssetEndsWith(low, ".bui") || AssetEndsWith(low, ".binui")) {
+        // src="card.bum" -> 二进制 card.bum，源码 card.bum.xml / card.bum.html 都认
         binCands.push_back(src);
         srcCands.push_back(src + ".xml");
+        srcCands.push_back(src + ".html");
     } else if (AssetEndsWith(low, ".xml") || AssetEndsWith(low, ".html") || AssetEndsWith(low, ".htm")) {
         srcCands.push_back(src);
     } else {
         binCands = {src + ".bum", src + ".bui", src + ".binui"};
-        srcCands = {src + ".bum.xml", src + ".bui.xml", src + ".binui.xml",
+        // 组件源码两种写法等价：.bum.xml（XML 写法）与 .bum.html（HTML 写法，
+        // 和主 UI 同一套语法）。两种都在同一个候选表里，就近优先、按顺序命中。
+        srcCands = {src + ".bum.xml", src + ".bum.html",
+                    src + ".bui.xml", src + ".bui.html",
+                    src + ".binui.xml", src + ".binui.html",
                     src + ".html", src + ".xml"};
     }
     auto pick = [&](const std::vector<std::string>& cands, bool wantBinary) -> std::string {

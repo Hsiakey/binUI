@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+### 新增 — 组件源码支持 `.bum.html`
+
+组件一直支持两种源码写法，但只有 `.bum.xml` 在文档里出现过。`ProbeAsset` 的候选表里
+漏了 `.bum.html`：写 `src="x.bum.html"`（显式扩展名）一直能内联，写 `src="x.bum"`
+（裸名字）就找不到 `x.bum.html`，只会安静地留一个空容器。
+
+- `include/binui_asset.h`：候选表补上 `.bum.html` / `.bui.html` / `.binui.html`；
+  裸名字顺序 `<名字>.bum` → `.bum.xml` → `.bum.html` → …（二进制优先，规则不变）。
+- 标准组件库新增 `components/tag.bum.html`：库里第一个 HTML 写法的组件，
+  `examples/features` 里用三种 `<use>` 写法（显式 `.bum.html` / 裸名字）指向同一个组件。
+- `test_compiler` 新增 5 条断言：显式扩展名内联、参数替换、`kind` 换肤、裸名字命中。
+- 文档：`components/README.md` 补「两种写法」一节，`docs/components.md` 清单加 `tag`。
+
+**注意**：组件只在 HTML 解析路径下展开。`CompileXML`（`.binui.xml` 老路径）不处理
+`<use>`，那种源文件里写组件不会生效。
+
 ### 变更 — 示例砍成 6 组：功能 / 动画 / 字体 / 2D 渲染 / 3D 渲染 / 纹理
 
 原来 9 个示例各演各的，彼此重叠又都不完整（cssshow 讲伪类、components 讲组件化、

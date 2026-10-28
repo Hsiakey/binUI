@@ -37,7 +37,23 @@ build-mingw/bin/offscreen_render components/preview.html docs/img/std-components
 | `stat.bum.xml` | `<div>` | `k` `v` `w` `h` | 指标单元（小标签 + 加粗数值） |
 | `avatar.bum.xml` | `<img>` | `src` `size` | 圆形头像，缺图退化成浅色圆 |
 | `divider.bum.xml` | `<div>` | `len` `color` | 1px 分隔线 |
+| `tag.bum.html` | `<span>` | `text` `kind`(blue/mint/amber/gray) `w` `fs` | 小标签。**HTML 写法**的样板（见下） |
 | `statusbar.bum.xml` | `<div>` | `text` `b1` `b2` `h` `bw` | 底部状态栏（左灰字 + 右两枚次要按钮） |
+
+## 两种写法：`.bum.xml` 与 `.bum.html`
+
+组件源码可以写成两种扩展名，**能力完全一样** —— 组件文件本来就是交给 HTML 元素解析器
+处理的，`<style>` 并表、`class`/伪类/`attr()`、`{{参数}}`、嵌套 `<use>` 全都一样：
+
+```html
+<use src="../../components/tag.bum.html" text="HTML 写法" kind="mint"/>  <!-- 显式扩展名 -->
+<use src="../../components/tag.bum"      text="裸名字也行"/>              <!-- 自动找 -->
+```
+
+裸名字时的候选顺序：`<名字>.bum`（二进制）→ `<名字>.bum.xml` → `<名字>.bum.html`
+→ …（二进制优先，源码比二进制新则用源码）。`tag.bum.html` 就是库里的 HTML 写法样板：
+界面全用 HTML 写的项目，组件也照着 HTML 写就行；XML 源项目想强调"这是 XML 源"就用
+`.bum.xml`。
 
 ## 三条使用约定
 

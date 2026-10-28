@@ -1601,6 +1601,32 @@ int main() {
         TEST("v14: 深底默认白色文字", tn && tn->color == 0xFFFFFFFFu);
     }
 
+    // ---- 组件源码的 HTML 写法（.bum.html）：和 .bum.xml 等价 ----
+    {
+        const char* html =
+            "<app_window width=\"420\" height=\"200\" bg=\"#F4F7FC\"><html><body>\n"
+            "  <use id=\"t1\" src=\"components/tag.bum.html\" x=\"16\" y=\"20\" w=\"90\"\n"
+            "       text=\"HTML 写法\" kind=\"mint\"/>\n"
+            "  <use id=\"t2\" src=\"components/tag.bum\" x=\"16\" y=\"60\" w=\"90\" text=\"裸名字\"/>\n"
+            "</body></html></app_window>\n";
+        auto res = CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("bum.html: 组件可编译加载", ParseInto(r, res.layout));
+
+        auto nodeOf = [&](uint16_t id) -> const BinUIRenderer::NodeInfo* {
+            for (const auto& n : r.getNodes()) if (n.id == id) return &n;
+            return nullptr;
+        };
+        const auto* t1 = nodeOf(r.findNodeByName("t1"));
+        const auto* t2 = nodeOf(r.findNodeByName("t2"));
+        // 根是 <span> → LABEL；参数替换 + 类名换肤都要生效
+        TEST("bum.html: 显式扩展名内联出组件根（span → LABEL）", t1 && t1->type == BINUI_LABEL);
+        TEST("bum.html: 参数 text 替换", t1 && t1->text == "HTML 写法");
+        TEST("bum.html: kind=mint 换肤", t1 && t1->color == 0xFFE3F7F1u);
+        // src="tag.bum" 的裸名字要能落到 tag.bum.html 上（同一个候选表）
+        TEST("bum.html: 裸名字 src 也命中 .bum.html", t2 && t2->text == "裸名字");
+    }
+
     // ---- v15：标准组件库 components/（根标签搬运 / 参数替换 / 插槽）----
     {
         const char* html =

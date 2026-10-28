@@ -174,7 +174,7 @@ WIN_BIN := $(BIN_DIR)
 
 # 标准组件库：demo 的 main.html 用 ../../components/xxx.bum.xml 引用，
 # 从 $(BIN_DIR)/<demo>/ 往上两级正好是 $(BUILD_DIR)/，所以拷到这里
-STD_LIB_SRCS  := $(wildcard components/*.bum.xml)
+STD_LIB_SRCS  := $(wildcard components/*.bum.xml components/*.bum.html)
 STD_LIB_STAMP := $(BUILD_DIR)/components/.stamp
 
 $(STD_LIB_STAMP): $(STD_LIB_SRCS)
