@@ -6,7 +6,8 @@
 
 ```html
 <use src="../../components/titlebar.bum.xml" x="0" y="0" w="960" z="100"
-     title="我的应用" hint="按 ESC 退出" idmin="btnMin" idclose="btnClose"/>
+     icon="◆" iconw="22" title="我的应用" sub="按 ESC 退出"
+     idmin="btnMin" idmax="btnMax" idclose="btnClose"/>
 ```
 
 ![全部组件](../docs/img/std-components.png)
@@ -26,7 +27,7 @@ build-mingw/bin/offscreen_render components/preview.html docs/img/std-components
 
 | 组件 | 根标签 | 主要参数 | 说明 |
 |---|---|---|---|
-| `titlebar.bum.xml` | `<titlebar>` | `title` `hint` `icon` `iconw` `h` `pad` `padr` `bs` `idmin` `idclose` | 窗口标题栏。flex 排版，多宽都不用算按钮坐标；根是 `<titlebar>`，所以拖动窗口照常生效 |
+| `titlebar.bum.xml` | `<titlebar>` | `title` `titlew` `sub` `icon` `iconw` `h` `pad` `padr` `bs` `gap` `idmin` `idmax` `idclose` | 窗口标题栏：**左**图标/标题/副标题，**右**最小化─ 最大化□ 关闭✕。flex 排版，多宽都不用算按钮坐标；根是 `<titlebar>`，所以拖动窗口照常生效 |
 | `button.bum.xml` | `<button>` | `label` `kind`(primary/secondary/ghost/danger) `w` `h` `fs` `r` | 四套外观，自带 `:hover`/`:active` |
 | `field.bum.xml` | `<input>` | `ph` 占位符 `val` 初值 `w` `h` `fs` `pad` | 单行输入框，聚焦转白底 |
 | `badge.bum.xml` | `<span>` | `text` `kind`(blue/mint/amber/red/gray) `w` | 状态胶囊 |

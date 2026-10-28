@@ -86,6 +86,7 @@ int main(int argc, char* argv[]) {
     uint16_t inputId    = renderer.findNodeByName("chatInput");
     uint16_t hintId     = renderer.findNodeByName("hint");
     uint16_t btnMin     = renderer.findNodeByName("btnMin");
+    uint16_t btnMax   = renderer.findNodeByName("btnMax");
     uint16_t btnClose   = renderer.findNodeByName("btnClose");
 
     auto findNode = [&](uint16_t id) -> const BinUIRenderer::NodeInfo* {
@@ -234,6 +235,7 @@ int main(int argc, char* argv[]) {
         if (id < 0) return;
         uint16_t nid = (uint16_t)id;
         if (nid == btnMin)    { app.minimize();    return; }
+        if (nid == btnMax)      { app.maximize();   return; }
         if (nid == btnClose)  { app.requestExit(); return; }
         invalidateNode(nid);
     });
@@ -301,6 +303,7 @@ int main(int argc, char* argv[]) {
             inputId    = renderer.findNodeByName("chatInput");
             hintId     = renderer.findNodeByName("hint");
             btnMin     = renderer.findNodeByName("btnMin");
+            btnMax   = renderer.findNodeByName("btnMax");
             btnClose   = renderer.findNodeByName("btnClose");
             if (const auto* n = findNode(logId)) {
                 logX = n->x; logY = n->y; logW = n->width; logH = n->height;

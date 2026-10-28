@@ -1606,7 +1606,7 @@ int main() {
         const char* html =
             "<app_window width=\"760\" height=\"420\" bg=\"#F4F7FC\"><html><body>\n"
             "  <use src=\"components/titlebar.bum.xml\" x=\"0\" y=\"0\" w=\"760\"\n"
-            "       title=\"标题A\" hint=\"提示B\" idmin=\"imin\" idclose=\"iclose\"/>\n"
+            "       title=\"标题A\" sub=\"提示B\" idmin=\"imin\" idmax=\"imax\" idclose=\"iclose\"/>\n"
             "  <use id=\"btn\" src=\"components/button.bum.xml\" x=\"16\" y=\"60\"\n"
             "       w=\"120\" h=\"36\" kind=\"secondary\" label=\"次按钮\"/>\n"
             "  <use id=\"fld\" src=\"components/field.bum.xml\" x=\"16\" y=\"110\"\n"
@@ -1634,15 +1634,17 @@ int main() {
         const uint16_t titleId = byText("标题A");
         const auto* titleNode = nodeOf(titleId);
         TEST("std: titlebar 标题取到参数", titleNode != nullptr);
-        TEST("std: titlebar 说明文字取到参数", byText("提示B") != 0xFFFF);
+        TEST("std: titlebar 副标题取到参数", byText("提示B") != 0xFFFF);
         if (titleNode) {
             const auto* tb = nodeOf(titleNode->parentId);
             TEST("std: titlebar 根带 BINUI_TITLEBAR（窗口拖动）",
                  tb != nullptr && (tb->flags & BINUI_TITLEBAR));
         }
-        TEST("std: titlebar 按钮 id 可定制",
-             r.findNodeByName("imin") != 0 && r.findNodeByName("iclose") != 0);
+        TEST("std: titlebar 三大按钮 id 可定制",
+             r.findNodeByName("imin") != 0 && r.findNodeByName("imax") != 0 &&
+             r.findNodeByName("iclose") != 0);
         TEST("std: titlebar 关闭按钮文案是 ✕", byText("\xE2\x9C\x95") != 0xFFFF);
+        TEST("std: titlebar 最大化按钮文案是 □", byText("\xE2\x96\xA1") != 0xFFFF);
 
         // 2) button：根标签搬过来 → 真的是 BINUI_BUTTON（可点击、居中、粗体）
         const uint16_t btnId = r.findNodeByName("btn");

@@ -137,6 +137,7 @@ public:
     // 无边框窗口交互：拖动（在标题栏按下时调用）/ 最小化
     void beginWindowDrag();
     void minimize();
+    void maximize();   // 最大化 / 还原（GL/GDI 窗口同样是无边框自绘，syscall 直接走 ShowWindow）
 
     BinUIGLGdi& gfx() { return gfx_; }
 

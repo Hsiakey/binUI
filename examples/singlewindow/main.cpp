@@ -80,6 +80,7 @@ int main(int argc, char* argv[]) {
     uint16_t btnBg    = renderer.findNodeByName("btnBg");
     uint16_t btnReload= renderer.findNodeByName("btnReload");
     uint16_t btnMin   = renderer.findNodeByName("btnMin");
+    uint16_t btnMax   = renderer.findNodeByName("btnMax");
     uint16_t btnClose = renderer.findNodeByName("btnClose");
 
     uint16_t heroImageIndex = 0;
@@ -132,6 +133,7 @@ int main(int argc, char* argv[]) {
         if (id < 0) return;
         uint16_t nid = (uint16_t)id;
         if (nid == btnMin)   { app.minimize();    return; }
+        if (nid == btnMax)      { app.maximize();   return; }
         if (nid == btnClose) { app.requestExit(); return; }
         if (nid == btnTog) {
             const auto* n = findNode(heroId);
@@ -217,6 +219,7 @@ int main(int argc, char* argv[]) {
             btnBg     = renderer.findNodeByName("btnBg");
             btnReload = renderer.findNodeByName("btnReload");
             btnMin    = renderer.findNodeByName("btnMin");
+            btnMax   = renderer.findNodeByName("btnMax");
             app.invalidateAll();
         }
         for (uint16_t id : renderer.stepAnimations())

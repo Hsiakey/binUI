@@ -40,9 +40,8 @@
 </head>
 <body>
     <!-- 标题栏（可拖动窗口）：三键用 id 区分，不再靠文字匹配 -->
-<use src="../../components/titlebar.bum.xml" x="0" y="0" w="1000" z="100"
-     title="单窗口模式 · NOELA_N001（1227×1227 PNG → GPU 纹理）" hint="ESC 退出 · 拖标题栏移动 · 窗口等比缩放" hintw="300"
-     idmin="btnMin" idclose="btnClose"/>
+<use src="../../components/titlebar.bum.xml" x="0" y="0" w="1000" z="100" icon="◆" iconw="22" title="单窗口模式 · NOELA_N001（1227×1227 PNG → GPU 纹理）" titlew="381"
+          sub="ESC 退出 · 拖标题栏移动 · 窗口等比缩放" idmin="btnMin" idmax="btnMax" idclose="btnClose"/>
 
     <!-- 舞台背光（圆角矩形，z-index 1，呼吸动画）：浅色底上改用淡蓝呼吸 -->
     <div style="position:absolute; left:210; top:96; width:580; height:580; background:rgba(62,139,255,0.10); border-radius:290; z-index:1; animation:glowPulse 4s ease-in-out 0s infinite"></div>

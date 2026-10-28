@@ -71,6 +71,7 @@ int RunWorker(const WinSpec& spec, bool watch) {
     app.setWindowOptions(false, 0, wd.present && wd.transparent(), spec.title);
 
     uint16_t btnMin   = renderer.findNodeByName("btnMin");
+    uint16_t btnMax   = renderer.findNodeByName("btnMax");
     uint16_t btnClose = renderer.findNodeByName("btnClose");
 
 
@@ -105,6 +106,7 @@ int RunWorker(const WinSpec& spec, bool watch) {
         if (id < 0) return;
         uint16_t nid = (uint16_t)id;
         if (nid == btnMin)        { app.minimize();    return; }
+        if (nid == btnMax)      { app.maximize();   return; }
         if (nid == btnClose)      { app.requestExit(); return; }
         invalidateNode(nid);
     });
@@ -124,6 +126,7 @@ int RunWorker(const WinSpec& spec, bool watch) {
     app.setUpdateFn([&](float) {
         if (hot.Tick(renderer, "multiwindow", winW, winH) == binui::ex::HotReload::Result::Reloaded) {
             btnMin   = renderer.findNodeByName("btnMin");
+            btnMax   = renderer.findNodeByName("btnMax");
             btnClose = renderer.findNodeByName("btnClose");
             app.invalidateAll();
         }

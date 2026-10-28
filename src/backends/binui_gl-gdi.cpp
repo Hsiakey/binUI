@@ -2228,6 +2228,12 @@ void BinUIAppGLGdi::minimize() {
     if (hwnd_) ShowWindow(static_cast<HWND>(hwnd_), SW_MINIMIZE);
 }
 
+void BinUIAppGLGdi::maximize() {
+    if (!hwnd_) return;
+    const HWND h = static_cast<HWND>(hwnd_);
+    ShowWindow(h, IsZoomed(h) ? SW_RESTORE : SW_MAXIMIZE);
+}
+
 // 手动 resize 拖拽循环（窗口无 WS_THICKFRAME，系统不提供 resize，这里自行实现）。
 // 拖拽期间每轮实时渲染到新尺寸离屏 + GDI blit 到窗口（实时重绘、跟手）。
 // 关键：拖拽期间绝不能 SwapBuffers——NVIDIA 驱动在"窗口 resize + SwapBuffers"组合下

@@ -122,6 +122,7 @@ int main(int argc, char* argv[]) {
             for (const auto& n : renderer.getNodes()) {
                 if (n.id != (uint16_t)id) continue;
                 if (n.text == "\xE2\x94\x80") app.minimize();
+                else if (n.text == "\xE2\x96\xA1") app.maximize();
                 else if (n.text == "\xE2\x9C\x95") app.requestExit();
                 break;
             }

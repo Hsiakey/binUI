@@ -1,23 +1,27 @@
 <!--
-  titlebar.bum.xml —— 标准标题栏：白底 + 底部 1px 线 + 右侧窗口按钮
-  用 flex 排版，窗口多宽都不用宿主算按钮坐标：
-      [左内边距][图标?][标题 flex:1][说明文字][─][✕][右内边距]
+  titlebar.bum.xml —— 标准标题栏
+      左：  图标  标题  副标题
+      右：  最小化 ─   最大化 □   关闭 ✕
+  整条用 flex 排版，窗口多宽都不用宿主算按钮坐标。
   根元素是 <titlebar>，所以窗口拖动（isTitlebarDrag）照常生效。
 
   参数                     默认          说明
-    title      标题文字      标题          主标题（14px / 700 / #1F2A37）
-    hint       说明文字      （空）        右侧浅灰小字；ESC 提示也塞这里
-    hintw      说明文字宽度  180
-    icon       左侧图标      （空）        一个字形，例如 ♻ ✏ ◆
-    iconw      图标宽度      0             用图标时记得一起给（如 28）
+    title      标题          标题          主标题 14px / 700 / #1F2A37
+    titlew     标题宽度      200           flex 里没有"宽度自适应"，标题占固定宽，
+                                           副标题从 titlew 之后开始（按标题字数给值）
+    sub        副标题        （空）        11px / #94A3B8，左对齐紧跟标题
+    icon       左侧图标      （空）        一个字形，例如 ◆ ♻ ✏；建议配 iconw
+    iconw      图标宽度      1             不给就只是 1px 占位（不传图标时不用管）
     h          高度          44
     pad        左内边距      16
     padr       右内边距      12
-    bs         窗口按钮边长  28
+    bs         按钮边长      28
+    gap        元素间距      6
     idmin      最小化按钮 id win-min
+    idmax      最大化按钮 id win-max
     idclose    关闭按钮 id   win-close
 
-  ⚠ 参数不要写进 <style>：组件样式表是**全局**的，多个实例会互相覆盖。
+  ⚠ 参数不要写进 <style>：组件样式表会并入宿主且是**全局**的，多个实例互相覆盖。
     所有可调值都走内联 style；<style> 里只放"同一套皮肤"的固定规则。
 -->
 <style>
@@ -29,7 +33,7 @@
     .bui-tb       { background:#FFFFFF; border-bottom:1px solid #E6EDF7; }
     .bui-tb-icon  { color:#3E8BFF; font-size:18px; }
     .bui-tb-title { color:#1F2A37; font-size:14px; font-weight:700; }
-    .bui-tb-hint  { color:#94A3B8; font-size:11px; }
+    .bui-tb-sub   { color:#94A3B8; font-size:11px; }
     .bui-tb-btn   { background:#EEF3FA; color:#66768C; border-radius:8; font-size:12px;
                     transition: background-color .15s ease; }
     .bui-tb-btn:hover  { background:#DCE5F2; }
@@ -39,12 +43,13 @@
     .bui-tb-close:hover  { background:#FFD9DE; }
     .bui-tb-close:active { background:#FFC6CE; }
 </style>
-<titlebar class="bui-tb" style="height:{{h=44}}; display:flex; align-items:center; gap:6">
+<titlebar class="bui-tb" style="height:{{h=44}}; display:flex; align-items:center; gap:{{gap=6}}">
     <div style="width:{{pad=16}}; height:1; background:transparent"></div>
     <span class="bui-tb-icon" style="width:{{iconw=1}}; height:22; animation:bui-tb-icon-pulse 2s ease-in-out 0s infinite">{{icon=}}</span>
-    <span class="bui-tb-title" style="flex:1; height:20">{{title=标题}}</span>
-    <span class="bui-tb-hint" style="width:{{hintw=180}}; height:16">{{hint=}}</span>
-    <button id="{{idmin=win-min}}" class="bui-tb-btn" style="width:{{bs=28}}; height:{{bs=28}}">─</button>
+    <span class="bui-tb-title" style="width:{{titlew=200}}; height:20">{{title=标题}}</span>
+    <span class="bui-tb-sub" style="flex:1; height:16">{{sub=}}</span>
+    <button id="{{idmin=win-min}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}">─</button>
+    <button id="{{idmax=win-max}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}">□</button>
     <button id="{{idclose=win-close}}" class="bui-tb-close" style="width:{{bs=28}}; height:{{bs=28}}">✕</button>
     <div style="width:{{padr=12}}; height:1; background:transparent"></div>
 </titlebar>

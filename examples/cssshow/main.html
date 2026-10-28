@@ -83,14 +83,8 @@
     </style>
 </head>
 <body>
-<use src="../../components/titlebar.bum.xml" x="0" y="0" w="720"     title="CSS 伪类 / 伪元素" hint="hover 按钮 · focus 输入框 · 点复选框切 :checked" hintw="330" idclose="close"/>
-
-    <!-- 卡片 1：运行时伪类 -->
-    <div class="card" style="position:absolute; left:16; top:56; width:332; height:212">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:200; height:18">运行时伪类</span>
-        <button id="b1" class="btn" style="position:absolute; left:16; top:44">悬停 / 按下</button>
-        <button id="b2" class="ghost" style="position:absolute; left:164; top:44">:hover / :active</button>
-        <input id="b3" class="field" style="position:absolute; left:16; top:98" placeholder="点这里聚焦（:focus）"/>
+<use src="../../components/titlebar.bum.xml" x="0" y="0" w="720" icon="✱" iconw="22" title="CSS 伪类 / 伪元素" titlew="135"
+          sub="hover 按钮 · focus 输入框 · 点复选框切 :checked" idclose="close"/>
         <button id="b4" class="toggle" style="position:absolute; left:16; top:152">点我切换 :checked</button>
         <span class="note" style="position:absolute; left:164; top:158; width:150; height:34">:checked 由外壳调用 setNodeChecked</span>
     </div>

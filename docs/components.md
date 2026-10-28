@@ -16,7 +16,7 @@
 
 | 组件 | 根标签 | 参数 |
 |---|---|---|
-| `titlebar` | `<titlebar>` | `title` `hint` `icon` `iconw` `h` `pad` `padr` `bs` `idmin` `idclose` |
+| `titlebar` | `<titlebar>` | `title` `titlew` `sub` `icon` `iconw` `h` `pad` `padr` `bs` `gap` `idmin` `idmax` `idclose`（左：图标/标题/副标题；右：─ □ ✕） |
 | `button` | `<button>` | `label` `kind`(primary/secondary/ghost/danger) `w` `h` `fs` `r` |
 | `field` | `<input>` | `ph` `val` `w` `h` `fs` `pad` |
 | `badge` | `<span>` | `text` `kind`(blue/mint/amber/red/gray) `w` |
