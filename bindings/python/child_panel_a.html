@@ -1,0 +1,15 @@
+# 子窗口演示 - 左侧面板（一个 binUI 实例）
+<html width="220" height="380" bg="#FFFFFF">
+<body>
+  <span style="position:absolute;left:16;top:14;width:190;height:18;font-size:12;font-weight:700;color:#1F2A37">左侧面板</span>
+  <span style="position:absolute;left:16;top:34;width:190;height:16;font-size:11;color:#94A3B8">WS_CHILD · binUI 实例 #1</span>
+  <div style="position:absolute;left:14;top:58;width:192;height:1;background:#E6EDF7"></div>
+
+  <button id="a_inc" style="position:absolute;left:16;top:74;width:188;height:40;background:#3E8BFF;color:#FFFFFF;border-radius:10;font-size:13">点我 +1</button>
+  <span id="a_count" style="position:absolute;left:16;top:126;width:188;height:40;font-size:24;font-weight:700;color:#3E8BFF">0</span>
+
+  <div style="position:absolute;left:16;top:186;width:188;height:96;background:#F7FAFF;border:1px solid #E1E9F5;border-radius:10"></div>
+  <span style="position:absolute;left:28;top:198;width:164;height:72;font-size:11;color:#66768C">这块 UI 是宿主的子窗口。
+
+宿主是一个普通 Win32 窗口，消息循环归它。</span>
+</body></html>

@@ -2220,7 +2220,7 @@ bool isTitlebarDrag(const BinUIRenderer& renderer, float x, float y) {
 }
 
 void BinUIAppGLGdi::beginWindowDrag() {
-    if (!hwnd_) return;
+    if (!hwnd_ || childMode_) return;   // 子窗口没有"拖动整窗"，那是宿主的标题栏生意
     ReleaseCapture();
     POINT p;
     GetCursorPos(&p);
@@ -2229,11 +2229,11 @@ void BinUIAppGLGdi::beginWindowDrag() {
 }
 
 void BinUIAppGLGdi::minimize() {
-    if (hwnd_) ShowWindow(static_cast<HWND>(hwnd_), SW_MINIMIZE);
+    if (hwnd_ && !childMode_) ShowWindow(static_cast<HWND>(hwnd_), SW_MINIMIZE);
 }
 
 void BinUIAppGLGdi::maximize() {
-    if (!hwnd_) return;
+    if (!hwnd_ || childMode_) return;
     const HWND h = static_cast<HWND>(hwnd_);
     ShowWindow(h, IsZoomed(h) ? SW_RESTORE : SW_MAXIMIZE);
 }
@@ -2374,7 +2374,9 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             return 0;
         case WM_NCLBUTTONDOWN: {
             // 无 WS_THICKFRAME：命中边框热区时自行启动 resize 循环
-            if (!app->resizable_) return DefWindowProcW(hwnd, msg, wParam, lParam);
+            // 子窗口没有非客户区，也没有"让系统带着拖动"的语义 —— 一律交给宿主
+            if (app->childMode_ || !app->resizable_)
+                return DefWindowProcW(hwnd, msg, wParam, lParam);
             switch (wParam) {
                 case HTLEFT: case HTRIGHT: case HTTOP: case HTBOTTOM:
                 case HTTOPLEFT: case HTTOPRIGHT: case HTBOTTOMLEFT:
@@ -2390,7 +2392,7 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
         case WM_NCHITTEST: {
             // 无边框窗口：边框 8px 热区用于调整大小，其余为客户区
-            if (!app->resizable_) return HTCLIENT;
+            if (app->childMode_ || !app->resizable_) return HTCLIENT;
             RECT rc;
             GetWindowRect(hwnd, &rc);
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
@@ -2411,6 +2413,14 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             app->requestExit();
             return 0;
         case WM_DESTROY:
+            // 子窗口：宿主销毁自己的窗口时子窗口跟着被销毁，这里必须当场收摊 ——
+            // 否则 hwnd_ 变悬垂指针、GL 上下文还挂着一个已经没了的 DC。
+            if (app->childMode_) {
+                app->gfx_.shutdown();
+                app->running_ = false;
+                app->hwnd_ = nullptr;
+                return 0;      // 绝不 PostQuitMessage：那会把宿主的消息循环干掉
+            }
             PostQuitMessage(0);
             return 0;
     }
@@ -2454,23 +2464,51 @@ int BinUIAppGLGdi::run() {
     return 0;
 }
 
-bool BinUIAppGLGdi::open() {
-    SetProcessDPIAware();
+// 窗口类注册（顶层窗与子窗口共用同一个类）。
+static const wchar_t kBinUIWindowClass[] = L"BinUIAppGLGdiWindow";
+
+// 本**模块**的实例句柄（DLL 里就是 DLL 的，不是宿主 exe 的）。
+// GetModuleHandleW(nullptr) 返回的是 exe —— 把类注册进别人的 atom 表是越界行为：
+// 顶层窗侥幸能用，子窗口模式会被父窗口的模块关系放大成问题。
+static HINSTANCE wcInstance() {
+    HMODULE module = nullptr;
+    ::GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                             GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                         reinterpret_cast<LPCWSTR>(&wcInstance), &module);
+    return module ? static_cast<HINSTANCE>(module) : GetModuleHandleW(nullptr);
+}
+
+// hCursor 给 IDC_ARROW：子窗口没有非客户区，光标只能由类来定。
+bool BinUIAppGLGdi::ensureClass() {
+    static bool done = false;
+    if (done) return true;
 
     // 窗口类必须是 Unicode（RegisterClassW + DispatchMessageW）：
     // ANSI 窗口在 CP936 等下，一个中文字符会被系统拆成两个 WM_CHAR（DBCS 字节），
     // handleChar 逐字节转 UTF-8 就得到乱码（中 -> "ÖÐ"）。IME 输入同理。
-    const wchar_t* CLASS_NAME = L"BinUIAppGLGdiWindow";
     WNDCLASSW wc = {};
     // CS_OWNDC：窗口独占 DC，resize 时系统不回收该 DC（避免 SwapBuffers 用到
     // 被拆掉的旧后备缓冲 —— GDI 呈现路径在快速 resize 时会因此崩溃）
     wc.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = BinUIAppGLGdi::wndProc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = CLASS_NAME;
+    wc.hInstance = wcInstance();
+    wc.lpszClassName = kBinUIWindowClass;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
-    RegisterClassW(&wc);
+    if (!RegisterClassW(&wc)) {
+        const DWORD err = GetLastError();
+        if (err != ERROR_CLASS_ALREADY_EXISTS) {
+            std::fprintf(stderr, "[gl] RegisterClassW failed: %lu\n", (unsigned long)err);
+            return false;
+        }
+    }
+    done = true;
+    return true;
+}
+
+bool BinUIAppGLGdi::open() {
+    SetProcessDPIAware();
+    if (!ensureClass()) return false;
 
     RECT work = { 0, 0, 800, 600 };
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
@@ -2488,14 +2526,15 @@ bool BinUIAppGLGdi::open() {
     // 无边框：WS_POPUP 无标题栏/边框/系统菜单；WS_MAXIMIZEBOX 允许 Win+↑ 最大化
     DWORD exStyle = 0;
     if (transparent_) exStyle |= WS_EX_LAYERED;
-    HWND hwnd = CreateWindowExW(exStyle, CLASS_NAME, wtitle,
+    HWND hwnd = CreateWindowExW(exStyle, kBinUIWindowClass, wtitle,
         WS_POPUP | WS_MAXIMIZEBOX | WS_VISIBLE, winX, winY, winW, winH,
-        nullptr, nullptr, wc.hInstance, nullptr);
+        nullptr, nullptr, wcInstance(), nullptr);
     if (!hwnd) {
         std::fprintf(stderr, "[gl] Failed to create window\n");
         return false;
     }
     hwnd_ = hwnd;
+    childMode_ = false;
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 
     // 禁用 Windows 11 DWM 自动圆角：UI 圆角由 border-radius 属性自控（跨平台一致）
@@ -2519,8 +2558,79 @@ bool BinUIAppGLGdi::open() {
     return true;
 }
 
+// 子窗口模式：作为控件挂进宿主窗口的客户区。
+//   · 不调 SetProcessDPIAware —— DPI 感知是进程级策略，库去改宿主的策略是越界行为
+//   · 不 SetFocus —— 焦点归宿主管，抢焦点会把宿主自己的控件踢掉
+//   · 不设 WS_EX_LAYERED —— 分层窗口属性对子窗口无效（逐像素透明在子窗口上做不到）
+bool BinUIAppGLGdi::openChild(void* parent, int x, int y, int width, int height) {
+    const HWND par = static_cast<HWND>(parent);
+    if (!par) {
+        std::fprintf(stderr, "[gl] openChild: parent 为空\n");
+        return false;
+    }
+    if (width <= 0 || height <= 0) {
+        std::fprintf(stderr, "[gl] openChild: 尺寸非法 %dx%d\n", width, height);
+        return false;
+    }
+    if (!ensureClass()) return false;
+
+    HWND hwnd = CreateWindowExW(0, kBinUIWindowClass, L"",
+        WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS,
+        x, y, width, height, par, nullptr, wcInstance(), nullptr);
+    if (!hwnd) {
+        std::fprintf(stderr, "[gl] openChild: CreateWindowExW 失败 (%lu)\n",
+                     (unsigned long)GetLastError());
+        return false;
+    }
+    hwnd_ = hwnd;
+    childMode_ = true;
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+
+    gfx_.setTransparent(false);
+    if (!gfx_.init(hwnd, width, height, vsync_)) {
+        std::fprintf(stderr, "[gl] openChild: OpenGL init failed\n");
+        DestroyWindow(hwnd);
+        hwnd_ = nullptr;
+        childMode_ = false;
+        return false;
+    }
+    width_ = width;
+    height_ = height;
+    invalidateAll();
+
+    lastTime_ = std::chrono::steady_clock::now();
+    running_ = true;
+    return true;
+}
+
+void BinUIAppGLGdi::renderFrame() {
+    if (!running_) return;
+    const auto now = std::chrono::steady_clock::now();
+    float dt = std::chrono::duration<float>(now - lastTime_).count();
+    lastTime_ = now;
+    if (dt > 0.1f) dt = 1.0f / 60.0f;
+    if (update_) update_(dt);
+    renderOnce();
+}
+
+void BinUIAppGLGdi::setClientSize(int width, int height) {
+    if (width <= 0 || height <= 0) return;
+    if (width == width_ && height == height_) return;
+    // 走和 WM_SIZE 相同的"挂起 → 下一帧应用"路径，避免宿主在绘制中途改尺寸
+    pendingW_ = width;
+    pendingH_ = height;
+    invalidateAll();
+}
+
 int BinUIAppGLGdi::pump(int timeoutMs) {
     if (!running_) return 1;
+
+    // 子窗口模式：消息由宿主的循环派发（DispatchMessage 会投递到本窗口的 wndProc），
+    // 这里**绝不能** PeekMessage —— 那会把宿主的消息抽走，宿主自己的控件就不响应了。
+    if (childMode_) {
+        renderFrame();
+        return running_ ? 0 : 1;
+    }
 
     // 空闲时阻塞到有输入（或超时），省 CPU；有脏区/挂起 resize 时不等待，直接出帧
     if (timeoutMs > 0 && !dirty_ && pendingW_ <= 0 && pendingH_ <= 0) {
@@ -2539,13 +2649,7 @@ int BinUIAppGLGdi::pump(int timeoutMs) {
     }
     if (!running_) return 1;
 
-    const auto now = std::chrono::steady_clock::now();
-    float dt = std::chrono::duration<float>(now - lastTime_).count();
-    lastTime_ = now;
-    if (dt > 0.1f) dt = 1.0f / 60.0f;
-    if (update_) update_(dt);
-
-    renderOnce();
+    renderFrame();
     return running_ ? 0 : 1;
 }
 
@@ -2556,9 +2660,13 @@ void BinUIAppGLGdi::close() {
         DestroyWindow(static_cast<HWND>(hwnd_));
         hwnd_ = nullptr;
     }
-    // 排空残留消息（含 WM_QUIT），避免宿主下一轮 pump 读到上一个窗口的退出消息
-    MSG msg = {};
-    while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {}
+    // 排空残留消息（含 WM_QUIT），避免宿主下一轮 pump 读到上一个窗口的退出消息。
+    // 子窗口模式下消息队列是宿主的，清空等于把宿主没处理完的消息吃掉 —— 绝不这么做。
+    if (!childMode_) {
+        MSG msg = {};
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {}
+    }
+    childMode_ = false;
 }
 
 void BinUIAppGLGdi::handleMouseMove(float x, float y) { if (move_) move_(x, y); }

@@ -168,6 +168,21 @@ int main() {
     TEST("poll empty queue", binui_poll_event(app, &ev) == 0);
     TEST("poll null out", binui_poll_event(app, nullptr) == 0);
 
+    // ---- 7.5 子窗口模式：只测参数校验与未开窗行为（真建窗需要宿主 HWND，不进 CI）----
+    TEST("open_child rejects null parent",
+         binui_app_open_child(app, nullptr, 0, 0, 200, 120, 0) == 0);
+    TEST("open_child null parent sets error", std::strlen(binui_last_error()) > 0);
+    TEST("open_child rejects zero size",
+         binui_app_open_child(app, reinterpret_cast<void*>(0x1), 0, 0, 0, 120, 0) == 0);
+    TEST("open_child rejects negative size",
+         binui_app_open_child(app, reinterpret_cast<void*>(0x1), 0, 0, 200, -1, 0) == 0);
+    TEST("app_hwnd(null)", binui_app_hwnd(nullptr) == nullptr);
+    TEST("app_hwnd before open", binui_app_hwnd(app) == nullptr);
+    TEST("render before open -> closed", binui_render(app) == 1);
+    binui_resize(app, 320, 200);   // 未开窗：忽略，不崩
+    binui_resize(app, 0, 0);
+    binui_resize(nullptr, 100, 100);
+
     // ---- 8. 空指针防护（绑定层最容易传错的地方）----
     TEST("node_count(null) == 0", binui_node_count(nullptr) == 0);
     TEST("hit_test(null) == -1", binui_hit_test(nullptr, 0, 0) == -1);

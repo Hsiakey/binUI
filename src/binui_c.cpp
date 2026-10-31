@@ -114,99 +114,9 @@ std::string asDir(std::string d) {
 // ============================================================
 // 版本 / 错误
 // ============================================================
-extern "C" {
-
-const char* BINUI_C_CALL binui_version(void) { return "0.2.0"; }
-
-int32_t BINUI_C_CALL binui_abi_version(void) { return BINUI_C_ABI_VERSION; }
-
-const char* BINUI_C_CALL binui_last_error(void) { return g_err.c_str(); }
-
-void BINUI_C_CALL binui_free(void* p) { std::free(p); }
-
-// ============================================================
-// 编译
-// ============================================================
-int32_t BINUI_C_CALL binui_compile_file(const char* src_path_utf8, const char* out_path_utf8) {
-    if (!src_path_utf8 || !*src_path_utf8) { SetErr("binui_compile_file: 源路径为空"); return 0; }
-    if (!out_path_utf8 || !*out_path_utf8) { SetErr("binui_compile_file: 输出路径为空"); return 0; }
-
-    std::vector<uint8_t> bytes = binui::ex::ReadFileBytes(src_path_utf8);
-    if (bytes.empty()) {
-        SetErr("binui_compile_file: 读不到源文件 %s", src_path_utf8);
-        return 0;
-    }
-    // 已经是二进制布局：原样写出（源码/二进制两条流水线共用一条命令）
-    if (binui::IsLayoutData(bytes.data(), bytes.size())) {
-        // 直接落盘
-    } else {
-        binui::CompileResult res = binui::CompileBinUIFileEx(src_path_utf8);
-        for (const auto& w : res.warnings) {
-            std::fprintf(stderr, "[binui_compile] warning: %s\n", w.c_str());
-        }
-        if (res.layout.empty()) {
-            SetErr("binui_compile_file: 编译 %s 失败（空布局）", src_path_utf8);
-            return 0;
-        }
-        bytes = std::move(res.layout);
-    }
-
-    std::FILE* f = std::fopen(out_path_utf8, "wb");
-    if (!f) {
-        SetErr("binui_compile_file: 无法写入 %s", out_path_utf8);
-        return 0;
-    }
-    const size_t n = std::fwrite(bytes.data(), 1, bytes.size(), f);
-    std::fclose(f);
-    if (n != bytes.size()) {
-        SetErr("binui_compile_file: 写入 %s 不完整（%zu / %zu 字节）",
-               out_path_utf8, n, bytes.size());
-        return 0;
-    }
-    return 1;
-}
-
-int32_t BINUI_C_CALL binui_compile_memory(const char* src_utf8, int32_t src_len,
-                                         void** out_data, int32_t* out_len) {
-    if (!out_data || !out_len) { SetErr("binui_compile_memory: out 参数为空"); return 0; }
-    *out_data = nullptr;
-    *out_len = 0;
-    if (!src_utf8 || src_len == 0) { SetErr("binui_compile_memory: 源码为空"); return 0; }
-
-    const std::string src = (src_len > 0) ? std::string(src_utf8, static_cast<size_t>(src_len))
-                                          : std::string(src_utf8);
-    const binui::CompileResult res = binui::CompileBinUIEx(src);
-    for (const auto& w : res.warnings) {
-        std::fprintf(stderr, "[binui_compile] warning: %s\n", w.c_str());
-    }
-    if (res.layout.empty()) { SetErr("binui_compile_memory: 编译失败（空布局）"); return 0; }
-
-    void* p = std::malloc(res.layout.size());
-    if (!p) { SetErr("binui_compile_memory: 内存不足"); return 0; }
-    std::memcpy(p, res.layout.data(), res.layout.size());
-    *out_data = p;
-    *out_len = static_cast<int32_t>(res.layout.size());
-    return 1;
-}
-
-// ============================================================
-// 应用生命周期
-// ============================================================
-void* BINUI_C_CALL binui_app_create(const void* layout, int32_t len, const char* asset_dir_utf8) {
-    if (!layout || len <= 0) { SetErr("binui_app_create: 布局为空"); return nullptr; }
-
-    std::unique_ptr<App> app(new App());
-    if (asset_dir_utf8 && *asset_dir_utf8) app->assetDir = asDir(asset_dir_utf8);
-
-    if (!app->renderer.loadLayout(static_cast<const uint8_t*>(layout), static_cast<size_t>(len))) {
-        SetErr("binui_app_create: 布局解析失败（不是 .bui / 版本不匹配 / 数据截断）");
-        return nullptr;
-    }
-    return app.release();
-}
-
-int32_t BINUI_C_CALL binui_app_open(void* appp, int32_t width, int32_t height,
-                                    uint32_t flags, const char* title_utf8) {
+static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
+                               uint32_t flags, const char* title_utf8,
+                               void* parent_hwnd, int32_t x, int32_t y) {
     App* a = A(appp);
     if (!a) { SetErr("binui_app_open: app 为空"); return 0; }
     if (a->opened) { SetErr("binui_app_open: 窗口已经打开"); return 0; }
@@ -221,13 +131,16 @@ int32_t BINUI_C_CALL binui_app_open(void* appp, int32_t width, int32_t height,
                                   : (wd.present && !wd.title.empty() ? wd.title
                                                                     : std::string("binUI"));
 
-    a->shell.reset(new binui::BinUIAppGLGdi(
-        w, h, (flags & BINUI_OPEN_NO_VSYNC) == 0));
-    a->shell->setWindowOptions(
-        (flags & BINUI_OPEN_RESIZABLE) != 0 || (wd.present && wd.resizable()),
-        wd.present ? wd.aspect : 0.0f,
-        (flags & BINUI_OPEN_TRANSPARENT) != 0 || (wd.present && wd.transparent()),
-        title.c_str());
+    const bool child = parent_hwnd != nullptr;
+    // 子窗口不支持分层（逐像素透明对子窗口无效），也没有"自己可缩放"的语义 —— 宿主说了算
+    const bool resizable = !child && ((flags & BINUI_OPEN_RESIZABLE) != 0 ||
+                                      (wd.present && wd.resizable()));
+    const bool transparent = !child && ((flags & BINUI_OPEN_TRANSPARENT) != 0 ||
+                                        (wd.present && wd.transparent()));
+
+    a->shell.reset(new binui::BinUIAppGLGdi(w, h, (flags & BINUI_OPEN_NO_VSYNC) == 0));
+    a->shell->setWindowOptions(resizable, child ? 0.0f : (wd.present ? wd.aspect : 0.0f),
+                               transparent, title.c_str());
 
     binui::BinUIRenderer& r = a->renderer;
     binui::BinUIAppGLGdi& sh = *a->shell;
@@ -281,7 +194,8 @@ int32_t BINUI_C_CALL binui_app_open(void* appp, int32_t width, int32_t height,
 
     // ---- 按下：标题栏拖动 / 焦点 / 输入框光标定位 ----
     sh.setPressFn([a](float x, float y) {
-        if (binui::isTitlebarDrag(a->renderer, x, y)) {
+        // 子窗口模式下"拖动整窗"是宿主标题栏的事，这里不能抢
+        if (!a->shell->isChildMode() && binui::isTitlebarDrag(a->renderer, x, y)) {
             a->shell->beginWindowDrag();
             return;
         }
@@ -404,7 +318,8 @@ int32_t BINUI_C_CALL binui_app_open(void* appp, int32_t width, int32_t height,
         }
     }
 
-    if (!sh.open()) {
+    const bool ok = child ? sh.openChild(parent_hwnd, x, y, w, h) : sh.open();
+    if (!ok) {
         SetErr("binui_app_open: 窗口或 OpenGL 上下文创建失败");
         a->shell.reset();
         return 0;
@@ -413,6 +328,136 @@ int32_t BINUI_C_CALL binui_app_open(void* appp, int32_t width, int32_t height,
     a->width = w;
     a->height = h;
     return 1;
+}
+
+extern "C" {
+
+const char* BINUI_C_CALL binui_version(void) { return "0.2.0"; }
+
+int32_t BINUI_C_CALL binui_abi_version(void) { return BINUI_C_ABI_VERSION; }
+
+const char* BINUI_C_CALL binui_last_error(void) { return g_err.c_str(); }
+
+void BINUI_C_CALL binui_free(void* p) { std::free(p); }
+
+// ============================================================
+// 编译
+// ============================================================
+int32_t BINUI_C_CALL binui_compile_file(const char* src_path_utf8, const char* out_path_utf8) {
+    if (!src_path_utf8 || !*src_path_utf8) { SetErr("binui_compile_file: 源路径为空"); return 0; }
+    if (!out_path_utf8 || !*out_path_utf8) { SetErr("binui_compile_file: 输出路径为空"); return 0; }
+
+    std::vector<uint8_t> bytes = binui::ex::ReadFileBytes(src_path_utf8);
+    if (bytes.empty()) {
+        SetErr("binui_compile_file: 读不到源文件 %s", src_path_utf8);
+        return 0;
+    }
+    // 已经是二进制布局：原样写出（源码/二进制两条流水线共用一条命令）
+    if (binui::IsLayoutData(bytes.data(), bytes.size())) {
+        // 直接落盘
+    } else {
+        binui::CompileResult res = binui::CompileBinUIFileEx(src_path_utf8);
+        for (const auto& w : res.warnings) {
+            std::fprintf(stderr, "[binui_compile] warning: %s\n", w.c_str());
+        }
+        if (res.layout.empty()) {
+            SetErr("binui_compile_file: 编译 %s 失败（空布局）", src_path_utf8);
+            return 0;
+        }
+        bytes = std::move(res.layout);
+    }
+
+    std::FILE* f = std::fopen(out_path_utf8, "wb");
+    if (!f) {
+        SetErr("binui_compile_file: 无法写入 %s", out_path_utf8);
+        return 0;
+    }
+    const size_t n = std::fwrite(bytes.data(), 1, bytes.size(), f);
+    std::fclose(f);
+    if (n != bytes.size()) {
+        SetErr("binui_compile_file: 写入 %s 不完整（%zu / %zu 字节）",
+               out_path_utf8, n, bytes.size());
+        return 0;
+    }
+    return 1;
+}
+
+int32_t BINUI_C_CALL binui_compile_memory(const char* src_utf8, int32_t src_len,
+                                         void** out_data, int32_t* out_len) {
+    if (!out_data || !out_len) { SetErr("binui_compile_memory: out 参数为空"); return 0; }
+    *out_data = nullptr;
+    *out_len = 0;
+    if (!src_utf8 || src_len == 0) { SetErr("binui_compile_memory: 源码为空"); return 0; }
+
+    const std::string src = (src_len > 0) ? std::string(src_utf8, static_cast<size_t>(src_len))
+                                          : std::string(src_utf8);
+    const binui::CompileResult res = binui::CompileBinUIEx(src);
+    for (const auto& w : res.warnings) {
+        std::fprintf(stderr, "[binui_compile] warning: %s\n", w.c_str());
+    }
+    if (res.layout.empty()) { SetErr("binui_compile_memory: 编译失败（空布局）"); return 0; }
+
+    void* p = std::malloc(res.layout.size());
+    if (!p) { SetErr("binui_compile_memory: 内存不足"); return 0; }
+    std::memcpy(p, res.layout.data(), res.layout.size());
+    *out_data = p;
+    *out_len = static_cast<int32_t>(res.layout.size());
+    return 1;
+}
+
+// ============================================================
+// 应用生命周期
+// ============================================================
+void* BINUI_C_CALL binui_app_create(const void* layout, int32_t len, const char* asset_dir_utf8) {
+    if (!layout || len <= 0) { SetErr("binui_app_create: 布局为空"); return nullptr; }
+
+    std::unique_ptr<App> app(new App());
+    if (asset_dir_utf8 && *asset_dir_utf8) app->assetDir = asDir(asset_dir_utf8);
+
+    if (!app->renderer.loadLayout(static_cast<const uint8_t*>(layout), static_cast<size_t>(len))) {
+        SetErr("binui_app_create: 布局解析失败（不是 .bui / 版本不匹配 / 数据截断）");
+        return nullptr;
+    }
+    return app.release();
+}
+
+int32_t BINUI_C_CALL binui_app_open(void* appp, int32_t width, int32_t height,
+                                    uint32_t flags, const char* title_utf8) {
+    return OpenAppInternal(appp, width, height, flags, title_utf8, nullptr, 0, 0);
+}
+
+int32_t BINUI_C_CALL binui_app_open_child(void* appp, void* parent_hwnd, int32_t x, int32_t y,
+                                         int32_t width, int32_t height, uint32_t flags) {
+    if (!parent_hwnd) {
+        SetErr("binui_app_open_child: parent_hwnd 为空");
+        return 0;
+    }
+    if (width <= 0 || height <= 0) {
+        SetErr("binui_app_open_child: 尺寸非法（%d x %d）", width, height);
+        return 0;
+    }
+    return OpenAppInternal(appp, width, height, flags, nullptr, parent_hwnd, x, y);
+}
+
+int32_t BINUI_C_CALL binui_render(void* appp) {
+    App* a = A(appp);
+    if (!a || !a->shell) return 1;
+    a->shell->renderFrame();
+    // 子窗口没有 WM_QUIT：宿主销毁自己的窗口时 WM_DESTROY 会把 shell 关掉，这里就返回 1
+    return a->shell->isOpen() ? 0 : 1;
+}
+
+void BINUI_C_CALL binui_resize(void* appp, int32_t width, int32_t height) {
+    App* a = A(appp);
+    if (!a || !a->shell || width <= 0 || height <= 0) return;
+    a->shell->setClientSize(width, height);
+    a->width = width;
+    a->height = height;
+}
+
+void* BINUI_C_CALL binui_app_hwnd(void* appp) {
+    App* a = A(appp);
+    return (a && a->shell) ? a->shell->windowHandle() : nullptr;
 }
 
 int32_t BINUI_C_CALL binui_pump(void* appp, int32_t timeout_ms) {

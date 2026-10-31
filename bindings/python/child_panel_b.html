@@ -1,0 +1,15 @@
+# 子窗口演示 - 右侧面板（另一个独立 binUI 实例）
+<html width="340" height="380" bg="#F7FAFF">
+<body>
+  <div style="position:absolute;left:14;top:14;width:312;height:150;background:#FFFFFF;border:1px solid #E6EDF7;border-radius:14"></div>
+  <span style="position:absolute;left:30;top:28;width:280;height:18;font-size:12;font-weight:700;color:#1F2A37">右侧面板</span>
+  <span style="position:absolute;left:30;top:46;width:280;height:16;font-size:11;color:#94A3B8">WS_CHILD · binUI 实例 #2（两个实例互不相干）</span>
+  <span id="b_count" style="position:absolute;left:30;top:70;width:200;height:48;font-size:34;font-weight:700;color:#2FBF9A">0</span>
+  <span style="position:absolute;left:30;top:126;width:280;height:18;font-size:11;color:#94A3B8">点左边或这里的按钮，两个面板一起更新</span>
+
+  <button id="b_inc" style="position:absolute;left:14;top:176;width:150;height:40;background:#2FBF9A;color:#FFFFFF;border-radius:10;font-size:13">也 +1</button>
+  <button id="b_quit" style="position:absolute;left:176;top:176;width:150;height:40;background:#FFE9EC;color:#FF6B6B;border-radius:10;font-size:13">关闭宿主</button>
+
+  <input id="b_input" style="position:absolute;left:14;top:232;width:312;height:40;background:#FFFFFF;color:#38445A;border:1px solid #E1E9F5;border-radius:10;padding:12;font-size:13" placeholder="输入框也照常工作" />
+  <span id="b_echo" style="position:absolute;left:14;top:284;width:312;height:20;font-size:12;color:#66768C">…</span>
+</body></html>

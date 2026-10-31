@@ -211,6 +211,35 @@ func (a *App) Pump(timeoutMs int) bool {
 	return C.binui_pump(a.h, C.int32_t(timeoutMs)) == 0
 }
 
+// OpenChild 以子窗口形式把 binUI 挂进宿主窗口 parent 的客户区（CWnd / QWidget 的 HWND）。
+//
+// 与 Open 的差别：不碰进程 DPI 策略、不抢焦点、**不自己收消息** —— 宿主
+// DispatchMessage 会把鼠标/键盘投递给本窗口，事件照旧从 Poll 出来。
+// 因此子窗口模式每帧调 Render 而不是 Pump。宿主窗口记得带 WS_CLIPCHILDREN。
+func (a *App) OpenChild(parent uintptr, x, y, width, height int) error {
+	if C.binui_app_open_child(a.h, unsafe.Pointer(parent), C.int32_t(x), C.int32_t(y),
+		C.int32_t(width), C.int32_t(height), 0) != 1 {
+		return errors.New(LastError())
+	}
+	return nil
+}
+
+// Render 只出一帧（推进动画 + 绘制脏区），不碰宿主的消息队列。
+// 返回 false 表示窗口已关闭（宿主销毁了父窗口）。
+func (a *App) Render() bool {
+	return C.binui_render(a.h) == 0
+}
+
+// Resize 宿主改了本区域尺寸时调用（等价于收到 WM_SIZE）。
+func (a *App) Resize(width, height int) {
+	C.binui_resize(a.h, C.int32_t(width), C.int32_t(height))
+}
+
+// HWND 返回本窗口句柄（子窗口模式下宿主布局要用它；未开窗返回 0）。
+func (a *App) HWND() uintptr {
+	return uintptr(C.binui_app_hwnd(a.h))
+}
+
 // Poll 取一个事件；第二个返回值为 false 表示队列空。
 func (a *App) Poll() (Event, bool) {
 	var ev C.BinUIEvent

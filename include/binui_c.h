@@ -184,6 +184,37 @@ BINUI_C_API void* BINUI_C_CALL binui_app_create(const void* layout, int32_t len,
 BINUI_C_API int32_t BINUI_C_CALL binui_app_open(void* app, int32_t width, int32_t height,
                                                 uint32_t flags, const char* title_utf8);
 
+/* ---------- 子窗口模式：把 binUI 作为控件嵌进宿主窗口 ----------
+ *
+ * 与 binui_app_open 的区别只有三处：
+ *   1. 窗口是 WS_CHILD，父窗口是 parent_hwnd，位置由 (x, y, w, h) 指定；
+ *   2. **不碰进程 DPI 策略**（DPI 由宿主决定），也不抢焦点；
+ *   3. **不自己收消息** —— 宿主在自己的消息循环里 DispatchMessage，Windows 会把
+ *      鼠标/键盘投递给本子窗口的窗口过程，事件照旧经 binui_poll_event 出来。
+ *
+ * 因此子窗口模式下每帧请调 **binui_render()** 而不是 binui_pump()。
+ * flags 只认 BINUI_OPEN_NO_VSYNC：RESIZABLE / TRANSPARENT 对子窗口无意义
+ * （WS_EX_LAYERED 不能用于子窗口，逐像素透明做不到），传了会被忽略。
+ *
+ * 宿主销毁自己的窗口时子窗口跟着消失，之后的 binui_render 返回 1。 */
+BINUI_C_API int32_t BINUI_C_CALL binui_app_open_child(void* app, void* parent_hwnd,
+                                                      int32_t x, int32_t y,
+                                                      int32_t width, int32_t height,
+                                                      uint32_t flags);
+
+/* 只出一帧（推进动画 + 绘制脏区），**不碰消息队列**。
+ * 返回 0 = 继续；1 = 窗口已关闭。子窗口模式的主循环入口。 */
+BINUI_C_API int32_t BINUI_C_CALL binui_render(void* app);
+
+/* 宿主改了本区域尺寸时调用（等价于子窗口收到 WM_SIZE，下一帧生效）。
+ * 宿主用 SetWindowPos 改尺寸也行 —— 这条只是省掉一次消息往返。 */
+BINUI_C_API void BINUI_C_CALL binui_resize(void* app, int32_t width, int32_t height);
+
+/* 本窗口的 HWND（窗口没开则返回 NULL）。
+ * 子窗口模式必备：宿主布局/移动/隐藏这块控件时要 SetWindowPos / ShowWindow 它。
+ * 注意别拿它去 DestroyWindow —— 销毁请走 binui_app_destroy。 */
+BINUI_C_API void* BINUI_C_CALL binui_app_hwnd(void* app);
+
 /* 推进一帧：收消息 -> 推进动画 -> 绘制脏区。
  * timeout_ms > 0 时，空闲状态下阻塞等待输入（省 CPU）；0 = 立即返回。
  * 返回 0 = 继续；1 = 窗口已关闭（此后应停止 pump 并 destroy）。

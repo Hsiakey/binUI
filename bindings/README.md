@@ -11,6 +11,18 @@
 
 ![Python 绑定演示](https://raw.githubusercontent.com/Hsiakey/binUI/main/docs/img/python-binding.png)
 
+## 两种形态
+
+| 形态 | C ABI | 说明 |
+|---|---|---|
+| 顶层窗口 | `binui_app_open` + `binui_pump` | binUI 自己当应用：无边框窗口 + 自己的消息循环 |
+| **子窗口（控件）** | `binui_app_open_child` + `binui_render` | 嵌进宿主的窗口：宿主管消息循环/布局/DPI，binUI 只管那一块画布 |
+
+子窗口模式是"把 binUI 当 WPF / Qt / WinForms 控件"的路径，完整规则（含宿主**必须**
+带 `WS_CLIPCHILDREN`）见 [`docs/bindings.md`](../docs/bindings.md#子窗口模式作为控件嵌进宿主窗口)。
+Python 侧的活例子是 [`python/demo_child.py`](python/demo_child.py)（ctypes 建普通
+Win32 宿主窗口 + 两块 binUI 面板）。
+
 ## 共同前提
 
 ```bash

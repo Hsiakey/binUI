@@ -6,6 +6,36 @@
 
 ## [Unreleased]
 
+### 新增 — 子窗口模式：把 binUI 当成控件嵌进宿主窗口
+
+之前只有"binUI 自己当应用"（顶层 `WS_POPUP` 无边框窗 + 自己的消息循环）。要把它塞进
+WPF / Qt / WinForms 的某个面板里，缺的是这一层：`WS_CHILD` 子窗口，宿主管消息循环、
+布局、DPI，binUI 只管那一块画布。
+
+- `BinUIAppGLGdi` 新增 `openChild(parent, x, y, w, h)` / `renderFrame()` /
+  `setClientSize(w, h)` / `windowHandle() / isChildMode()`；`pump()` 在子窗口模式下
+  只出帧、**不 `PeekMessage`**（碰了就是把宿主的消息吃掉）。
+- C ABI 新增 `binui_app_open_child` / `binui_render` / `binui_resize` / `binui_app_hwnd`。
+- 窗口类注册顺带修正：`hInstance` 改为取**本模块**（`GetModuleHandleExW` +
+  `FROM_ADDRESS`）而不是 `GetModuleHandleW(nullptr)`。DLL 里后者拿到的是宿主 exe 的
+  实例，把窗口类注册进别人的 atom 表是越界行为——顶层窗侥幸能用，子窗口模式不行。
+- 子窗口模式下刻意不做的事：`SetProcessDPIAware`（进程级策略归宿主）、`SetFocus`
+  （不抢宿主焦点）、`WS_EX_LAYERED`（对子窗口无效）、标题栏拖动/边框缩放/最大化。
+- 生命周期：宿主 `DestroyWindow` 时子窗口的 `WM_DESTROY` 当场收摊（关 GL、标记关闭），
+  且**不发 `PostQuitMessage`**（那会把宿主的消息循环干掉）；之后 `binui_render` 返回 1。
+- Python 绑定加 `open_child` / `render` / `resize` / `hwnd`，并给了活例子
+  `bindings/python/demo_child.py`：用 ctypes 建一个普通 Win32 宿主窗口，里面嵌两块
+  独立 binUI 面板。
+
+**踩到的坑（已写进文档）**：宿主窗口必须带 `WS_CLIPCHILDREN`。不加的话宿主的
+`WM_PAINT` 会把整个客户区刷一遍、把 GL 子窗口那块一起刷掉——GL 子窗口没有留存面，
+表现就是"面板是白的、点得到但看不见"。加与不加是"整块空白"和"两块面板各就各位"的区别。
+
+验证：点击两块面板的按钮 → 事件回到 Python、两块面板同时更新；输入框聚焦 + 输入中文；
+点"关闭宿主" → 干净退出（退出码 0）。参数校验进 `tests/test_capi.cpp`，CI 可跑。
+**像素级外观未能自动确认**：本会话里所有 OpenGL 窗口内容都没合成到桌面（连原有的
+`features.exe` 也一样，而同进程的 GDI 绘制正常），需要人眼在真机复核。
+
 ### 新增 — C ABI（`include/binui_c.h`）与 Python / Go / Rust 绑定
 
 引擎一直是纯 C++（`namespace binui`、`std::function`、`std::vector` 返回），其他语言

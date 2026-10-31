@@ -139,6 +139,16 @@ lib.binui_app_create.restype = ctypes.c_void_p
 lib.binui_app_open.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32,
                                ctypes.c_uint32, ctypes.c_char_p]
 lib.binui_app_open.restype = ctypes.c_int32
+lib.binui_app_open_child.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int32,
+                                     ctypes.c_int32, ctypes.c_int32, ctypes.c_int32,
+                                     ctypes.c_uint32]
+lib.binui_app_open_child.restype = ctypes.c_int32
+lib.binui_render.argtypes = [ctypes.c_void_p]
+lib.binui_render.restype = ctypes.c_int32
+lib.binui_resize.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32]
+lib.binui_resize.restype = None
+lib.binui_app_hwnd.argtypes = [ctypes.c_void_p]
+lib.binui_app_hwnd.restype = ctypes.c_void_p
 lib.binui_pump.argtypes = [ctypes.c_void_p, ctypes.c_int32]
 lib.binui_pump.restype = ctypes.c_int32
 lib.binui_poll_event.argtypes = [ctypes.c_void_p, ctypes.POINTER(CEvent)]
@@ -283,6 +293,7 @@ class App:
             raise BinUIError(last_error())
         self._app: Optional[int] = handle
         self._opened = False
+        self._child = False
 
     # ---- 生命周期 ----
     def open(self, width: int = 0, height: int = 0, title: str = "binUI",
@@ -295,6 +306,36 @@ class App:
     def pump(self, timeout_ms: int = 8) -> bool:
         """推进一帧；返回 False 表示窗口已关闭。"""
         return lib.binui_pump(self._h, timeout_ms) == 0
+
+    def open_child(self, parent_hwnd: int, x: int, y: int, width: int, height: int,
+                   flags: int = 0) -> "App":
+        """以子窗口形式挂进宿主窗口（parent_hwnd）的客户区。
+
+        和 open() 的差别：不碰进程 DPI 策略、不抢焦点、**不自己收消息** ——
+        宿主 DispatchMessage 会把鼠标/键盘投递给本窗口，事件照旧从 poll() 出来。
+        flags 只认 OPEN_NO_VSYNC（透明/可缩放对子窗口无意义）。
+        """
+        if lib.binui_app_open_child(self._h, parent_hwnd, x, y, width, height, flags) != 1:
+            raise BinUIError(last_error())
+        self._opened = True
+        self._child = True
+        return self
+
+    def render(self) -> bool:
+        """只出一帧（推进动画 + 绘制脏区），不碰宿主的消息队列。
+
+        子窗口模式每帧调这个；返回 False 表示窗口已关闭（宿主销毁了父窗口）。
+        """
+        return lib.binui_render(self._h) == 0
+
+    def resize(self, width: int, height: int) -> None:
+        """宿主改了本区域尺寸时调用（等价于收到 WM_SIZE）。"""
+        lib.binui_resize(self._h, width, height)
+
+    @property
+    def hwnd(self) -> int:
+        """本窗口的 HWND（子窗口模式下宿主布局要用到）。"""
+        return lib.binui_app_hwnd(self._h) or 0
 
     def poll(self) -> Optional[Event]:
         ev = CEvent()

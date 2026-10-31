@@ -189,6 +189,18 @@ extern "C" {
         title: *const c_char,
     ) -> i32;
     fn binui_pump(app: *mut c_void, timeout_ms: i32) -> i32;
+    fn binui_app_open_child(
+        app: *mut c_void,
+        parent_hwnd: *mut c_void,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        flags: u32,
+    ) -> i32;
+    fn binui_render(app: *mut c_void) -> i32;
+    fn binui_resize(app: *mut c_void, w: i32, h: i32);
+    fn binui_app_hwnd(app: *mut c_void) -> *mut c_void;
     fn binui_poll_event(app: *mut c_void, out: *mut RawEvent) -> i32;
     fn binui_app_destroy(app: *mut c_void);
 
@@ -305,6 +317,42 @@ impl App {
     /// 推进一帧；`false` 表示窗口已关闭
     pub fn pump(&self, timeout_ms: i32) -> bool {
         unsafe { binui_pump(self.handle, timeout_ms) == 0 }
+    }
+
+    /// 以子窗口形式挂进宿主窗口的客户区（`WS_CHILD`）。
+    ///
+    /// 与 [`App::open`] 的差别：不碰进程 DPI 策略、不抢焦点、**不自己收消息** ——
+    /// 宿主 `DispatchMessage` 会把鼠标/键盘投递给本窗口，事件照旧从 [`App::poll`] 出来。
+    /// 所以子窗口模式每帧调 [`App::render`] 而不是 [`App::pump`]。
+    /// 宿主窗口记得带 `WS_CLIPCHILDREN`（否则父窗口的 `WM_PAINT` 会把子窗口刷掉）。
+    pub fn open_child(&self, parent: *mut c_void, x: i32, y: i32, w: i32, h: i32) -> Result<()> {
+        if parent.is_null() {
+            return Err(Error("parent HWND 为空".into()));
+        }
+        if w <= 0 || h <= 0 {
+            return Err(Error("尺寸非法".into()));
+        }
+        if unsafe { binui_app_open_child(self.handle, parent, x, y, w, h, 0) } == 1 {
+            Ok(())
+        } else {
+            Err(last_error())
+        }
+    }
+
+    /// 只出一帧（推进动画 + 绘制脏区），不碰宿主的消息队列。
+    /// `false` 表示窗口已关闭（宿主销毁了父窗口）。
+    pub fn render(&self) -> bool {
+        unsafe { binui_render(self.handle) == 0 }
+    }
+
+    /// 宿主改了本区域尺寸时调用（等价于收到 `WM_SIZE`）
+    pub fn resize(&self, w: i32, h: i32) {
+        unsafe { binui_resize(self.handle, w, h) };
+    }
+
+    /// 本窗口句柄（子窗口模式下宿主布局要用它；未开窗返回 null）
+    pub fn hwnd(&self) -> *mut c_void {
+        unsafe { binui_app_hwnd(self.handle) }
     }
 
     /// 取一个事件（队列空返回 None）

@@ -152,8 +152,22 @@ public:
     void close();             // 销毁窗口（幂等，可在 pump 返回 1 后调用）
     bool isOpen() const { return running_; }
 
+    // ---------- 子窗口模式（作为控件嵌进宿主窗口）----------
+    // 和 open() 的差别只有三处：WS_CHILD 而不是顶层无边框窗；**不碰进程 DPI 策略**
+    //（DPI 由宿主决定）；**不自己收消息**（宿主 DispatchMessage 会把鼠标/键盘投递给
+    //  本窗口的 wndProc，事件链路原样可用）。边框拖动 / 缩放 / 最小化在此模式下无效。
+    bool openChild(void* parent, int x, int y, int width, int height);
+    bool isChildMode() const { return childMode_; }
+    // 只出一帧（推进动画时钟 + 绘制脏区），不碰消息队列。子窗口模式的主入口。
+    void renderFrame();
+    // 宿主改了本区域尺寸时调用（等价于收到 WM_SIZE，下一帧生效）
+    void setClientSize(int width, int height);
+    // 本窗口句柄（宿主布局子窗口时要 SetWindowPos 它）
+    void* windowHandle() const { return hwnd_; }
+
 private:
     static LRESULT CALLBACK wndProc(HWND, UINT, WPARAM, LPARAM);
+    static bool ensureClass();   // 注册（并缓存）窗口类：顶层窗与子窗口共用
     void handleMouseMove(float x, float y);
     void handleMousePress(float x, float y);
     void handleMouseRelease(float x, float y);
@@ -188,6 +202,7 @@ private:
     FocusFn focus_;
 
     bool running_ = false;
+    bool childMode_ = false;  // true = WS_CHILD（宿主窗口里的控件），不走自己的消息循环
     std::chrono::steady_clock::time_point lastTime_;  // pump() 的帧间隔基准
     bool dirty_ = true;
     int dirtyL_ = 0, dirtyT_ = 0, dirtyR_ = 0, dirtyB_ = 0;

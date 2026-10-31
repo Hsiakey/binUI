@@ -242,8 +242,14 @@ with binui.App(layout) as app:
 设计约束、线程规则、ABI 布局自检、新增语言的步骤见
 **[docs/bindings.md](docs/bindings.md)**；总表见 [bindings/README.md](bindings/README.md)。
 
-> 窗口目前只出独立顶层窗口（Win32 / OpenGL 3.3），不支持嵌成子窗口，也不支持
-> 非 Windows 平台 —— 核心库跨平台，外壳不是。
+**两种形态**：`binui_app_open` + `binui_pump`（binUI 自己当应用，无边框顶层窗）和
+`binui_app_open_child` + `binui_render`（作为控件嵌进宿主窗口，宿主管消息循环/布局/DPI）。
+后者是接 WPF / Qt / WinForms 的路径，宿主窗口记得带 `WS_CLIPCHILDREN`，否则
+父窗口的 `WM_PAINT` 会把子窗口那块一起刷掉。活例子：
+[`bindings/python/demo_child.py`](bindings/python/demo_child.py)。
+
+> 目前只支持 Windows + OpenGL 3.3；核心库跨平台，外壳不是。子窗口模式下没有窗口级
+> 透明（`WS_EX_LAYERED` 对子窗口无效），也不带标题栏拖动/边框缩放。
 
 ## UI 描述格式
 
