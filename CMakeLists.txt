@@ -75,6 +75,16 @@ if(WIN32)
     target_include_directories(gl_shell PUBLIC ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(gl_shell PUBLIC binui opengl32 gdiplus dwmapi)
 
+    # C ABI：给 Python / Go / Rust 等宿主语言的唯一入口（include/binui_c.h）。
+    # 静态库给 C/C++/Rust 直接链，动态库给 ctypes / cgo（免编译，随包分发）。
+    add_library(binui_c STATIC src/binui_c.cpp)
+    target_link_libraries(binui_c PUBLIC binui gl_shell)
+
+    add_library(binui_c_shared SHARED src/binui_c.cpp)
+    target_compile_definitions(binui_c_shared PRIVATE BINUI_C_BUILD_DLL)
+    target_link_libraries(binui_c_shared PRIVATE binui gl_shell)
+    set_target_properties(binui_c_shared PROPERTIES OUTPUT_NAME binui_c)
+
     function(add_binui_demo name src_dir ui_file)
         add_executable(${name} ${src_dir}/main.cpp)
         target_link_libraries(${name} PRIVATE app_shell binui)
@@ -175,6 +185,12 @@ set_tests_properties(test_renderer_real PROPERTIES
 # test_font：字体服务（FreeType 光栅化 + HarfBuzz 整形）与渲染质量参数
 add_binui_test(test_font tests/test_font.cpp)
 
+# test_capi：C ABI 冒烟测试（不开窗口：编译 / 加载 / 节点查询 / 改文本 / 错误路径）
+if(WIN32)
+    add_binui_test(test_capi tests/test_capi.cpp)
+    target_link_libraries(test_capi PRIVATE binui_c)
+endif()
+
 # test_hot_reload：路径解析 + 热重载（需要 examples/ 下的 header，工作目录须为源码树根）
 add_binui_test(test_hot_reload tests/test_hot_reload.cpp)
 target_include_directories(test_hot_reload PRIVATE ${CMAKE_SOURCE_DIR}/examples)
@@ -188,6 +204,12 @@ set_tests_properties(test_hot_reload PROPERTIES
 install(TARGETS binui
     ARCHIVE DESTINATION lib
 )
+if(WIN32)
+    install(TARGETS binui_c binui_c_shared
+        ARCHIVE DESTINATION lib
+        RUNTIME DESTINATION bin
+    )
+endif()
 install(FILES
     include/binui_format.h
     include/binui_renderer.h
@@ -198,6 +220,7 @@ install(FILES
     include/binui_paths.h
     include/binui_hot_reload.h
     include/binui_paint.h
+    include/binui_c.h
     DESTINATION include/binui
 )
 

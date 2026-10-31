@@ -118,9 +118,9 @@ static void StartResize(HWND hwnd, int hit, RECT startRect) {
     GetCursorPos(&start);
     while (GetAsyncKeyState(VK_LBUTTON) & 0x8000) {
         MSG m;
-        while (PeekMessageA(&m, nullptr, 0, 0, PM_REMOVE)) {
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&m);
-            DispatchMessageA(&m);
+            DispatchMessageW(&m);
         }
         POINT cur;
         GetCursorPos(&cur);
@@ -156,8 +156,8 @@ static void StartResize(HWND hwnd, int hit, RECT startRect) {
 }
 
 LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    BinUIApp* app = reinterpret_cast<BinUIApp*>(GetWindowLongPtrA(hwnd, GWLP_USERDATA));
-    if (!app) return DefWindowProcA(hwnd, msg, wParam, lParam);
+    BinUIApp* app = reinterpret_cast<BinUIApp*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!app) return DefWindowProcW(hwnd, msg, wParam, lParam);
 
     switch (msg) {
         case WM_ERASEBKGND:
@@ -186,14 +186,14 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 case HTTOPLEFT: case HTTOPRIGHT: case HTBOTTOMLEFT:
                 case HTBOTTOMRIGHT: {
                     if (IsZoomed(hwnd))
-                        return DefWindowProcA(hwnd, msg, wParam, lParam);
+                        return DefWindowProcW(hwnd, msg, wParam, lParam);
                     RECT wr;
                     GetWindowRect(hwnd, &wr);
                     StartResize(hwnd, static_cast<int>(wParam), wr);
                     return 0;
                 }
                 default:
-                    return DefWindowProcA(hwnd, msg, wParam, lParam);
+                    return DefWindowProcW(hwnd, msg, wParam, lParam);
             }
         }
         case WM_NCHITTEST: {
@@ -294,7 +294,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             PostQuitMessage(0);
             return 0;
     }
-    return DefWindowProcA(hwnd, msg, wParam, lParam);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 } // namespace
@@ -386,15 +386,17 @@ int BinUIApp::run() {
     // DPI 感知：布局坐标使用物理像素，避免窗口被系统缩放放大超出屏幕
     SetProcessDPIAware();
 
-    const char* CLASS_NAME = "BinUIAppWindow";
+    // Unicode 窗口类：ANSI 窗口在 CP936 下会把中文拆成两个 WM_CHAR（DBCS 字节），
+    // 输入框里就成乱码（中 -> "ÖÐ"）；IME 输入同理
+    const wchar_t* CLASS_NAME = L"BinUIAppWindow";
 
-    WNDCLASSA wc = {};
+    WNDCLASSW wc = {};
     wc.lpfnWndProc = WndProc;
-    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = CLASS_NAME;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
-    RegisterClassA(&wc);
+    RegisterClassW(&wc);
 
     // 无边框窗口：外尺寸 = 布局尺寸。无 WS_THICKFRAME（避免 DWM 边框/焦点框），
     // resize 由 WM_NCLBUTTONDOWN 手动实现；焦点指示用自绘 1px 细框
@@ -410,7 +412,11 @@ int BinUIApp::run() {
     int winX = work.left + ((work.right - work.left) - winW) / 2;
     int winY = work.top + ((work.bottom - work.top) - winH) / 2;
 
-    hwnd_ = CreateWindowExA(0, CLASS_NAME, title_.c_str(),
+    wchar_t wtitle[512] = {};
+    if (!title_.empty())
+        MultiByteToWideChar(CP_UTF8, 0, title_.c_str(), -1, wtitle,
+                            static_cast<int>(sizeof(wtitle) / sizeof(wtitle[0])));
+    hwnd_ = CreateWindowExW(0, CLASS_NAME, wtitle,
         style, winX, winY, winW, winH,
         nullptr, nullptr, wc.hInstance, nullptr);
     if (!hwnd_) {
@@ -418,7 +424,7 @@ int BinUIApp::run() {
         return 1;
     }
 
-    SetWindowLongPtrA(reinterpret_cast<HWND>(hwnd_), GWLP_USERDATA,
+    SetWindowLongPtrW(reinterpret_cast<HWND>(hwnd_), GWLP_USERDATA,
         reinterpret_cast<LONG_PTR>(this));
     // 强制重算非客户区：客户区 = 窗口矩形（去掉 WS_THICKFRAME 边框线）
     SetWindowPos(reinterpret_cast<HWND>(hwnd_), nullptr, 0, 0, 0, 0,
@@ -431,10 +437,10 @@ int BinUIApp::run() {
     MSG msg = {};
 
     while (running_) {
-        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { running_ = false; break; }
             TranslateMessage(&msg);
-            DispatchMessageA(&msg);
+            DispatchMessageW(&msg);
         }
 
         auto now = std::chrono::high_resolution_clock::now();
@@ -988,15 +994,20 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 //（以前写死 #BB86FC，浅色主题下没法跟着配色走）
                 const uint32_t inAccent = (pt && (pt->flags & PAINT_TEXT_COLOR))
                                               ? pt->textColor : 0xFFBB86FCu;
-                // 底部强调线压到 35%（GDI 无 alpha，按与底色混合近似）
-                const uint32_t inLineCol = fadeOver(inAccent, 90);
-                HPEN underlinePen = CreatePen(PS_SOLID, 2,
-                                              RGB((inLineCol >> 16) & 0xFF, (inLineCol >> 8) & 0xFF, inLineCol & 0xFF));
-                HGDIOBJ oldPen = SelectObject(hdc, underlinePen);
-                MoveToEx(hdc, x, y + nh - 2, nullptr);
-                LineTo(hdc, x + nw, y + nh - 2);
-                SelectObject(hdc, oldPen);
-                DeleteObject(underlinePen);
+                // 底部强调线压到 35%（GDI 无 alpha，按与底色混合近似）。
+                // 作者给了 border 就不再画：那是直角 Material 下划线的遗留，
+                // 在圆角带框的输入框上会变成一道悬空横杠（v13 之后已多余）
+                const bool inHasBorder = (pt && (pt->flags & PAINT_BORDER));
+                if (!inHasBorder) {
+                    const uint32_t inLineCol = fadeOver(inAccent, 90);
+                    HPEN underlinePen = CreatePen(PS_SOLID, 2,
+                                                  RGB((inLineCol >> 16) & 0xFF, (inLineCol >> 8) & 0xFF, inLineCol & 0xFF));
+                    HGDIOBJ oldPen = SelectObject(hdc, underlinePen);
+                    MoveToEx(hdc, x, y + nh - 2, nullptr);
+                    LineTo(hdc, x + nw, y + nh - 2);
+                    SelectObject(hdc, oldPen);
+                    DeleteObject(underlinePen);
+                }
 
                 bool editing = renderer.isFocused(node.id);
                 std::string text = node.text;

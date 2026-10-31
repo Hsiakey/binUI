@@ -148,6 +148,10 @@ test: $(TEST_BINS)
 	$(BIN_DIR)/test_hot_reload$(EXT)
 	@echo "--- test_font ---"
 	$(BIN_DIR)/test_font$(EXT)
+ifdef ComSpec
+	@echo "--- test_capi ---"
+	$(BIN_DIR)/test_capi$(EXT)
+endif
 
 # =============================================
 # Win32 demos
@@ -156,6 +160,14 @@ ifdef ComSpec
 
 # OpenGL 后端（WGL + FreeType/HarfBuzz 静态库）
 GL_LIBS := -lopengl32 -ldwmapi -Lthird_party/freetype/build -lfreetype -Lthird_party/harfbuzz/build-static/src -lharfbuzz
+
+# C ABI 的冒烟测试（无窗口：只测编译/加载/节点查询/改文本，需链 GL 后端对象）
+TEST_BINS += $(BIN_DIR)/test_capi$(EXT)
+test: $(BIN_DIR)/test_capi$(EXT)
+
+$(BIN_DIR)/test_capi$(EXT): tests/test_capi.cpp $(BINUI_C_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(BINUI_C_A) $(LIB_A) $(WINLIBS) $(GL_LIBS)
 
 # 6 个示例 = 6 组：功能 / 动画 / 字体 / 2D 渲染 / 3D 渲染 / 纹理
 DEMO_BINS := \
@@ -219,7 +231,38 @@ $(BIN_DIR)/texturedemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/texturedemo/main.html $(WIN_BIN)/texturedemo/main.html
 
-all: $(LIB_A) $(TEST_BINS) $(DEMO_BINS) $(STD_LIB_STAMP)
+# =============================================
+# C ABI：给 Python / Go / Rust 等宿主语言的绑定入口（include/binui_c.h）
+#   build-mingw/libbinui_c.a    静态库：C / C++ / Rust 直接链
+#   build-mingw/bin/binui_c.dll 动态库：Python ctypes / Go cgo（免编译，随包分发）
+# =============================================
+BINUI_C_A   := $(BUILD_DIR)/libbinui_c.a
+BINUI_C_DLL := $(BIN_DIR)/binui_c.dll
+
+$(BUILD_DIR)/binui_c.o: $(SRC_DIR)/binui_c.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
+
+# DLL 版单独编一份：-DBINUI_C_BUILD_DLL 让头文件把函数标成 __declspec(dllexport)
+$(BUILD_DIR)/binui_c_dll.o: $(SRC_DIR)/binui_c.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -DBINUI_C_BUILD_DLL -I$(INC_DIR) -Isrc -c $< -o $@
+
+$(BINUI_C_A): $(BUILD_DIR)/binui_c.o $(BUILD_DIR)/binui_gl-gdi.o
+	ar rcs $@ $^
+
+# RTLINK 同样要带上：Windows 上 libstdc++-6.dll / libgcc_s_seh-1.dll 不能指望宿主有，
+# freetype/harfbuzz 也走静态库 —— 产物除系统 DLL 外自包含
+$(BINUI_C_DLL): $(BUILD_DIR)/binui_c_dll.o $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(LDFLAGS) $(RTLINK) -shared -o $@ $^ $(WINLIBS) $(GL_LIBS) \
+	    -Wl,--out-implib=$(BIN_DIR)/libbinui_c.dll.a
+
+.PHONY: capi
+capi: $(BINUI_C_A) $(BINUI_C_DLL)
+	@echo "C ABI -> $(BINUI_C_A) $(BINUI_C_DLL)"
+
+all: $(LIB_A) $(TEST_BINS) $(DEMO_BINS) $(STD_LIB_STAMP) $(BINUI_C_A) $(BINUI_C_DLL)
 
 # 调试工具（可选，不入 all）：离屏渲染 / 窗口抓取 / 窗口枚举
 TOOL_BINS := \

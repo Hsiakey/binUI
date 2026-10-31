@@ -6,6 +6,77 @@
 
 ## [Unreleased]
 
+### 新增 — C ABI（`include/binui_c.h`）与 Python / Go / Rust 绑定
+
+引擎一直是纯 C++（`namespace binui`、`std::function`、`std::vector` 返回），其他语言
+根本接不上：全仓库没有 `__declspec(dllexport)`，CMake 只有 `STATIC` 库。这次补了对外
+的唯一一扇门，并把三门语言跑通。
+
+设计上只守三条约束，绑定写法就统一了：
+
+1. **定长 POD** —— 只用 `int32_t` / `uint32_t` / `float`。没有 `bool`（C 是 1 字节、
+   C# 默认 4 字节）、没有 `enum`（宽度随编译器）、没有 `size_t`（32/64 位会变）。
+   所以结构体天然 4 字节对齐，**不需要任何 `#pragma pack`**。
+2. **没有跨语言回调** —— 事件全部 `binui_poll_event()` 轮询。宿主不进引擎的调用栈，
+   就没有线程亲和、GC 保活、重入这些问题；PHP/Ruby 这类没有稳定回调的语言也能用。
+3. **UTF-8 + (buf, cap) 两段式取文本** —— 不返回需要宿主释放的指针。
+
+新增文件与改动：
+
+- `include/binui_c.h` / `src/binui_c.cpp`：约 40 个函数。编译（`binui_compile_file` /
+  `binui_compile_memory`）、应用生命周期（`app_create` / `app_open` / `pump` /
+  `poll_event` / `app_destroy`）、节点查询与修改、窗口动作、图片与组件挂载。
+- `BinUIAppGLGdi` 拆出 **`open()` / `pump(timeoutMs)` / `close()`**（`run()` 行为不变，
+  等价于三者串起来）。宿主语言需要"自己拥有消息循环"，原来的 `run()` 把循环锁死在里面。
+  `pump` 在空闲时用 `MsgWaitForMultipleObjectsEx` 阻塞到有输入，不空转烧 CPU。
+- 事件队列 + 内建交互：悬停重绘、标题栏拖动、输入框光标定位、Tab 循环焦点、
+  Enter 激活、滚轮滚动、动画/视频时钟推进 —— 宿主只管 `pump` + `poll` + 改文本。
+- 构建：`Makefile` 加 `capi` 目标（`libbinui_c.a` 静态库 + `binui_c.dll` 动态库 +
+  它俩的 import lib），`CMakeLists.txt` 加 `binui_c` / `binui_c_shared`（仅 Windows）。
+  DLL 自包含：`-static-libgcc -static-libstdc++` + FreeType/HarfBuzz 静态库，除系统 DLL
+  外不用附带任何运行时。
+- 绑定：`bindings/python/`（ctypes，零第三方依赖）、`bindings/go/`（cgo）、
+  `bindings/rust/`（手写 `extern "C"` + 安全封装，不用 bindgen）。三份都能编 UI、
+  建窗、收点击、改文本，且都验证过中文与 emoji 输入。
+- 测试：`tests/test_capi.cpp`（无窗口，CI 可跑）把 ABI 钉死 ——
+  `sizeof(BinUINode) == 56`、`offsetof(color) == 32`、`sizeof(BinUIEvent) == 48`、
+  `offsetof(text) == 24`，外加编译/加载/两段式取文本/截断/NULL 防护/错误路径。
+- 文档：`docs/bindings.md`（约束、流程、线程规则、未覆盖能力、新增语言步骤）、
+  `bindings/README.md`（总表）、三份子 README；README 加「在别的语言里用」一节。
+
+### 修复 — ANSI 窗口类导致中文输入变乱码（三个外壳全中）
+
+三个窗口外壳（`binui_gl-gdi` / `app_win32` / `binui_d3d11`）都用 `RegisterClassA` +
+`DispatchMessageA` 建窗。在 CP936 系统上，Windows 会把**一个中文字符拆成两个
+`WM_CHAR`**（DBCS 字节），`handleChar` 逐字节转 UTF-8 就得到乱码：输入框里打「中」
+显示「ÖÐ」，打「鱼」显示「Óã」。IME 输入同理。
+
+改成 Unicode 窗口（`RegisterClassW` + `DispatchMessageW` + `CreateWindowExW` +
+`DefWindowProcW`）后正常，代理对（emoji）也走通了 —— 原本写好的 `pendingHigh_`
+代理对逻辑以前根本收不到数据，因为 ANSI 窗口不会给 16 位码元。
+
+这条 bug 只在"真在别的语言里打一遍字"时暴露（C++ demo 一直是中文标签、没人打中文），
+算是本次做绑定最实在的收获。
+
+### 修复 — 输入框底部强调线与作者边框重复
+
+三个后端都给每个 `<input>` 硬画一条 2px 底部强调线（老深色主题的 Material 下划线）。
+v13 有 `border` 之后作者已经用 `border: 1px solid #E1E9F5; border-radius: 10` 画了
+真正的框，那条线就变成横穿圆角的悬空横杠。改为**作者声明了 `PAINT_BORDER` 时不画**，
+没声明的旧界面行为不变。
+
+### 修复 — 点击输入框中部不定位光标
+
+`placeCaretAtClick` / `placeCaretAtClickGLGdi` / `placeCaretAtClickD3D` 三个函数写了
+但**从来没有调用点**（README 里却写着"点击光标定位"）。C ABI 的 press 里接上了；
+`examples/features` 的 press 回调也补了这一行。
+
+### 修复 — 库内调试输出污染宿主 stdout
+
+`BinUiRenderer` 里有 4 处 `std::cout`（加载统计、组件挂载、点击日志、资源加载）。
+作为嵌入式库，这会把噪声塞进宿主语言的 stdout。改为默认静默、`BINUI_VERBOSE=1`
+打到 stderr（`std::cerr` 的错误输出保留）。
+
 ### 新增 — 组件源码支持 `.bum.html`
 
 组件一直支持两种源码写法，但只有 `.bum.xml` 在文档里出现过。`ProbeAsset` 的候选表里

@@ -113,6 +113,8 @@ int main(int argc, char* argv[]) {
         if (isTitlebarDrag(renderer, x, y)) { app.beginWindowDrag(); return; }
         int old = renderer.keyboardNode();   // :focus 可能在按下时变化
         renderer.press(x, y);
+        // 点输入框中部：光标落在点击位置，而不是永远跳到末尾
+        if (renderer.isEditing()) placeCaretAtClickGLGdi(renderer, app.gfx(), x, y);
         int n = renderer.hitTest(x, y);
         if (n >= 0) invalidateNode((uint16_t)n);
         if (old >= 0 && old != renderer.keyboardNode()) invalidateNode((uint16_t)old);

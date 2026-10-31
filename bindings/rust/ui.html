@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<!-- Rust 绑定演示的界面：逻辑在 examples/demo.rs -->
+<html width="460" height="404" bg="#EEF3FA" title="binUI · Rust">
+<body>
+  <div style="position:absolute;left:0;top:0;width:460;height:56;background:#FFFFFF"></div>
+  <span style="position:absolute;left:18;top:18;width:300;height:22;font-size:15;font-weight:700;color:#1F2A37">binUI × Rust</span>
+  <button id="quit" style="position:absolute;left:402;top:14;width:40;height:28;background:#FFE9EC;color:#FF6B6B;border-radius:8;font-size:13">✕</button>
+
+  <div style="position:absolute;left:18;top:76;width:424;height:132;background:#FFFFFF;border:1px solid #E6EDF7;border-radius:14"></div>
+  <span style="position:absolute;left:36;top:94;width:300;height:18;font-size:12;font-weight:700;color:#1F2A37">点击计数（逻辑在 Rust 里）</span>
+  <span id="count" style="position:absolute;left:36;top:116;width:200;height:46;font-size:34;font-weight:700;color:#F2B544">0</span>
+  <span style="position:absolute;left:36;top:172;width:390;height:18;font-size:11;color:#94A3B8">C ABI + 轮询事件，没有跨语言回调</span>
+
+  <button id="inc" style="position:absolute;left:18;top:224;width:200;height:42;background:#F2B544;color:#FFFFFF;border-radius:10;font-size:13">点我 +1</button>
+  <button id="reset" style="position:absolute;left:230;top:224;width:100;height:42;background:#EEF3FA;color:#B98A1E;border:1px solid #F6E3B8;border-radius:10;font-size:13">归零</button>
+  <button id="toggle" style="position:absolute;left:340;top:224;width:102;height:42;background:#EEF3FA;color:#66768C;border:1px solid #DFE9F7;border-radius:10;font-size:13">开关</button>
+
+  <input id="name" style="position:absolute;left:18;top:286;width:424;height:42;background:#F7FAFF;color:#38445A;border:1px solid #E1E9F5;border-radius:10;padding:12;font-size:13" placeholder="点这里输入，INPUT 事件回到 Rust" />
+
+  <span id="echo" style="position:absolute;left:18;top:344;width:424;height:20;font-size:12;color:#66768C">…</span>
+</body></html>

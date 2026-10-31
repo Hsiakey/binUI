@@ -1,0 +1,12 @@
+[package]
+name = "binui"
+version = "0.2.0"
+edition = "2021"
+description = "binUI 的 Rust 绑定（C ABI 封装）"
+license = "MIT"
+links = "binui_c"
+build = "build.rs"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"

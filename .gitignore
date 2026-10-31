@@ -57,3 +57,7 @@ desktop.ini
 __pycache__/
 *.pyc
 .venv/
+
+# ---------- Go / Rust 绑定 ----------
+bindings/rust/target/
+bindings/rust/Cargo.lock

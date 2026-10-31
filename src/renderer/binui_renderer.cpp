@@ -5,10 +5,23 @@
 #include <iostream>
 #include <algorithm>
 #include <array>
+#include <cstdio>
+#include <cstdlib>
 
 namespace binui {
 
 namespace {
+
+// 库内信息性输出（加载统计 / 挂载成功 / 点击）：默认静默。
+// 作为嵌入式库，宿主的 stdout 不该被引擎的调试信息污染（Python/Go/Rust 宿主尤其明显），
+// 但出问题时又要能开：设 BINUI_VERBOSE=1 就打到 stderr。
+bool VerboseOn() {
+    static const bool on = [] {
+        const char* v = std::getenv("BINUI_VERBOSE");
+        return v && *v && *v != '0';
+    }();
+    return on;
+}
 
 // ---------- UTF-8 工具 ----------
 bool Utf8IsCont(uint8_t c) { return (c & 0xC0) == 0x80; }
@@ -607,17 +620,18 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         scaleX_ = scaleY_ = 1.0f;
     }
 
-    std::cout << "[binui] Loaded layout: " << header->nodeCount << " nodes"
-              << ", " << header->stringSize << " bytes of strings"
-              << (hasSpecs_ ? " (+resize spec)" : "")
-              << (winDesc_.present ? " (+window desc)" : "")
-              << (!animDefs_.empty() || !transitions_.empty() ? " (+anim)" : "")
-              << (!videos_.empty() ? " (+video x" + std::to_string(videos_.size()) + ")" : "")
-              << (imagePaths_.empty() ? std::string()
-                                      : " (+imgs x" + std::to_string(imagePaths_.size()) + ")")
-              << (componentRefs_.empty() ? std::string()
-                                         : " (+mounts x" + std::to_string(componentRefs_.size()) + ")")
-              << std::endl;
+    if (VerboseOn()) {
+        std::string extra;
+        if (hasSpecs_) extra += " (+resize spec)";
+        if (winDesc_.present) extra += " (+window desc)";
+        if (!animDefs_.empty() || !transitions_.empty()) extra += " (+anim)";
+        if (!videos_.empty()) extra += " (+video x" + std::to_string(videos_.size()) + ")";
+        if (!imagePaths_.empty()) extra += " (+imgs x" + std::to_string(imagePaths_.size()) + ")";
+        if (!componentRefs_.empty())
+            extra += " (+mounts x" + std::to_string(componentRefs_.size()) + ")";
+        std::fprintf(stderr, "[binui] Loaded layout: %u nodes, %u bytes of strings%s\n",
+                     header->nodeCount, header->stringSize, extra.c_str());
+    }
     return true;
 }
 
@@ -641,7 +655,8 @@ bool BinUIRenderer::mountComponent(const uint8_t* data, size_t size, uint16_t an
     }
     if (!loadLayout(merged.data(), merged.size())) return false;
     mountedAnchors_.insert(anchorId);
-    std::cout << "[binui] Mounted component under node " << anchorId << std::endl;
+    if (VerboseOn())
+        std::fprintf(stderr, "[binui] Mounted component under node %u\n", (unsigned)anchorId);
     return true;
 }
 
@@ -665,8 +680,9 @@ void BinUIRenderer::loadResources(const std::unordered_map<std::string, std::vec
         }
     }
 
-    std::cout << "[binui] Loaded " << images_.size() << " images, "
-              << fonts_.size() << " fonts" << std::endl;
+    if (VerboseOn())
+        std::fprintf(stderr, "[binui] Loaded %zu images, %zu fonts\n",
+                     images_.size(), fonts_.size());
 }
 
 void BinUIRenderer::setText(uint16_t nodeId, const std::string& text) {
@@ -1448,7 +1464,9 @@ int BinUIRenderer::release(float x, float y) {
     if (id < 0) return -1;
     if (hitTest(x, y) != id) return -1;
 
-    std::cout << "[binui] Click on node #" << id << " at (" << x << "," << y << ")" << std::endl;
+    if (VerboseOn())
+        std::fprintf(stderr, "[binui] Click on node #%d at (%.0f,%.0f)\n", id, x, y);
+
 
     if (eventCallback_) {
         Event ev;

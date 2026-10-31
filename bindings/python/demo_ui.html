@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<!--
+  Python 绑定的演示 UI：整窗界面由 binUI 解析 + 渲染，业务逻辑全在 demo.py 里。
+  改这个文件就能改界面，不用碰 Python 代码。
+
+  离屏预览（不需要 GL 窗口，也不需要 Python）：
+      build-mingw/bin/offscreen_render.exe bindings/python/demo_ui.html out.png
+-->
+<html width="460" height="404" bg="#EEF3FA" title="binUI · Python">
+<body>
+  <div style="position:absolute;left:0;top:0;width:460;height:56;background:#FFFFFF"></div>
+  <span style="position:absolute;left:18;top:18;width:300;height:22;font-size:15;font-weight:700;color:#1F2A37">binUI × Python</span>
+  <button id="quit" style="position:absolute;left:402;top:14;width:40;height:28;background:#FFE9EC;color:#FF6B6B;border-radius:8;font-size:13">✕</button>
+
+  <div style="position:absolute;left:18;top:76;width:424;height:132;background:#FFFFFF;border:1px solid #E6EDF7;border-radius:14"></div>
+  <span style="position:absolute;left:36;top:94;width:300;height:18;font-size:12;font-weight:700;color:#1F2A37">点击计数（逻辑在 Python 里）</span>
+  <span id="count" style="position:absolute;left:36;top:116;width:200;height:46;font-size:34;font-weight:700;color:#3E8BFF">0</span>
+  <span id="hint" style="position:absolute;left:36;top:172;width:390;height:18;font-size:11;color:#94A3B8">按钮被点 → 回调进 Python → set_text 回写这行字</span>
+
+  <button id="inc" style="position:absolute;left:18;top:224;width:200;height:42;background:#3E8BFF;color:#FFFFFF;border-radius:10;font-size:13">点我 +1</button>
+  <button id="reset" style="position:absolute;left:230;top:224;width:100;height:42;background:#EEF3FA;color:#3E8BFF;border:1px solid #DFE9F7;border-radius:10;font-size:13">归零</button>
+  <button id="toggle" style="position:absolute;left:340;top:224;width:102;height:42;background:#EEF3FA;color:#66768C;border:1px solid #DFE9F7;border-radius:10;font-size:13">开关</button>
+
+  <input id="name" style="position:absolute;left:18;top:286;width:424;height:42;background:#F7FAFF;color:#38445A;border:1px solid #E1E9F5;border-radius:10;padding:12;font-size:13" placeholder="点这里输入，INPUT 事件回到 Python" />
+
+  <span id="echo" style="position:absolute;left:18;top:344;width:424;height:20;font-size:12;color:#66768C">…</span>
+</body>
+</html>

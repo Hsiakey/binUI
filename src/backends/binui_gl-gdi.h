@@ -7,6 +7,7 @@
 // 纯色/圆角矩形 = 顶点四边形（九宫格模板），文本 = FreeType 字形图集，滚动/裁剪 = scissor。
 // VSync 按需呈现，空闲时 CPU 0%。
 #pragma once
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -143,6 +144,14 @@ public:
 
     int run(); // 创建无边框窗口 + OpenGL 上下文 + 事件循环
 
+    // ---------- 非阻塞外壳（给 C ABI / 其他语言绑定 / 自管循环的宿主用）----------
+    // run() 完全等价于 open(); while (pump(1) == 0) {} close(); 三者的行为逐帧一致，
+    // 只是把"谁拥有消息循环"交出去：宿主自己决定每帧什么时候推进。
+    bool open();              // 建窗口 + GL 上下文（失败返回 false）
+    int  pump(int timeoutMs); // 推进一帧：收消息 → update → 绘制脏区；返回 0=继续 1=已关闭
+    void close();             // 销毁窗口（幂等，可在 pump 返回 1 后调用）
+    bool isOpen() const { return running_; }
+
 private:
     static LRESULT CALLBACK wndProc(HWND, UINT, WPARAM, LPARAM);
     void handleMouseMove(float x, float y);
@@ -179,6 +188,7 @@ private:
     FocusFn focus_;
 
     bool running_ = false;
+    std::chrono::steady_clock::time_point lastTime_;  // pump() 的帧间隔基准
     bool dirty_ = true;
     int dirtyL_ = 0, dirtyT_ = 0, dirtyR_ = 0, dirtyB_ = 0;
     int pendingW_ = 0, pendingH_ = 0; // 挂起的窗口尺寸（WM_SIZE 只记录，帧内应用一次）

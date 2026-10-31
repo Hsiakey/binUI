@@ -1906,8 +1906,12 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                     const uint32_t inAccent = (pt && (pt->flags & PAINT_TEXT_COLOR))
                                                   ? ScaleAlpha(pt->textColor, opacity) : accentCol;
                     // 底部强调线是"控件可供性"，不是正文：压到 35% 免得在浅底上成一道黑杠
-                    gfx.fillRect(static_cast<float>(x), static_cast<float>(y + nh - 2),
-                                 static_cast<float>(nw), 2, ScaleAlpha(inAccent, 0.35f));
+                    // 底部强调线 35%：作者给了 border 就不画（直角 Material 下划线遗留，
+                    // 横穿圆角输入框会在框底多出一道悬空横杠）
+                    if (!hasBorder) {
+                        gfx.fillRect(static_cast<float>(x), static_cast<float>(y + nh - 2),
+                                     static_cast<float>(nw), 2, ScaleAlpha(inAccent, 0.35f));
+                    }
 
                     bool editing = renderer.isFocused(node.id);
                     std::string text = node.text;
@@ -2201,9 +2205,9 @@ void BinUIAppD3D::startResize(int hit) {
     GetWindowRect(hwnd, &startRect);
     while (GetAsyncKeyState(VK_LBUTTON) & 0x8000) {
         MSG m;
-        while (PeekMessageA(&m, nullptr, 0, 0, PM_REMOVE)) {
+        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
             TranslateMessage(&m);
-            DispatchMessageA(&m);
+            DispatchMessageW(&m);
         }
         POINT cur;
         GetCursorPos(&cur);
@@ -2264,8 +2268,8 @@ void BinUIAppD3D::startResize(int hit) {
 // BinUIAppD3D：无边框窗口 + 事件循环
 // ============================================================
 LRESULT CALLBACK BinUIAppD3D::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    BinUIAppD3D* app = reinterpret_cast<BinUIAppD3D*>(GetWindowLongPtrA(hwnd, GWLP_USERDATA));
-    if (!app) return DefWindowProcA(hwnd, msg, wParam, lParam);
+    BinUIAppD3D* app = reinterpret_cast<BinUIAppD3D*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (!app) return DefWindowProcW(hwnd, msg, wParam, lParam);
 
     switch (msg) {
         case WM_MOUSEMOVE: {
@@ -2317,18 +2321,18 @@ LRESULT CALLBACK BinUIAppD3D::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             return 0;
         case WM_NCLBUTTONDOWN: {
             // 无 WS_THICKFRAME：命中边框热区时自行启动 resize 循环
-            if (!app->resizable_) return DefWindowProcA(hwnd, msg, wParam, lParam);
+            if (!app->resizable_) return DefWindowProcW(hwnd, msg, wParam, lParam);
             switch (wParam) {
                 case HTLEFT: case HTRIGHT: case HTTOP: case HTBOTTOM:
                 case HTTOPLEFT: case HTTOPRIGHT: case HTBOTTOMLEFT:
                 case HTBOTTOMRIGHT: {
                     if (IsZoomed(hwnd))
-                        return DefWindowProcA(hwnd, msg, wParam, lParam);
+                        return DefWindowProcW(hwnd, msg, wParam, lParam);
                     app->startResize(static_cast<int>(wParam));
                     return 0;
                 }
                 default:
-                    return DefWindowProcA(hwnd, msg, wParam, lParam);
+                    return DefWindowProcW(hwnd, msg, wParam, lParam);
             }
         }
         case WM_NCHITTEST: {
@@ -2357,7 +2361,7 @@ LRESULT CALLBACK BinUIAppD3D::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             PostQuitMessage(0);
             return 0;
     }
-    return DefWindowProcA(hwnd, msg, wParam, lParam);
+    return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
 BinUIAppD3D::BinUIAppD3D(int width, int height, bool vsync)
@@ -2393,14 +2397,16 @@ void BinUIAppD3D::invalidateAll() {
 int BinUIAppD3D::run() {
     SetProcessDPIAware();
 
-    const char* CLASS_NAME = "BinUIAppD3DWindow";
-    WNDCLASSA wc = {};
+    // Unicode 窗口类：ANSI 窗口在 CP936 下把中文拆成两个 WM_CHAR（DBCS 字节），
+    // 输入框会得到乱码（中 -> "ÖÐ"）；IME 输入同理
+    const wchar_t* CLASS_NAME = L"BinUIAppD3DWindow";
+    WNDCLASSW wc = {};
     wc.lpfnWndProc = BinUIAppD3D::wndProc;
-    wc.hInstance = GetModuleHandleA(nullptr);
+    wc.hInstance = GetModuleHandleW(nullptr);
     wc.lpszClassName = CLASS_NAME;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     wc.hbrBackground = nullptr;
-    RegisterClassA(&wc);
+    RegisterClassW(&wc);
 
     RECT work = { 0, 0, 800, 600 };
     SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
@@ -2412,7 +2418,11 @@ int BinUIAppD3D::run() {
     // 无边框：WS_POPUP 无标题栏/边框/系统菜单；WS_MAXIMIZEBOX 允许 Win+↑ 最大化
     DWORD exStyle = 0;
     if (transparent_) exStyle |= WS_EX_LAYERED;
-    HWND hwnd = CreateWindowExA(exStyle, CLASS_NAME, title_.c_str(),
+    wchar_t wtitle[512] = {};
+    if (!title_.empty())
+        MultiByteToWideChar(CP_UTF8, 0, title_.c_str(), -1, wtitle,
+                            static_cast<int>(sizeof(wtitle) / sizeof(wtitle[0])));
+    HWND hwnd = CreateWindowExW(exStyle, CLASS_NAME, wtitle,
         WS_POPUP | WS_MAXIMIZEBOX | WS_VISIBLE, winX, winY, winW, winH,
         nullptr, nullptr, wc.hInstance, nullptr);
     if (!hwnd) {
@@ -2420,7 +2430,7 @@ int BinUIAppD3D::run() {
         return 1;
     }
     hwnd_ = hwnd;
-    SetWindowLongPtrA(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
+    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 
     // 禁用 Windows 11 DWM 自动圆角：UI 圆角由 border-radius 属性自控（跨平台一致）
     DWORD corner = DWMWCP_DONOTROUND;
@@ -2441,10 +2451,10 @@ int BinUIAppD3D::run() {
     MSG msg = {};
 
     while (running_) {
-        while (PeekMessageA(&msg, nullptr, 0, 0, PM_REMOVE)) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { running_ = false; break; }
             TranslateMessage(&msg);
-            DispatchMessageA(&msg);
+            DispatchMessageW(&msg);
         }
 
         auto now = std::chrono::high_resolution_clock::now();

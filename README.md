@@ -32,9 +32,11 @@ src/
 components/         **标准组件库**：titlebar / button / field / badge / toggle /
                     panel / dialogue / stat / avatar / divider / statusbar
                     （纯 HTML+CSS，<use src="…"> 编译期内联，见 components/README.md）
+bindings/           **其他语言绑定**：Python(ctypes) / Go(cgo) / Rust(extern "C")，
+                    统一对着 include/binui_c.h 的 C ABI（见 docs/bindings.md）
 examples/           演示（每个子目录 = 一个 demo：main.cpp + main.html）
                       （6 组示例里 features 就是组件化三形态的活示例）
-tests/              测试（轻量自写断言，7 个独立可执行文件）
+tests/              测试（轻量自写断言，8 个独立可执行文件）
 tools/              调试工具：离屏渲染 / 窗口抓取 / 窗口枚举 / 示例 UI 检查（见 tools/README.md）
 docs/               设计文档、图片、设计稿（见 docs/README.md；组件规范见 docs/components.md）
 scripts/            fetch-deps.sh 等辅助脚本
@@ -60,6 +62,8 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `include/binui_paths.h` | 跨平台路径解析：exe 真实路径（`GetModuleFileName`/`/proc/self/exe`）+ UI 查找顺序 + 图片资源加载（`--ui` / `$BINUI_UI`） |
 | `include/binui_hot_reload.h` | UI 热重载（`--watch`）：保存即重编译换树，保留窗口尺寸/滚动/焦点/输入内容 |
 | `src/backends/binui_gl-gdi.h/.cpp` | GPU 绘制后端：OpenGL 3.3 + 字形图集 + 顶点四边形（无边框窗口） |
+| `include/binui_c.h` | **C ABI**：定长 POD + 不透明句柄 + 轮询事件，给 Python/Go/Rust 等宿主语言的唯一入口（实现在 `src/binui_c.cpp`） |
+| `bindings/` | 语言绑定：`python/`（ctypes）、`go/`（cgo）、`rust/`（手写 extern "C"） |
 | `examples/features` | **功能**：伪类/扩展绘制/HTML 语义/组件化三形态/数据驱动 setText |
 | `examples/animshow` | **动画**：缓动 / 方向 / 时长 / fill / infinite / 悬停过渡 / 运行时 API |
 | `examples/fontshow` | **字体**：字号阶梯 / 字重 400–800 / 斜体 / 行高 / 文字装饰 / 中英混排与符号 |
@@ -198,6 +202,48 @@ renderer.restartAnimations();                                   // 重播所有�
 // 4. 渲染：任意后端遍历 renderer.getNodes() 绘制即可
 //    （Win32 示例直接用 drawNodesGDI(hdc, renderer)）
 ```
+
+## 在别的语言里用（C ABI）
+
+引擎是 C++ 的，对外只开一扇门：`include/binui_c.h`（实现在 `src/binui_c.cpp`）。
+它把整个曲面压成**定长 POD + 不透明句柄 + 轮询事件**三件套 —— 没有跨语言回调，
+所以不需要操心线程亲和、GC 保活、重入。
+
+```sh
+mingw32-make SHELL=sh capi
+# build-mingw/libbinui_c.a          静态库（C / C++ / Rust）
+# build-mingw/bin/binui_c.dll       动态库（Python ctypes / Go cgo）
+```
+
+```python
+import binui
+layout = binui.compile_source(open("ui.html", encoding="utf-8").read())
+with binui.App(layout) as app:
+    app.open(title="Python 驱动")
+    while app.pump():                       # 8ms 超时，空闲不烧 CPU
+        while (ev := app.poll()) is not None:
+            if ev.type == binui.CLICK:
+                app.set_text(app.find("count"), "被点了")
+```
+
+已带三份绑定（Python `ctypes` / Go `cgo` / Rust 手写 `extern "C"`），都跑通并覆盖了
+点击、文本输入、中文与 emoji 输入：
+
+| 语言 | 目录 | 跑法 |
+|---|---|---|
+| Python | [`bindings/python/`](bindings/python/README.md) | `python bindings/python/demo.py` |
+| Go | [`bindings/go/`](bindings/go/README.md) | `cd bindings/go && go run ./demo` |
+| Rust | [`bindings/rust/`](bindings/rust/README.md) | `cd bindings/rust && cargo run --example demo` |
+
+| Python 绑定 | Go 绑定 | Rust 绑定 |
+|---|---|---|
+| ![](docs/img/python-binding.png) | ![](docs/img/go-binding.png) | ![](docs/img/rust-binding.png) |
+
+设计约束、线程规则、ABI 布局自检、新增语言的步骤见
+**[docs/bindings.md](docs/bindings.md)**；总表见 [bindings/README.md](bindings/README.md)。
+
+> 窗口目前只出独立顶层窗口（Win32 / OpenGL 3.3），不支持嵌成子窗口，也不支持
+> 非 Windows 平台 —— 核心库跨平台，外壳不是。
 
 ## UI 描述格式
 
