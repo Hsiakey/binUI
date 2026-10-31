@@ -6,15 +6,17 @@
 ## 目录结构
 
 ```
-include/                # 公共头（格式 / 编译器 / 渲染器 / 字体 / 图表 / 视频接口
+include/                # 公共头（格式 / 编译器 / 渲染器 / 字体 / 图表 / 视频接口 / C ABI
                         #   + binui_paths.h / binui_hot_reload.h 两个 header-only 应用工具）
 src/compiler/           # XML、HTML5 → binUI 编译器（含 CSS 解析与级联）
 src/renderer/           # binUI 解析、节点状态、命中测试、事件、动画、滚动、文本编辑
 src/font/               # FreeType + HarfBuzz 字体服务（字形图集）
 src/backends/           # binui_gl-gdi.*（OpenGL 3.3）/ binui_d3d11.*（D3D11）绘制后端
 src/platform/           # app_win32.*：Win32 窗口外壳 + GDI 绘制（演示与工具共用）
-examples/               # 演示程序（每个子目录 = 一个 demo：main.cpp + main.html）
-examples/assets/        # 演示共用图片（构建时拷到各 demo 目录）
+src/binui_c.cpp         # C ABI 实现（对外声明在 include/binui_c.h）
+components/             # 标准组件库（纯 HTML+CSS，<use src="…"> 编译期内联）
+bindings/               # 其他语言绑定：python(ctypes) / go(cgo) / rust(extern "C")
+examples/               # 演示程序（6 组，每个子目录 = 一个 demo：main.cpp + main.html）
 tests/                  # 测试（自写的轻量断言，无第三方框架）
 tools/                  # 调试工具：离屏渲染、窗口抓取、窗口枚举、示例 UI 检查
 docs/                   # 设计文档、图片、设计稿（mockups/）

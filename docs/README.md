@@ -26,7 +26,7 @@
 | [img/go-binding.png](img/go-binding.png) | Go 绑定演示界面（`bindings/go/demo/ui.html`） |
 | [img/rust-binding.png](img/rust-binding.png) | Rust 绑定演示界面（`bindings/rust/ui.html`） |
 | [font_rendering_before_after.png](font_rendering_before_after.png) | 字体渲染修正前后对比（像素对齐 + gamma + 轻量 hinting + advance 修正） |
-| [font_hinting_modes.png](font_hinting_modes.png) | `BINUI_FONT_HINT=0|1|2` 三种 hinting 模式对比 |
+| [font_hinting_modes.png](font_hinting_modes.png) | `BINUI_FONT_HINT=0\|1\|2` 三种 hinting 模式对比 |
 
 > 绑定演示图为什么是离屏渲染：OpenGL 窗口的内容抓不到（`PrintWindow` 对双缓冲 GL
 > 窗口返回全黑，`BitBlt` 只能抓被遮挡后合成到桌面的部分）。所以演示图一律走
