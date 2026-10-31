@@ -121,7 +121,18 @@ D3D11 后端要点：
 
 - 彩色 emoji：HarfBuzz `hb_shape` 整簇（GSUB 合体/旗帜/肤色/VS16），FreeType 枚举 COLR 层（`FT_Get_Color_Glyph_Layer` + CPAL palette），逐层光栅化后按"底→顶"预乘 over 合成，上传独立彩色图集（格宽 4× 容纳 ZWJ 家庭序列）；簇检测覆盖 ZWJ 合体（👨👩👧👦）、肤色修饰（✊🏻）、变体选择符（❤️）、国旗双拼（🇨🇳）、键帽（1️⃣）。无 COLR 数据时自动降级单色（如 Segoe UI Emoji 的区域指示符为纯 outline）。
 - `textWidth`/`drawText`/`drawTextWrapped` 均为 emoji 簇感知（整簇度量/绘制，宽度与光标定位一致）。
-- 字体发现：`registerSystemFonts` 注册 Windows 系统字体（Segoe UI / Segoe UI Emoji / 微软雅黑），非 Windows 平台由调用方 `addFont` 注册（后续接 fontconfig）。
+- 字体发现：`registerSystemFonts` 注册 Windows 系统字体（Segoe UI / Segoe UI Emoji / Segoe UI Symbol / 微软雅黑 / 宋体 / MS Gothic / Malgun Gothic / Nirmala UI / Leelawadee UI …），非 Windows 平台探测 Noto/文泉驿/苹方/DejaVu 等常见路径（后续可接 fontconfig）。
+- **逐字形回退（缺字画豆腐块）**：`registerSystemFonts` 填一条有序候选链，每个码点按 `FontEngine::faceIndexFor(cp)` **查字体自报的 cmap**（`FT_Get_Char_Index`）决定用哪个面，结果按码点缓存；候选的 `FT_Face` 也是按需加载（前面的面命中就不读后面的）。
+  - 为什么不能按码点区间猜：Unicode 只规定"码点 ↔ 字符"，字形归谁由每个字体文件的 cmap 决定，Block 只是管理分组、标准明确说不能用来选字体。按区间猜会同时错两次——缺字（空白）和风格错（`⌘⌫⎋` 这类符号被丢给 emoji 字体画成彩色图形）。
+  - 候选顺序（Windows）：Segoe UI → 微软雅黑 → **Segoe UI Symbol** → Segoe UI Emoji → 宋体/黑体 → MS Gothic → Malgun Gothic → Nirmala UI → Leelawadee UI → Arial。符号面排在 emoji 面之前，黑白符号不会被画成彩色 emoji；只有真 emoji（`😀`、ZWJ 序列）才解析到 emoji 面并走 COLR 彩色路径。
+  - **全链都没有时画空心方框**（`renderMissingGlyph`），而不是留白：留白看起来像引擎显示 bug，方框是"当前字体链里没有这个字符"的明确信号（浏览器/终端同款做法）。测宽与绘制用同一份度量，不再出现"占着宽度但不画"。
+  - 设计上不可见的码点（C0 控制符、ZWJ/ZWNJ、变体选择符 VS1–256、键帽组合符）不画方框，否则一串 emoji 会凭空多出方块。
+
+![逐字形回退与豆腐块](docs/img/glyph-fallback.png)
+
+（上图是 **GL 后端的真实像素**，由 `tools/gl_shot.exe` 离屏抓取：拉丁走 Segoe UI、中文走微软雅黑、`⌘⌥⌫⎋⏎⇧` 走 Segoe UI Symbol 保持黑白、`U+10FFFD` 落在所有候选之外所以画方框、`𠮷`（CJK 扩展 B，代理对）有字形、emoji 走彩色。）
+
+同一线程里开多个 GPU 后端实例（嵌多个面板 / 多窗口）时，`beginFrame()` / `present()` 会先把上下文切回自己（`wglMakeCurrent` + `wglGetCurrentContext` 比对）：WGL 的 current context 是**线程级**的，不切回去两块的绘制会全画到后建的那块身上，先建的显示纯黑。
 
 GPU 后端缩放处理（D3D11 / OpenGL 同构）：
 - 手动拖边缩放时 `WM_SIZE` 只记录尺寸，合并为每帧应用一次（`applyPendingResize`），交换链/FBO 每帧至多重建一次，避免高频重建导致的花屏/卡顿。

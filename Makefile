@@ -268,6 +268,7 @@ all: $(LIB_A) $(TEST_BINS) $(DEMO_BINS) $(STD_LIB_STAMP) $(BINUI_C_A) $(BINUI_C_
 TOOL_BINS := \
     $(BIN_DIR)/binui_compile$(EXT) \
     $(BIN_DIR)/offscreen_render$(EXT) \
+    $(BIN_DIR)/gl_shot$(EXT) \
     $(BIN_DIR)/window_capture$(EXT) \
     $(BIN_DIR)/enum_windows$(EXT) \
     $(BIN_DIR)/check_examples$(EXT)
@@ -285,10 +286,15 @@ $(BIN_DIR)/offscreen_render$(EXT): tools/offscreen_render.cpp $(SRC_DIR)/platfor
 $(BIN_DIR)/window_capture$(EXT): tools/window_capture.cpp
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $< -lgdiplus -lgdi32 -luser32
-
 $(BIN_DIR)/enum_windows$(EXT): tools/enum_windows.cpp
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $< -luser32
+
+# GL 后端的离屏抓图：GL 窗口抓不到图（PrintWindow 全黑），这个直接读回离屏像素
+$(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -o $@ $< \
+	    $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
 
 .PHONY: tools
 tools: $(TOOL_BINS)

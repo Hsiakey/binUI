@@ -170,6 +170,92 @@ int main() {
         }
     }
 
+    // ============================================================
+    // 逐字形回退 + 豆腐块
+    // ============================================================
+    // 这一段守的是"缺字必须看得见"：谁有字形靠字体的 cmap 决定（不是码点区间），
+    // 全都没有时必须画空心方框，而不是留白（留白会被当成引擎 bug）。
+    std::printf("\n--- 逐字形回退 / 豆腐块 ---\n");
+    CHECK(!fe.fallbackChain().empty(), "回退链已由 registerSystemFonts 填好");
+
+    {
+        // 未注册的面名要被静默过滤，不能凭空出现在链上
+        FontEngine probe;
+        probe.init();
+        probe.addFont("Only", fe.defaultFace());
+        probe.setFallbackChain({ "Only", "NoSuchFace", "Only" });
+        CHECK(probe.fallbackChain().size() == 1, "setFallbackChain 过滤未注册 + 去重");
+    }
+
+    {
+        struct ResolveCase { const char* name; uint32_t cp; };
+        const ResolveCase cases[] = {
+            { "拉丁 'A'", 'A' },
+            { "中文 U+4E2D", 0x4E2D },
+            { "符号 U+2212 (−)", 0x2212 },
+        };
+        for (const auto& c : cases) {
+            const int idx = fe.faceIndexFor(c.cp);
+            char msg[192];
+            std::snprintf(msg, sizeof(msg), "faceIndexFor(%s) 命中链上下标 %d（%s）", c.name,
+                          idx, idx >= 0 ? fe.faceName(idx).c_str() : "无");
+            CHECK(idx >= 0, msg);
+            if (idx >= 0) {
+                // 命中的面必须**真的**画得出这个码点，否则"解析"就是骗人的
+                const InkStat s = Measure(fe, fe.faceName(idx).c_str(), 16.0f, c.cp);
+                std::snprintf(msg, sizeof(msg), "%s：解析到的面确实有字形（ink=%lld）",
+                              c.name, s.ink);
+                CHECK(s.ok && s.advance > 0, msg);
+            }
+        }
+    }
+
+    {
+        // 私用区末尾：任何系统字体都不该有 —— 必须判定为"没有"
+        const int idx = fe.faceIndexFor(0x10FFFD);
+        CHECK(idx == -1, "faceIndexFor(U+10FFFD) = -1（真正没有字形的码点）");
+    }
+
+    {
+        // 符号优先黑白：⌘ 若系统装了 Segoe UI Symbol，就该解析到它，而不是 emoji 面
+        bool hasSymbol = false;
+        for (const auto& n : fe.fallbackChain())
+            if (n == "Segoe UI Symbol") hasSymbol = true;
+        if (hasSymbol) {
+            const int idx = fe.faceIndexFor(0x2318);   // ⌘
+            std::printf("[info] U+2318 → %s\n", idx >= 0 ? fe.faceName(idx).c_str() : "(无)");
+            CHECK(idx < 0 || fe.faceName(idx) == "Segoe UI Symbol",
+                  "⌘ 解析到 Segoe UI Symbol（黑白符号，不落 emoji 面）");
+        } else {
+            std::printf("[skip] 没装 Segoe UI Symbol，跳过符号优先黑白检查\n");
+        }
+    }
+
+    // 豆腐块本身：空心方框，四边有墨、中心空
+    for (float size : { 12.0f, 14.0f, 32.0f }) {
+        GrayGlyph g;
+        const bool ok = fe.renderMissingGlyph(size, g);
+        char msg[192];
+        std::snprintf(msg, sizeof(msg),
+                      "renderMissingGlyph(%.0fpx)：有尺寸且 advance 合理（%dx%d adv=%d）",
+                      size, g.width, g.height, g.advance);
+        CHECK(ok && g.width > 0 && g.height > 0 && g.advance >= g.width, msg);
+        if (!ok || !g.alpha) continue;
+
+        auto at = [&](int x, int y) {
+            return static_cast<int>(g.alpha[static_cast<size_t>(y) * g.pitch + x]);
+        };
+        const int midX = g.width / 2, midY = g.height / 2;
+        const bool edgeTop = at(midX, 0) > 0, edgeBottom = at(midX, g.height - 1) > 0;
+        const bool edgeLeft = at(0, midY) > 0, edgeRight = at(g.width - 1, midY) > 0;
+        std::snprintf(msg, sizeof(msg), "豆腐块 %.0fpx：四边有墨", size);
+        CHECK(edgeTop && edgeBottom && edgeLeft && edgeRight, msg);
+        std::snprintf(msg, sizeof(msg), "豆腐块 %.0fpx：中间空心（不是实心块）", size);
+        CHECK(at(midX, midY) == 0, msg);
+        std::snprintf(msg, sizeof(msg), "豆腐块 %.0fpx：边框不透明", size);
+        CHECK(at(midX, 0) == 255, msg);
+    }
+
     std::printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "PASSED", g_fail,
                 g_fail == 1 ? "" : "s");
     return g_fail ? 1 : 0;

@@ -167,9 +167,16 @@ CreateWindowExW(0, cls, title, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBL
 （`中文`）正常；点"关闭宿主"→ 子窗口 `WM_DESTROY` → `render()` 返回 1 → 进程干净退出。
 参数字校验（NULL 父窗口 / 尺寸非法）进 `tests/test_capi.cpp`，CI 可跑。
 
-⚠️ **像素级外观没能在自动化环境里确认**：这个会话里所有 OpenGL 窗口的内容都没有合成
-到桌面（连仓库里原有的 `features.exe` 也一样，而同一进程的 GDI 绘制正常）——所以
-"面板显示成什么样"需要人眼在真机上看一眼，别把离屏 GDI 渲染图当 GL 输出。
+![子窗口模式](../docs/img/child-window.png)
+
+（这是真机截屏：一个普通 Win32 宿主窗口，左边 220px 定宽面板、右边自适应面板，
+两块各自是独立的 binUI 实例。）
+
+⚠️ **同一个线程里开多个实例时，每帧必须切回自己的 GL 上下文**。WGL 的 current
+context 是线程级的，谁最后 `init` 谁一直占着——不切回去，两块的绘制会全画到后建的那块
+身上，先建的显示纯黑。引擎已在 `beginFrame()` / `present()` 里做
+`wglMakeCurrent`（且先 `wglGetCurrentContext` 比对，已是自己就跳过），所以宿主不用管；
+但如果你自己直接驱动 `BinUIGLGdi`，注意这一条。
 
 ## 没有跨过去的部分（明确不支持，不是 bug）
 

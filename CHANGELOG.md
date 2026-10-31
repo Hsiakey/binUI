@@ -6,6 +6,65 @@
 
 ## [Unreleased]
 
+### 修复 — 同一线程多实例时 GL 上下文不切换，先建的实例画成纯黑
+
+WGL 的 current context 是**线程级**的。`BinUIGLGdi::init()` 里 `wglMakeCurrent`
+只做一次，之后没人再切回来 —— 于是同一线程里有两个后端实例（子窗口模式嵌两块面板、
+或者多窗口）时，所有绘制都跑到最后 init 的那个上下文里，先建的那块**整个窗口纯黑**，
+而它的事件/命中测试一切正常（所以很难察觉是渲染问题）。
+
+- `Impl::makeCurrent()`：先 `wglGetCurrentContext()` 比对，不是自己才
+  `wglMakeCurrent`；`beginFrame()` / `present()` / `presentViaGdi()` 三处入口统一调用。
+- 这条是"子窗口模式"的必修项：嵌入场景天然每帧多个实例交替绘制。
+
+### 新增 — `tools/gl_shot`：GL 后端的离屏抓图（终于能看见 GL 输出）
+
+OpenGL 窗口抓不到图 —— `PrintWindow` 对双缓冲 GL 窗口返回全黑，`BitBlt` 只能抓合成
+到桌面的部分；所以文档图一直只有 GDI 离屏渲染，而 GDI 自带字体链接，"GL 到底画成
+什么样"谁都没验证过。
+
+`tools/gl_shot <ui.html> <out.png> [w] [h]`：建一个窗口 → GL 上下文 → 渲染一帧 →
+`presentViaGdi()` 读回离屏像素并 `StretchDIBits` 到窗口 DC → `BitBlt` 存 PNG。
+**窗口必须先 `ShowWindow`**：GDI 对隐藏窗口的 `StretchDIBits` 直接丢弃（不报错），
+读回会得到一片空白 —— 这也是排查时踩过的坑。
+
+产物：[docs/img/glyph-fallback.png](docs/img/glyph-fallback.png)（逐字形回退 + 豆腐块）。
+
+### 修复 — 缺字留白改成豆腐块：逐字形回退（问字体的 cmap，不按码点区间猜）
+
+GL / D3D 后端选字体一直是"按码点区间猜"：`cp >= 0x80` → 微软雅黑，落进 emoji 区间 →
+Segoe UI Emoji，否则 Segoe UI。猜中的面里没有这个字形时，`FT_Get_Char_Index` 返回 0，
+`renderGlyph` 直接 `return false`，光栅化不缓存、绘制时 `if (!g) return;` —— **渲染成一片
+空白**。用户看到的不是"这个字体没有该字符"，而是"引擎没画"。
+
+为什么猜本身是错的：Unicode 只规定"码点 ↔ 抽象字符"，字形归谁由**每个字体文件自报的
+cmap** 决定；Block 只是管理分组，标准明确说不能用来选字体。按区间猜会同时错两次 ——
+缺字（空白），以及风格错（`⌘⌫⎋` 这类黑白符号被丢给 emoji 字体，画成彩色图形）。
+
+- `FontEngine` 新增**逐字形回退**：`setFallbackChain({…})` / `faceIndexFor(cp)` /
+  `faceName(idx)`。`faceIndexFor` 扫候选链、查的正是 `FT_Get_Char_Index`（字体 cmap），
+  命中即停、结果按码点缓存；候选面的 `FT_Face` 也按需加载（前面的面命中就不读后面的，
+  中文界面不会因为链尾有泰文候选就多读一个字体文件）。
+- 新增 `renderMissingGlyph(size, …)`：**空心方框（豆腐块）**，几何只有一份，两个 GPU
+  后端共用。缺字时画方框而不是留白 —— 留白像引擎 bug，方框是"当前字体链里没有这个
+  字符"的明确信号。测宽与绘制用同一份度量，顺带修掉"占着 0.6em 宽度却不画"的错位。
+- 设计上不可见的码点（C0 控制符、ZWJ/ZWNJ、变体选择符 VS1–256、键帽组合符）不画方框，
+  否则一串 emoji 里会凭空多出方块。
+- `registerSystemFonts` 把候选面补齐并排好顺序（Windows）：Segoe UI → 微软雅黑 →
+  **Segoe UI Symbol** → Segoe UI Emoji → 宋体/黑体 → MS Gothic → Malgun Gothic →
+  Nirmala UI → Leelawadee UI → Arial。符号面排在 emoji 面之前：`⌘⌫✕` 现在走
+  Segoe UI Symbol 画**黑白**符号，只有真 emoji（`😀`、ZWJ 序列）才走 COLR 彩色路径。
+- 两个 GPU 后端的字形图集 key：低 6 位从 `cjk|emoji` 两个布尔换成**面下标**
+  （同一码点解析到不同字体时必须分图集，否则字形会串）。
+- `test_font` 新增断言：回退链已填、`setFallbackChain` 过滤未注册名 + 去重、
+  `faceIndexFor` 对 `A` / `中` / `−` 命中且**命中面确实画得出该字**、
+  `U+10FFFD`（私用区末尾）判定为无字形、`⌘` 解析到 Segoe UI Symbol、
+  豆腐块 12/14/32px 的四边有墨 + 中心空心 + 边框不透明。
+
+> 顺带说明为什么这个 bug 一直没在文档图里暴露：GDI 离屏渲染走 `DrawTextW`，系统有
+> **字体链接**（font linking）自己挑字体补上；GL/D3D 后端自己管字形图集，缺就是缺。
+> 所以 `docs/img/*.png` 全对，真程序里才有空白。
+
 ### 新增 — 子窗口模式：把 binUI 当成控件嵌进宿主窗口
 
 之前只有"binUI 自己当应用"（顶层 `WS_POPUP` 无边框窗 + 自己的消息循环）。要把它塞进
@@ -33,8 +92,8 @@ WPF / Qt / WinForms 的某个面板里，缺的是这一层：`WS_CHILD` 子窗�
 
 验证：点击两块面板的按钮 → 事件回到 Python、两块面板同时更新；输入框聚焦 + 输入中文；
 点"关闭宿主" → 干净退出（退出码 0）。参数校验进 `tests/test_capi.cpp`，CI 可跑。
-**像素级外观未能自动确认**：本会话里所有 OpenGL 窗口内容都没合成到桌面（连原有的
-`features.exe` 也一样，而同进程的 GDI 绘制正常），需要人眼在真机复核。
+真机截屏见 [docs/img/child-window.png](docs/img/child-window.png)：普通 Win32 宿主窗口，
+左边 220px 定宽面板、右边自适应面板，两块独立实例同时正确渲染。
 
 ### 新增 — C ABI（`include/binui_c.h`）与 Python / Go / Rust 绑定
 

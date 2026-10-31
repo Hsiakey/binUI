@@ -58,6 +58,26 @@ public:
     void setDefaultFace(const std::string& name);
     const std::string& defaultFace() const;
 
+    // ============ 逐字形回退（Unicode 只定"是哪个字符"，谁有字形得问字体）============
+    // 候选链是有序的：setFallbackChain({"Segoe UI", "Microsoft YaHei", "Segoe UI Symbol", …})。
+    // 名字必须已 addFont 注册，未注册的项会被静默跳过（跨平台时字体名不一样很正常）。
+    // registerSystemFonts 会填一条合理默认链，普通应用不用管。
+    void setFallbackChain(const std::vector<std::string>& faces);
+    const std::vector<std::string>& fallbackChain() const;
+    // 链上下标 → face 名（越界返回 defaultFace()）
+    const std::string& faceName(int index) const;
+
+    // 查字体的 cmap：返回**第一个真正含该码点**的链上下标；全都没有返回 -1。
+    // 结果按码点缓存（建字形图集时每个码点只查一次），热路径零开销。
+    // 注意这不是"猜区间"：查的就是字体自报的 cmap（FT_Get_Char_Index）。
+    int faceIndexFor(uint32_t cp);
+
+    // 缺失字形的兜底：一个空心方框（"豆腐块"）。
+    // 语义上必须画 —— 留白是显示 bug，方框是"字体里没有这个字"的明确信号。
+    // 返回 false = 字号太小画不出（调用方退化成空白 + advance）。
+    bool renderMissingGlyph(float size, GrayGlyph& out);
+    bool renderMissingGlyph(float size, bool bold, bool italic, GrayGlyph& out);
+
     // 度量
     FontMetrics metrics(const std::string& face, float size);
 

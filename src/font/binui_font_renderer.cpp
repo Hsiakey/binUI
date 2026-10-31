@@ -118,6 +118,16 @@ struct FontEngine::Impl {
 
     std::vector<uint8_t> colorBuf;  // 彩色合成输出缓冲
 
+    // ---- 逐字形回退 ----
+    std::vector<std::string> fallback;                 // 有序候选 face 名
+    std::unordered_map<std::string, FT_Face> probes;   // 面名 → 只用于 cmap 查询的 FT_Face
+    std::unordered_map<uint32_t, int> coverCache;      // 码点 → 链上下标（-1 = 都没有）
+
+    std::vector<uint8_t> tofuBuf;   // 豆腐块位图缓冲（renderMissingGlyph 输出）
+
+    // 按需加载只做 cmap 查询的 FT_Face（不建会话、不设字号 —— cmap 与字号无关）
+    static FT_Face probeFace(Impl* p, const std::string& name);
+
     static Session* getSession(Impl* p, const std::string& face, float size);
 
     ~Impl();
@@ -130,6 +140,9 @@ FontEngine::Impl::~Impl() {
         delete kv.second;
     }
     sessions.clear();
+    for (auto& kv : probes)
+        if (kv.second) FT_Done_Face(kv.second);
+    probes.clear();
     if (ft) FT_Done_FreeType(ft);
 }
 
@@ -158,6 +171,100 @@ void FontEngine::setDefaultFace(const std::string& name) {
 }
 
 const std::string& FontEngine::defaultFace() const { return impl_->defaultFace; }
+
+// ============================================================
+// 逐字形回退
+// ============================================================
+// 为什么不能"按码点区间猜"：Unicode 只定"U+XXXX 是哪个字符"，谁有它的字形
+// 是**字体自报的 cmap**（每个字体文件都不一样），跟区段没有任何对应关系 ——
+// Unicode 明确说 Block 只是管理分组，不能用来选字体。所以这里就一件事：问字体。
+//
+// 查询成本：每个码点扫一遍候选链，命中即停；结果按码点缓存。候选 face 的
+// FT_Face 也按需加载（只有前面的面都缺才轮到后面的），中文界面永远不会
+// 因为有泰文候选就多读一个字体文件。
+
+FT_Face FontEngine::Impl::probeFace(Impl* p, const std::string& name) {
+    auto it = p->probes.find(name);
+    if (it != p->probes.end()) return it->second;
+    FT_Face f = nullptr;
+    auto fit = p->faces.find(name);
+    if (p->ft && fit != p->faces.end() && !fit->second.empty()) {
+        if (FT_New_Face(p->ft, fit->second.c_str(), 0, &f) != 0) f = nullptr;
+    }
+    p->probes[name] = f;   // 失败也缓存（nullptr），不在热路径上反复尝试
+    return f;
+}
+
+void FontEngine::setFallbackChain(const std::vector<std::string>& faces) {
+    impl_->fallback.clear();
+    for (const auto& n : faces) {
+        if (n.empty()) continue;
+        if (impl_->faces.find(n) == impl_->faces.end()) continue;   // 没注册过：跳过
+        bool dup = false;
+        for (const auto& e : impl_->fallback)
+            if (e == n) { dup = true; break; }
+        if (!dup) impl_->fallback.push_back(n);
+    }
+    impl_->coverCache.clear();   // 链变了，覆盖缓存作废
+}
+
+const std::vector<std::string>& FontEngine::fallbackChain() const { return impl_->fallback; }
+
+const std::string& FontEngine::faceName(int index) const {
+    if (index >= 0 && static_cast<size_t>(index) < impl_->fallback.size())
+        return impl_->fallback[static_cast<size_t>(index)];
+    return impl_->defaultFace;
+}
+
+int FontEngine::faceIndexFor(uint32_t cp) {
+    auto it = impl_->coverCache.find(cp);
+    if (it != impl_->coverCache.end()) return it->second;
+
+    int found = -1;
+    if (!impl_->fallback.empty()) {
+        for (size_t i = 0; i < impl_->fallback.size(); i++) {
+            FT_Face f = Impl::probeFace(impl_, impl_->fallback[i]);
+            if (!f) continue;
+            if (FT_Get_Char_Index(f, cp) != 0) { found = static_cast<int>(i); break; }
+        }
+    } else {
+        // 没设链：至少查一下默认 face，别把"能画"也说成缺字
+        FT_Face f = Impl::probeFace(impl_, impl_->defaultFace);
+        if (f && FT_Get_Char_Index(f, cp) != 0) found = 0;
+    }
+    impl_->coverCache[cp] = found;
+    return found;
+}
+
+// 豆腐块：空心方框。几何写在这一处，两个 GPU 后端共用，也方便测试断言。
+// 「留白」和「方框」的区别不是观感问题：留白看起来像引擎 bug，方框是
+// "当前字体里没有这个字符"的明确信号 —— 用户能判断是缺字体还是缺数据。
+bool FontEngine::renderMissingGlyph(float size, GrayGlyph& out) {
+    return renderMissingGlyph(size, false, false, out);
+}
+
+bool FontEngine::renderMissingGlyph(float size, bool bold, bool italic, GrayGlyph& out) {
+    (void)bold;    // 方框用几何画，加粗/倾斜没有意义
+    (void)italic;
+    const int w = std::max(4, static_cast<int>(std::lround(size * 0.58f)));
+    const int h = std::max(5, static_cast<int>(std::lround(size * 0.72f)));
+    const int th = size >= 26.0f ? 2 : 1;   // 大字号用 2px 边，否则细得看不清
+    impl_->tofuBuf.assign(static_cast<size_t>(w) * h, 0);
+    for (int y = 0; y < h; y++) {
+        for (int x = 0; x < w; x++) {
+            const bool edge = (x < th || x >= w - th || y < th || y >= h - th);
+            impl_->tofuBuf[static_cast<size_t>(y) * w + x] = edge ? 255 : 0;
+        }
+    }
+    out.width = w;
+    out.height = h;
+    out.pitch = w;
+    out.left = 0;
+    out.top = h;                              // 整块在基线之上，和普通字形同一套坐标
+    out.advance = w + std::max(1, th);
+    out.alpha = impl_->tofuBuf.data();
+    return true;
+}
 
 // 取 (face, sizePx) 会话，必要时创建（FT_Face + hb_font + 度量）
 FontEngine::Impl::Session* FontEngine::Impl::getSession(Impl* p, const std::string& face,
@@ -496,12 +603,32 @@ void registerSystemFonts(FontEngine& engine) {
     };
     reg("Segoe UI", "segoeui.ttf");
     reg("Segoe UI Emoji", "seguiemj.ttf");
+    reg("Segoe UI Symbol", "seguisym.ttf");
     reg("Microsoft YaHei", "msyh.ttc");
     reg("Microsoft YaHei", "msyh.ttf");
     reg("SimHei", "simhei.ttf");
     reg("SimSun", "simsun.ttc");
     reg("Arial", "arial.ttf");
+    // 回退链的"深水区"：中日韩生僻字、日文假名、韩文、印度语系、泰文
+    reg("MS Gothic", "msgothic.ttc");
+    reg("Malgun Gothic", "malgun.ttf");
+    reg("Nirmala UI", "Nirmala.ttf");
+    reg("Leelawadee UI", "Leelaw.ttf");
     if (engine.defaultFace().empty()) engine.setDefaultFace("Segoe UI");
+
+    // 回退顺序就是"问字体的顺序"（命中即停）：
+    //   · 拉丁 —— Segoe UI
+    //   · 中日韩 —— 雅黑（界面观感最正）
+    //   · 符号 —— Segoe UI Symbol 在 Emoji 之前：⌘⌫⎋ 这类要黑白符号，
+    //     不能让它们落到 emoji 字体、被画成彩色图形（那是选面选错了，不是缺字）
+    //   · 真 emoji —— Segoe UI Emoji（含 COLR 彩色层）
+    //   · 生僻汉字 / 假名 / 韩文 / 印度语系 / 泰文 —— 依次兜底
+    //   · Arial 最后兜底（某些老系统上它覆盖最全）
+    engine.setFallbackChain({
+        "Segoe UI", "Microsoft YaHei", "Segoe UI Symbol", "Segoe UI Emoji",
+        "SimSun", "SimHei", "MS Gothic", "Malgun Gothic",
+        "Nirmala UI", "Leelawadee UI", "Arial",
+    });
 #else
     // 非 Windows：按发行版/系统的常见安装路径探测（Linux 各发行版 + macOS）。
     // 一个都没有也不报错 —— 应用可以自己 addFont()，核心库不假设系统里必定有字体。
@@ -516,6 +643,11 @@ void registerSystemFonts(FontEngine& engine) {
         {"DejaVu Sans", "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",                  false},
         {"Liberation Sans", "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf", false},
         {"Helvetica", "/System/Library/Fonts/Helvetica.ttc",                                false},
+        // 符号 / emoji：回退链后半段，只有前面的面都不覆盖时才会被读到
+        {"Noto Color Emoji", "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",           false},
+        {"Noto Color Emoji", "/usr/share/fonts/noto/NotoColorEmoji.ttf",                    false},
+        {"Symbola", "/usr/share/fonts/truetype/ancient-scripts/Symbola_hint.ttf",           false},
+        {"Apple Color Emoji", "/System/Library/Fonts/Apple Color Emoji.ttc",                false},
     };
     auto exists = [](const char* path) {
         FILE* f = std::fopen(path, "rb");
@@ -525,9 +657,11 @@ void registerSystemFonts(FontEngine& engine) {
     };
     const char* firstCjk = nullptr;
     const char* firstAny = nullptr;
+    std::vector<std::string> chain;
     for (const auto& c : kCands) {
         if (!exists(c.path)) continue;
         engine.addFont(c.face, c.path);
+        chain.push_back(c.face);
         if (!firstAny) firstAny = c.path;
         if (!firstCjk && c.cjk) firstCjk = c.path;
     }
@@ -538,6 +672,10 @@ void registerSystemFonts(FontEngine& engine) {
         engine.addFont("Microsoft YaHei", dflt);
         engine.addFont("Noto Sans", dflt);
         engine.setDefaultFace("Segoe UI");
+        // 名字统一到上面三个别名（后端只认 Windows 的 face 名），顺序即回退顺序
+        std::vector<std::string> ordered = {"Segoe UI", "Microsoft YaHei", "Noto Sans"};
+        for (const auto& n : chain) ordered.push_back(n);
+        engine.setFallbackChain(ordered);
     }
 #endif
 }

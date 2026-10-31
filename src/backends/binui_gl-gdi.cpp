@@ -296,7 +296,7 @@ struct Atlas {
     int ascent = 0, descent = 0;
     float size = 0;
     int weight = 400;
-    bool cjk = false;
+    int faceIdx = 0;          // 回退链上的面下标（0 = 主面；缺字的豆腐块也放这里）
     bool italic = false;
     std::string face;
     std::unordered_map<uint32_t, Glyph> glyphs;
@@ -450,6 +450,44 @@ struct BinUIGLGdi::Impl {
     binui_font::FontEngine font;
     bool fontReady = false;
 
+    // ---------- 逐字形回退 ----------
+    // 谁有字形是字体自报的 cmap，不是码点区间能推出来的（Unicode 的 Block 只是
+    // 管理分组，标准明确说不能用来选字体）。所以这里就一件事：问字体。
+    // 返回该码点该用哪张图集的面下标；字体服务返回 -1 = 所有候选都没有。
+    // 缺字的豆腐块借 0 号面的图集 —— 它是几何，跟哪个字体无关。
+    int faceIdxForCp(uint32_t cp) {
+        if (!fontReady) return 0;
+        const int idx = font.faceIndexFor(cp);
+        return idx < 0 ? 0 : idx;
+    }
+
+    // 设计上就不可见的码点：不画豆腐块（否则一串 emoji 里会凭空多出方框）
+    static bool IsInvisibleCp(uint32_t cp) {
+        if (cp < 0x20) return true;                                    // C0 控制符
+        if (cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0xFEFF) return true;
+        if (cp >= 0xFE00 && cp <= 0xFE0F) return true;                  // 变体选择符 VS1–16
+        if (cp >= 0xE0100 && cp <= 0xE01EF) return true;                // 变体选择符 VS17–256
+        if (cp == 0x20E3) return true;                                  // 键帽组合符
+        return false;
+    }
+
+    // emoji 面在链上的下标（-1 = 没有这个候选）。彩色路径只在这个面上尝试：
+    // 真 emoji 走彩色，符号（⌘⌫✕）命中 Segoe UI Symbol 就不会被画成彩色图形。
+    int emojiFaceIdx() {
+        if (!emojiIdxInit) {
+            emojiIdxInit = true;
+            emojiIdx = -1;
+            if (fontReady) {
+                const auto& chain = font.fallbackChain();
+                for (size_t i = 0; i < chain.size(); i++)
+                    if (chain[i] == emojiFont) { emojiIdx = static_cast<int>(i); break; }
+            }
+        }
+        return emojiIdx;
+    }
+    bool emojiIdxInit = false;
+    int emojiIdx = -1;
+
     std::unordered_map<uint32_t, ColorAtlas*> colorAtlases;
     std::unordered_map<int, RoundTex> rounds;
 
@@ -495,9 +533,17 @@ struct BinUIGLGdi::Impl {
         return best;
     }
 
+    // 绑回自己的上下文。WGL 的 current context 是**线程级**的：同一线程里有两个
+    // 后端实例（嵌多个面板、开多个窗口）时，谁最后 init 谁一直占着 —— 不逐帧切回来，
+    // 绘制就全画到另一个实例身上，自己那块显示成黑的。
+    bool makeCurrent() {
+        if (!hdc || !ctx) return false;
+        if (wglGetCurrentContext() == ctx) return true;
+        return wglMakeCurrent(hdc, ctx) != FALSE;
+    }
+
     bool createContext() {
-        hdc = GetDC(hwnd);
-        if (!hdc) {
+        hdc = GetDC(hwnd);        if (!hdc) {
             std::fprintf(stderr, "[gl] GetDC failed\n");
             return false;
         }
@@ -667,23 +713,26 @@ struct BinUIGLGdi::Impl {
         return true;
     }
 
-    Atlas* getAtlas(float size, int weight, bool cjk, bool emoji = false, bool italic = false) {
-        // 斜体与粗体一样是"另一张图集"：合成倾斜发生在光栅化阶段，不能共用缓存
+    Atlas* getAtlas(float size, int weight, int faceIdx, bool italic = false) {
+        // 斜体与粗体一样是"另一张图集"：合成倾斜发生在光栅化阶段，不能共用缓存。
+        // 低 6 位放**面下标**（原来是 cjk / emoji 两个布尔）：同一个码点解析到不同
+        // 字体时必须分图集，否则字形会串。
+        const uint32_t fidx = static_cast<uint32_t>(faceIdx < 0 ? 0 : faceIdx) & 0x3Fu;
         uint64_t key = (static_cast<uint64_t>(std::lround(size)) << 32) |
                        (static_cast<uint64_t>((weight & 0x7FFF) | (italic ? 0x8000 : 0)) << 16) |
-                       (cjk ? 1u : 0u) | (emoji ? 2u : 0u);
+                       fidx;
         auto it = atlases.find(key);
         if (it != atlases.end()) return it->second;
 
         Atlas* a = new Atlas();
         a->size = size;
         a->weight = weight;
-        a->cjk = cjk;
+        a->faceIdx = static_cast<int>(fidx);
         a->italic = italic;
         a->cellH = static_cast<int>(std::ceil(size * 1.4f)) + 2;
         a->cellW = a->cellH;
         a->cols = a->sizePx / a->cellW;
-        a->face = emoji ? emojiFont : (cjk ? cjkFont : asciiFont);
+        a->face = fontReady ? font.faceName(a->faceIdx) : asciiFont;
         std::vector<uint8_t> zeros(static_cast<size_t>(a->sizePx) * a->sizePx * 4, 0);
         a->tex = CreateTexture2D(a->sizePx, a->sizePx, zeros.data(), false);
         if (!a->tex) {
@@ -706,6 +755,11 @@ struct BinUIGLGdi::Impl {
         // 粗体：atlas key 里带 weight，粗体是独立的一张图集；这里按新签名让 FreeType
         // 合成加粗（FT_GlyphSlot_Embolden），否则 font-weight:700 只是换个空图集重复光栅化
         bool ok = font.renderGlyph(a->face, a->size, cp, a->weight >= 600, a->italic, g);
+        if (!ok && !IsInvisibleCp(cp)) {
+            // 缺字 → 画豆腐块。留白会被当成"引擎显示 bug"，空方框才是给用户的
+            // 明确信号：这个字体链里没有这个字符。浏览器和终端都是这么做的。
+            ok = font.renderMissingGlyph(a->size, a->weight >= 600, a->italic, g);
+        }
         if (!ok || !g.alpha || g.height <= 0) {
             // 空白字形（如空格）：无像素但有有效 advance —— 仍占一格并缓存，
             // 否则 glyphFor 返回 null，测宽/绘制都不推进，单词会挤在一起
@@ -833,14 +887,12 @@ struct BinUIGLGdi::Impl {
                                 bool italic = false) {
         ClusterMetric m;
         m.len = EmojiClusterLen(cps, n);
-        float fallback = std::ceil(size * 0.6f);
-        if (!(m.len > 1 || IsEmojiCp(cps[0]))) {
-            Atlas* a = getAtlas(size, weight, cps[0] >= 0x80, false, italic);
-            const Glyph* g = a ? glyphFor(a, cps[0]) : nullptr;
-            m.adv = g ? static_cast<float>(g->advW) : fallback;
-            return m;
-        }
-        if (fontReady) {
+        const float fallback = std::ceil(size * 0.6f);
+        const int firstFace = faceIdxForCp(cps[0]);
+        // 彩色只在该码点确实由 emoji 面覆盖时才尝试：符号（⌘⌫✕）命中 Segoe UI Symbol
+        // 就走灰度，不会被画成彩色图形；真 emoji 才走 COLR。
+        const bool tryColor = fontReady && (m.len > 1 || firstFace == emojiFaceIdx());
+        if (tryColor) {
             ColorAtlas* ca = getColorAtlas(size);
             const ColorGlyph* g = ca ? colorGlyphFor(ca, cps, m.len) : nullptr;
             if (g) {
@@ -849,8 +901,14 @@ struct BinUIGLGdi::Impl {
                 return m;
             }
         }
+        if (m.len <= 1) {
+            Atlas* a = getAtlas(size, weight, firstFace, italic);
+            const Glyph* g = a ? glyphFor(a, cps[0]) : nullptr;
+            m.adv = g ? static_cast<float>(g->advW) : fallback;
+            return m;
+        }
         for (size_t i = 0; i < m.len; i++) {
-            Atlas* a = getAtlas(size, weight, cps[i] >= 0x80, IsEmojiCp(cps[i]), italic);
+            Atlas* a = getAtlas(size, weight, faceIdxForCp(cps[i]), italic);
             const Glyph* g = a ? glyphFor(a, cps[i]) : nullptr;
             m.adv += g ? static_cast<float>(g->advW) : fallback;
         }
@@ -1124,6 +1182,7 @@ void BinUIGLGdi::resize(int width, int height) {
 
 void BinUIGLGdi::beginFrame(const void* clipRect) {
     if (!impl_->ready) return;
+    if (!impl_->makeCurrent()) return;   // 多实例：逐帧切回自己的上下文
     impl_->verts.clear();
     impl_->batches.clear();
     impl_->curBatch = nullptr;
@@ -1155,6 +1214,7 @@ void BinUIGLGdi::beginFrame(const void* clipRect) {
 
 void BinUIGLGdi::present() {
     if (!impl_->ready) return;
+    if (!impl_->makeCurrent()) return;
     impl_->flushAll(); // 画到 MSAA 帧缓冲
 
     // MSAA 解析：msFbo -> offTex（单采样离屏纹理，供整帧 blit / 透明窗口读回）。
@@ -1240,6 +1300,7 @@ void BinUIGLGdi::present() {
 
 void BinUIGLGdi::presentViaGdi() {
     if (!impl_->ready) return;
+    if (!impl_->makeCurrent()) return;
     impl_->flushAll();
     glBindFramebufferP(GL_READ_FRAMEBUFFER, impl_->msFbo);
     glBindFramebufferP(GL_DRAW_FRAMEBUFFER, impl_->offFbo);
@@ -1402,7 +1463,7 @@ float BinUIGLGdi::textWidth(float size, int weight, const std::string& utf8, boo
 }
 
 void BinUIGLGdi::fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic) {
-    Atlas* a = impl_->getAtlas(size, weight, false, false, italic);
+    Atlas* a = impl_->getAtlas(size, weight, 0, italic);   // 度量用主面
     if (!a) { ascent = lineHeight = static_cast<int>(size); return; }
     ascent = a->ascent;
     lineHeight = a->ascent + a->descent;
@@ -1431,7 +1492,7 @@ void BinUIGLGdi::drawText(float x, float y, float size, int weight,
     impl_->curTex = impl_->whiteTex;
     float cx = x;
     auto drawGray = [&](uint32_t cp) {
-        Atlas* a = impl_->getAtlas(size, weight, cp >= 0x80, IsEmojiCp(cp), italic);
+        Atlas* a = impl_->getAtlas(size, weight, impl_->faceIdxForCp(cp), italic);
         if (!a) return;
         const Glyph* g = impl_->glyphFor(a, cp);
         if (!g) return;
@@ -1449,7 +1510,9 @@ void BinUIGLGdi::drawText(float x, float y, float size, int weight,
     size_t i = 0;
     while (i < cps.size()) {
         size_t n = EmojiClusterLen(cps.data() + i, cps.size() - i);
-        bool colorCp = impl_->fontReady && (n > 1 || IsEmojiCp(cps[i]));
+        // 彩色只在该码点确实由 emoji 面覆盖时尝试（真 emoji 走 COLR；符号走灰度）
+        bool colorCp = impl_->fontReady &&
+                       (n > 1 || impl_->faceIdxForCp(cps[i]) == impl_->emojiFaceIdx());
         if (colorCp) {
             ColorAtlas* ca = impl_->getColorAtlas(size);
             const ColorGlyph* g = ca ? impl_->colorGlyphFor(ca, cps.data() + i, n) : nullptr;

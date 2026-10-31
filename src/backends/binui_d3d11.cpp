@@ -172,7 +172,7 @@ struct Atlas {
     int ascent = 0, descent = 0;
     float size = 0;
     int weight = 400;
-    bool cjk = false;
+    int faceIdx = 0;          // 回退链上的面下标（0 = 主面；缺字的豆腐块也放这里）
     bool italic = false;
     std::string face;         // 字体面名（FontEngine 注册名）
     std::unordered_map<uint32_t, Glyph> glyphs;
@@ -318,6 +318,39 @@ struct BinUID3D::Impl {
     // 跨平台字体服务（FreeType 光栅化 + HarfBuzz 整形）
     binui_font::FontEngine font;
     bool fontReady = false;
+
+    // ---------- 逐字形回退（与 GL 后端同一套语义）----------
+    // 谁有字形是字体自报的 cmap，不是码点区间能推出来的。字体服务返回 -1 = 所有
+    // 候选都没有；缺字的豆腐块借 0 号面的图集（几何与字体无关）。
+    int faceIdxForCp(uint32_t cp) {
+        if (!fontReady) return 0;
+        const int idx = font.faceIndexFor(cp);
+        return idx < 0 ? 0 : idx;
+    }
+
+    static bool IsInvisibleCp(uint32_t cp) {
+        if (cp < 0x20) return true;
+        if (cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0xFEFF) return true;
+        if (cp >= 0xFE00 && cp <= 0xFE0F) return true;
+        if (cp >= 0xE0100 && cp <= 0xE01EF) return true;
+        if (cp == 0x20E3) return true;
+        return false;
+    }
+
+    int emojiFaceIdx() {
+        if (!emojiIdxInit) {
+            emojiIdxInit = true;
+            emojiIdx = -1;
+            if (fontReady) {
+                const auto& chain = font.fallbackChain();
+                for (size_t i = 0; i < chain.size(); i++)
+                    if (chain[i] == emojiFont) { emojiIdx = static_cast<int>(i); break; }
+            }
+        }
+        return emojiIdx;
+    }
+    bool emojiIdxInit = false;
+    int emojiIdx = -1;
 
     std::unordered_map<uint32_t, ColorAtlas*> colorAtlases;        // 按字号
     // 圆角模板（按 radius；负 key = 描边）
@@ -571,23 +604,26 @@ struct BinUID3D::Impl {
         return true;
     }
 
-    Atlas* getAtlas(float size, int weight, bool cjk, bool emoji = false, bool italic = false) {
-        // 斜体与粗体一样是"另一张图集"：合成倾斜发生在光栅化阶段，不能共用缓存
+    Atlas* getAtlas(float size, int weight, int faceIdx, bool italic = false) {
+        // 斜体与粗体一样是"另一张图集"：合成倾斜发生在光栅化阶段，不能共用缓存。
+        // 低 6 位放**面下标**（原来是 cjk / emoji 两个布尔）：同一个码点解析到不同
+        // 字体时必须分图集，否则字形会串。
+        const uint32_t fidx = static_cast<uint32_t>(faceIdx < 0 ? 0 : faceIdx) & 0x3Fu;
         uint64_t key = (static_cast<uint64_t>(std::lround(size)) << 32) |
                        (static_cast<uint64_t>((weight & 0x7FFF) | (italic ? 0x8000 : 0)) << 16) |
-                       (cjk ? 1u : 0u) | (emoji ? 2u : 0u);
+                       fidx;
         auto it = atlases.find(key);
         if (it != atlases.end()) return it->second;
 
         Atlas* a = new Atlas();
         a->size = size;
         a->weight = weight;
-        a->cjk = cjk;
+        a->faceIdx = static_cast<int>(fidx);
         a->italic = italic;
         a->cellH = static_cast<int>(std::ceil(size * 1.4f)) + 2;
         a->cellW = a->cellH;
         a->cols = a->sizePx / a->cellW;
-        a->face = emoji ? emojiFont : (cjk ? cjkFont : asciiFont);
+        a->face = fontReady ? font.faceName(a->faceIdx) : asciiFont;
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = td.Height = static_cast<UINT>(a->sizePx);
         td.MipLevels = 1;
@@ -622,6 +658,10 @@ struct BinUID3D::Impl {
         // 常规字形），CSS 的 font-weight:700 因此完全不生效。bold=true 走 FreeType
         // 的合成加粗（FT_GlyphSlot_Embolden），图集 key 已含 weight，不会串档。
         bool ok = font.renderGlyph(a->face, a->size, cp, a->weight >= 600, a->italic, g);
+        if (!ok && !IsInvisibleCp(cp)) {
+            // 缺字 → 画豆腐块：留白会被当成"引擎显示 bug"，空方框才是明确信号
+            ok = font.renderMissingGlyph(a->size, a->weight >= 600, a->italic, g);
+        }
         if (!ok || !g.alpha || g.height <= 0) {
             // 空白字形（如空格）：无像素但有有效 advance —— 仍占一格并缓存，
             // 否则 glyphFor 返回 null，测宽/绘制都不推进，单词会挤在一起
@@ -769,14 +809,11 @@ struct BinUID3D::Impl {
                                 bool italic = false) {
         ClusterMetric m;
         m.len = EmojiClusterLen(cps, n);
-        float fallback = std::ceil(size * 0.6f);
-        if (!(m.len > 1 || IsEmojiCp(cps[0]))) {
-            Atlas* a = getAtlas(size, weight, cps[0] >= 0x80, false, italic);
-            const Glyph* g = a ? glyphFor(a, cps[0]) : nullptr;
-            m.adv = g ? static_cast<float>(g->advW) : fallback;
-            return m;
-        }
-        if (fontReady) {
+        const float fallback = std::ceil(size * 0.6f);
+        const int firstFace = faceIdxForCp(cps[0]);
+        // 彩色只在该码点确实由 emoji 面覆盖时才尝试（符号走灰度，真 emoji 走 COLR）
+        const bool tryColor = fontReady && (m.len > 1 || firstFace == emojiFaceIdx());
+        if (tryColor) {
             ColorAtlas* ca = getColorAtlas(size);
             const ColorGlyph* g = ca ? colorGlyphFor(ca, cps, m.len) : nullptr;
             if (g) {
@@ -785,9 +822,15 @@ struct BinUID3D::Impl {
                 return m;
             }
         }
-        // 降级：逐码点走灰度图集（emoji 用 Segoe UI Emoji 单色字形）
+        if (m.len <= 1) {
+            Atlas* a = getAtlas(size, weight, firstFace, italic);
+            const Glyph* g = a ? glyphFor(a, cps[0]) : nullptr;
+            m.adv = g ? static_cast<float>(g->advW) : fallback;
+            return m;
+        }
+        // 降级：逐码点走灰度图集（各自解析到覆盖它的那个面）
         for (size_t i = 0; i < m.len; i++) {
-            Atlas* a = getAtlas(size, weight, cps[i] >= 0x80, IsEmojiCp(cps[i]), italic);
+            Atlas* a = getAtlas(size, weight, faceIdxForCp(cps[i]), italic);
             const Glyph* g = a ? glyphFor(a, cps[i]) : nullptr;
             m.adv += g ? static_cast<float>(g->advW) : fallback;
         }
@@ -1341,7 +1384,7 @@ float BinUID3D::textWidth(float size, int weight, const std::string& utf8, bool 
 }
 
 void BinUID3D::fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic) {
-    Atlas* a = impl_->getAtlas(size, weight, false, false, italic);
+    Atlas* a = impl_->getAtlas(size, weight, 0, italic);   // 度量用主面
     if (!a) { ascent = lineHeight = static_cast<int>(size); return; }
     ascent = a->ascent;
     lineHeight = a->ascent + a->descent;
@@ -1371,7 +1414,7 @@ void BinUID3D::drawText(float x, float y, float size, int weight,
     impl_->curSrv = impl_->whiteSrv;
     float cx = x;
     auto drawGray = [&](uint32_t cp) {
-        Atlas* a = impl_->getAtlas(size, weight, cp >= 0x80, IsEmojiCp(cp), italic);
+        Atlas* a = impl_->getAtlas(size, weight, impl_->faceIdxForCp(cp), italic);
         if (!a) return;
         const Glyph* g = impl_->glyphFor(a, cp);
         if (!g) return;
@@ -1389,7 +1432,8 @@ void BinUID3D::drawText(float x, float y, float size, int weight,
     size_t i = 0;
     while (i < cps.size()) {
         size_t n = EmojiClusterLen(cps.data() + i, cps.size() - i);
-        bool colorCp = impl_->fontReady && (n > 1 || IsEmojiCp(cps[i]));
+        bool colorCp = impl_->fontReady &&
+                       (n > 1 || impl_->faceIdxForCp(cps[i]) == impl_->emojiFaceIdx());
         if (colorCp) {
             ColorAtlas* ca = impl_->getColorAtlas(size);
             const ColorGlyph* g = ca ? impl_->colorGlyphFor(ca, cps.data() + i, n) : nullptr;

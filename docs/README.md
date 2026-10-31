@@ -25,6 +25,8 @@
 | [img/python-binding.png](img/python-binding.png) | Python 绑定演示界面（`bindings/python/demo_ui.html`） |
 | [img/go-binding.png](img/go-binding.png) | Go 绑定演示界面（`bindings/go/demo/ui.html`） |
 | [img/rust-binding.png](img/rust-binding.png) | Rust 绑定演示界面（`bindings/rust/ui.html`） |
+| [img/child-window.png](img/child-window.png) | 子窗口模式真机截屏：普通 Win32 宿主窗口里嵌两块独立 binUI 面板 |
+| [img/glyph-fallback.png](img/glyph-fallback.png) | 逐字形回退与豆腐块（**GL 后端真实像素**，`tools/gl_shot.exe` 离屏抓取） |
 | [font_rendering_before_after.png](font_rendering_before_after.png) | 字体渲染修正前后对比（像素对齐 + gamma + 轻量 hinting + advance 修正） |
 | [font_hinting_modes.png](font_hinting_modes.png) | `BINUI_FONT_HINT=0\|1\|2` 三种 hinting 模式对比 |
 
