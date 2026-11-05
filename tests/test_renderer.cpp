@@ -51,6 +51,122 @@ static std::vector<uint8_t> BuildMinimalBinUI() {
     return buf;
 }
 
+// ============================================================
+// docs/issues 回归：05 滚动条样式 / 06 setText 重算高度 / 07 setNodeBounds
+// ============================================================
+static const BinUIRenderer::NodeInfo* IssueNode(BinUIRenderer& r, uint16_t id) {
+    for (const auto& n : r.getNodes())
+        if (n.id == id) return &n;
+    return nullptr;
+}
+
+static void TestIssueRegressions() {
+    // ---- 05：滚动条样式默认按根节点底色派生，可覆写、可复位 ----
+    {
+        const char* dark = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014"><body>
+  <div style="position:absolute; left:0; top:0; width:200; height:100; overflow:auto">
+    <div style="position:absolute; left:0; top:0; width:200; height:600; background:#222"></div>
+  </div>
+</body></html></app_window>)HTML";
+        const char* light = R"HTML(<app_window width="400" height="300" bg="#FFFFFF">
+<html width="400" height="300" bg="#FFFFFF"><body>
+  <div style="position:absolute; left:0; top:0; width:200; height:100; overflow:auto">
+    <div style="position:absolute; left:0; top:0; width:200; height:600; background:#EEE"></div>
+  </div>
+</body></html></app_window>)HTML";
+
+        const auto binDark = CompileHTML(dark);
+        const auto binLight = CompileHTML(light);
+        BinUIRenderer rd, rl;
+        TEST("05: 深色布局加载", !binDark.empty() && rd.loadLayout(binDark.data(), binDark.size()));
+        TEST("05: 浅色布局加载", !binLight.empty() && rl.loadLayout(binLight.data(), binLight.size()));
+
+        TEST("05: 深色主题滚动条保持深灰",
+             rd.scrollbarStyle().track == 0xFF2E2E2Eu && rd.scrollbarStyle().thumb == 0xFF5A5A5Au);
+        TEST("05: 浅色主题滚动条自动变浅",
+             rl.scrollbarStyle().track == 0xFFE5E7EBu && rl.scrollbarStyle().thumb == 0xFFC7CBD1u);
+        TEST("05: 默认宽度 8", rl.scrollbarStyle().width == 8);
+
+        rl.setScrollbarStyle(0xFF112233u, 0xFF445566u, 12);
+        TEST("05: setScrollbarStyle 覆盖滑块色", rl.scrollbarStyle().thumb == 0xFF112233u);
+        TEST("05: setScrollbarStyle 覆盖轨道色", rl.scrollbarStyle().track == 0xFF445566u);
+        TEST("05: setScrollbarStyle 覆盖宽度", rl.scrollbarStyle().width == 12);
+        rl.setScrollbarStyle(0xFF112233u, 0xFF445566u, 1);
+        TEST("05: 宽度下限钳到 2", rl.scrollbarStyle().width == 2);
+        rl.setScrollbarStyle(0xFF112233u, 0xFF445566u, 999);
+        TEST("05: 宽度上限钳到 32", rl.scrollbarStyle().width == 32);
+
+        rl.resetScrollbarStyleToDefault();
+        TEST("05: reset 回到按根底色派生的浅色",
+             rl.scrollbarStyle().thumb == 0xFFC7CBD1u && rl.scrollbarStyle().width == 8);
+    }
+
+    // ---- 06：heightAuto 的节点 setText 换长文本后要重算高度 ----
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014"><body>
+  <span id="log" style="position:absolute; left:20; top:20; width:300; font-size:13px">OK</span>
+  <span id="fixed" style="position:absolute; left:20; top:200; width:300; height:40; font-size:13px">OK</span>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("06: 编译并加载", !bin.empty() && r.loadLayout(bin.data(), bin.size()));
+        const uint16_t logId = r.findNodeByName("log");
+        const uint16_t fixedId = r.findNodeByName("fixed");
+        TEST("06: 找得到 log 节点", logId != 0);
+        TEST("06: log 带 heightAuto 标记", r.specHeightAuto(logId));
+        TEST("06: fixed 不带 heightAuto 标记", fixedId != 0 && !r.specHeightAuto(fixedId));
+
+        const auto* n0 = IssueNode(r, logId);
+        const float h0 = n0 ? n0->height : -1.0f;
+        TEST("06: 初始高度是一行", h0 > 0.0f && h0 < 30.0f);
+
+        // 换成 3 行长文本：「中」×23 @13px ≈ 299px，正好占满 300px 一行
+        std::string longText;
+        for (int line = 0; line < 3; line++)
+            for (int i = 0; i < 23; i++) longText += "\xE4\xB8\xAD";
+        r.setText(logId, longText);
+        const auto* n1 = IssueNode(r, logId);
+        const float h1 = n1 ? n1->height : -1.0f;
+        TEST("06: 换长文本后高度变大", h1 > h0 + 30.0f);
+        TEST("06: 高度至少容纳 3 行", h1 >= 3.0f * 13.0f * 1.35f - 0.5f);
+
+        // 换回短文本：高度跟着变回来（不是只增不减）
+        r.setText(logId, "OK");
+        const auto* n2 = IssueNode(r, logId);
+        TEST("06: 换回短文本后高度回落", n2 && std::fabs(n2->height - h0) < 0.5f);
+
+        // 作者显式写了 height 的节点不重排
+        const auto* f0 = IssueNode(r, fixedId);
+        const float fh0 = f0 ? f0->height : -1.0f;
+        r.setText(fixedId, longText + longText);
+        const auto* f1 = IssueNode(r, fixedId);
+        TEST("06: 显式高度节点保持原高", f1 && std::fabs(f1->height - fh0) < 0.01f);
+    }
+
+    // ---- 07：setNodeBounds 的边界处理 ----
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014"><body>
+  <div id="box" style="position:absolute; left:20; top:20; width:100; height:40"></div>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        r.loadLayout(bin.data(), bin.size());
+        const uint16_t box = r.findNodeByName("box");
+        TEST("07: setNodeBounds 改坐标", box && r.setNodeBounds(box, 33, 44, 120, 55));
+        const auto* b = IssueNode(r, box);
+        TEST("07: setNodeBounds 生效", b && std::fabs(b->x - 33.0f) < 0.01f &&
+                                        std::fabs(b->height - 55.0f) < 0.01f);
+        TEST("07: setNodeBounds 拒绝负尺寸", !r.setNodeBounds(box, 0, 0, -1, 10));
+        TEST("07: setNodeBounds 拒绝 NaN", !r.setNodeBounds(box, 0, 0, NAN, 10));
+        TEST("07: setNodeBounds 不存在的节点返回 false", !r.setNodeBounds(60000, 0, 0, 10, 10));
+    }
+}
+
 int main() {
     printf("=== test_renderer: BinUIRenderer parse / update / events ===\n\n");
 
@@ -944,6 +1060,8 @@ int main() {
         TEST("v14r: 只读不画光标", !r.isFocused(ro));
         r.blur();
     }
+
+    TestIssueRegressions();
 
 printf("\n=== Results: %d tests failed ===\n", failed);
     return failed > 0 ? 1 : 0;

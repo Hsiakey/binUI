@@ -199,6 +199,26 @@ lib.binui_set_image.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_void_p
 lib.binui_set_image.restype = ctypes.c_int32
 lib.binui_mount_components.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 lib.binui_mount_components.restype = ctypes.c_int32
+lib.binui_scroll_to.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_float, ctypes.c_float]
+lib.binui_scroll_to.restype = None
+lib.binui_scroll_by.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_float, ctypes.c_float]
+lib.binui_scroll_by.restype = None
+lib.binui_content_height.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+lib.binui_content_height.restype = ctypes.c_float
+lib.binui_set_node_bounds.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_float,
+                                      ctypes.c_float, ctypes.c_float, ctypes.c_float]
+lib.binui_set_node_bounds.restype = ctypes.c_int32
+lib.binui_add_node.argtypes = [ctypes.c_void_p, ctypes.c_int32, ctypes.c_int32,
+                               ctypes.c_float, ctypes.c_float, ctypes.c_float, ctypes.c_float,
+                               ctypes.c_uint32, ctypes.c_int32, ctypes.c_int32]
+lib.binui_add_node.restype = ctypes.c_int32
+lib.binui_remove_node.argtypes = [ctypes.c_void_p, ctypes.c_int32]
+lib.binui_remove_node.restype = ctypes.c_int32
+lib.binui_set_scrollbar_style.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                          ctypes.c_int32]
+lib.binui_set_scrollbar_style.restype = ctypes.c_int32
+lib.binui_reset_scrollbar_style.argtypes = [ctypes.c_void_p]
+lib.binui_reset_scrollbar_style.restype = None
 
 
 def version() -> str:
@@ -453,6 +473,47 @@ class App:
         if n < 0:
             raise BinUIError(last_error())
         return n
+
+    def set_image(self, index: int, data: bytes) -> None:
+        """用编码数据（PNG / JPEG / WebP）替换图片槽。"""
+        buf = ctypes.create_string_buffer(data, len(data))
+        if lib.binui_set_image(self._h, index, buf, len(data)) != 1:
+            raise BinUIError(last_error())
+
+    # ---- 运行期能力：滚动 / 节点几何 / 动态节点 ----
+    # 限制：运行期 add_node 加出来的节点不参与 set_size 的百分比 / flex 重排，
+    # 也不会自动给兄弟节点让位 —— 需要自己挪（set_node_bounds）。
+    def scroll_to(self, node_id: int, x: float, y: float) -> None:
+        lib.binui_scroll_to(self._h, node_id, x, y)
+
+    def scroll_by(self, node_id: int, dx: float, dy: float) -> None:
+        lib.binui_scroll_by(self._h, node_id, dx, dy)
+
+    def content_height(self, node_id: int) -> float:
+        """滚动容器的内容总高；无此节点返回 -1。"""
+        return float(lib.binui_content_height(self._h, node_id))
+
+    def set_node_bounds(self, node_id: int, x: float, y: float,
+                        width: float, height: float) -> bool:
+        return lib.binui_set_node_bounds(self._h, node_id, x, y, width, height) == 1
+
+    def add_node(self, parent_id: int, node_type: int, x: float, y: float, width: float,
+                 height: float, color: int = 0xFF888888, radius: int = 0,
+                 font_size: int = 0) -> int:
+        """在 parent_id 下追加节点，返回新节点 id；失败返回 -1。"""
+        return int(lib.binui_add_node(self._h, parent_id, node_type, x, y, width, height,
+                                      color, radius, font_size))
+
+    def remove_node(self, node_id: int) -> bool:
+        """隐藏节点（节点保留在表里供复用，id 不会被回收）。"""
+        return lib.binui_remove_node(self._h, node_id) == 1
+
+    def set_scrollbar_style(self, track: int, thumb: int, width: int = 8) -> bool:
+        """滚动条外观。不调用时按根节点底色亮度自动派生（浅色主题不会是黑杠）。"""
+        return lib.binui_set_scrollbar_style(self._h, track, thumb, width) == 1
+
+    def reset_scrollbar_style(self) -> None:
+        lib.binui_reset_scrollbar_style(self._h)
 
 
 def _node_of(c: CNode) -> Node:

@@ -969,18 +969,28 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                                           ? pt->textColor : 0xFFFFFFFFu;
                     if (disabled) tcol = fadeOver(tcol, 140);
                     SetTextColor(hdc, RGB((tcol >> 16) & 0xFF, (tcol >> 8) & 0xFF, tcol & 0xFF));
+                    // 字重：作者声明了 font-weight 就用声明值（取法与 LABEL / LIST 同一套
+                    // PaintWeightOf → FW_* 换算）；没声明才回落 700 粗体，
+                    // 以前写死 FW_BOLD，font-weight 写了也没效果。
+                    const int fw = (pt && (pt->flags & PAINT_WEIGHT))
+                                 ? binui::PaintWeightOf(pt) : 700;
                     HFONT font = CreateFontA(
-                        -(node.fontSize ? node.fontSize : 14), 0, 0, 0, FW_BOLD,
+                        -(node.fontSize ? node.fontSize : 14), 0, 0, 0,
+                        fw >= 600 ? FW_BOLD : FW_NORMAL,
                         italic ? TRUE : FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                         OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                         gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                     HGDIOBJ oldFont = SelectObject(hdc, font);
                     RECT tr = { x + pad, y, x + nw - pad, y + nh };
+                    // 水平对齐：与 LABEL 分支同一套 flags 语义（都不置位 = 左对齐）。
+                    // 以前固定 DT_CENTER，text-align:left 与 padding 都被忽略。
+                    const UINT halign = (node.flags & BINUI_TEXT_CENTER) ? DT_CENTER
+                                      : (node.flags & BINUI_TEXT_RIGHT) ? DT_RIGHT : DT_LEFT;
                     // 文本是 UTF-8：必须转宽字符用 DrawTextW。早先用 DrawTextA，
                     // 中文会被按系统代码页解释成乱码（叠加成一团）。
                     std::wstring wtext = LfToCrlf(Utf8ToWide(node.text));
                     DrawTextW(hdc, wtext.c_str(), -1, &tr,
-                        DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                        halign | DT_VCENTER | DT_SINGLELINE);
                     SelectObject(hdc, oldFont);
                     DeleteObject(font);
                 }
@@ -1266,18 +1276,28 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         int x = (int)node.x, y = (int)node.y, nw = (int)node.width, nh = (int)node.height;
         if (ch <= nh + 0.5f) continue; // 内容未溢出不显示
 
-        int barW = 8;
-        HBRUSH track = CreateSolidBrush(RGB(0x2E, 0x2E, 0x2E));
+        // 滚动条配色/宽度由渲染器提供（C ABI 与编译器 scrollbar-* 落到同一处）。
+        // 以前写死 8px + #2E2E2E/#5A5A5A，浅色主题下就是右边一条黑杠，
+        // 而且没有任何入口能覆盖。GDI 无 alpha 合成，颜色取 RGB 分量即可。
+        const auto& sb = renderer.scrollbarStyle();
+        const int barW = sb.width;
+        HBRUSH track = CreateSolidBrush(RGB((sb.track >> 16) & 0xFF, (sb.track >> 8) & 0xFF,
+                                            sb.track & 0xFF));
         RECT tr = { x + nw - barW, y, x + nw, y + nh };
         FillRect(hdc, &tr, track);
         DeleteObject(track);
 
-        // 滑块：高度 = 视口比例，位置 = 滚动比例
+        // 滑块：高度 = 视口比例，位置 = 滚动比例（位置算法保持原样）
         float thumbH = std::max(24.0f, (float)nh * nh / ch);
         float maxScroll = ch - nh;
         float thumbY = maxScroll > 0 ? sy / maxScroll * (nh - thumbH) : 0;
-        HBRUSH thumb = CreateSolidBrush(RGB(0x5A, 0x5A, 0x5A));
-        RECT ur = { x + nw - barW + 2, y + (int)thumbY, x + nw - 2, y + (int)(thumbY + thumbH) };
+        // 滑块宽度沿用"轨道一半"的老比例（轨道 8 → 滑块 4），左右各留 (barW-thumbW)/2，
+        // 这样 barW=8 时与原来一致（左 2 右 2）
+        const int thumbW = std::max(2, barW / 2);
+        const int thumbX = x + nw - barW + (barW - thumbW) / 2;
+        HBRUSH thumb = CreateSolidBrush(RGB((sb.thumb >> 16) & 0xFF, (sb.thumb >> 8) & 0xFF,
+                                            sb.thumb & 0xFF));
+        RECT ur = { thumbX, y + (int)thumbY, thumbX + thumbW, y + (int)(thumbY + thumbH) };
         FillRect(hdc, &ur, thumb);
         DeleteObject(thumb);
     }

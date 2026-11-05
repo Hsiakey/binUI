@@ -51,6 +51,57 @@ binui_app_destroy(app);
 `binui_pump()` 内部做四件事：收 Win32 消息 → 推进动画/视频时钟 → 重绘脏矩形 →
 返回。宿主不需要知道 GL、不需要知道消息循环，也不需要自己算脏区。
 
+## 运行期能力：滚动 / 节点几何 / 动态节点
+
+C ABI 的默认口径是"**布局编译期定死，运行期只改内容**"（`set_text` / `set_visible` /
+`set_checked` / `set_image`）。这对静态面板够用，但一写成列表 / 聊天流就不行了 ——
+追一条消息要滚到底、消息高度不固定、条目数运行期才知道。这三件事对应下面这组接口：
+
+| 需求 | C ABI | Python | Go | Rust |
+|---|---|---|---|---|
+| 滚到底 | `binui_scroll_to(app, id, x, y)` | `scroll_to` | `ScrollTo` | `scroll_to` |
+| 相对滚动 | `binui_scroll_by(app, id, dx, dy)` | `scroll_by` | `ScrollBy` | `scroll_by` |
+| 内容总高 | `binui_content_height(app, id)` | `content_height` | `ContentHeight` | `content_height` |
+| 宿主自己排版 / 撑高 | `binui_set_node_bounds(app, id, x, y, w, h)` | `set_node_bounds` | `SetNodeBounds` | `set_node_bounds` |
+| 追加节点 | `binui_add_node(app, parent, type, x, y, w, h, color, radius, fontSize)` | `add_node` | `AddNode` | `add_node` |
+| 移除节点 | `binui_remove_node(app, id)` | `remove_node` | `RemoveNode` | `remove_node` |
+
+典型用法（追加一条消息并贴底）：
+
+```python
+row = app.add_node(list_id, binui.NODE_LABEL, 0, y, 320, 20, 0xFF202225, 4, 13)
+app.set_text(row, "很长的消息……")          # heightAuto 节点会自动重算高度
+app.scroll_to(list_id, 0, app.content_height(list_id) - 视口高)
+```
+
+三条限制（都是"不做",不是 bug）：
+
+1. **运行期新增的节点不参与 `set_size` 的百分比 / flex 重排** —— 重排只认静态布局里的
+   缩放规格段；
+2. **新增节点不会自动给兄弟节点让位**，位置由调用方给的 `(x, y)` 决定，后续节点要自己挪；
+3. **`binui_remove_node` 只是隐藏**，节点留在表里供复用，id 不会被回收
+   （所以"删了再加"不会无限涨节点数）。
+
+### `set_text` 会重算高度，但只对"高度是自动撑开"的节点
+
+编译期没写 `height` 的文本节点，高度是按文本估出来的，规格段里带 `heightAuto` 标记；
+运行期 `set_text` 会按**同一套口径**（CJK 1.0× / 拉丁 0.52×字号，行距取 `line-height`）
+重算，并保证不低于元素的默认盒高。作者显式写了 `height` 的节点不重排 ——
+需要自己撑高就用 `binui_set_node_bounds`。
+
+### 滚动条样式
+
+滚动条是后端自绘的，颜色/宽度由渲染器提供：
+
+```c
+binui_set_scrollbar_style(app, 0xFFE5E7EBu /*轨道*/, 0xFFC7CBD1u /*滑块*/, 10 /*宽 2..32*/);
+binui_reset_scrollbar_style(app);   // 回到自动派生
+```
+
+不调用时按**根节点底色亮度**自动派生：浅底给浅色轨道/滑块，深底给深灰 ——
+所以浅色主题下不会再出现"右边一条黑杠"。CSS 的 `scrollbar-color` / `scrollbar-width`
+仍然不支持，写了会得到一条编译警告（指向这个接口）。
+
 ## 各语言
 
 | 语言 | 目录 | 机制 | 状态 |

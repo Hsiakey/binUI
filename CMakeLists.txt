@@ -185,6 +185,9 @@ set_tests_properties(test_renderer_real PROPERTIES
 # test_font：字体服务（FreeType 光栅化 + HarfBuzz 整形）与渲染质量参数
 add_binui_test(test_font tests/test_font.cpp)
 
+# test_paint：圆角九宫格几何 + 文本尺寸粗估（纯 header，不需要链接库）
+add_binui_test(test_paint tests/test_paint.cpp)
+
 # test_capi：C ABI 冒烟测试（不开窗口：编译 / 加载 / 节点查询 / 改文本 / 错误路径）
 if(WIN32)
     add_binui_test(test_capi tests/test_capi.cpp)

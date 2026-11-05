@@ -96,7 +96,16 @@ struct BinUISpecNode {
     uint16_t nodeId;
     uint16_t flags;        // BinUISpecFlag
     uint8_t  flexWeight;   // SPEC_IN_FLEX：弹性权重（0 = 固定/百分比尺寸）
-    uint8_t  reserve[3];
+    // heightAuto：1 = 高度是编译期按文本估算撑开的（作者未声明 height），
+    //   运行期 setText 换文本后需要按同一口径（include/binui_text_estimate.h）重算高度。
+    //   占用旧布局的 reserve[0]：旧二进制这里恒为 0，等价于 heightAuto=0，因此不升
+    //   BINUI_VERSION（先例：BINUI_TEXT_CENTER 复用 flags 的空闲位）。
+    uint8_t  heightAuto;
+    // autoBase：heightAuto 时的**基线高度**（估算之前的高度，即元素默认盒高，像素）。
+    //   运行期重算按 max(autoBase, 估算高度) 取，才与编译期完全一致 —— 否则 13px 的
+    //   span 会被重算成 17px 而编译期是 20px，短文本反而被压扁。
+    //   两者都占用旧的 reserve 字节（旧布局恒为 0 = 不重算、不做基线钳制）。
+    uint16_t autoBase;
     float    relX, relY;   // 编译期相对父内容盒坐标（流式节点即 margin 偏移；无 % 时作锚点）
     float    pctX, pctY, pctW, pctH; // 0..1，无效为 -1
     float    ml, mr, mt, mb;         // 流式 margin（SPEC_FLOW_Y / SPEC_AUTO_W 时有效）

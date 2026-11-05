@@ -262,6 +262,13 @@ with binui.App(layout) as app:
 > 目前只支持 Windows + OpenGL 3.3；核心库跨平台，外壳不是。子窗口模式下没有窗口级
 > 透明（`WS_EX_LAYERED` 对子窗口无效），也不带标题栏拖动/边框缩放。
 
+**布局编译期定死，运行期只改内容**是默认口径（`set_text` / `set_visible` / `set_checked` /
+`set_image`）。列表、聊天流这类"数量和高度都要运行期才知道"的界面另外有一组接口：
+`binui_scroll_to` / `binui_scroll_by` / `binui_content_height` / `binui_set_node_bounds` /
+`binui_add_node` / `binui_remove_node`，以及滚动条配色 `binui_set_scrollbar_style`。
+`set_text` 对"没写 height、由引擎估算撑开"的文本节点会**自动重算高度**。详见
+[docs/bindings.md](docs/bindings.md) 的「运行期能力」一节。
+
 ## UI 描述格式
 
 两种源码格式，编译为统一的 binUI 二进制布局：

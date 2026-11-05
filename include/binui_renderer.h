@@ -59,6 +59,14 @@ struct EditState {
     size_t selStart = 0; // 选区起点（== caret 表示无选区）
 };
 
+// 滚动条外观（overflow:auto/scroll 容器由后端绘制滚动条，样式来自这里）。
+// 未显式设置时按根节点底色亮度派生：浅底给浅色轨道/滑块，深底给深色 —— 不再有"浅色主题一条黑杠"。
+struct BinUIScrollbarStyle {
+    uint32_t thumb = 0xFF5A5A5A;  // 滑块色 AARRGGBB
+    uint32_t track = 0xFF2E2E2E;  // 轨道色 AARRGGBB
+    int      width = 8;           // 轨道宽（像素，会被钳到 2..32）
+};
+
 // UI 核心：binUI 布局解析、节点状态、命中测试与事件分发。
 // 不依赖任何平台 API，渲染由外部后端通过 getNodes() 读取节点树完成。
 class BinUIRenderer {
@@ -141,6 +149,13 @@ public:
     // 运行时更新节点
     void setText(uint16_t nodeId, const std::string& text);
     void setVisible(uint16_t nodeId, bool visible);
+    // 运行时改节点矩形（宿主自己排版：配合 setText 换长文本后手动撑高）。
+    // 只改这一个节点，不牵动兄弟节点（不做流式重排）；宿主需要自己挪后续节点。
+    // 返回 false = 无此节点。
+    bool setNodeBounds(uint16_t nodeId, float x, float y, float w, float h);
+    // 该节点的规格段是否带 heightAuto 标记（高度是编译期按文本估算撑开的）。
+    // true 的节点在 setText 换文本时会自动重算高度；作者显式写了 height 的为 false。
+    bool specHeightAuto(uint16_t nodeId) const;
 
     // v8 运行时动态节点：图表 API 等直接在节点表追加元素（静态绝对定位，无缩放规格）
     uint16_t addNode(uint16_t parentId, uint8_t type,
@@ -192,6 +207,14 @@ public:
 
     // ============ 滚动容器 ============
     struct ScrollState { float x = 0, y = 0; };
+
+    // 滚动条样式：显式指定 / 回到默认（默认 = 按根节点底色派生，见 BinUIScrollbarStyle）。
+    // 派生时机是 loadLayout（那时根节点底色已知）；之后 setScrollbarStyle 覆盖，
+    // resetScrollbarStyleToDefault 重新派生。
+    using ScrollbarStyle = BinUIScrollbarStyle;
+    void setScrollbarStyle(uint32_t thumb_argb, uint32_t track_argb, int width);  // 显式指定
+    void resetScrollbarStyleToDefault();                                          // 回到按根节点底色派生
+    const BinUIScrollbarStyle& scrollbarStyle() const;
 
     bool isScrollable(uint16_t nodeId) const;
     void scrollTo(uint16_t nodeId, float x, float y);          // 设置滚动偏移（钳制到内容范围）
@@ -340,6 +363,10 @@ private:
     void applyFocus(int nodeId); // 按节点类型聚焦/失焦
     void dragScroll(float px, float py); // 滚动条拖动
     void relayout(int width, int height); // 运行时重排（百分比/流式/flex；无规格段仅同步根）
+    // 按根节点底色亮度派生滚动条默认色（浅底浅色、深底深色）
+    void deriveScrollbarStyleFromRoot();
+    BinUIScrollbarStyle scrollbarStyle_;
+    bool scrollbarStyleExplicit_ = false;  // true = setScrollbarStyle 指定过，不再自动派生
     std::vector<NodeInfo> nodes_;
     std::unordered_map<uint16_t, size_t> nodeIndexById_;
     std::unordered_map<std::string, uint16_t> nameToId_; // v8 名称表：htmlId -> nodeId

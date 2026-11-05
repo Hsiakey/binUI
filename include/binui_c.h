@@ -37,8 +37,10 @@
  * ---------------------------------------------------------------------------
  * - <canvas> 的绘制回调（需要跨语言回调，与约束 2 冲突；需要就在宿主侧自己画）
  * - <video> 的播放控制（解码模块 BINUI_ENABLE_VIDEO，另行挂载）
- * - 窗口嵌入（把 binUI 作为子窗口塞进别的工具包）；当前只出独立顶层窗口
  * - 非 Windows 平台（GL-GDI 外壳是 Win32 实现；核心库跨平台，外壳不是）
+ *
+ * 窗口嵌入已经支持：走 binui_app_open_child()（WS_CHILD 子窗口模式），
+ * 宿主自己收消息、自己 DispatchMessage，每帧调 binui_render()。
  * ==========================================================================*/
 #ifndef BINUI_C_H
 #define BINUI_C_H
@@ -67,7 +69,12 @@ extern "C" {
 /* ============================ 版本 ============================ */
 
 /* ABI 版本：结构体布局/函数签名有任何不兼容变化就 +1。
- * 宿主应在启动时校验，避免拿到旧 DLL 后安静地读错内存。 */
+ * 宿主应在启动时校验，避免拿到旧 DLL 后安静地读错内存。
+ *
+ * 本次（运行期能力：scroll_to / set_node_bounds / add_node 等）为**增量新增**：
+ * 只加函数、不动任何既有结构体与函数签名，所以 BINUI_C_ABI_VERSION 保持 1。
+ * 旧宿主链新 DLL 照常工作；新宿主连旧 DLL 时找不到符号（链接/加载期报错），
+ * 不会读错内存。 */
 #define BINUI_C_ABI_VERSION 1
 
 BINUI_C_API const char* BINUI_C_CALL binui_version(void);      /* 库版本串（静态，勿释放） */
@@ -245,7 +252,12 @@ BINUI_C_API int32_t BINUI_C_CALL binui_node_text(void* app, int32_t id, char* bu
 /* ============================ 节点修改 ============================ */
 
 /* 改文本（会自动重绘该节点）。len < 0 时按 NUL 结尾取长度。
- * 返回 1 = 成功，0 = 无此节点。 */
+ * 返回 1 = 成功，0 = 无此节点。
+ *
+ * 文本节点在编译期"没写 height、由引擎估算撑开"的（规格段 heightAuto=1），
+ * 这里会按新文本重算高度（同一套粗估口径：CJK 1.0×、拉丁 0.52×字号，
+ * 行距 = line-height，未声明按 1.35×）。作者显式写了 height 的节点不重排 ——
+ * 需要自己撑高就用 binui_set_node_bounds。 */
 BINUI_C_API int32_t BINUI_C_CALL binui_set_text(void* app, int32_t id,
                                                 const char* utf8, int32_t len);
 /* 显隐。返回 1 = 成功。 */
@@ -260,6 +272,44 @@ BINUI_C_API void BINUI_C_CALL binui_invalidate_all(void* app);
 BINUI_C_API int32_t BINUI_C_CALL binui_hit_test(void* app, float x, float y);
 /* 当前窗口尺寸。参数可为 NULL。返回 1 = 成功（窗口已开）。 */
 BINUI_C_API int32_t BINUI_C_CALL binui_app_size(void* app, int32_t* w, int32_t* h);
+
+/* ============================ 运行期能力 ============================ */
+
+/* "节点修改"那一组的口径是"布局编译期定死，运行期只改内容"。下面这一组是为列表 /
+ * 聊天流这类"数量和高度都要运行期才知道"的界面补的：滚动、节点几何、动态增删节点。
+ *
+ * 共同限制（重要）：运行期新增的节点**不参与** setSize 的百分比 / flex 重排
+ * （重排只认静态布局里的缩放规格段），也不会自动给兄弟节点让位 —— 需要自己挪。 */
+
+/* 滚动容器：设置滚动偏移（自动钳制到内容范围）。追加一条消息后要"滚到底"，
+ * 就先 binui_content_height() 再 scroll_to(..., ch - 视口高)。 */
+BINUI_C_API void BINUI_C_CALL binui_scroll_to(void* app, int32_t node_id, float x, float y);
+BINUI_C_API void BINUI_C_CALL binui_scroll_by(void* app, int32_t node_id, float dx, float dy);
+/* 滚动容器的内容总高（子节点下界 - 容器顶）。无此节点返回 -1。 */
+BINUI_C_API float BINUI_C_CALL binui_content_height(void* app, int32_t node_id);
+
+/* 直接改节点矩形（宿主自己排版 / 手动撑高）。只动这一个节点，不牵动兄弟节点。
+ * 返回 1 = 成功，0 = 无此节点或参数非法（NaN / 负尺寸）。 */
+BINUI_C_API int32_t BINUI_C_CALL binui_set_node_bounds(void* app, int32_t node_id,
+                                                       float x, float y, float w, float h);
+
+/* 动态节点：在 parent_id 下追加一个节点，返回新节点 id（>= 0）；失败返回 -1。
+ * type 用 BINUI_NODE_*；color 为 0xAARRGGBB；radius / font_size 传 0 = 默认。
+ * 这是"列表项数量运行期才知道"的官方出口（以前必须在布局里预留 N 个槽位）。 */
+BINUI_C_API int32_t BINUI_C_CALL binui_add_node(void* app, int32_t parent_id, int32_t type,
+                                                float x, float y, float w, float h,
+                                                uint32_t color, int32_t radius,
+                                                int32_t font_size);
+/* 隐藏一个节点（节点保留在表里供复用，id 不会被回收）。返回 1 = 成功。 */
+BINUI_C_API int32_t BINUI_C_CALL binui_remove_node(void* app, int32_t node_id);
+
+/* 滚动条外观（轨道色 / 滑块色 / 轨道宽 2..32）。不调用时按根节点底色亮度自动派生：
+ * 浅色主题给浅色滚动条，深色主题给深色 —— 不会再出现"浅底上一条黑杠"。
+ * 返回 1 = 成功，0 = app 为空。宽度会被钳到 2..32。 */
+BINUI_C_API int32_t BINUI_C_CALL binui_set_scrollbar_style(void* app, uint32_t track_argb,
+                                                           uint32_t thumb_argb, int32_t width);
+/* 回到"按根节点底色派生"的默认滚动条样式。 */
+BINUI_C_API void BINUI_C_CALL binui_reset_scrollbar_style(void* app);
 
 /* ============================ 窗口动作 ============================ */
 

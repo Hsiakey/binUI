@@ -304,8 +304,7 @@ struct Atlas {
 
 struct RoundTex {
     GLuint tex = 0;
-    int t = 0;         // 模板边长（4r）
-    int corner = 0;    // 角区边长（2r+1）
+    int t = 0;         // 模板边长（RoundTemplateSize：2r+4）
 };
 
 // ---------- emoji 簇检测（与 D3D11 后端一致） ----------
@@ -490,6 +489,7 @@ struct BinUIGLGdi::Impl {
 
     std::unordered_map<uint32_t, ColorAtlas*> colorAtlases;
     std::unordered_map<int, RoundTex> rounds;
+    RoundTex emptyRound_;   // roundFor 失败时的空返回（调用方据此退回 fillRect）
 
     std::unordered_map<uint16_t, GLuint> images;
     std::unordered_map<uint16_t, uint32_t> imageGen; // 换图 generation：不匹配时重新上传
@@ -915,24 +915,33 @@ struct BinUIGLGdi::Impl {
         return m;
     }
 
-    // 圆角模板（九宫格）：4r×4r 白色圆角矩形（实心/2px 描边），预乘 alpha
+    // 圆角模板（九宫格）：把"圆弧紧贴边"的圆角矩形光栅化到临时 DIB，再传成纹理。
+    // 模板边长 RoundTemplateSize(r) = 2r+4：角片只采样 [0,r]（圆弧的包围盒），
+    // 末尾 4px 是直边段，供九宫格中段取一个实心像素。
     RoundTex& roundFor(int radius, bool stroke) {
         int r = std::max(1, radius);
         int key = stroke ? -r : r;
         auto it = rounds.find(key);
         if (it != rounds.end()) return it->second;
 
-        int t = std::max(8, r * 4);
-        ensureRasterDC(t, t);
+        int t = RoundTemplateSize(r);
+        // ensureRasterDC 失败时 rasterBits 还是**上一个尺寸**的缓冲，
+        // 按新尺寸 memset 会踩坏堆（这里以前没判返回值）
+        if (!ensureRasterDC(t, t)) {
+            std::fprintf(stderr, "[gl] roundFor: 光栅化缓冲分配失败 (%dx%d)\n", t, t);
+            return emptyRound_;
+        }
         memset(rasterBits, 0, static_cast<size_t>(t) * t * 4);
 
         // 解析式逐像素覆盖率（1px 抗锯齿边缘），替代 GDI RoundRect（无 AA，转角锯齿明显）。
-        // 模板几何与 GDI 一致：圆角矩形外框 [1, t-1]，角半轴 r；填充 = 内部，描边 = 2px 带。
+        // 形状铺满整个模板 [0,t]（不再内缩 1px）：这样圆弧的包围盒正好是 [0,r]，
+        // 角片边长与弧长严格对应 —— 半径到短边一半时四角才能无缝拼成圆/胶囊。
+        // 填充 = 内部，描边 = 1px 带。
         {
             uint32_t* px = static_cast<uint32_t*>(rasterBits);
-            const float half = (t - 2.0f) / 2.0f;
-            const float inset = half - static_cast<float>(r); // 直线段起始距中心
-            const float c0 = static_cast<float>(t) / 2.0f;
+            const float half = static_cast<float>(t) / 2.0f;      // 形状半边长
+            const float inset = half - static_cast<float>(r);     // 直边段起点距中心
+            const float c0 = half;                                // 模板中心
             for (int i = 0; i < t; i++) {
                 for (int j = 0; j < t; j++) {
                     float fx = fabsf(j + 0.5f - c0) - inset;
@@ -953,8 +962,17 @@ struct BinUIGLGdi::Impl {
 
         RoundTex rt;
         rt.t = t;
-        rt.corner = r * 2 + 1;
         rt.tex = CreateTexture2D(t, t, rasterBits, true);
+        if (!rt.tex) return emptyRound_;
+
+        // 缓存上限：半径种类一多（动效/多主题）会一路涨显存；超了就淘汰最大的一张
+        if (rounds.size() >= 48) {
+            auto victim = rounds.begin();
+            for (auto k = rounds.begin(); k != rounds.end(); ++k)
+                if (k->second.t > victim->second.t) victim = k;
+            if (victim->second.tex) glDeleteTextures(1, &victim->second.tex);
+            rounds.erase(victim);
+        }
         return rounds.emplace(key, rt).first->second;
     }
 
@@ -1382,33 +1400,24 @@ void BinUIGLGdi::fillLine(float x0, float y0, float x1, float y1, float width, u
 void BinUIGLGdi::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
     int r = static_cast<int>(radius);
+    // 半径钳到短边一半：再大就是圆/胶囊，多出来的部分没有几何意义
     r = std::max(0, std::min(r, static_cast<int>(std::min(w, h) / 2)));
     if (r <= 0) { fillRect(x, y, w, h, color); return; }
 
     RoundTex& rt = impl_->roundFor(r, false);
     if (!rt.tex) { fillRect(x, y, w, h, color); return; }
 
-    float t = static_cast<float>(rt.t);
-    float cu = static_cast<float>(rt.corner) / t;
-    float strip0 = 0.5f;
-    float strip1 = 0.5f + 1.0f / t;
-    float c = static_cast<float>(rt.corner);
+    // 九宫格拆分走共用几何（include/binui_paint.h）：角片边长 = r，
+    // 中段宽高按 max(0, …) 跳过，所以 r == 短边一半时四角正好拼成圆/胶囊。
+    PaintQuad q[9];
+    const int n = BuildRoundedNineSlice(x, y, w, h, static_cast<float>(r), rt.t, q, 9);
+    if (n <= 0) { fillRect(x, y, w, h, color); return; }
 
     Premult(color);
     impl_->curTex = rt.tex;
-    auto quad = [&](float qx, float qy, float qw, float qh,
-                    float u0, float v0, float u1, float v1) {
-        impl_->emitQuad(qx, qy, qx + qw, qy + qh, u0, v0, u1, v1, color);
-    };
-    quad(x, y, c, c, 0, 0, cu, cu);
-    quad(x + w - c, y, c, c, 1 - cu, 0, 1, cu);
-    quad(x, y + h - c, c, c, 0, 1 - cu, cu, 1);
-    quad(x + w - c, y + h - c, c, c, 1 - cu, 1 - cu, 1, 1);
-    quad(x + c, y, w - 2 * c, c, strip0, 0, strip1, cu);
-    quad(x + c, y + h - c, w - 2 * c, c, strip0, 1 - cu, strip1, 1);
-    quad(x, y + c, c, h - 2 * c, 0, strip0, cu, strip1);
-    quad(x + w - c, y + c, c, h - 2 * c, 1 - cu, strip0, 1, strip1);
-    quad(x + c, y + c, w - 2 * c, h - 2 * c, strip0, strip0, strip1, strip1);
+    for (int i = 0; i < n; i++)
+        impl_->emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
+                        q[i].u0, q[i].v0, q[i].u1, q[i].v1, color);
     impl_->curTex = impl_->whiteTex;
 }
 
@@ -1423,27 +1432,15 @@ void BinUIGLGdi::strokeRounded(float x, float y, float w, float h, float radius,
     RoundTex& rt = impl_->roundFor(r, true);
     if (!rt.tex) { fillRect(x, y, w, h, color); return; }
 
-    float t = static_cast<float>(rt.t);
-    float cu = static_cast<float>(rt.corner) / t;
-    float strip0 = 0.5f;
-    float strip1 = 0.5f + 1.0f / t;
-    float c = static_cast<float>(rt.corner);
+    PaintQuad q[9];
+    const int n = BuildRoundedNineSlice(x, y, w, h, static_cast<float>(r), rt.t, q, 9);
+    if (n <= 0) { fillRect(x, y, w, h, color); return; }
 
     Premult(color);
     impl_->curTex = rt.tex;
-    auto quad = [&](float qx, float qy, float qw, float qh,
-                    float u0, float v0, float u1, float v1) {
-        impl_->emitQuad(qx, qy, qx + qw, qy + qh, u0, v0, u1, v1, color);
-    };
-    quad(x, y, c, c, 0, 0, cu, cu);
-    quad(x + w - c, y, c, c, 1 - cu, 0, 1, cu);
-    quad(x, y + h - c, c, c, 0, 1 - cu, cu, 1);
-    quad(x + w - c, y + h - c, c, c, 1 - cu, 1 - cu, 1, 1);
-    quad(x + c, y, w - 2 * c, c, strip0, 0, strip1, cu);
-    quad(x + c, y + h - c, w - 2 * c, c, strip0, 1 - cu, strip1, 1);
-    quad(x, y + c, c, h - 2 * c, 0, strip0, cu, strip1);
-    quad(x + w - c, y + c, c, h - 2 * c, 1 - cu, strip0, 1, strip1);
-    quad(x + c, y + c, w - 2 * c, h - 2 * c, strip0, strip0, strip1, strip1);
+    for (int i = 0; i < n; i++)
+        impl_->emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
+                        q[i].u0, q[i].v0, q[i].u1, q[i].v1, color);
     impl_->curTex = impl_->whiteTex;
 }
 
@@ -2003,13 +2000,31 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
                         const uint32_t tcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
                                                   ? ScaleAlpha(pt->textColor, opacity) : textCol;
                         int bs = node.fontSize ? node.fontSize : 14;
-                        float tw = gfx.textWidth(static_cast<float>(bs), 700, node.text, italic);
+                        // 字重：作者声明了 font-weight 就按声明（与 LABEL 同一套
+                        // PaintWeightOf，归一化到 400/700）；没声明才回落 700 ——
+                        // 按钮的旧观感是粗体，不能让老布局突然变细。
+                        // textWidth / fontMetrics / drawText 三处必须同一个值。
+                        const int wt = (pt && (pt->flags & PAINT_WEIGHT))
+                                     ? binui::PaintWeightOf(pt) : 700;
+                        const float fs = static_cast<float>(bs);
+                        float tw = gfx.textWidth(fs, wt, node.text, italic);
                         int asc = 0, lh = 0;
-                        gfx.fontMetrics(static_cast<float>(bs), 700, asc, lh, italic);
-                        float tx = x + pad + (nw - 2 * pad - tw) / 2.0f;
+                        gfx.fontMetrics(fs, wt, asc, lh, italic);
+                        // 水平对齐：与上面 BINUI_LABEL 分支完全同一套算法
+                        //（都不置位 = 左对齐 / CENTER / RIGHT）。以前写死居中，
+                        // text-align:left 与 padding-left 写了都没效果。
+                        const float boxW = static_cast<float>(nw - 2 * pad);
+                        const float availW = boxW > 1.0f ? boxW : 1.0f;
+                        const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
+                                        : (node.flags & BINUI_TEXT_RIGHT) ? 2 : 0;
+                        float tx = static_cast<float>(x + pad);
+                        if (align != 0) {
+                            tx += (align == 1) ? (availW - tw) / 2.0f : (availW - tw);
+                            // 文字比盒子宽时别越过左内边距（与 LABEL 一致）
+                            if (tx < static_cast<float>(x + pad)) tx = static_cast<float>(x + pad);
+                        }
                         float base = y + (nh - lh) / 2.0f + asc;
-                        gfx.drawText(tx, base, static_cast<float>(bs), 700, node.text, tcol,
-                                     false, false, italic);
+                        gfx.drawText(tx, base, fs, wt, node.text, tcol, false, false, italic);
                     }
                     break;
                 }
@@ -2193,14 +2208,21 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
         int nw = static_cast<int>(node.width), nh = static_cast<int>(node.height);
         if (ch <= nh + 0.5f) continue;
 
-        int barW = 8;
+        // 滚动条配色/宽度由渲染器提供（C ABI 的 binui_set_scrollbar_style 落到同一处）。
+        // 以前这里写死 8px + #2E2E2E / #5A5A5A，浅色主题下就是右边一条黑杠，
+        // 而且没有任何入口能覆盖。
+        const auto& sb = renderer.scrollbarStyle();
+        const int barW = sb.width;
         gfx.fillRect(static_cast<float>(x + nw - barW), static_cast<float>(y),
-                     static_cast<float>(barW), static_cast<float>(nh), 0xFF2E2E2E);
+                     static_cast<float>(barW), static_cast<float>(nh), sb.track);
         float thumbH = std::max(24.0f, static_cast<float>(nh) * nh / ch);
         float maxScroll = ch - nh;
+        // 位置算法（贴右、按滚动比例）保持原样；只有宽度跟着轨道换算
         float thumbY = maxScroll > 0 ? sy / maxScroll * (nh - thumbH) : 0;
-        gfx.fillRect(static_cast<float>(x + nw - barW + 2), static_cast<float>(y + thumbY),
-                     4.0f, thumbH, 0xFF5A5A5A);
+        // 滑块宽度沿用"轨道一半"的老比例（轨道 8 → 滑块 4），左右各留 (barW-thumbW)/2
+        const float thumbW = static_cast<float>(std::max(2, barW / 2));
+        const float thumbX = static_cast<float>(x + nw - barW) + (barW - thumbW) * 0.5f;
+        gfx.fillRect(thumbX, static_cast<float>(y) + thumbY, thumbW, thumbH, sb.thumb);
     }
     gfx.popClipTo(sbDepth);
 }
@@ -2475,6 +2497,14 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case WM_CLOSE:
             app->requestExit();
             return 0;
+        case WM_PAINT:
+            // 就绪守卫：GL 已经拆掉 / 窗口正在销毁时，任何重绘都只会去碰已析构的状态。
+            // 直接把脏区标成已处理，别落到 DefWindowProc 去真画一遍（docs/issues/02）。
+            if (!app->gfx_.isReady()) {
+                ValidateRect(hwnd, nullptr);
+                return 0;
+            }
+            break;   // 就绪时交给 DefWindowProc（本窗口的绘制由 GL/分层表面负责）
         case WM_DESTROY:
             // 子窗口：宿主销毁自己的窗口时子窗口跟着被销毁，这里必须当场收摊 ——
             // 否则 hwnd_ 变悬垂指针、GL 上下文还挂着一个已经没了的 DC。
@@ -2718,9 +2748,22 @@ int BinUIAppGLGdi::pump(int timeoutMs) {
 
 void BinUIAppGLGdi::close() {
     running_ = false;
-    gfx_.shutdown();   // 先拆 GL（含 ReleaseDC，必须在窗口销毁前）；shutdown 幂等
-    if (hwnd_) {
-        DestroyWindow(static_cast<HWND>(hwnd_));
+    // 窗口还开着就销毁时，DestroyWindow 会**同步**把 WM_KILLFOCUS / WM_NCDESTROY 派发给
+    // 我们的窗口过程，而 GL 上下文这时已经被 shutdown() 拆掉了 —— 重入路径踩到已析构的
+    // 成员，表现为随机 AV（docs/issues/02：约一半概率，写地址恒定）。
+    // 正确顺序：先把窗口过程摘回 DefWindowProc（之后任何消息都不进我们的代码），
+    // 再把 GL 拆掉，最后才 DestroyWindow。
+    // 之前"先 shutdown 再 DestroyWindow"之所以有时不崩，是因为那条路径下窗口已经因为
+    // WM_CLOSE 走过一遍销毁，hwnd_ 早被置空 —— 只是碰巧绕开了。
+    HWND win = static_cast<HWND>(hwnd_);
+    if (win) {
+        SetWindowLongPtrW(win, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DefWindowProcW));
+        SetWindowLongPtrW(win, GWLP_USERDATA, 0);
+        ShowWindow(win, SW_HIDE);    // 隐藏后销毁不会再产生一次真实绘制
+    }
+    gfx_.shutdown();   // 拆 GL（含 ReleaseDC，必须在窗口销毁前）；shutdown 幂等
+    if (win) {
+        DestroyWindow(win);
         hwnd_ = nullptr;
     }
     // 排空残留消息（含 WM_QUIT），避免宿主下一轮 pump 读到上一个窗口的退出消息。

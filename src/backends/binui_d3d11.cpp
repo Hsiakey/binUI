@@ -1933,13 +1933,32 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                         const uint32_t bcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
                                             ? ScaleAlpha(pt->textColor, opacity) : textCol;
                         int bs = node.fontSize ? node.fontSize : 14;
-                        float tw = gfx.textWidth(static_cast<float>(bs), 700, node.text, italic);
+                        // 字重：作者声明了 font-weight 就按声明（取法与 LABEL 同一套
+                        // PaintWeightOf，归一化到 400/700 两档）；没声明才回落 700 ——
+                        // 按钮的旧观感就是粗体，这里不能让老布局突然变细。
+                        // textWidth / fontMetrics / drawText 三处必须同一个值，
+                        // 否则宽度按 700 量、字形按 400 画，居中会偏。
+                        const int wt = (pt && (pt->flags & PAINT_WEIGHT))
+                                     ? binui::PaintWeightOf(pt) : 700;
+                        const float fs = static_cast<float>(bs);
+                        float tw = gfx.textWidth(fs, wt, node.text, italic);
                         int asc = 0, lh = 0;
-                        gfx.fontMetrics(static_cast<float>(bs), 700, asc, lh, italic);
-                        float tx = x + pad + (nw - 2 * pad - tw) / 2.0f;
+                        gfx.fontMetrics(fs, wt, asc, lh, italic);
+                        // 水平对齐：与上面 BINUI_LABEL 分支完全同一套算法
+                        //（flags 都不置位 = 左对齐，CENTER 居中，RIGHT 右对齐）。
+                        // 以前写死 (nw - 2*pad - tw)/2，text-align:left 写了也没效果。
+                        const float boxW = static_cast<float>(nw - 2 * pad);
+                        const float availW = boxW > 1.0f ? boxW : 1.0f;
+                        const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
+                                        : (node.flags & BINUI_TEXT_RIGHT) ? 2 : 0;
+                        float tx = static_cast<float>(x + pad);
+                        if (align != 0) {
+                            tx += (align == 1) ? (availW - tw) / 2.0f : (availW - tw);
+                            // 文字比盒子宽时别越过左内边距（与 LABEL 一致）
+                            if (tx < static_cast<float>(x + pad)) tx = static_cast<float>(x + pad);
+                        }
                         float base = y + (nh - lh) / 2.0f + asc;
-                        gfx.drawText(tx, base, static_cast<float>(bs), 700, node.text, bcol,
-                                     false, false, italic);
+                        gfx.drawText(tx, base, fs, wt, node.text, bcol, false, false, italic);
                     }
                     break;
                 }
@@ -2132,14 +2151,22 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
         int nw = static_cast<int>(node.width), nh = static_cast<int>(node.height);
         if (ch <= nh + 0.5f) continue;
 
-        int barW = 8;
+        // 滚动条配色/宽度由渲染器提供（C ABI 与编译器 scrollbar-* 落到同一处）。
+        // 以前这里写死 8px + #2E2E2E/#5A5A5A，浅色主题下就是右边一条黑杠，
+        // 而且没有任何入口能覆盖。
+        const auto& sb = renderer.scrollbarStyle();
+        const int barW = sb.width;
         gfx.fillRect(static_cast<float>(x + nw - barW), static_cast<float>(y),
-                     static_cast<float>(barW), static_cast<float>(nh), 0xFF2E2E2E);
+                     static_cast<float>(barW), static_cast<float>(nh), sb.track);
         float thumbH = std::max(24.0f, static_cast<float>(nh) * nh / ch);
         float maxScroll = ch - nh;
+        // 位置算法（贴右、按滚动比例）保持原样；只有宽度跟着轨道换算
         float thumbY = maxScroll > 0 ? sy / maxScroll * (nh - thumbH) : 0;
-        gfx.fillRect(static_cast<float>(x + nw - barW + 2), static_cast<float>(y + thumbY),
-                     4.0f, thumbH, 0xFF5A5A5A);
+        // 滑块宽度沿用"轨道一半"的老比例（轨道 8 → 滑块 4），左右各留 (barW-thumbW)/2，
+        // 这样 barW=8 时就是老样子（左 2 右 2）
+        const float thumbW = static_cast<float>(std::max(2, barW / 2));
+        const float thumbX = static_cast<float>(x + nw - barW) + (barW - thumbW) * 0.5f;
+        gfx.fillRect(thumbX, static_cast<float>(y) + thumbY, thumbW, thumbH, sb.thumb);
     }
     gfx.popClipTo(sbDepth);
 }

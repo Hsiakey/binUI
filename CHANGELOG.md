@@ -6,6 +6,95 @@
 
 ## [Unreleased]
 
+### 修复 — 圆角半径到"短边一半"就退化成直角（胶囊 / 正圆画不出来，GL 与 D3D11）
+
+九宫格拼接把角片边长写死成 `2r+1`（模板 4r×4r，形状内缩 1px）。角片比四分之一圆弧
+本身需要的 `r` 大一倍多，于是 `2×角片` 很快超过盒子短边：两个角片互相重叠（四边中部
+露出凹口），中段宽高转负（整块被角片自带的弧裁掉）—— `border-radius:999` 的圆形头像、
+胶囊按钮、`<svg><circle>` 全都命中，半径到短边一半时直接变**直角**。
+
+- 几何统一抽到 `include/binui_paint.h` 的 `BuildRoundedNineSlice()`：角片边长 = `r`
+  （四分之一圆弧的包围盒正好是 r×r），模板改成"形状铺满 [0,t]"（不再内缩 1px），
+  模板边长从 `4r` 降到 `2r+4`（r=200 时 2.5MB → 653KB）。
+- 半径钳到 `min(w,h)/2` 后九块**精确铺满**：`2r == 短边` 时中段宽高为 0，四个 1/4 圆
+  正好拼成正圆 / 胶囊。
+- `ensureRasterDC()` 的返回值以前没检查（失败后按新尺寸 memset 会踩坏堆），现在检查；
+  圆角模板缓存加了上限（超过 48 张淘汰最大的一张）。
+- GL 与 D3D11 两个后端同步；GDI 走 `RoundRect` 本来就是对的。
+
+### 修复 — `binui_app_destroy()` 在窗口仍打开时可能崩（AV @ null+偏移）
+
+`close()` 以前是"先 `gfx_.shutdown()` 再 `DestroyWindow()`"。窗口还活着时
+`DestroyWindow` 会**同步**把 `WM_KILLFOCUS` / `WM_NCDESTROY` 派发回窗口过程，
+而 GL 上下文这时已经拆掉了 —— 重入路径踩到已析构的成员，表现为随机 AV。
+窗口已经因为 `WM_CLOSE` 关过的路径碰巧绕开了这一步，所以只有一半概率崩。
+
+- 顺序改成：先把窗口过程摘回 `DefWindowProc` 并清掉 `GWLP_USERDATA`（之后任何消息
+  都不进我们的代码，也不会有悬垂 `this`）→ `ShowWindow(SW_HIDE)` → 拆 GL →
+  `DestroyWindow`。
+- `WM_PAINT` 加就绪守卫：GL 没就绪时 `ValidateRect` 掉，别落到 `DefWindowProc` 去真画。
+
+### 修复 — `display:none` 只跳过元素本身，子树被重挂到最近的可见祖先
+
+隐藏容器里的绝对定位子元素会按"新父级"重新解析坐标（跑到左上角），而且**零警告**。
+
+- 编译器新增一趟预处理：按**级联后的 style**（class 规则也算）标出 `display:none`
+  的整棵子树，主循环按标记跳过。沿 `parentIdx` 链向上查，对元素顺序没有要求
+  （`::before` 合成节点的父索引可能大于自身下标）。
+- `:nth-child` 的口径（`display:none` 的元素仍计入兄弟序号）不变。
+
+### 修复 — `<button>` / `<input>` 默认底色写死 `#222222`，按钮文字强制居中 + 700 粗体
+
+浅色主题下"不写 background 的按钮"就是一坨黑块；`text-align:left` 与 `font-weight`
+双双失效（三个后端各有一份写死的绘制代码）。
+
+- 默认底色：`BINUI_BUTTON` / `BINUI_INPUT` 也改成透明，与 v13 起"容器默认透明"一致。
+- 文字对齐：三个后端都改成读 `BINUI_TEXT_CENTER` / `BINUI_TEXT_RIGHT`，算法与
+  `BINUI_LABEL` 分支完全一致。`<button>` 的 UA 默认居中由**编译器**补（浏览器如此），
+  所以没写 `text-align` 的按钮观感不变。
+- 字重：读扩展绘制段的 `font-weight`（`PAINT_WEIGHT`），没声明时回落 700。
+
+### 修复 — Makefile：`test_capi` 从不重链，跑的是旧二进制
+
+`test_capi` 的规则把 `$(BINUI_C_A)` 写在变量定义之前 —— GNU Make 立即展开成空，
+于是这个目标只依赖 `.cpp`，库更新后不重链。改了 C ABI 之后跑出来的崩溃其实是
+"新旧两套目标文件混链"。现在直接写 `$(BUILD_DIR)/libbinui_c.a` 并补上 `$(LIB_A)`。
+
+### 修复 — 滚动条颜色/宽度写死，浅色主题右边一条黑杠
+
+轨道 `#2E2E2E` / 滑块 `#5A5A5A` / 宽 8px 全是字面量，没有任何配置入口。
+
+- 渲染器新增 `BinUIScrollbarStyle` + `setScrollbarStyle()` / `resetScrollbarStyleToDefault()`；
+  **默认按根节点底色亮度派生**（浅底浅色、深底深灰）。
+- C ABI 新增 `binui_set_scrollbar_style()` / `binui_reset_scrollbar_style()`，
+  三个绑定同步。三个后端都改成从 `renderer.scrollbarStyle()` 取色与宽度。
+- CSS 的 `scrollbar-color` / `scrollbar-width` 仍然不支持，但**不再静默忽略**：
+  编译期会告警并指向上面的接口（否则作者会以为改主题生效了）。
+
+### 新增 — 运行期能力：`scroll_to` / `set_node_bounds` / `add_node` 等
+
+核心渲染器里一直有，只是没导出。列表 / 聊天流绕不过去的能力：
+
+- `binui_scroll_to` / `binui_scroll_by` / `binui_content_height`
+- `binui_set_node_bounds`（宿主自己排版 / 撑高）
+- `binui_add_node` / `binui_remove_node`（动态节点；`remove_node` 只是隐藏，id 不复用）
+- 纯增量新增，不动既有结构体 / 签名，`BINUI_C_ABI_VERSION` 保持 1。
+- Python / Go / Rust 三个绑定同步补齐（Go 还补了 `SetImageRaw` / `SetImage` /
+  `MountComponents`，并用 `unsafe.SliceData` 修掉了 `go vet` 的
+  `possible misuse of unsafe.Pointer`）。
+
+### 新增 — `set_text` 换长文本后自动重算高度
+
+以前"未声明高度就按文本估算撑开"这一步**只在编译期**做，运行期 `set_text` 换成长文本
+会画到节点盒外、压到下一个元素身上。
+
+- 规格段用旧布局的 `reserve` 字节承载 `heightAuto` + `autoBase`（基线高度，即估算前的
+  元素默认盒高）。旧二进制这两位恒为 0 = 不重算，**不升 `BINUI_VERSION`**
+  （先例：`BINUI_TEXT_CENTER` 复用 flags 的空闲位）。
+- 估算口径抽成 header-only 的 `include/binui_text_estimate.h`，编译器与渲染器共用一份
+  （否则"编译期刚好放下、换文本就压字"）。重算取 `max(基线高度, 估算高度)`，
+  与编译期完全一致。
+
 ### 修复 — 同一线程多实例时 GL 上下文不切换，先建的实例画成纯黑
 
 WGL 的 current context 是**线程级**的。`BinUIGLGdi::init()` 里 `wglMakeCurrent`

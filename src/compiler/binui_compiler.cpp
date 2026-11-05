@@ -3,6 +3,7 @@
 #include "binui_asset.h"
 #include "binui_format.h"
 #include "binui_link.h"
+#include "binui_text_estimate.h"   // 文本尺寸粗估：与渲染器运行期 setText 重算共用同一口径
 
 #include <fstream>
 #include <sstream>
@@ -3187,46 +3188,36 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     };
 
     // 文字宽度估算（编译期没有字体度量）：CJK/全角按 1.0×字号，其余按 0.52×字号。
-    // 只用于"未声明高度的文本节点该占多高"，宁可按偏宽估（多一行总比压字好）。
+    // 算法只有一份，在 include/binui_text_estimate.h —— 渲染器运行期对 heightAuto
+    // 节点 setText 后重算高度必须与编译期同口径，否则"编译期刚好放下、换文本就压字"。
+    // 这里保留 lambda 只是让调用点沿用原来的名字。
     auto estTextWidth = [](const std::string& text, float fontSize) -> float {
-        float w = 0.0f;
-        for (size_t i = 0; i < text.size(); ) {
-            const unsigned char c = (unsigned char)text[i];
-            uint32_t cp = c;
-            size_t len = 1;
-            if (c >= 0xF0) len = 4;
-            else if (c >= 0xE0) len = 3;
-            else if (c >= 0xC0) len = 2;
-            if (len > 1 && i + len <= text.size()) {
-                cp = (len == 2) ? (uint32_t)(c & 0x1F)
-                   : (len == 3) ? (uint32_t)(c & 0x0F) : (uint32_t)(c & 0x07);
-                for (size_t k = 1; k < len; k++)
-                    cp = (cp << 6) | (uint32_t)((unsigned char)text[i + k] & 0x3F);
-            }
-            i += len;
-            if (cp == '\t') { w += fontSize * 2.0f; continue; }
-            const bool wide = cp >= 0x1100 && (cp <= 0x115F || (cp >= 0x2E80 && cp <= 0xA4CF) ||
-                               (cp >= 0xAC00 && cp <= 0xD7A3) || (cp >= 0xF900 && cp <= 0xFAFF) ||
-                               (cp >= 0xFE30 && cp <= 0xFE6F) || (cp >= 0xFF00 && cp <= 0xFF60) ||
-                               (cp >= 0xFFE0 && cp <= 0xFFE6) || (cp >= 0x1F300 && cp <= 0x1FAFF));
-            w += wide ? fontSize : fontSize * 0.52f;
-        }
-        return w;
+        return EstimateTextWidth(text, fontSize);
     };
-    // 行距（像素）：line-height 支持无单位倍数 / % / px；未声明按 1.35×字号
+    // 行距（像素）：line-height 支持无单位倍数 / % / px；未声明按 1.35×字号。
+    // 解析留在这里（style 是编译器的私有类型），换算口径（1.35×字号兜底、50%~400% 有效）
+    // 走共享头的 EstimateLineStep。极端值（如 line-height:5）共享口径按未声明处理，
+    // 与旧实现的 5×字号略有出入 —— 正常布局用不到，且宁可估低不压字。
     auto estLineStep = [](const std::unordered_map<std::string, std::string>& style,
                           float fontSize) -> float {
         auto it = style.find("line-height");
-        if (it == style.end()) return fontSize * 1.35f;
-        const std::string v = TrimCopy(it->second);
-        if (v.empty() || LowerCopy(v) == "normal") return fontSize * 1.35f;
-        const bool pct = v.back() == '%';
-        const bool unitless = v.find_first_not_of("0123456789.+-") == std::string::npos;
-        float num = 0;
-        try { num = std::stof(v); } catch (...) { return fontSize * 1.35f; }
-        if (unitless) return num > 0.1f ? num * fontSize : fontSize * 1.35f;
-        if (pct) return num > 10.0f ? fontSize * num / 100.0f : fontSize * 1.35f;
-        return num > 0.5f ? num : fontSize * 1.35f;   // px
+        int pct = 0;   // 0 = 未声明/不可解析 → EstimateLineStep 按 1.35×字号
+        if (it != style.end()) {
+            const std::string v = TrimCopy(it->second);
+            if (!v.empty() && LowerCopy(v) != "normal") {
+                if (v.back() == '%') {
+                    try { pct = (int)std::lround(std::stof(v)); } catch (...) {}
+                } else {
+                    const bool unitless = v.find_first_not_of("0123456789.+-") == std::string::npos;
+                    float num = 0;
+                    try { num = std::stof(v); } catch (...) { num = 0; }
+                    if (unitless) pct = (int)std::lround(num * 100.0f);
+                    else if (num > 0.5f && fontSize > 0.5f)
+                        pct = (int)std::lround(num / fontSize * 100.0f);   // px → 百分数
+                }
+            }
+        }
+        return EstimateLineStep(fontSize, pct);
     };
 
 
@@ -3911,8 +3902,33 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         }
     }
 
+    // ---- 3.5 display:none：把整棵子树标出来 ----
+    // 只跳过元素本身是不够的：子元素的父级解析（resolveParentId）会继续往上找最近的
+    // 已生成祖先，于是隐藏容器里的绝对定位子元素被重挂到根/上层容器，按自己的原始坐标
+    // 画到别处（而且零警告，issue 03）。这里先按"级联后的 style"（class 规则也算）
+    // 算出每个元素自身是否 display:none，再沿 parentIdx 链向上判断是否落在隐藏子树里。
+    // 不用单趟前向传播：::before 合成节点的 parentIdx 可能大于自身下标（宿主紧随其后入表），
+    // 沿父链向上查对元素顺序没有要求。结构伪类（:nth-child）仍把 display:none 的元素
+    // 计入兄弟序号（见文件上方注释），本预处理只管"生成节点"，不动选择器口径。
+    std::vector<char> hiddenSelf(elems.size(), 0);
+    std::vector<char> hidden(elems.size(), 0);
+    for (size_t hi = 0; hi < elems.size(); hi++) {
+        const auto& he = elems[hi];
+        auto hst = styleOf(he, hi);
+        if (lowerStr(pick(he.attrs, hst, "display", "display", "")) == "none") hiddenSelf[hi] = 1;
+    }
+    for (size_t hi = 0; hi < elems.size(); hi++) {
+        size_t k = hi;
+        size_t guard = elems.size() + 1;   // 防御 parentIdx 成环（脏输入）
+        while (k != SIZE_MAX && k < elems.size() && guard-- > 0) {
+            if (hiddenSelf[k]) { hidden[hi] = 1; break; }
+            k = elems[k].parentIdx;
+        }
+    }
+
     for (size_t ei = 0; ei < elems.size(); ei++) {
         if (id >= 0x10000) break; // 节点 id 为 uint16_t，超限停止生成
+        if (hidden[ei]) continue; // display:none 的整棵子树都不生成节点（见上面的预处理）
         const auto& e = elems[ei];
         auto style = styleOf(e, ei);
         uint8_t type = tagToType(e.tag);
@@ -3932,6 +3948,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             for (const char* k : kIgnoredCss)
                 if (style.count(k))
                     Warn(std::string("CSS 属性 ") + k + " 暂不支持，已忽略");
+
+            // 滚动条颜色/宽度：CSS 侧没有对应通道（后端写死 8px/#2E2E2E/#5A5A5A，
+            // 浅色主题下是一条黑杠，issue 05）。如果静默忽略，作者会以为改主题生效了。
+            // 同一属性全文档只报一条（Warn 自带去重）。
+            static const char* kScrollbarCss[] = { "scrollbar-color", "scrollbar-width" };
+            for (const char* k : kScrollbarCss)
+                if (style.count(k))
+                    Warn(std::string("CSS 属性 ") + k +
+                         " 暂不支持，请用 binui_set_scrollbar_style() 在运行期设置");
         }
 
         // ---- white-space / <pre>：文本是否保留原始换行与缩进 ----
@@ -4006,9 +4031,6 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 inputPlaceholder = true;
             }
         }
-
-        std::string display = pick(e.attrs, style, "display", "display", "");
-        if (display == "none") continue;
 
         if (e.tag=="head" || e.tag=="title" || e.tag=="meta" || e.tag=="link" ||
             e.tag=="script" || e.tag=="style" || e.tag=="app_window")
@@ -4115,12 +4137,20 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 
         // 文本节点未声明高度时估算行数并撑开高度。
         // 没有这一步，段落按单行高排布：换行后的第二行会压到下一个元素身上
-        // （三个后端都按节点矩形绘制，谁也没办法把节点撑高）。估算口径：
+        // （三个后端都按节点矩形绘制，谁也没办法把节点撑高）。估算口径统一在
+        // include/binui_text_estimate.h —— 渲染器运行期 setText 重算高度用的必须是同一份，
+        // 否则"编译期刚好放下、换成长文本就溢出"（issue 06）。
         //   · CJK/全角按 1.0×字号，其余按 0.52×字号（拉丁小写平均宽度），宁可高一点
         //   · 行距取 line-height（未声明则 1.35×字号）
         //   · 显式写了 height 的不动（作者说了算）
+        // heightAuto：高度是估算撑开的就标 1（即使这次估算没撑高也要标 —— 运行期换成
+        // 更长的文本同样需要重算），写进缩放规格段，供 renderer.setText 判断。
+        bool heightAuto = false;
+        uint16_t autoBase = 0;   // 估算之前的高度（元素默认盒高），运行期重算的基线
         if (sh.empty() && !srcText.empty() &&
             (type == BINUI_LABEL || type == BINUI_LIST || type == BINUI_BUTTON)) {
+            heightAuto = true;
+            autoBase = static_cast<uint16_t>(std::lround(lh));
             const float step = estLineStep(style, nodeFontSize);
             float avail = pc.contentW;
             if (!sw.empty()) {   // sw 已在上面的几何区里解析过（'auto' 被清空）
@@ -4128,18 +4158,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 avail = sp.pct ? sp.value / 100.0f * pc.contentW : sp.value;
             }
             avail -= type == BINUI_LIST ? 24.0f : 0.0f;   // LIST 文字左右各有 12px 内缩
-            if (avail < 8.0f) avail = 8.0f;
-            size_t lines = 0;
-            size_t p0 = 0;
-            while (true) {
-                const size_t nl = srcText.find('\n', p0);
-                const std::string seg = srcText.substr(
-                    p0, (nl == std::string::npos) ? std::string::npos : nl - p0);
-                lines += (size_t)std::max(1.0f, std::ceil(estTextWidth(seg, nodeFontSize) / avail));
-                if (nl == std::string::npos) break;
-                p0 = nl + 1;
-            }
-            if (lines < 1) lines = 1;
+            const int lines = EstimateLineCount(srcText, nodeFontSize, avail); // 至少 1 行，'\n' 硬断
             const float needH = (float)lines * step;
             if (needH > lh) lh = needH;
         }
@@ -4325,6 +4344,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             std::string ta = lowerStr(pick(e.attrs, style, "align", "text-align", ""));
             if (ta == "center") n.flags |= BINUI_TEXT_CENTER;
             else if (ta == "right" || ta == "end") n.flags |= BINUI_TEXT_RIGHT;
+            // <button> 的 UA 默认值是居中（浏览器如此）。后端以前把按钮文字写死居中，
+            // 所以这份"默认"一直没人写；现在后端改成读 flags 了，必须在这里补上，
+            // 否则所有没写 text-align 的按钮会突然变左对齐（演示全都要改观感）。
+            else if (type == BINUI_BUTTON && ta.empty()) n.flags |= BINUI_TEXT_CENTER;
         }
 
         // 静态 opacity 在颜色赋值之后处理（见下方），这里先落几何
@@ -4349,11 +4372,13 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         GradSpec gs = parseLinearGradient(bgRaw);
         if (!gs.ok && style.count("background-image")) gs = parseLinearGradient(style.at("background-image"));
 
+        // 没写底色的默认值：v13 起容器默认透明（以前是 #222222，浅色主题直接被吃掉），
+        // 但当时漏了 BUTTON/INPUT 这一档 —— 浅底页面上"不写 background 的按钮"就是一坨黑块。
+        // 现在统一成透明：没写就是透明，要底色请显式声明 background（示例与组件库都写了）。
         uint32_t defBg = (type == BINUI_LABEL)  ? 0xFFFFFFFFu
                        : (type == BINUI_SVG || type == BINUI_CANVAS) ? 0x00000000u
                        : (type == BINUI_VIDEO) ? 0xFF101010u
-                       : (type == BINUI_BUTTON || type == BINUI_INPUT) ? 0xFF222222u
-                       : 0x00000000u;   // v13：容器默认透明（以前是 #222222，浅色主题直接被吃掉）
+                       : 0x00000000u;   // 容器 / BUTTON / INPUT 默认透明
         if (bgRaw.empty()) n.color = defBg;
         else if (gs.ok) n.color = gs.from;   // 渐变：底色兜底用起点色（免得被当颜色解析刷警告）
         else n.color = parseColorWith(bgRaw, defBg, "背景色");
@@ -4748,6 +4773,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (mxHp) sp.flags |= SPEC_MAXH_PCT;
         sp.relW = (!flexPlaced && hasW && pctW < 0) ? baseW : -1;
         sp.relH = (!flexPlaced && !sh.empty() && pctH < 0) ? baseH : -1;
+        // 高度是编译期按文本估算撑开的：运行期 setText 换文本后需要重算（issue 06 的第 1 步）
+        if (heightAuto) { sp.heightAuto = 1; sp.autoBase = autoBase; }
         specNodes.push_back(sp);
 
         // 容器上下文：内容盒 = 自身位置 + padding

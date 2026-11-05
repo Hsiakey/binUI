@@ -31,8 +31,18 @@ package binui
 /*
 #cgo CFLAGS: -I${SRCDIR}/../../../include
 #cgo LDFLAGS: -L${SRCDIR}/../../../build-mingw/bin -lbinui_c
+#include <stdint.h>
 #include <stdlib.h>
 #include "binui_c.h"
+
+// HWND 在 Go 侧是 uintptr。直接 unsafe.Pointer(uintptr) 会被 go vet 报
+// "possible misuse of unsafe.Pointer"（vet 无法区分"来自 Go 堆的整数"和
+// "操作系统给的句柄"）。走一层 C 小壳就绕开了：整数在 C 侧转成指针，
+// Go 代码里不再出现任何 uintptr→unsafe.Pointer 的转换。
+static int binui_go_open_child(void* app, uintptr_t parent, int x, int y,
+                               int w, int h, unsigned int flags) {
+    return binui_app_open_child(app, (void*)parent, x, y, w, h, flags);
+}
 */
 import "C"
 
@@ -188,7 +198,11 @@ func New(layout []byte, assetDir string) (*App, error) {
 		dir = C.CString(assetDir)
 		defer C.free(unsafe.Pointer(dir))
 	}
-	h := C.binui_app_create(unsafe.Pointer(&layout[0]), C.int32_t(len(layout)), dir)
+	var lp unsafe.Pointer   // 空布局时 layout 可能没有第 0 个元素，先判长度
+	if len(layout) > 0 {
+		lp = unsafe.Pointer(unsafe.SliceData(layout))
+	}
+	h := C.binui_app_create(lp, C.int32_t(len(layout)), dir)
 	if h == nil {
 		return nil, errors.New(LastError())
 	}
@@ -217,8 +231,8 @@ func (a *App) Pump(timeoutMs int) bool {
 // DispatchMessage 会把鼠标/键盘投递给本窗口，事件照旧从 Poll 出来。
 // 因此子窗口模式每帧调 Render 而不是 Pump。宿主窗口记得带 WS_CLIPCHILDREN。
 func (a *App) OpenChild(parent uintptr, x, y, width, height int) error {
-	if C.binui_app_open_child(a.h, unsafe.Pointer(parent), C.int32_t(x), C.int32_t(y),
-		C.int32_t(width), C.int32_t(height), 0) != 1 {
+	if C.binui_go_open_child(a.h, C.uintptr_t(parent), C.int(x), C.int(y),
+		C.int(width), C.int(height), 0) != 1 {
 		return errors.New(LastError())
 	}
 	return nil
@@ -377,6 +391,89 @@ func (a *App) Minimize()        { C.binui_minimize(a.h) }
 func (a *App) Maximize()        { C.binui_maximize(a.h) }
 func (a *App) RequestExit()     { C.binui_request_exit(a.h) }
 func (a *App) BeginWindowDrag() { C.binui_begin_window_drag(a.h) }
+
+// ---------- 资源：图片槽 / 外挂组件 ----------
+
+// SetImageRaw 用原始 RGBA8 像素（w*h*4 字节，行序自上而下）替换图片槽。
+// 程序化纹理 / 视频帧走这个（槽号 = 节点的 ImageIndex）。
+func (a *App) SetImageRaw(index, w, h int32, rgba []byte) bool {
+	if w <= 0 || h <= 0 || len(rgba) < int(w*h*4) {
+		return false
+	}
+	p := C.CBytes(rgba)
+	defer C.free(p)
+	return C.binui_set_image_raw(a.h, C.int32_t(index), C.int32_t(w), C.int32_t(h), p) == 1
+}
+
+// SetImage 用编码数据（PNG / JPEG / WebP）替换图片槽。
+// 想要正圆头像这类形状，可以先用它塞一张已裁好的位图（binUI 没有位图裁切）。
+func (a *App) SetImage(index int32, data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	p := C.CBytes(data)
+	defer C.free(p)
+	return C.binui_set_image(a.h, C.int32_t(index), p, C.int32_t(len(data))) == 1
+}
+
+// MountComponents 挂载布局里 <use ... external> 记录的外挂组件（.bum）。
+// 路径相对 layoutDir（空串 = 用 New 时给的 assetDir）。返回挂载成功的组件数。
+func (a *App) MountComponents(layoutDir string) int32 {
+	cd := C.CString(layoutDir)
+	defer C.free(unsafe.Pointer(cd))
+	return int32(C.binui_mount_components(a.h, cd))
+}
+
+// ---------- 运行期能力：滚动 / 节点几何 / 动态节点 ----------
+//
+// 限制：运行期 AddNode 加出来的节点不参与 SetSize 的百分比 / flex 重排，
+// 也不会自动给兄弟节点让位 —— 需要自己挪（SetNodeBounds）。
+
+// ScrollTo 设置滚动容器的滚动偏移（自动钳制到内容范围）。
+func (a *App) ScrollTo(id int32, x, y float32) {
+	C.binui_scroll_to(a.h, C.int32_t(id), C.float(x), C.float(y))
+}
+
+// ScrollBy 相对滚动。
+func (a *App) ScrollBy(id int32, dx, dy float32) {
+	C.binui_scroll_by(a.h, C.int32_t(id), C.float(dx), C.float(dy))
+}
+
+// ContentHeight 滚动容器的内容总高；无此节点返回 -1。
+// "追加一条消息后滚到底" = ScrollTo(id, 0, ContentHeight(id)-视口高)。
+func (a *App) ContentHeight(id int32) float32 {
+	return float32(C.binui_content_height(a.h, C.int32_t(id)))
+}
+
+// SetNodeBounds 直接改节点矩形（宿主自己排版 / 手动撑高）。只动这一个节点。
+func (a *App) SetNodeBounds(id int32, x, y, w, h float32) bool {
+	return C.binui_set_node_bounds(a.h, C.int32_t(id), C.float(x), C.float(y),
+		C.float(w), C.float(h)) == 1
+}
+
+// AddNode 在 parentID 下追加一个节点，返回新节点 id；失败返回 -1。
+// 列表项数量运行期才知道时用它（不用再在布局里预留 N 个槽位）。
+func (a *App) AddNode(parentID, typ int32, x, y, w, h float32, color uint32,
+	radius, fontSize int32) int32 {
+	return int32(C.binui_add_node(a.h, C.int32_t(parentID), C.int32_t(typ),
+		C.float(x), C.float(y), C.float(w), C.float(h),
+		C.uint32_t(color), C.int32_t(radius), C.int32_t(fontSize)))
+}
+
+// RemoveNode 隐藏一个节点（节点保留在表里供复用，id 不会被回收）。
+func (a *App) RemoveNode(id int32) bool {
+	return C.binui_remove_node(a.h, C.int32_t(id)) == 1
+}
+
+// SetScrollbarStyle 设置滚动条外观（轨道色 / 滑块色 / 轨道宽 2..32）。
+// 不调用时按根节点底色亮度自动派生：浅色主题不会再出现"右边一条黑杠"。
+func (a *App) SetScrollbarStyle(track, thumb uint32, width int32) bool {
+	return C.binui_set_scrollbar_style(a.h, C.uint32_t(track), C.uint32_t(thumb),
+		C.int32_t(width)) == 1
+}
+
+// ResetScrollbarStyle 回到按根节点底色派生的默认滚动条样式。
+func (a *App) ResetScrollbarStyle() { C.binui_reset_scrollbar_style(a.h) }
 
 func nodeOf(c C.BinUINode) Node {
 	return Node{

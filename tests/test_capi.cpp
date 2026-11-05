@@ -183,6 +183,61 @@ int main() {
     binui_resize(app, 0, 0);
     binui_resize(nullptr, 100, 100);
 
+    // ---- 7.6 运行期能力（docs/issues/07）：滚动 / 节点几何 / 动态节点 / 滚动条 ----
+    {
+        // 内容高度：没有可滚动的子节点时也是"下界 - 容器顶"，只要节点存在就是 >= 0
+        TEST("content_height(title) >= 0", binui_content_height(app, idTitle) >= 0.0f);
+        TEST("content_height missing -> -1", binui_content_height(app, 9999) == -1.0f);
+        TEST("content_height(null) -> -1", binui_content_height(nullptr, 0) == -1.0f);
+
+        // scroll_to / scroll_by：未开窗时只改状态，不崩即可
+        binui_scroll_to(app, idTitle, 0, 10);
+        binui_scroll_by(app, idTitle, 0, -5);
+        binui_scroll_to(nullptr, 0, 1, 1);
+        TEST("scroll_* 不崩", true);
+
+        // set_node_bounds：合法改成功、非法拒绝
+        BinUINode before;
+        std::memset(&before, 0, sizeof(before));
+        binui_node_by_id(app, idTitle, &before);
+        TEST("set_node_bounds ok", binui_set_node_bounds(app, idTitle, 12, 34, 200, 44) == 1);
+        BinUINode after;
+        std::memset(&after, 0, sizeof(after));
+        binui_node_by_id(app, idTitle, &after);
+        TEST("set_node_bounds 生效", after.x == 12.0f && after.width == 200.0f && after.height == 44.0f);
+        TEST("set_node_bounds 负宽度拒绝", binui_set_node_bounds(app, idTitle, 0, 0, -1, 10) == 0);
+        TEST("set_node_bounds 无此节点", binui_set_node_bounds(app, 9999, 0, 0, 10, 10) == 0);
+        TEST("set_node_bounds(null)", binui_set_node_bounds(nullptr, 0, 0, 0, 10, 10) == 0);
+
+        // add_node / remove_node：列表/日志流的官方出口
+        const int32_t newId = binui_add_node(app, 0, BINUI_NODE_LABEL, 10, 10, 100, 20,
+                                             0xFF102030u, 4, 13);
+        TEST("add_node 返回新 id", newId > 0);
+        TEST("add_node 父节点不存在", binui_add_node(app, 9999, BINUI_NODE_LABEL, 0, 0, 10, 10,
+                                                     0, 0, 0) == -1);
+        TEST("add_node(null) == -1", binui_add_node(nullptr, 0, 0, 0, 0, 10, 10, 0, 0, 0) == -1);
+        BinUINode added;
+        std::memset(&added, 0, sizeof(added));
+        TEST("新增节点可查回", binui_node_by_id(app, newId, &added) == 1 &&
+                                added.color == 0xFF102030u && added.radius == 4);
+        TEST("set_text 作用于新增节点", binui_set_text(app, newId, "动态行", -1) == 1);
+        TEST("remove_node ok", binui_remove_node(app, newId) == 1);
+        BinUINode gone;
+        std::memset(&gone, 0, sizeof(gone));
+        TEST("remove_node 只是隐藏（节点保留供复用）",
+             binui_node_by_id(app, newId, &gone) == 1 && (gone.flags & BINUI_NF_VISIBLE) == 0);
+        TEST("remove_node 幂等（重复移除仍是 1）", binui_remove_node(app, newId) == 1);
+        TEST("remove_node 无此节点", binui_remove_node(app, 9999) == 0);
+        TEST("remove_node(null)", binui_remove_node(nullptr, 0) == 0);
+
+        // 滚动条样式：设置/复位都不崩，NULL 安全
+        TEST("set_scrollbar_style ok", binui_set_scrollbar_style(app, 0xFFE5E7EBu, 0xFFC7CBD1u, 10) == 1);
+        TEST("set_scrollbar_style(null)", binui_set_scrollbar_style(nullptr, 0, 0, 8) == 0);
+        binui_reset_scrollbar_style(app);
+        binui_reset_scrollbar_style(nullptr);
+        TEST("scrollbar 样式接口不崩", true);
+    }
+
     // ---- 8. 空指针防护（绑定层最容易传错的地方）----
     TEST("node_count(null) == 0", binui_node_count(nullptr) == 0);
     TEST("hit_test(null) == -1", binui_hit_test(nullptr, 0, 0) == -1);

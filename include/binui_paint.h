@@ -244,6 +244,67 @@ inline uint32_t PaintContrastText(uint32_t bg) {
     return lum > 0.5f ? 0xFF1A1A1Au : 0xFFFFFFFFu;
 }
 
+// ============================================================
+// 圆角矩形 → 九宫格四边形（GL / D3D11 共用）
+//
+// 旧做法把"角片边长"写死成 2r+1（模板 4r×4r，形状内缩 1px），角片比圆弧本身
+// 需要的 r 大一倍多。后果是 2×角片很快超过盒子短边：两个角片互相重叠（四边中部
+// 露凹口），中段宽高转负（整块被角片自带的弧裁掉）—— 半径一到短边一半就退化成
+// 直角，胶囊按钮、border-radius:999 的圆形头像、<svg><circle> 全部命中。
+//
+// 这里改成"角片边长 = r"：四分之一圆弧的包围盒恰好是 r×r，多一个像素都是浪费。
+// 同时模板里的形状铺满 [0,t]（不再内缩 1px），于是圆弧紧贴模板边缘、角片尺寸
+// 与弧长严格对应。半径钳到 min(w,h)/2 后，
+//   · 2r < min(w,h)：九块无缝铺满，无重叠；
+//   · 2r == min(w,h)：中段宽高为 0，四个 1/4 圆正好拼成胶囊/正圆。
+//
+// 模板边长取 2r+4 而不是 4r：角片只采样 [0,r]，多出来的部分只用于给中段取一个
+// 直边像素，4r 纯属浪费显存（r=200 时 800×800×4 = 2.5MB → 404×404×4 = 653KB）。
+// ============================================================
+struct PaintQuad {
+    float x = 0, y = 0, w = 0, h = 0;
+    float u0 = 0, v0 = 0, u1 = 1, v1 = 1;
+};
+
+// 圆角模板边长：2r + 4（末尾 4px 是直边段，供中段取一个实心像素）
+inline int RoundTemplateSize(int radius) {
+    const int r = std::max(1, radius);
+    return std::max(8, r * 2 + 4);
+}
+
+// 把圆角矩形拆成九个轴对齐块（四角 + 四边中段 + 中心）。返回块数；
+// 0 = 半径无效，调用方应退回 fillRect。t 必须是 RoundTemplateSize(radius)。
+inline int BuildRoundedNineSlice(float x, float y, float w, float h, float radius, int t,
+                                 PaintQuad* out, int cap = 9) {
+    if (!out || cap < 9 || w <= 0.0f || h <= 0.0f) return 0;
+    const float r = std::min(radius, std::min(w, h) * 0.5f);
+    if (r <= 0.0f) return 0;
+    const float T = static_cast<float>(std::max(t, 1));
+    const float c = r;                 // 角片边长 = 四分之一圆弧的包围盒
+    const float cu = c / T;
+    // 中段取模板正中 1 个像素：t>=2r+4 时它一定落在直边段里（不会把弧采样进来）
+    const float s0 = 0.5f;
+    const float s1 = 0.5f + 1.0f / T;
+
+    const float mx = w - 2.0f * c, my = h - 2.0f * c;
+    int n = 0;
+    auto push = [&](float qx, float qy, float qw, float qh,
+                    float u0, float v0, float u1, float v1) {
+        if (qw <= 0.0f || qh <= 0.0f || n >= cap) return;   // 中段为 0 时正好跳过
+        out[n++] = { qx, qy, qw, qh, u0, v0, u1, v1 };
+    };
+    push(x, y, c, c, 0, 0, cu, cu);                               // 左上
+    push(x + w - c, y, c, c, 1 - cu, 0, 1, cu);                   // 右上
+    push(x, y + h - c, c, c, 0, 1 - cu, cu, 1);                   // 左下
+    push(x + w - c, y + h - c, c, c, 1 - cu, 1 - cu, 1, 1);       // 右下
+    push(x + c, y, mx, c, s0, 0, s1, cu);                         // 上
+    push(x + c, y + h - c, mx, c, s0, 1 - cu, s1, 1);             // 下
+    push(x, y + c, c, my, 0, s0, cu, s1);                         // 左
+    push(x + w - c, y + c, c, my, 1 - cu, s0, 1, s1);             // 右
+    push(x + c, y + c, mx, my, s0, s0, s1, s1);                   // 中
+    return n;
+}
+
 // 文字装饰线条（下划线/删除线/上划线）：返回要画的条数，最多 3
 inline int BuildTextRuleBands(const BinUIPaintNode* p, float x, float textTop, float w,
                               float fontSize, PaintBand* out, int cap = 3) {

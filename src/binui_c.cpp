@@ -618,6 +618,88 @@ int32_t BINUI_C_CALL binui_app_size(void* appp, int32_t* w, int32_t* h) {
 }
 
 // ============================================================
+// 运行期能力（滚动 / 节点几何 / 动态节点 / 滚动条样式）
+// ============================================================
+void BINUI_C_CALL binui_scroll_to(void* appp, int32_t node_id, float x, float y) {
+    App* a = A(appp);
+    if (!a || node_id < 0) return;
+    a->renderer.scrollTo(static_cast<uint16_t>(node_id), x, y);
+    InvalidateNode(a, node_id);
+}
+
+void BINUI_C_CALL binui_scroll_by(void* appp, int32_t node_id, float dx, float dy) {
+    App* a = A(appp);
+    if (!a || node_id < 0) return;
+    a->renderer.scrollBy(static_cast<uint16_t>(node_id), dx, dy);
+    InvalidateNode(a, node_id);
+}
+
+float BINUI_C_CALL binui_content_height(void* appp, int32_t node_id) {
+    App* a = A(appp);
+    if (!a || node_id < 0 || !FindNode(a, node_id)) return -1.0f;
+    return a->renderer.contentHeight(static_cast<uint16_t>(node_id));
+}
+
+int32_t BINUI_C_CALL binui_set_node_bounds(void* appp, int32_t node_id,
+                                           float x, float y, float w, float h) {
+    App* a = A(appp);
+    if (!a || node_id < 0) return 0;
+    if (!a->renderer.setNodeBounds(static_cast<uint16_t>(node_id), x, y, w, h)) return 0;
+    // 尺寸变了，兄弟节点的绘制区域也可能受影响：整窗重绘最省事也最不容易漏
+    if (a->shell) a->shell->invalidateAll();
+    return 1;
+}
+
+int32_t BINUI_C_CALL binui_add_node(void* appp, int32_t parent_id, int32_t type,
+                                    float x, float y, float w, float h,
+                                    uint32_t color, int32_t radius, int32_t font_size) {
+    App* a = A(appp);
+    if (!a || parent_id < 0 || type < 0 || type > 255) return -1;
+    // addNode 自己不校验父节点：挂到不存在的父上会变成一个永远不可见的孤儿节点
+    if (!FindNode(a, parent_id)) {
+        SetErr("binui_add_node: 父节点 %d 不存在", parent_id);
+        return -1;
+    }
+    if (radius < 0) radius = 0;
+    if (radius > 0xFFFF) radius = 0xFFFF;
+    if (font_size < 0) font_size = 0;
+    if (font_size > 0xFFFF) font_size = 0xFFFF;
+    const uint16_t id = a->renderer.addNode(
+        static_cast<uint16_t>(parent_id), static_cast<uint8_t>(type),
+        x, y, w, h, color, static_cast<uint16_t>(radius), static_cast<uint16_t>(font_size));
+    if (id == 0) {   // 0 是根节点，新建节点不可能拿到它 → 视为 id 用尽
+        SetErr("binui_add_node: 节点 id 已用尽（上限 65534）");
+        return -1;
+    }
+    if (a->shell) a->shell->invalidateAll();
+    return static_cast<int32_t>(id);
+}
+
+int32_t BINUI_C_CALL binui_remove_node(void* appp, int32_t node_id) {
+    App* a = A(appp);
+    if (!a || node_id < 0 || !FindNode(a, node_id)) return 0;
+    a->renderer.removeNode(static_cast<uint16_t>(node_id));
+    if (a->shell) a->shell->invalidateAll();
+    return 1;
+}
+
+int32_t BINUI_C_CALL binui_set_scrollbar_style(void* appp, uint32_t track_argb,
+                                               uint32_t thumb_argb, int32_t width) {
+    App* a = A(appp);
+    if (!a) return 0;
+    a->renderer.setScrollbarStyle(thumb_argb, track_argb, width);
+    if (a->shell) a->shell->invalidateAll();
+    return 1;
+}
+
+void BINUI_C_CALL binui_reset_scrollbar_style(void* appp) {
+    App* a = A(appp);
+    if (!a) return;
+    a->renderer.resetScrollbarStyleToDefault();
+    if (a->shell) a->shell->invalidateAll();
+}
+
+// ============================================================
 // 窗口动作
 // ============================================================
 void BINUI_C_CALL binui_request_exit(void* appp) {

@@ -27,6 +27,110 @@ static bool ParseInto(BinUIRenderer& r, const std::vector<uint8_t>& binui) {
     return !binui.empty() && r.loadLayout(binui.data(), binui.size());
 }
 
+// ============================================================
+// docs/issues 回归：03 display:none 子树 / 04 按钮默认样式 /
+//                    05 scrollbar-* 告警 / 06 heightAuto 标记
+// ============================================================
+static const BinUIRenderer::NodeInfo* NodeById(BinUIRenderer& r, uint16_t id) {
+    for (const auto& n : r.getNodes())
+        if (n.id == id) return &n;
+    return nullptr;
+}
+
+static void TestIssueRegressions() {
+    // ---- 03：display:none 必须连整棵子树一起不生成 ----
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014">
+<head><style>
+  .hidden { display: none; }
+  .card { background: #2C2C2E; border-radius: 8; }
+</style></head>
+<body>
+  <div class="card" id="inlineHide" style="position:absolute; left:600; top:200; width:120; height:80; display:none">
+    <div id="childA" style="position:absolute; left:20; top:20; width:60; height:30; background:#F25A5A"></div>
+  </div>
+  <div class="card hidden" id="classHide" style="position:absolute; left:640; top:200; width:120; height:80">
+    <div id="childB" style="position:absolute; left:200; top:20; width:60; height:30; background:#F59E0B"></div>
+  </div>
+  <div class="card" id="visibleOne" style="position:absolute; left:160; top:200; width:300; height:80">
+    <div id="childC" style="position:absolute; left:20; top:20; width:60; height:30; background:#4ED17E"></div>
+  </div>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("03: 编译成功", ParseInto(r, bin));
+        TEST("03: 内联 display:none 的容器不生成", r.findNodeByName("inlineHide") == 0);
+        TEST("03: 内联 display:none 的子节点也不生成", r.findNodeByName("childA") == 0);
+        TEST("03: class display:none 的容器不生成", r.findNodeByName("classHide") == 0);
+        TEST("03: class display:none 的子节点也不生成", r.findNodeByName("childB") == 0);
+        TEST("03: 可见容器仍在", r.findNodeByName("visibleOne") != 0);
+        TEST("03: 可见容器的子节点仍在", r.findNodeByName("childC") != 0);
+    }
+
+    // ---- 04：没写 background 的 button / input 默认透明；按钮默认居中 ----
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#FFFFFF">
+<html width="400" height="300" bg="#FFFFFF"><body>
+  <button id="plainBtn" style="position:absolute; left:20; top:20; width:120; height:32">按钮</button>
+  <button id="bgBtn" style="position:absolute; left:20; top:60; width:120; height:32; background:#3E8BFF">按钮</button>
+  <input id="plainInput" style="position:absolute; left:20; top:100; width:120; height:32"/>
+  <button id="leftBtn" style="position:absolute; left:20; top:140; width:200; height:32; text-align:left">左</button>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("04: 编译成功", ParseInto(r, bin));
+        const auto* plain = NodeById(r, r.findNodeByName("plainBtn"));
+        const auto* bgb = NodeById(r, r.findNodeByName("bgBtn"));
+        const auto* input = NodeById(r, r.findNodeByName("plainInput"));
+        const auto* left = NodeById(r, r.findNodeByName("leftBtn"));
+        TEST("04: 无 background 的按钮默认透明", plain && plain->color == 0u);
+        TEST("04: 写了 background 的按钮不受影响", bgb && bgb->color == 0xFF3E8BFFu);
+        TEST("04: 无 background 的输入框默认透明", input && input->color == 0u);
+        // 后端从"写死居中"改成"读 flags"之后，默认居中必须由编译器补，
+        // 否则所有没写 text-align 的按钮会突然变左对齐（演示观感全变）。
+        TEST("04: 未写 text-align 的按钮默认居中", plain && (plain->flags & BINUI_TEXT_CENTER));
+        TEST("04: text-align:left 的按钮不置居中/右对齐位",
+             left && !(left->flags & (BINUI_TEXT_CENTER | BINUI_TEXT_RIGHT)));
+    }
+
+    // ---- 05：scrollbar-color / scrollbar-width 必须告警（不能静默忽略）----
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#FFFFFF">
+<html width="400" height="300" bg="#FFFFFF">
+<head><style> .sc { scrollbar-color: #C7CBD1 #E5E7EB; scrollbar-width: thin; } </style></head>
+<body><div class="sc" style="position:absolute; left:0; top:0; width:200; height:100; overflow:auto"></div></body>
+</html></app_window>)HTML";
+        const CompileResult res = CompileBinUIEx(html);
+        bool sawScrollbar = false, sawApi = false;
+        for (const auto& w : res.warnings) {
+            if (w.find("scrollbar") != std::string::npos) sawScrollbar = true;
+            if (w.find("binui_set_scrollbar_style") != std::string::npos) sawApi = true;
+        }
+        TEST("05: scrollbar-* 有编译警告", sawScrollbar);
+        TEST("05: 警告里点了 binui_set_scrollbar_style", sawApi);
+    }
+
+    // ---- 06：未声明高度的文本节点要带 heightAuto 标记 ----
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#FFFFFF">
+<html width="400" height="300" bg="#FFFFFF"><body>
+  <span id="autoH" style="position:absolute; left:20; top:20; width:300; font-size:13px">OK</span>
+  <span id="fixedH" style="position:absolute; left:20; top:60; width:300; height:40; font-size:13px">OK</span>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("06: 编译成功", ParseInto(r, bin));
+        const uint16_t a = r.findNodeByName("autoH");
+        const uint16_t f = r.findNodeByName("fixedH");
+        TEST("06: 未声明高度的文本节点 heightAuto=1", a != 0 && r.specHeightAuto(a));
+        TEST("06: 显式声明高度的节点 heightAuto=0", f != 0 && !r.specHeightAuto(f));
+    }
+}
+
 int main() {
     printf("=== test_compiler: XML/HTML5 -> binUI -> parse roundtrip ===\n\n");
 
@@ -1702,6 +1806,8 @@ int main() {
         TEST("std: panel 里的宿主子元素挂在同一父节点",
              inner && panelTitle && inner->parentId == panelTitle->parentId);
     }
+
+    TestIssueRegressions();
 
     printf("\n=== Results: %d tests failed ===\n", failed);
     return failed > 0 ? 1 : 0;

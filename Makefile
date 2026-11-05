@@ -98,7 +98,8 @@ TEST_BINS := \
     $(BIN_DIR)/test_compiler$(EXT) \
     $(BIN_DIR)/test_anim$(EXT) \
     $(BIN_DIR)/test_hot_reload$(EXT) \
-    $(BIN_DIR)/test_font$(EXT)
+    $(BIN_DIR)/test_font$(EXT) \
+    $(BIN_DIR)/test_paint$(EXT)
 
 $(BIN_DIR)/test_binui$(EXT): tests/test_binui.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
@@ -132,6 +133,11 @@ $(BIN_DIR)/test_font$(EXT): tests/test_font.cpp $(LIB_A)
 	    -o $@ $< $(LIB_A) -Lthird_party/freetype/build -lfreetype \
 	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
+# test_paint 只测 header-only 的绘制几何与文本粗估，不依赖库
+$(BIN_DIR)/test_paint$(EXT): tests/test_paint.cpp $(INC_DIR)/binui_paint.h
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $<
+
 .PHONY: test
 test: $(TEST_BINS)
 	@echo "--- test_binui ---"
@@ -148,6 +154,8 @@ test: $(TEST_BINS)
 	$(BIN_DIR)/test_hot_reload$(EXT)
 	@echo "--- test_font ---"
 	$(BIN_DIR)/test_font$(EXT)
+	@echo "--- test_paint ---"
+	$(BIN_DIR)/test_paint$(EXT)
 ifdef ComSpec
 	@echo "--- test_capi ---"
 	$(BIN_DIR)/test_capi$(EXT)
@@ -165,9 +173,12 @@ GL_LIBS := -lopengl32 -ldwmapi -Lthird_party/freetype/build -lfreetype -Lthird_p
 TEST_BINS += $(BIN_DIR)/test_capi$(EXT)
 test: $(BIN_DIR)/test_capi$(EXT)
 
-$(BIN_DIR)/test_capi$(EXT): tests/test_capi.cpp $(BINUI_C_A)
+# 注意：这里必须直接写 $(BUILD_DIR)/libbinui_c.a，不能写 $(BINUI_C_A) ——
+# 那个变量是后面用 := 定义的，GNU Make 在读到这一行时就展开成了空，
+# 于是 test_capi 永远只依赖 .cpp，库更新后不重链，跑的是旧二进制。
+$(BIN_DIR)/test_capi$(EXT): tests/test_capi.cpp $(BUILD_DIR)/libbinui_c.a $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(BINUI_C_A) $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(BUILD_DIR)/libbinui_c.a $(LIB_A) $(WINLIBS) $(GL_LIBS)
 
 # 6 个示例 = 6 组：功能 / 动画 / 字体 / 2D 渲染 / 3D 渲染 / 纹理
 DEMO_BINS := \

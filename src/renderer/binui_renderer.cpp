@@ -1,4 +1,5 @@
 #include "binui_renderer.h"
+#include "binui_text_estimate.h"
 #include <cstring>
 #include <cmath>
 #include <chrono>
@@ -252,6 +253,10 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         nodes_.push_back(node);
         nodeIndexById_[node.id] = i;
     }
+
+    // 根节点底色此刻已知：滚动条默认样式在这里派生一次（浅底浅色、深底深色）。
+    // setScrollbarStyle 之后不再自动派生（宿主说了算），reset 会重新走这里。
+    if (!scrollbarStyleExplicit_) deriveScrollbarStyleFromRoot();
 
     // ---- 缩放规格段（可选；v3 编译器输出，手写/默认布局可缺省） ----
     specOf_.assign(nodes_.size(), nullptr);
@@ -691,7 +696,32 @@ void BinUIRenderer::setText(uint16_t nodeId, const std::string& text) {
     // 作者/setText 给的是真实值：占位符标记随之撤掉
     auto pit = paintIdx_.find(nodeId);
     if (pit != paintIdx_.end()) paints_[pit->second].textFlags &= ~TEXT_PLACEHOLDER;
-    nodes_[it->second].text = text;
+    NodeInfo& node = nodes_[it->second];
+    node.text = text;
+
+    // issue 06b：编译期"高度是按文本估算撑开的"节点（规格段 heightAuto=1）换文本后
+    // 要按同一口径重算高度，否则第二行起画到节点盒外、压到下一个元素身上。
+    // 作者显式写了 height 的节点（heightAuto=0）不动 —— 作者说了算。
+    const BinUISpecNode* spec = (it->second < specOf_.size()) ? specOf_[it->second] : nullptr;
+    if (!spec || !spec->heightAuto) return;
+    // 与编译器同一个类型集合（src/compiler/binui_compiler.cpp:4122-4145 只估这三类）
+    if (node.type != BINUI_LABEL && node.type != BINUI_LIST && node.type != BINUI_BUTTON) return;
+
+    const float fontSize = node.fontSize > 0 ? static_cast<float>(node.fontSize) : 14.0f;
+    // 可用宽度 = 内容宽度（去掉左右 padding）；LIST 文字左右各有 12px 内缩（同编译器口径）
+    float avail = node.width - 2.0f * static_cast<float>(node.padding);
+    if (node.type == BINUI_LIST) avail -= 24.0f;
+    if (avail < 8.0f) avail = 8.0f;   // 极窄时按 8px 兜底（EstimateLineCount 内部也会兜）
+    // lineHeight：扩展绘制段的百分数（0 = 未声明，EstimateLineStep 按 1.35×字号）
+    int lineHeightPct = 0;
+    if (const BinUIPaintNode* p = paintOf(nodeId)) lineHeightPct = p->lineHeight;
+    // 直接采用新文本算出的高度（短文本跟着变矮），但**不低于编译期的基线高度**：
+    // 编译器那边是 max(元素默认盒高, 估算高度)，这里漏了基线就会把短文本压扁
+    // （13px 的 span 默认盒高 20，估算只有 17.6）。
+    float h = EstimateTextHeight(text, fontSize, avail, lineHeightPct);
+    if (spec->autoBase > 0 && h < static_cast<float>(spec->autoBase))
+        h = static_cast<float>(spec->autoBase);
+    node.height = h;
 }
 
 void BinUIRenderer::setVisible(uint16_t nodeId, bool visible) {
@@ -703,6 +733,30 @@ void BinUIRenderer::setVisible(uint16_t nodeId, bool visible) {
     } else {
         nodes_[it->second].flags &= ~BINUI_VISIBLE;
     }
+}
+
+// 运行时改节点矩形：只动这一个节点，不做流式/flex 重排（兄弟节点位置不变）。
+// 宿主自己排版（比如按新文本算完高度后把后续节点下挪）时用。
+bool BinUIRenderer::setNodeBounds(uint16_t nodeId, float x, float y, float w, float h) {
+    auto it = nodeIndexById_.find(nodeId);
+    if (it == nodeIndexById_.end()) return false;
+    if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) || !std::isfinite(h)) return false;
+    if (w < 0.0f || h < 0.0f) return false;
+    NodeInfo& node = nodes_[it->second];
+    node.x = x;
+    node.y = y;
+    node.width = w;
+    node.height = h;
+    return true;
+}
+
+// 规格段的 heightAuto 标记：高度是编译期按文本估算撑开的（见 binui_format.h）
+bool BinUIRenderer::specHeightAuto(uint16_t nodeId) const {
+    auto it = nodeIndexById_.find(nodeId);
+    if (it == nodeIndexById_.end()) return false;
+    if (it->second >= specOf_.size()) return false;
+    const BinUISpecNode* s = specOf_[it->second];
+    return s && s->heightAuto != 0;
 }
 
 uint16_t BinUIRenderer::findNodeByName(const std::string& name) const {
@@ -717,6 +771,8 @@ uint16_t BinUIRenderer::addNode(uint16_t parentId, uint8_t type,
         for (const auto& n : nodes_)
             if ((uint32_t)n.id + 1 > nextNodeId_) nextNodeId_ = (uint16_t)(n.id + 1);
     }
+    // id 是 uint16_t：用尽后回绕会撞上已有节点，宁可返回 0（调用方当失败处理）
+    if (nextNodeId_ >= 0xFFFFu) return 0;
     NodeInfo node;
     node.id = nextNodeId_++;
     node.parentId = parentId;
@@ -1167,8 +1223,47 @@ int BinUIRenderer::dispatchClick(float x, float y) {
 
 // ============ 滚动容器 ============
 
-namespace {
-constexpr float kScrollBarW = 8.0f; // 滚动条宽度/厚度
+// ============ 滚动条样式 ============
+// 默认值按根节点底色亮度派生：浅底给浅色轨道/滑块，深底保持原来的深灰。
+// 亮度用常规 0.299R + 0.587G + 0.114B（归一化到 0..1），阈值 0.55。
+// 为什么不看 CSS：滚动条是后端自绘的，CSS 那边（scrollbar-color）还没落到格式
+// 段里；这里先把"不刺眼"这件事做掉，样式仍可由 setScrollbarStyle 覆盖。
+void BinUIRenderer::deriveScrollbarStyleFromRoot() {
+    uint32_t bg = 0xFF000000u;
+    if (!nodes_.empty()) bg = nodes_[0].color;
+    else if (winDesc_.present) bg = winDesc_.bgColor;
+
+    const float r = static_cast<float>((bg >> 16) & 0xFFu);
+    const float g = static_cast<float>((bg >> 8) & 0xFFu);
+    const float b = static_cast<float>(bg & 0xFFu);
+    const float lum = (0.299f * r + 0.587f * g + 0.114f * b) / 255.0f;
+
+    if (lum > 0.55f) {              // 浅底：浅色轨道/滑块
+        scrollbarStyle_.track = 0xFFE5E7EBu;
+        scrollbarStyle_.thumb = 0xFFC7CBD1u;
+    } else {                        // 深底：保持现状
+        scrollbarStyle_.track = 0xFF2E2E2Eu;
+        scrollbarStyle_.thumb = 0xFF5A5A5Au;
+    }
+    scrollbarStyle_.width = 8;      // 宽度不随亮暗变，回到默认值
+}
+
+void BinUIRenderer::setScrollbarStyle(uint32_t thumb_argb, uint32_t track_argb, int width) {
+    scrollbarStyle_.thumb = thumb_argb;
+    scrollbarStyle_.track = track_argb;
+    if (width < 2) width = 2;       // 太窄点不中，太宽压内容
+    if (width > 32) width = 32;
+    scrollbarStyle_.width = width;
+    scrollbarStyleExplicit_ = true;
+}
+
+void BinUIRenderer::resetScrollbarStyleToDefault() {
+    scrollbarStyleExplicit_ = false;
+    deriveScrollbarStyleFromRoot();
+}
+
+const BinUIScrollbarStyle& BinUIRenderer::scrollbarStyle() const {
+    return scrollbarStyle_;
 }
 
 bool BinUIRenderer::isScrollable(uint16_t nodeId) const {
@@ -1297,6 +1392,7 @@ static bool ScrollThumbRect(const BinUIRenderer::NodeInfo& c, float contentH,
 }
 
 int BinUIRenderer::hitScrollBar(float x, float y, bool& vertical) const {
+    const float barW = static_cast<float>(scrollbarStyle_.width);  // 命中区宽度跟样式走
     for (size_t i = nodes_.size(); i-- > 0;) {
         const auto& n = nodes_[i];
         if (!isUserScrollable(n.id) || !(n.flags & BINUI_VISIBLE)) continue;
@@ -1306,7 +1402,7 @@ int BinUIRenderer::hitScrollBar(float x, float y, bool& vertical) const {
         // 垂直滚动条（右缘）
         float tp, ts;
         if (ScrollThumbRect(n, ch, sy, true, tp, ts)) {
-            if (x >= n.x + n.width - kScrollBarW && x <= n.x + n.width &&
+            if (x >= n.x + n.width - barW && x <= n.x + n.width &&
                 y >= n.y && y <= n.y + n.height) {
                 vertical = true;
                 return n.id;
@@ -1314,7 +1410,7 @@ int BinUIRenderer::hitScrollBar(float x, float y, bool& vertical) const {
         }
         // 水平滚动条（下缘）
         if (ScrollThumbRect(n, ch, sy, false, tp, ts)) {
-            if (y >= n.y + n.height - kScrollBarW && y <= n.y + n.height &&
+            if (y >= n.y + n.height - barW && y <= n.y + n.height &&
                 x >= n.x && x <= n.x + n.width) {
                 vertical = false;
                 return n.id;

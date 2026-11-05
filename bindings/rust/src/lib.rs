@@ -204,6 +204,34 @@ extern "C" {
     fn binui_poll_event(app: *mut c_void, out: *mut RawEvent) -> i32;
     fn binui_app_destroy(app: *mut c_void);
 
+    // 运行期能力（docs/issues/07）：滚动 / 节点几何 / 动态节点 / 滚动条样式
+    fn binui_scroll_to(app: *mut c_void, node_id: i32, x: f32, y: f32);
+    fn binui_scroll_by(app: *mut c_void, node_id: i32, dx: f32, dy: f32);
+    fn binui_content_height(app: *mut c_void, node_id: i32) -> f32;
+    fn binui_set_node_bounds(
+        app: *mut c_void,
+        node_id: i32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    ) -> i32;
+    fn binui_add_node(
+        app: *mut c_void,
+        parent_id: i32,
+        node_type: i32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: u32,
+        radius: i32,
+        font_size: i32,
+    ) -> i32;
+    fn binui_remove_node(app: *mut c_void, node_id: i32) -> i32;
+    fn binui_set_scrollbar_style(app: *mut c_void, track: u32, thumb: u32, width: i32) -> i32;
+    fn binui_reset_scrollbar_style(app: *mut c_void);
+
     fn binui_node_count(app: *mut c_void) -> i32;
     fn binui_node_at(app: *mut c_void, index: i32, out: *mut RawNode) -> i32;
     fn binui_node_by_id(app: *mut c_void, id: i32, out: *mut RawNode) -> i32;
@@ -519,6 +547,67 @@ impl App {
         } else {
             Err(last_error())
         }
+    }
+
+    // ---------- 运行期能力：滚动 / 节点几何 / 动态节点 ----------
+    //
+    // 限制：运行期 add_node 加出来的节点不参与 set_size 的百分比 / flex 重排，
+    // 也不会自动给兄弟节点让位 —— 需要自己挪（set_node_bounds）。
+
+    /// 设置滚动容器的滚动偏移（自动钳制到内容范围）
+    pub fn scroll_to(&self, id: i32, x: f32, y: f32) {
+        unsafe { binui_scroll_to(self.handle, id, x, y) }
+    }
+
+    /// 相对滚动
+    pub fn scroll_by(&self, id: i32, dx: f32, dy: f32) {
+        unsafe { binui_scroll_by(self.handle, id, dx, dy) }
+    }
+
+    /// 滚动容器的内容总高；无此节点返回 -1
+    pub fn content_height(&self, id: i32) -> f32 {
+        unsafe { binui_content_height(self.handle, id) }
+    }
+
+    /// 直接改节点矩形（宿主自己排版 / 手动撑高）；只动这一个节点
+    pub fn set_node_bounds(&self, id: i32, x: f32, y: f32, w: f32, h: f32) -> bool {
+        unsafe { binui_set_node_bounds(self.handle, id, x, y, w, h) == 1 }
+    }
+
+    /// 在 parent_id 下追加节点，返回新节点 id；失败返回 -1
+    #[allow(clippy::too_many_arguments)]
+    pub fn add_node(
+        &self,
+        parent_id: i32,
+        node_type: i32,
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        color: u32,
+        radius: i32,
+        font_size: i32,
+    ) -> i32 {
+        unsafe {
+            binui_add_node(
+                self.handle, parent_id, node_type, x, y, w, h, color, radius, font_size,
+            )
+        }
+    }
+
+    /// 隐藏节点（节点保留在表里供复用，id 不会被回收）
+    pub fn remove_node(&self, id: i32) -> bool {
+        unsafe { binui_remove_node(self.handle, id) == 1 }
+    }
+
+    /// 设置滚动条外观（轨道色 / 滑块色 / 轨道宽）。不调用时按根节点底色亮度自动派生
+    pub fn set_scrollbar_style(&self, track: u32, thumb: u32, width: i32) -> bool {
+        unsafe { binui_set_scrollbar_style(self.handle, track, thumb, width) == 1 }
+    }
+
+    /// 回到按根节点底色派生的默认滚动条样式
+    pub fn reset_scrollbar_style(&self) {
+        unsafe { binui_reset_scrollbar_style(self.handle) }
     }
 
     /// 挂载 `<use ... external>` 记录的外挂组件，返回挂载数量
