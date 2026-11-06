@@ -117,3 +117,34 @@ void BinUIAppGLGdi::close() {
 
 另外：我的宿主里只要改成"抓完图 `os.Exit()` 不调 destroy"就 6/6 稳定，
 可作为"确实卡在 destroy"的旁证。
+
+
+---
+
+## 复验（2026-11-06，外部宿主 · 结论有更正）
+
+`20e7a71` 修完之后，用**原来那个宿主**做了对照实验（同一份二进制，只切 DLL 和
+是否 `runtime.LockOSThread`），每轮 `WaitForExit(6000)`，超时记挂死：
+
+| binUI | 宿主 `LockOSThread` | 结果 |
+|---|---|---|
+| `88931ee`（本文件报告的版本） | ❌ | **11/16 崩溃**（写 `0x1528`，在 `binui_app_destroy`） |
+| `88931ee` | ✅ | **16/16 正常** |
+| `20e7a71` | ❌ | **3/12 挂死**（不崩，停在 `binui_app_destroy`，6s 不退出） |
+| `20e7a71` | ✅ | **12/12 正常** |
+
+**更正**：这条崩溃的根因不是 `close()` 的顺序，而是**我的宿主跨线程调用**了
+Win32/WGL —— Go 的 main goroutine 没 `LockOSThread` 时会迁移，`DestroyWindow` /
+`gfx_.shutdown()` 落到了非建窗线程上。旧代码在"宿主正确加锁"时 16/16 不崩，
+所以：
+
+- 本文件里"约一半概率的 AV"**不是 binUI 的缺陷**，我把它算错了；
+- `20e7a71` 对 `close()` 的加固仍然值得留（顺序确实更稳，`WM_PAINT` 就绪守卫也有意义），
+  但它没有"修好"这个崩溃，因为崩溃本来不在库里；
+- 修完之后，跨线程宿主的症状从"偶尔崩"变成"偶尔挂"，两者都没有任何提示 ——
+  这才是真正该修的地方，见 [08-go-binding-thread-affinity.md](08-go-binding-thread-affinity.md)。
+
+顺带：用同一个宿主复核了 01 / 03 / 04（真窗口抓图，不是 `gl_shot`）——
+26×26 头像、34×34 发送键都是**正圆**，气泡 20、Composer 28 也正常；
+`display:none` 只剩对照组；`text-align:left` 生效而"没写 text-align 的按钮仍居中"。
+这三条是真的修好了。

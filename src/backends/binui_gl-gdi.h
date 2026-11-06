@@ -148,9 +148,15 @@ public:
     // run() 完全等价于 open(); while (pump(1) == 0) {} close(); 三者的行为逐帧一致，
     // 只是把"谁拥有消息循环"交出去：宿主自己决定每帧什么时候推进。
     bool open();              // 建窗口 + GL 上下文（失败返回 false）
-    int  pump(int timeoutMs); // 推进一帧：收消息 → update → 绘制脏区；返回 0=继续 1=已关闭
+    // 推进一帧：收消息 → update → 绘制脏区。
+    // 返回 0 = 继续；1 = 已关闭；**-1 = 调用线程不是建窗线程**（宿主写错了，别再继续）。
+    // 窗口/WGL 上下文都有线程亲和：从别的线程进来不会立刻炸，而是随机崩或退出时挂死，
+    // 所以这里显式拦一道（见 docs/issues/08）。
+    int  pump(int timeoutMs);
     void close();             // 销毁窗口（幂等，可在 pump 返回 1 后调用）
     bool isOpen() const { return running_; }
+    // 当前调用线程是不是建窗线程（binui_render / binui_pump 的自检用）
+    bool onOwnerThread() const;
 
     // ---------- 子窗口模式（作为控件嵌进宿主窗口）----------
     // 和 open() 的差别只有三处：WS_CHILD 而不是顶层无边框窗；**不碰进程 DPI 策略**
@@ -203,6 +209,9 @@ private:
 
     bool running_ = false;
     bool childMode_ = false;  // true = WS_CHILD（宿主窗口里的控件），不走自己的消息循环
+    // 建窗线程（Win32 窗口 + WGL 上下文都有线程亲和）。open()/openChild() 时记下，
+    // pump()/renderFrame() 每次比对；0 = 还没建窗。
+    unsigned long ownerThread_ = 0;
     std::chrono::steady_clock::time_point lastTime_;  // pump() 的帧间隔基准
     bool dirty_ = true;
     int dirtyL_ = 0, dirtyT_ = 0, dirtyR_ = 0, dirtyB_ = 0;

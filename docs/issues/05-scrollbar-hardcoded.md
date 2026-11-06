@@ -1,4 +1,4 @@
-> **状态：已修复：滚动条样式来自 BinUIScrollbarStyle，默认按根节点底色亮度派生，C ABI 可用 binui_set_scrollbar_style() 覆盖；CSS scrollbar-* 会告警。**
+> **状态：已修复（配色 + gutter）** —— 滚动条样式来自 `BinUIScrollbarStyle`，默认按根节点底色亮度派生，C ABI 可用 `binui_set_scrollbar_style()` 覆盖；CSS `scrollbar-*` 会告警。**gutter 也补上了**：真的要出竖直滚动条时，滚动容器右侧扣掉滚动条宽度，内容不再被压住（三个后端一致）。
 
 # 滚动条颜色/宽度写死在渲染里，浅色主题下是一条黑杠
 

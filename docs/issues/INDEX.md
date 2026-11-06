@@ -19,12 +19,13 @@ Windows 11 · MinGW-w64 gcc · Go 1.26（cgo）
 | # | 标题 | 类型 | 严重度 | 一眼结论 |
 |---|---|---|---|---|
 | 01 | [圆角接近「短边一半」时退化，胶囊/正圆画不出来](01-gl-radius-degrades.md) | bug | **高** | 九宫格拼接在中段宽度变负时失效；`<circle>` 正好踩中 |
-| 02 | [`binui_app_destroy()` 在窗口仍打开时崩（约 50%）](02-app-destroy-crash.md) | bug | **P0 崩溃** | 先 `gfx_.shutdown()` 再 `DestroyWindow()`，销毁途中的重绘踩到已拆的 GL |
+| 02 | [`binui_app_destroy()` 在窗口仍打开时崩（约 50%）](02-app-destroy-crash.md) | bug → **归因更正** | P0 | 复验：旧码 + 宿主加锁 16/16 不崩 → 真因是跨线程（见 08），`close()` 的顺序只是隐患 |
 | 03 | [`display:none` 只跳过元素本身，子树被重挂到根](03-display-none-subtree-leak.md) | bug | 高 | 子元素跑到左上角，且**零警告** |
 | 04 | [按钮默认底色写死 `#222222` + 文字强制居中/粗体](04-button-default-bg-and-text-align.md) | bug | 中 | 浅色主题下按钮就是黑块；左对齐只能拿空按钮当底 |
-| 05 | [滚动条颜色/宽度写死](05-scrollbar-hardcoded.md) | bug | 中 | 浅色主题右侧一条黑杠，内容还被压住 8px |
+| 05 | [滚动条颜色/宽度写死](05-scrollbar-hardcoded.md) | bug | 中 | 浅色主题右侧一条黑杠，内容还被压住 8px —— 配色与 gutter 都已修 |
 | 06 | [`setText` 不重算文本高度](06-settext-no-reflow.md) | enhancement | 中 | 运行期换长文本就压到下一个元素 |
 | 07 | [C ABI 缺 `scrollTo` / `setNodeBounds` / `addNode`](07-cabi-runtime-apis.md) | enhancement | 中 | 渲染器里都有，只是没导出；Go 绑定还漏了 `set_image*` |
+| 08 | [Go 绑定文档说错「主 goroutine 天然固定线程」](08-go-binding-thread-affinity.md) | documentation | **高（踩了就必现）** | 宿主不 `LockOSThread` → 跨线程调 Win32/WGL → 随机崩或退出挂死；**02 的崩溃就是这条** |
 
 ## 修复顺序建议
 

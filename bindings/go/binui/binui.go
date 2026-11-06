@@ -18,9 +18,17 @@
 //		}
 //	}
 //
-// 注意：窗口必须在同一个 OS 线程上创建和 pump。主 goroutine 天然固定线程，
-// 所以别把 Pump 丢进子 goroutine —— 那不是线程安全问题，是 Win32 的规则
-// （子 goroutine 上要自己 runtime.LockOSThread()）。
+// 注意：窗口必须在**同一个 OS 线程**上 create/open/pump/destroy。
+//
+// Go 这边有个坑：main goroutine 只在启动时位于主线程，运行期可以在安全点被调度到
+// 别的 M —— 所以"别把 Pump 丢进子 goroutine"并不够，**main 里也必须锁线程**。
+// 最省事的写法是用 RunMain 包一层（它替你做 runtime.LockOSThread）：
+//
+//	func main() { os.Exit(binui.RunMain(run)) }
+//
+// 不锁的症状是随机崩溃或退出时挂死（Win32 窗口与 WGL 上下文都有线程亲和），
+// 而且日志里一句提示都没有。现在 binui_pump 会拒绝非建窗线程的调用（返回 -1），
+// Pump 于是返回 false 并把原因放进 LastError()。
 //
 // 构建（仓库根目录）:
 //
@@ -48,6 +56,7 @@ import "C"
 
 import (
 	"errors"
+	"runtime"
 	"unsafe"
 )
 
@@ -223,6 +232,33 @@ func (a *App) Open(width, height int, flags uint32, title string) error {
 // Pump 推进一帧；返回 false 表示窗口已关闭。
 func (a *App) Pump(timeoutMs int) bool {
 	return C.binui_pump(a.h, C.int32_t(timeoutMs)) == 0
+}
+
+// ErrWrongThread 是"在非建窗线程上推进窗口"的错误标记，可用 errors.Is 判断
+var ErrWrongThread = errors.New("binui: 调用线程不是建窗线程（窗口/GL 上下文有线程亲和）")
+
+// PumpOrErr 与 Pump 一样，但把"线程不对"单独报出来：
+// 返回 (继续, nil) / (false, nil) = 窗口已关闭 / (false, ErrWrongThread) = 宿主写错了。
+func (a *App) PumpOrErr(timeoutMs int) (bool, error) {
+	rc := C.binui_pump(a.h, C.int32_t(timeoutMs))
+	switch {
+	case rc == 0:
+		return true, nil
+	case rc < 0:
+		return false, ErrWrongThread
+	default:
+		return false, nil
+	}
+}
+
+// RunMain 锁住 OS 线程后执行 fn，返回它的退出码。
+//
+// 只要是"建窗 + 消息循环"的宿主就必须用它（或者自己在 main 里 runtime.LockOSThread）。
+// 一定要在 main 里调，不要在子 goroutine 里调完再回 main —— 锁是 goroutine 级的。
+func RunMain(fn func() int) int {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	return fn()
 }
 
 // OpenChild 以子窗口形式把 binUI 挂进宿主窗口 parent 的客户区（CWnd / QWidget 的 HWND）。

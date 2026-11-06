@@ -139,9 +139,21 @@ Python 用户不会撞上经典的 `OSError: [WinError 126] 找不到指定模�
 
 ## 线程与窗口
 
-- 窗口必须在**创建它的那个线程**上 `pump` / `render`。Win32 规则，不是线程安全问题。
-  Python：主循环天然满足；Go：别把 `Pump` 丢进子 goroutine（要丢就
-  `runtime.LockOSThread()`）；Rust：绑定刻意不给 `App` 实现 `Send`。
+- 窗口必须在**创建它的那个线程**上 `pump` / `render` / `resize` / `destroy`。
+  Win32 与 WGL 都有线程亲和，这不是"线程安全"问题，是 API 契约。
+  违反了**不会当场报错**，而是随机 AV 或退出时挂死（[issues/08](issues/08-go-binding-thread-affinity.md)
+  就是这条：宿主没锁线程，崩在 `binui_app_destroy` 里，被误当成库的 bug）。
+- 本库自己拦了一道：`binui_pump` / `binui_render` 在非建窗线程上调用时返回 **-1**
+  （并往 stderr 打一行说明），`binui_app_destroy` 会先打警告再执行。
+- 各语言的正确写法：
+
+  | 语言 | 做法 |
+  |---|---|
+  | Python | 主循环天然在同一线程，不用管 |
+  | Go | **`main` 里也必须 `runtime.LockOSThread()`** —— main goroutine 会在安全点被调度到别的 M，只加在子 goroutine 上不够。直接用 `binui.RunMain(func() int { … })` 包一层 |
+  | Rust | 绑定刻意不给 `App` 实现 `Send`，编译期就挡住 |
+  | C/C++ | 自己在同一个线程里跑循环即可 |
+
 - 两种形态：**独立顶层窗**（`binui_app_open` + `binui_pump`）和**子窗口/控件**
   （`binui_app_open_child` + `binui_render`）。后者见下一节。
 

@@ -52,6 +52,12 @@ mingw32-make SHELL=sh test
 > `STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139)` 或直接段错误。把目标工具链目录
 > （如 `C:\ubin\mingw64\bin`）放到 PATH 最前再跑 `make test`。
 
+> **重建 third_party 的坑**：Harfbuzz **必须**带 `-Dfreetype=enabled` 编译，否则链接
+> 时报 `undefined reference to hb_ft_font_create_referenced`。本机没有 pkg-config 时
+> meson 找不到 FreeType，先 `cmake --install` FreeType 到一个 prefix，再用
+> `PKG_CONFIG_PATH`/`CMAKE_PREFIX_PATH` 指过去（仓库里 `third_party/freetype/dist/`
+> 就是这个 prefix，可以删，但删了下次重建 harfbuzz 要自己补）。
+
 ## 改代码的硬规矩
 
 1. **核心库不依赖平台 API**。`src/compiler`、`src/renderer`、`src/font`、`include/*`（除后端头）里

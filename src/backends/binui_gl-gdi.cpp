@@ -1730,9 +1730,14 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
     for (size_t i = 0; i < nodes.size(); i++) byId[nodes[i].id] = i;
 
     std::unordered_map<uint16_t, binui::BinUIRenderer::ScrollState> scrolls;
+    // 真的要出竖直滚动条的容器 → 给它留 gutter（右侧扣掉滚动条宽度）。
+    // 以前滚动条直接压在内容上：最右一列文字/气泡会被盖住一截（docs/issues/05）。
+    std::unordered_map<uint16_t, int32_t> gutterOf;
+    const int32_t sbW = static_cast<int32_t>(renderer.scrollbarStyle().width);
     for (const auto& node : nodes) {
         if (node.flags & BINUI_SCROLLABLE) {
             if (const auto* s = renderer.scrollState(node.id)) scrolls[node.id] = *s;
+            if (renderer.contentHeight(node.id) > node.height + 0.5f) gutterOf[node.id] = sbW;
         }
     }
 
@@ -1762,6 +1767,9 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
             vpT[i] = static_cast<int32_t>(par.y);
             vpR[i] = static_cast<int32_t>(par.x + par.width);
             vpB[i] = static_cast<int32_t>(par.y + par.height);
+            // 出竖直滚动条时右侧留 gutter：内容裁在滚动条左边，不再被它压住
+            auto git = gutterOf.find(par.id);
+            if (git != gutterOf.end()) vpR[i] -= git->second;
         } else {
             hasVp[i] = hasVp[pi];
             vpL[i] = vpL[pi]; vpT[i] = vpT[pi];
@@ -2648,6 +2656,7 @@ bool BinUIAppGLGdi::open() {
 
     lastTime_ = std::chrono::steady_clock::now();
     running_ = true;
+    ownerThread_ = static_cast<unsigned long>(GetCurrentThreadId());
     return true;
 }
 
@@ -2693,11 +2702,31 @@ bool BinUIAppGLGdi::openChild(void* parent, int x, int y, int width, int height)
 
     lastTime_ = std::chrono::steady_clock::now();
     running_ = true;
+    ownerThread_ = static_cast<unsigned long>(GetCurrentThreadId());
     return true;
+}
+
+// 当前线程是不是建窗线程。窗口与 WGL 上下文都有线程亲和：从别的线程调 pump/render
+// 不会立刻报错，而是随机崩（GL 状态被并发改）或退出时挂死 —— 见 docs/issues/08。
+bool BinUIAppGLGdi::onOwnerThread() const {
+    if (ownerThread_ == 0) return true;   // 还没建窗：交给上层按"未打开"处理
+    return ownerThread_ == static_cast<unsigned long>(GetCurrentThreadId());
 }
 
 void BinUIAppGLGdi::renderFrame() {
     if (!running_) return;
+    if (!onOwnerThread()) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::fprintf(stderr,
+                "[binui] binui_render/binui_pump 在**非建窗线程**上被调用 —— "
+                "Windows 窗口与 OpenGL 上下文都有线程亲和，继续跑会随机崩溃或退出挂死。\n"
+                "        Go 宿主：在 main 里调一次 runtime.LockOSThread()（单线程锁住，"
+                "不是只加在子 goroutine 上）。\n");
+        }
+        return;
+    }
     const auto now = std::chrono::steady_clock::now();
     float dt = std::chrono::duration<float>(now - lastTime_).count();
     lastTime_ = now;
@@ -2717,6 +2746,20 @@ void BinUIAppGLGdi::setClientSize(int width, int height) {
 
 int BinUIAppGLGdi::pump(int timeoutMs) {
     if (!running_) return 1;
+    // 跨线程调用：明确报错，别让它变成"随机崩 / 退出挂死"（docs/issues/08）
+    if (!onOwnerThread()) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::fprintf(stderr,
+                "[binui] binui_pump 在**非建窗线程**上被调用，已拒绝（返回 -1）。\n"
+                "        Windows 窗口与 OpenGL 上下文都有线程亲和：宿主必须在同一个 OS 线程上"
+                "建窗、pump、销毁。\n"
+                "        Go 宿主：在 main 里调一次 runtime.LockOSThread()（main goroutine "
+                "会被调度到别的线程，只加在子 goroutine 上不够）。\n");
+        }
+        return -1;
+    }
 
     // 子窗口模式：消息由宿主的循环派发（DispatchMessage 会投递到本窗口的 wndProc），
     // 这里**绝不能** PeekMessage —— 那会把宿主的消息抽走，宿主自己的控件就不响应了。
@@ -2748,14 +2791,23 @@ int BinUIAppGLGdi::pump(int timeoutMs) {
 
 void BinUIAppGLGdi::close() {
     running_ = false;
-    // 窗口还开着就销毁时，DestroyWindow 会**同步**把 WM_KILLFOCUS / WM_NCDESTROY 派发给
-    // 我们的窗口过程，而 GL 上下文这时已经被 shutdown() 拆掉了 —— 重入路径踩到已析构的
-    // 成员，表现为随机 AV（docs/issues/02：约一半概率，写地址恒定）。
-    // 正确顺序：先把窗口过程摘回 DefWindowProc（之后任何消息都不进我们的代码），
-    // 再把 GL 拆掉，最后才 DestroyWindow。
-    // 之前"先 shutdown 再 DestroyWindow"之所以有时不崩，是因为那条路径下窗口已经因为
-    // WM_CLOSE 走过一遍销毁，hwnd_ 早被置空 —— 只是碰巧绕开了。
+    // 销毁顺序：先把窗口过程摘回 DefWindowProc（之后任何消息都不进我们的代码，
+    // 也不会有悬垂的 GWLP_USERDATA），再拆 GL，最后 DestroyWindow。
+    //
+    // 为什么是这个顺序：窗口还活着时 DestroyWindow 会**同步**把 WM_KILLFOCUS /
+    // WM_NCDESTROY 派发回窗口过程；"先拆 GL 再销毁"在那条重入路径上会踩到已析构的成员。
+    // 这是一处真隐患，但不是 docs/issues/02 那个"约 50% AV"的根因 —— 事后复验发现，
+    // 那条崩溃的真因是**宿主跨线程**调用（Go 的 main goroutine 没 LockOSThread 会迁移），
+    // 见 docs/issues/02 的「复验」一节与 docs/issues/08。这里的加固保留，另加线程自检。
     HWND win = static_cast<HWND>(hwnd_);
+    if (win && !onOwnerThread()) {
+        // 跨线程销毁是 docs/issues/02 那个"约 50% AV"的真因（宿主没锁 OS 线程）。
+        // 走到这一步说明宿主已经写错了，但能打的提示还是要打：不然现象只有随机崩/挂。
+        std::fprintf(stderr,
+            "[binui] binui_app_destroy 在**非建窗线程**上被调用 —— "
+            "这是未定义行为（DestroyWindow / wglDeleteContext 要求建窗线程）。\n"
+            "        Go 宿主：在 main 里调一次 runtime.LockOSThread()。\n");
+    }
     if (win) {
         SetWindowLongPtrW(win, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(DefWindowProcW));
         SetWindowLongPtrW(win, GWLP_USERDATA, 0);

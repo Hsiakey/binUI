@@ -442,6 +442,11 @@ int32_t BINUI_C_CALL binui_app_open_child(void* appp, void* parent_hwnd, int32_t
 int32_t BINUI_C_CALL binui_render(void* appp) {
     App* a = A(appp);
     if (!a || !a->shell) return 1;
+    // 跨线程：窗口与 GL 上下文都有线程亲和，明确报错而不是让它随机崩（docs/issues/08）
+    if (!a->shell->onOwnerThread()) {
+        SetErr("binui_render: 调用线程不是建窗线程（窗口/GL 上下文都有线程亲和）");
+        return -1;
+    }
     a->shell->renderFrame();
     // 子窗口没有 WM_QUIT：宿主销毁自己的窗口时 WM_DESTROY 会把 shell 关掉，这里就返回 1
     return a->shell->isOpen() ? 0 : 1;
@@ -464,6 +469,11 @@ int32_t BINUI_C_CALL binui_pump(void* appp, int32_t timeout_ms) {
     App* a = A(appp);
     if (!a || !a->shell) return 1;
     const int rc = a->shell->pump(timeout_ms);
+    // -1 = 调用线程不是建窗线程：这不是"窗口关了"，不要推 CLOSE 事件（docs/issues/08）
+    if (rc < 0) {
+        SetErr("binui_pump: 调用线程不是建窗线程（窗口/GL 上下文都有线程亲和）");
+        return rc;
+    }
     if (rc != 0 && !a->closeSent) {
         a->closeSent = true;
         BinUIEvent e = MakeEvent(BINUI_EV_CLOSE);

@@ -24,6 +24,12 @@ import (
 var uiHTML string
 
 func main() {
+	// 窗口必须在同一个 OS 线程上建/跑/销毁：main goroutine 会被调度到别的 M，
+	// 所以这里必须锁线程（RunMain 就是 runtime.LockOSThread 的薄包装）。
+	os.Exit(binui.RunMain(run))
+}
+
+func run() int {
 	fmt.Println("binui_c", binui.Version(), "abi", binui.ABIVersion())
 	if binui.ABIVersion() != binui.ABI {
 		fmt.Fprintf(os.Stderr, "警告：ABI 版本不一致（库 %d / 绑定 %d）\n",
@@ -100,4 +106,5 @@ func main() {
 	})
 
 	fmt.Println("退出")
+	return 0
 }

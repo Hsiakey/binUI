@@ -9,7 +9,7 @@
 | [bex_container.md](bex_container.md) | **`.bex` 单文件容器规范（设计归档，暂不实现）**：ELF 自定义段 / PE 资源节承载 binUI 布局、节布局与 trailer |
 | [img/](img/) | 文档用图：默认布局渲染、字体渲染对比、伪类演示、语言绑定演示 |
 | [mockups/](mockups/) | 演示的**设计稿/对照稿**（HTML，不参与构建，允许出现未支持的写法）：`galgamechat.html`、`singlewindow.html` |
-| [issues/INDEX.md](issues/INDEX.md) | **用 Go + C ABI 做 GUI 时踩到的问题清单**（7 条，附复现资产与根因定位）：圆角/圆形退化、`app_destroy` 偶发崩溃、`display:none` 子树泄漏、按钮默认样式、滚动条写死、`setText` 不重排、C ABI 运行期能力缺口 |
+| [issues/INDEX.md](issues/INDEX.md) | **用 Go + C ABI 做 GUI 时踩到的问题清单**（8 条，附复现资产与根因定位）：圆角/圆形退化、`app_destroy` 偶发崩溃（复验后更正为宿主跨线程）、`display:none` 子树泄漏、按钮默认样式、滚动条写死、`setText` 不重排、C ABI 运行期能力缺口、Go 绑定线程亲和文档纠错 |
 
 ## 图片
 

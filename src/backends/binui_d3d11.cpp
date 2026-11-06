@@ -1661,9 +1661,14 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
     for (size_t i = 0; i < nodes.size(); i++) byId[nodes[i].id] = i;
 
     std::unordered_map<uint16_t, binui::BinUIRenderer::ScrollState> scrolls;
+    // 真要出竖直滚动条的容器 → 给它留 gutter（右侧扣掉滚动条宽度），
+    // 否则滚动条会直接压住最右一列内容（docs/issues/05）。
+    std::unordered_map<uint16_t, int32_t> gutterOf;
+    const int32_t sbW = static_cast<int32_t>(renderer.scrollbarStyle().width);
     for (const auto& node : nodes) {
         if (node.flags & BINUI_SCROLLABLE) {
             if (const auto* s = renderer.scrollState(node.id)) scrolls[node.id] = *s;
+            if (renderer.contentHeight(node.id) > node.height + 0.5f) gutterOf[node.id] = sbW;
         }
     }
 
@@ -1693,6 +1698,8 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
             vpT[i] = static_cast<int32_t>(par.y);
             vpR[i] = static_cast<int32_t>(par.x + par.width);
             vpB[i] = static_cast<int32_t>(par.y + par.height);
+            auto git = gutterOf.find(par.id);   // 出滚动条时右侧留 gutter
+            if (git != gutterOf.end()) vpR[i] -= git->second;
         } else {
             hasVp[i] = hasVp[pi];
             vpL[i] = vpL[pi]; vpT[i] = vpT[pi];

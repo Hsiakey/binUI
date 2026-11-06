@@ -210,7 +210,8 @@ BINUI_C_API int32_t BINUI_C_CALL binui_app_open_child(void* app, void* parent_hw
                                                       uint32_t flags);
 
 /* 只出一帧（推进动画 + 绘制脏区），**不碰消息队列**。
- * 返回 0 = 继续；1 = 窗口已关闭。子窗口模式的主循环入口。 */
+ * 返回 0 = 继续；1 = 窗口已关闭；-1 = 调用线程不是建窗线程（见下面的「线程亲和」）。
+ * 子窗口模式的主循环入口。 */
 BINUI_C_API int32_t BINUI_C_CALL binui_render(void* app);
 
 /* 宿主改了本区域尺寸时调用（等价于子窗口收到 WM_SIZE，下一帧生效）。
@@ -224,14 +225,28 @@ BINUI_C_API void* BINUI_C_CALL binui_app_hwnd(void* app);
 
 /* 推进一帧：收消息 -> 推进动画 -> 绘制脏区。
  * timeout_ms > 0 时，空闲状态下阻塞等待输入（省 CPU）；0 = 立即返回。
- * 返回 0 = 继续；1 = 窗口已关闭（此后应停止 pump 并 destroy）。
+ * 返回 0 = 继续；1 = 窗口已关闭（此后应停止 pump 并 destroy）；
+ *      **-1 = 调用线程不是建窗线程**（见下面的「线程亲和」）。
  * 建议宿主每轮先 pump 再 poll，timeout 取 8~16ms。 */
 BINUI_C_API int32_t BINUI_C_CALL binui_pump(void* app, int32_t timeout_ms);
 
 /* 取一个事件。返回 1 = 已填充 out；0 = 队列空。 */
 BINUI_C_API int32_t BINUI_C_CALL binui_poll_event(void* app, BinUIEvent* out);
 
-/* 销毁（内部会先关窗口）。NULL 安全。 */
+/* 销毁（内部会先关窗口）。NULL 安全。
+ *
+ * ---------------------------------------------------------------------------
+ * 线程亲和（**必读**，docs/issues/08）：窗口、消息循环、GL 上下文都有线程亲和。
+ * binui_app_create / open / pump / render / resize / destroy 必须在**同一个 OS 线程**
+ * 上调用。Win32 与 WGL 不会替你检查这一点，症状是随机 AV 或退出时挂死，日志里一句提示
+ * 都没有 —— 所以本库自己拦了一道：
+ *
+ *   · binui_pump / binui_render 在非建窗线程上调用时返回 -1（并往 stderr 打一行说明）；
+ *   · binui_app_destroy 在非建窗线程上调用时仍会执行（没法返回错误），但先打警告。
+ *
+ * Go 宿主特别注意：`main` goroutine **不是**固定在主线程上的 —— 运行期可能被调度到
+ * 别的 M。必须在 main 里显式 `runtime.LockOSThread()`（不是"只加在子 goroutine"），
+ * 或者直接用 `bindings/go` 里的 `binui.RunMain()`。 */
 BINUI_C_API void BINUI_C_CALL binui_app_destroy(void* app);
 
 /* ============================ 节点查询 ============================ */

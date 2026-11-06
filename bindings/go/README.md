@@ -45,8 +45,18 @@ app.Run(8, func(ev binui.Event) {
 
 ## 注意
 
-- **别把 `Pump` 丢进子 goroutine**。Win32 窗口有线程亲和；主 goroutine 天然固定
-  线程，子 goroutine 上要自己 `runtime.LockOSThread()`。绑定刻意没有在内部起线程。
+- **建窗和消息循环必须锁在一个 OS 线程上，`main` 也要锁**。Win32 窗口和 WGL 上下文
+  都有线程亲和，而 Go 的 main goroutine 只在启动时位于主线程，运行期可以被调度到
+  别的 M —— 所以"别把 `Pump` 丢进子 goroutine"并不够。用 `binui.RunMain`：
+
+  ```go
+  func main() { os.Exit(binui.RunMain(run)) }
+
+  func run() int { /* New / Open / for Pump ... / Close */ return 0 }
+  ```
+
+  不锁的症状是**随机崩溃或退出时挂死**，日志里没有任何提示。绑定没有在内部起线程，
+  也不会替你锁（锁是 goroutine 级的，得在你要跑循环的那个 goroutine 上做）。
 - cgo 每次调用有固定开销（百纳秒级），别在"逐节点每帧"的循环里反复跨 ——
   `Nodes()` 一次性拿全部快照就是这个原因。
 - 字符串走 `C.CString` + `C.free`，`GoStringN` 取回时按 `text_len` 而不是等 NUL。

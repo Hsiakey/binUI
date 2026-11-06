@@ -22,17 +22,36 @@
   圆角模板缓存加了上限（超过 48 张淘汰最大的一张）。
 - GL 与 D3D11 两个后端同步；GDI 走 `RoundRect` 本来就是对的。
 
-### 修复 — `binui_app_destroy()` 在窗口仍打开时可能崩（AV @ null+偏移）
+### 修复 — `binui_app_destroy()` 在窗口仍打开时可能崩（**结论有更正**）
+
+> 后续用原宿主复验发现：这条崩溃**不是库的缺陷**，是宿主跨线程调用（Go 的 main
+> goroutine 没 `runtime.LockOSThread()` 会迁移，`DestroyWindow` / `gfx_.shutdown()`
+> 落到非建窗线程）。旧代码 + 宿主锁线程 16/16 不崩。详见 `docs/issues/02` 的
+> 「复验」一节与 `docs/issues/08`。下面的加固保留（顺序确实更稳），但它没有"修好"
+> 那个崩溃，因为崩溃本来不在库里 —— 真正补上的是下一条的线程自检。
 
 `close()` 以前是"先 `gfx_.shutdown()` 再 `DestroyWindow()`"。窗口还活着时
 `DestroyWindow` 会**同步**把 `WM_KILLFOCUS` / `WM_NCDESTROY` 派发回窗口过程，
-而 GL 上下文这时已经拆掉了 —— 重入路径踩到已析构的成员，表现为随机 AV。
-窗口已经因为 `WM_CLOSE` 关过的路径碰巧绕开了这一步，所以只有一半概率崩。
+而 GL 上下文这时已经拆掉了 —— 重入路径踩到已析构的成员。
 
 - 顺序改成：先把窗口过程摘回 `DefWindowProc` 并清掉 `GWLP_USERDATA`（之后任何消息
   都不进我们的代码，也不会有悬垂 `this`）→ `ShowWindow(SW_HIDE)` → 拆 GL →
   `DestroyWindow`。
 - `WM_PAINT` 加就绪守卫：GL 没就绪时 `ValidateRect` 掉，别落到 `DefWindowProc` 去真画。
+
+### 新增 — 线程自检：跨线程调 `pump` / `render` 明确报错（docs/issues/08）
+
+窗口、消息循环、WGL 上下文都有线程亲和。以前跨线程调用**不报错**，症状是随机 AV
+或退出时挂死，日志里一片空白 —— 连"是不是我写错了"都看不出来。
+
+- `open()` / `openChild()` 记下建窗线程；`binui_pump` / `binui_render` 在非建窗线程上
+  调用时返回 **-1**（原语义只有 0/1，扩一位向后兼容），并往 stderr 打一行说明；
+  `binui_app_destroy` 仍会执行（没法返回错误），但先打警告。
+- Go 绑定：新增 `binui.RunMain(fn func() int) int`（替宿主 `runtime.LockOSThread`）与
+  `PumpOrErr`（把"线程不对"单独报成 `ErrWrongThread`）；demo 改用 `RunMain`。
+- **文档纠错**：`bindings/go/README.md`、`binui.go` 顶部注释、`docs/bindings.md`
+  原先都写着「主 goroutine 天然固定线程」—— 这句是错的，main goroutine 会在安全点被
+  调度到别的 M，`main` 里也必须锁线程。
 
 ### 修复 — `display:none` 只跳过元素本身，子树被重挂到最近的可见祖先
 
@@ -70,6 +89,8 @@
   三个绑定同步。三个后端都改成从 `renderer.scrollbarStyle()` 取色与宽度。
 - CSS 的 `scrollbar-color` / `scrollbar-width` 仍然不支持，但**不再静默忽略**：
   编译期会告警并指向上面的接口（否则作者会以为改主题生效了）。
+- **补上 gutter**：真的要出竖直滚动条时，滚动容器的内容视口右侧扣掉滚动条宽度，
+  内容不再被滚动条压住（GL / D3D11 / GDI 三端一致）。
 
 ### 新增 — 运行期能力：`scroll_to` / `set_node_bounds` / `add_node` 等
 
