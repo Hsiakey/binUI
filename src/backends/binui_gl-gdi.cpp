@@ -33,6 +33,7 @@
 
 #include "binui_font_renderer.h"
 #include "binui_paint.h"   // v13 扩展绘制的条带几何（与 GDI/D3D11 后端共用同一份数学）
+#include "platform/binui_win32_foreground.h"
 
 using namespace binui;
 
@@ -2894,6 +2895,9 @@ bool BinUIAppGLGdi::open() {
         hwnd_ = nullptr;
         return false;
     }
+    // WS_VISIBLE 只保证"可见"，SetFocus 只改本线程键盘焦点 —— 都不会把窗口提到
+    // 前台，于是从控制台启动时窗口被 cmd 压在后面。这里补一次显式前台化。
+    BinUIForceForeground(hwnd);
     SetFocus(hwnd);
     width_ = winW;
     height_ = winH;

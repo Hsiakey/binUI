@@ -16,6 +16,7 @@
 #include <chrono>
 
 #include "binui_paint.h"
+#include "platform/binui_win32_foreground.h"
 
 using namespace binui;
 
@@ -430,6 +431,8 @@ int BinUIApp::run() {
     SetWindowPos(reinterpret_cast<HWND>(hwnd_), nullptr, 0, 0, 0, 0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     ShowWindow(reinterpret_cast<HWND>(hwnd_), SW_SHOW);
+    // SW_SHOW 不一定能抢到前台（前台锁），从控制台启动时窗口会被 cmd 压住
+    BinUIForceForeground(reinterpret_cast<HWND>(hwnd_));
     UpdateWindow(reinterpret_cast<HWND>(hwnd_));
 
     auto lastTime = std::chrono::high_resolution_clock::now();
