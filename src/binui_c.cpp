@@ -219,6 +219,15 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
         binui::drawNodesGLGdi(gfx, a->renderer, clip, nullptr);
     });
 
+    // ---- 双击：选中双击位置所在的"词" ----
+    sh.setDoubleClickFn([a](float x, float y) {
+        if (!a->renderer.isEditing()) return;
+        const size_t u16 = binui::placeCaretAtClickGLGdi(a->renderer, a->shell->gfx(), x, y);
+        if (a->renderer.selectWordByUtf16Index(u16)) {
+            InvalidateNode(a, a->renderer.edit().nodeId);
+        }
+    });
+
     // ---- 光标形状：输入框 I 型、可交互节点手型、滚动条边缘拖动形状 ----
     sh.setCursorFn([a](float x, float y) -> int {
         return static_cast<int>(a->renderer.cursorAt(x, y));
@@ -253,6 +262,11 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
 
     // ---- 鼠标移动：悬停切换（只重绘前后两个节点） ----
     sh.setMoveFn([a](float x, float y) {
+        // 按住左键在输入框里移动 = 拖选：只挪 caret，选区起点保持按下时的锚点
+        if (a->renderer.isEditing() && (::GetKeyState(VK_LBUTTON) & 0x8000)) {
+            binui::placeCaretAtClickGLGdi(a->renderer, a->shell->gfx(), x, y, /*extend*/ true);
+            InvalidateNode(a, a->renderer.edit().nodeId);
+        }
         const int oldId = a->renderer.hoveredNode();
         a->renderer.setHover(x, y);
         const int newId = a->renderer.hoveredNode();

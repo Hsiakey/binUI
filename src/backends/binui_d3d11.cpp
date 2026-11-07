@@ -2200,8 +2200,9 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
 // ============================================================
 // placeCaretAtClickD3D（基于字形 advance 测量）
 // ============================================================
-void placeCaretAtClickD3D(BinUIRenderer& renderer, BinUID3D& gfx, float cx, float cy) {
-    if (!renderer.isEditing()) return;
+size_t placeCaretAtClickD3D(BinUIRenderer& renderer, BinUID3D& gfx, float cx, float cy,
+                            bool extend) {
+    if (!renderer.isEditing()) return 0;
     const auto& edit = renderer.edit();
 
     const auto& nodes = renderer.getNodes();
@@ -2209,14 +2210,13 @@ void placeCaretAtClickD3D(BinUIRenderer& renderer, BinUID3D& gfx, float cx, floa
     for (const auto& n : nodes) {
         if (n.id == edit.nodeId) { node = &n; break; }
     }
-    if (!node || node->type != BINUI_INPUT) return;
-    if (cy < node->y || cy > node->y + node->height) return;
-
+    if (!node || node->type != BINUI_INPUT) return 0;
+    if (cy < node->y || cy > node->y + node->height) return 0;
     std::wstring wtext = Utf8ToWide(edit.value);
     float textX = static_cast<float>(node->x) + node->padding + 4;
     float target = cx - textX;
     int fs = node->fontSize ? node->fontSize : 14;
-    if (target <= 0) { renderer.setCaretByUtf16Index(0); return; }
+    if (target <= 0) { renderer.setCaretByUtf16Index(0, extend); return 0; }
 
     // 累计前缀宽度（UTF-16 单位），找越过点击点的位置
     std::string prefix;
@@ -2245,7 +2245,8 @@ void placeCaretAtClickD3D(BinUIRenderer& renderer, BinUID3D& gfx, float cx, floa
         prefix += ch;
         idx = i + 1;
     }
-    renderer.setCaretByUtf16Index(idx);
+    renderer.setCaretByUtf16Index(idx, extend);
+    return idx;
 }
 
 // ============================================================
@@ -2404,6 +2405,14 @@ LRESULT CALLBACK BinUIAppD3D::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         case WM_LBUTTONDOWN:
             app->handleMousePress(static_cast<float>(LOWORD(lParam)),
                                   static_cast<float>(HIWORD(lParam)));
+            return 0;
+        case WM_LBUTTONDBLCLK:
+            app->handleMousePress(static_cast<float>(LOWORD(lParam)),
+                                  static_cast<float>(HIWORD(lParam)));
+            if (app->dblclick_)
+                app->dblclick_(static_cast<float>(LOWORD(lParam)),
+                               static_cast<float>(HIWORD(lParam)));
+            return 0;
             SetFocus(hwnd);
             return 0;
         case WM_LBUTTONUP:

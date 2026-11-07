@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### 新增 — 鼠标拖选与双击选词
+
+以前文本选区只能靠 Shift+方向键，鼠标用户会以为输入框坏了。
+
+- 渲染器：`setCaretByUtf16Index(idx, extend)` 多了 extend 参数 —— extend 时只挪 caret、
+  保留选区起点（按下时的锚点），这就是拖选；`selectWordByUtf16Index()` 按 UTF-16 索引
+  选中所在的"词"（ASCII 字母数字下划线 / 连续非 ASCII 当一个词；点在空白或标点上时
+  退化成"连到该处的那段非空白"）。
+- 后端：`placeCaretAtClick*()` 多了 extend 参数并返回换算出的 UTF-16 索引（双击复用
+  同一次换算，不会因为两次测量的舍入差半格）。
+- 窗口外壳：注册窗口类加 `CS_DBLCLKS`（没有它系统根本不发 `WM_LBUTTONDBLCLK`），
+  新增 `WM_LBUTTONDBLCLK` → `setDoubleClickFn`；C ABI 里把它接到"选词"，
+  并在 `setMoveFn` 里检测左键按下 → 扩展选区。
+
 ### 新增 — 剪贴板：Ctrl+C / X / V / A
 
 以前输入框能打字但不能复制粘贴 —— 等于半残。

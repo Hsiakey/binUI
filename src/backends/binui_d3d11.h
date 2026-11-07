@@ -77,7 +77,9 @@ private:
 void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clipRect,
                   const std::function<void(BinUID3D&, uint16_t, float, float, float, float)>& canvas = {});
 // 点击定位输入框光标（基于字形 advance 测量，无 GDI 依赖）
-void placeCaretAtClickD3D(BinUIRenderer& renderer, BinUID3D& gfx, float cx, float cy);
+// 与 GL 外壳同签名：extend = 拖选；返回 UTF-16 索引（双击选词复用）
+size_t placeCaretAtClickD3D(BinUIRenderer& renderer, BinUID3D& gfx, float cx, float cy,
+                            bool extend = false);
 
 // 光标闪烁相位（500ms 周期），与 GDI 后端共用语义
 bool caretBlinkOn();
@@ -102,6 +104,7 @@ public:
     using FocusFn   = std::function<void(bool focused)>;
     // 光标查询：给定客户区坐标，返回 0=箭头 1=手型 2=I 型 3=竖直 4=水平（与 GL 外壳一致）
     using CursorFn  = std::function<int(float x, float y)>;
+    using DoubleClickFn = std::function<void(float x, float y)>;
 
     BinUIAppD3D(int width, int height, bool vsync = true);
     ~BinUIAppD3D();
@@ -121,6 +124,7 @@ public:
     void setWheelFn(WheelFn fn)     { wheel_ = std::move(fn); }
     void setFocusFn(FocusFn fn)     { focus_ = std::move(fn); }
     void setCursorFn(CursorFn fn)   { cursor_ = std::move(fn); }
+    void setDoubleClickFn(DoubleClickFn fn) { dblclick_ = std::move(fn); }
 
     void invalidateRect(int x, int y, int w, int h);
     void invalidateAll();
@@ -168,6 +172,7 @@ private:
     WheelFn wheel_;
     FocusFn focus_;
     CursorFn cursor_;
+    DoubleClickFn dblclick_;
 
     bool running_ = false;
     bool dirty_ = true;

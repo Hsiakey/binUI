@@ -2155,10 +2155,48 @@ bool BinUIRenderer::setCaret(size_t byteOffset) {
     return true;
 }
 
-bool BinUIRenderer::setCaretByUtf16Index(size_t utf16Index) {
+bool BinUIRenderer::setCaretByUtf16Index(size_t utf16Index, bool extend) {
     if (!edit_.active) return false;
     edit_.caret = Utf16IndexToBytes(edit_.value, utf16Index);
-    edit_.selStart = edit_.caret;
+    // extend = 拖选：只挪 caret，选区起点（selStart）保持按下时的锚点不动
+    if (!extend) edit_.selStart = edit_.caret;
+    return true;
+}
+
+// 双击选词。分类只看字节：
+//   · >= 0x80 一律算"词内"（CJK / emoji 的每个字节都 >= 0x80，所以整串连续非 ASCII
+//     会一起被选中；字符边界天然对齐，不会切在半个字里）；
+//   · ASCII 只认字母/数字/下划线；
+//   · 点在标点或空格上时，退化成"连到上一个/下一个空白"的那一段。
+bool BinUIRenderer::selectWordByUtf16Index(size_t utf16Index) {
+    if (!edit_.active) return false;
+    const std::string& v = edit_.value;
+    const size_t i = std::min(Utf16IndexToBytes(v, utf16Index), v.size());
+    auto isWord = [](unsigned char c) {
+        if (c >= 0x80) return true;
+        return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') ||
+               (c >= 'A' && c <= 'Z') || c == '_';
+    };
+    auto isSpace = [](unsigned char c) {
+        return c == ' ' || c == '\t' || c == '\n' || c == '\r';
+    };
+    // 光标落在字符右侧还是左侧：优先看右边那个字符
+    const bool wordClass = (i < v.size()) ? isWord(static_cast<unsigned char>(v[i]))
+                         : (i > 0 ? isWord(static_cast<unsigned char>(v[i - 1])) : false);
+    size_t a = i, b = i;
+    while (a > 0) {
+        const unsigned char c = static_cast<unsigned char>(v[a - 1]);
+        if (wordClass ? !isWord(c) : isSpace(c)) break;
+        --a;
+    }
+    while (b < v.size()) {
+        const unsigned char c = static_cast<unsigned char>(v[b]);
+        if (wordClass ? !isWord(c) : isSpace(c)) break;
+        ++b;
+    }
+    if (b <= a) return false;
+    edit_.selStart = a;
+    edit_.caret = b;
     return true;
 }
 

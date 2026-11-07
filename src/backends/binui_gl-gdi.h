@@ -89,7 +89,10 @@ using CanvasDrawFn = std::function<void(BinUIGLGdi& gfx, uint16_t nodeId,
 void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* clipRect,
                  const CanvasDrawFn& canvas = {});
 // 点击定位输入框光标（基于字形 advance 测量）
-void placeCaretAtClickGLGdi(BinUIRenderer& renderer, BinUIGLGdi& gfx, float cx, float cy);
+// 把点击位置换算成光标位置并落点；extend = 拖选（只挪 caret，选区起点不动）。
+// 返回换算出来的 UTF-16 索引（双击选词要用同一个换算结果）。
+size_t placeCaretAtClickGLGdi(BinUIRenderer& renderer, BinUIGLGdi& gfx, float cx, float cy,
+                              bool extend = false);
 
 // 光标闪烁相位（500ms 周期），与 GDI/D3D 后端共用语义
 bool caretBlinkOn();
@@ -115,6 +118,8 @@ public:
     // 光标查询：给定客户区坐标，返回 BinUICursorKind（0=箭头 1=手型 2=I 型 3=竖直 4=水平）。
     // 以前整个库只加载了 IDC_ARROW，文本框里不会变 I 型、按钮上没有手型 —— 用过就发现"不像原生"。
     using CursorFn  = std::function<int(float x, float y)>;
+    // 双击：宿主拿到的是客户区坐标（双击选词用）
+    using DoubleClickFn = std::function<void(float x, float y)>;
 
     BinUIAppGLGdi(int width, int height, bool vsync = true);
     ~BinUIAppGLGdi();
@@ -134,6 +139,7 @@ public:
     void setWheelFn(WheelFn fn)     { wheel_ = std::move(fn); }
     void setFocusFn(FocusFn fn)     { focus_ = std::move(fn); }
     void setCursorFn(CursorFn fn)   { cursor_ = std::move(fn); }
+    void setDoubleClickFn(DoubleClickFn fn) { dblclick_ = std::move(fn); }
 
     void invalidateRect(int x, int y, int w, int h);
     void invalidateAll();
@@ -211,6 +217,7 @@ private:
     WheelFn wheel_;
     FocusFn focus_;
     CursorFn cursor_;
+    DoubleClickFn dblclick_;
 
     bool running_ = false;
     bool childMode_ = false;  // true = WS_CHILD（宿主窗口里的控件），不走自己的消息循环

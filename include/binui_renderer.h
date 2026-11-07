@@ -280,7 +280,12 @@ public:
     bool deleteForward();                              // 删除光标后字符
     bool moveCaret(int deltaChars, bool extend = false); // 按字符移动光标，extend 时保留选区起点
     bool setCaret(size_t byteOffset);                  // 设置光标（钳制到字符边界）
-    bool setCaretByUtf16Index(size_t utf16Index);      // 后端测量后按 UTF-16 索引定位
+    // 后端测量后按 UTF-16 索引定位。extend=true 时**保留选区起点** —— 鼠标拖选就靠它：
+    // 按下时 anchor 落在 selStart，拖动过程中只挪 caret。
+    bool setCaretByUtf16Index(size_t utf16Index, bool extend = false);
+    // 双击选词：按 UTF-16 索引选中它所在的"词"（ASCII 字母数字下划线 / 连续非 ASCII
+    // 当一个词；点在标点上则选中连续的一段标点/符号）。返回 false = 那里没有可选内容。
+    bool selectWordByUtf16Index(size_t utf16Index);
 
     // 剪贴板编辑（真正的剪贴板 I/O 在平台层：GL/D3D 外壳与 C ABI 各读各的）。
     // 这三个是"文本层面的动作"：取选中文字、删掉选区、全选。

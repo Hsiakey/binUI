@@ -2266,8 +2266,9 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
 // ============================================================
 // placeCaretAtClickGLGdi（基于字形 advance 测量）
 // ============================================================
-void placeCaretAtClickGLGdi(BinUIRenderer& renderer, BinUIGLGdi& gfx, float cx, float cy) {
-    if (!renderer.isEditing()) return;
+size_t placeCaretAtClickGLGdi(BinUIRenderer& renderer, BinUIGLGdi& gfx, float cx, float cy,
+                              bool extend) {
+    if (!renderer.isEditing()) return 0;
     const auto& edit = renderer.edit();
 
     const auto& nodes = renderer.getNodes();
@@ -2275,14 +2276,14 @@ void placeCaretAtClickGLGdi(BinUIRenderer& renderer, BinUIGLGdi& gfx, float cx, 
     for (const auto& n : nodes) {
         if (n.id == edit.nodeId) { node = &n; break; }
     }
-    if (!node || node->type != BINUI_INPUT) return;
-    if (cy < node->y || cy > node->y + node->height) return;
+    if (!node || node->type != BINUI_INPUT) return 0;
+    if (cy < node->y || cy > node->y + node->height) return 0;
 
     std::wstring wtext = Utf8ToWide(edit.value);
     float textX = static_cast<float>(node->x) + node->padding + 4;
     float target = cx - textX;
     int fs = node->fontSize ? node->fontSize : 14;
-    if (target <= 0) { renderer.setCaretByUtf16Index(0); return; }
+    if (target <= 0) { renderer.setCaretByUtf16Index(0, extend); return 0; }
 
     // 累计前缀宽度（UTF-16 单位），找越过点击点的位置
     std::string prefix;
@@ -2311,7 +2312,8 @@ void placeCaretAtClickGLGdi(BinUIRenderer& renderer, BinUIGLGdi& gfx, float cx, 
         prefix += ch;
         idx = i + 1;
     }
-    renderer.setCaretByUtf16Index(idx);
+    renderer.setCaretByUtf16Index(idx, extend);
+    return idx;
 }
 
 // ============================================================
@@ -2483,6 +2485,16 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                                   static_cast<float>(HIWORD(lParam)));
             SetFocus(hwnd);
             return 0;
+        case WM_LBUTTONDBLCLK:
+            // 第二次按下走的是这条（第一次仍是 WM_LBUTTONDOWN）。先按一次"按下"把
+            // 焦点/光标放好，再交给宿主做"选词"。
+            app->handleMousePress(static_cast<float>(LOWORD(lParam)),
+                                  static_cast<float>(HIWORD(lParam)));
+            if (app->dblclick_)
+                app->dblclick_(static_cast<float>(LOWORD(lParam)),
+                               static_cast<float>(HIWORD(lParam)));
+            SetFocus(hwnd);
+            return 0;
         case WM_LBUTTONUP:
             app->handleMouseRelease(static_cast<float>(LOWORD(lParam)),
                                     static_cast<float>(HIWORD(lParam)));
@@ -2646,7 +2658,8 @@ bool BinUIAppGLGdi::ensureClass() {
     WNDCLASSW wc = {};
     // CS_OWNDC：窗口独占 DC，resize 时系统不回收该 DC（避免 SwapBuffers 用到
     // 被拆掉的旧后备缓冲 —— GDI 呈现路径在快速 resize 时会因此崩溃）
-    wc.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
+    // CS_DBLCLKS：没有它系统不会发 WM_LBUTTONDBLCLK，双击选词就永远收不到
+    wc.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpfnWndProc = BinUIAppGLGdi::wndProc;
     wc.hInstance = wcInstance();
     wc.lpszClassName = kBinUIWindowClass;

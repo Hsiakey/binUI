@@ -201,6 +201,46 @@ static void TestIssueRegressions() {
         r.blur();
     }
 
+    // ---- 拖选（extend）与双击选词 ----
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014"><body>
+  <input id="fld" style="position:absolute; left:20; top:20; width:260; height:32"/>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        r.loadLayout(bin.data(), bin.size());
+        const uint16_t fld = r.findNodeByName("fld");
+        r.focus(fld);
+        r.insertText("hello world 中文");
+
+        // 拖选：锚点落在 2，caret 拖到 5 → 选中 "llo"
+        r.setCaretByUtf16Index(2);
+        r.setCaretByUtf16Index(5, /*extend*/ true);
+        TEST("拖选: 选中区间", r.selectedText() == "llo");
+        // 反向拖：caret 回到 1，锚点仍在 2 → 选中 "e"（min..max 口径）
+        r.setCaretByUtf16Index(1, true);
+        TEST("拖选: 反向仍然正确", r.selectedText() == "e");
+        // 不 extend 时清零选区
+        r.setCaretByUtf16Index(3);
+        TEST("拖选: 不 extend 会清选区", r.selectedText().empty());
+
+        // 双击选词：点在 "world" 中间
+        TEST("选词: 命中 world", r.selectWordByUtf16Index(8) && r.selectedText() == "world");
+        // 点在开头空格上：退化成"连到下一个空白"的那段（这里就是空格本身之外的空段）
+
+        // 点在空格上：不是"词",所以按"连续非空白"那一段选 —— 这里就是前面的 hello
+        TEST("选词: 点在空格上选中前面那段非空白",
+             r.selectWordByUtf16Index(5) && r.selectedText() == "hello");
+        // CJK 连续段
+        TEST("选词: 中文整段", r.selectWordByUtf16Index(12) && r.selectedText() == "中文");
+        // 位置越界钳制
+        TEST("选词: 越界钳制到末尾的词", r.selectWordByUtf16Index(9999) &&
+                                          r.selectedText() == "中文");
+        r.blur();
+    }
+
     // ---- 07：setNodeBounds 的边界处理 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
