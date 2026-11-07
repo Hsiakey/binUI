@@ -2629,6 +2629,14 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             app->handleKey(static_cast<int>(wParam));
             return 0;
         case WM_KILLFOCUS:
+            // 失焦时把**没提交的组字**取消掉。不取消的话输入法会留着一个悬着的
+            // 候选窗；而且我们的 blur() 已经把编辑会话结束了，残留的组字之后再提交
+            // 就会落到"没有编辑中的输入框"，表现为"只进了第一个字 / 后面全丢"。
+            // （切焦点测出来的那串怪现象，根子在宿主窗口被别的窗口抢了前台。）
+            if (HIMC himc = ImmGetContext(hwnd)) {
+                ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+                ImmReleaseContext(hwnd, himc);
+            }
             app->handleFocusLost();
             return 0;
         case WM_SIZE:
