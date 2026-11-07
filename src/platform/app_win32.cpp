@@ -1046,6 +1046,12 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                         gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                     HGDIOBJ oldFont = SelectObject(hdc, font);
                     RECT tr = { x + pad + 4, y, x + nw - pad - 4, y + nh };
+                    // 光标/选区的竖直范围 = 文字行高，不是整条节点高度
+                    //（以前用 tr.top+2 .. tr.bottom-2：36px 的输入框里光标有 32px）
+                    TEXTMETRICW tm = {};
+                    GetTextMetricsW(hdc, &tm);
+                    const int glineH = tm.tmHeight > 0 ? tm.tmHeight : (node.fontSize ? node.fontSize : 14);
+                    const int glineTop = y + (nh - glineH) / 2;
 
                     std::wstring wtext = Utf8ToWide(text);
                     // 占位符画 45% 淡、禁用再压到 55%（GDI 无 alpha，按与底色混合近似）
@@ -1069,7 +1075,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                                 DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
                             DrawTextW(hdc, wb.c_str(), -1, &rb,
                                 DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
-                            XorFillRect(hdc, ra.right, tr.top + 2, rb.right, tr.bottom - 2);
+                            XorFillRect(hdc, ra.right, glineTop, rb.right, glineTop + glineH);
                         }
 
                         // 闪烁光标：测量光标前文本宽度，XOR 竖线
@@ -1078,7 +1084,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                             std::wstring wc = Utf8ToWide(text.substr(0, caret));
                             DrawTextW(hdc, wc.c_str(), -1, &cr,
                                 DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
-                            XorFillRect(hdc, cr.right, tr.top + 2, cr.right + 2, tr.bottom - 2);
+                            XorFillRect(hdc, cr.right, glineTop, cr.right + 2, glineTop + glineH);
                         }
                     }
 

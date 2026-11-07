@@ -1995,9 +1995,14 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                         selStart = renderer.edit().selStart;
                     }
 
+                    // 光标/选区的竖直范围 = 文字行高（不是整条节点高度）：
+                    // 36px 高的输入框里以前光标有 32px，比 13px 的字高出一倍。
+                    int asc = 0, lh = 0;
+                    gfx.fontMetrics(static_cast<float>(fs), 400, asc, lh, italic);
+                    if (lh <= 0) lh = fs + 2;
+                    const float dlineTop = static_cast<float>(y) + (nh - lh) / 2.0f;
+                    const float dlineH = static_cast<float>(lh);
                     if (!text.empty()) {
-                        int asc = 0, lh = 0;
-                        gfx.fontMetrics(static_cast<float>(fs), 400, asc, lh, italic);
                         float base = static_cast<float>(y) + (nh - lh) / 2.0f + asc;
                         float tx = static_cast<float>(x + pad + 4);
                         // 占位符按 45% 色画（不是真实内容，视觉上要和已输入文本区分开）
@@ -2012,14 +2017,13 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                             if (a != b) {
                                 float wa = gfx.textWidth(static_cast<float>(fs), 400, text.substr(0, a));
                                 float wb = gfx.textWidth(static_cast<float>(fs), 400, text.substr(0, b));
-                                gfx.fillRect(tx + wa, static_cast<float>(y + 2),
-                                             wb - wa, static_cast<float>(nh - 4),
+                                gfx.fillRect(tx + wa, dlineTop,
+                                             wb - wa, dlineH,
                                              (inAccent & 0x00FFFFFFu) | 0x66000000u);
                             }
                             if (caretBlinkOn()) {
                                 float wc = gfx.textWidth(static_cast<float>(fs), 400, text.substr(0, caret));
-                                gfx.fillRect(tx + wc, static_cast<float>(y + 2),
-                                             2, static_cast<float>(nh - 4), inAccent);
+                                gfx.fillRect(tx + wc, dlineTop, 1.5f, dlineH, inAccent);
                             }
                         }
                     }
