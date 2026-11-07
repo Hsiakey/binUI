@@ -150,6 +150,11 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
         binui::drawNodesGLGdi(gfx, a->renderer, clip, nullptr);
     });
 
+    // ---- 光标形状：输入框 I 型、可交互节点手型、滚动条边缘拖动形状 ----
+    sh.setCursorFn([a](float x, float y) -> int {
+        return static_cast<int>(a->renderer.cursorAt(x, y));
+    });
+
     // ---- 每帧：推进动画 / 视频时钟，只重绘变化的节点 ----
     sh.setUpdateFn([a](float) {
         for (uint16_t id : a->renderer.stepAnimations()) InvalidateNode(a, id);

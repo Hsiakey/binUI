@@ -2441,6 +2441,24 @@ void BinUIAppGLGdi::startResize(int hit) {
 // ============================================================
 // BinUIAppGLGdi：无边框窗口 + 事件循环
 // ============================================================
+// 光标形状缓存：IDC_* 是系统共享资源，LoadCursor 只想加载一次
+static HCURSOR CursorHandleOf(int kind) {
+    static HCURSOR cache[5] = {};
+    if (kind < 0 || kind > 4) kind = 0;
+    if (!cache[kind]) {
+        LPCWSTR id = reinterpret_cast<LPCWSTR>(IDC_ARROW);
+        switch (kind) {
+            case 1: id = reinterpret_cast<LPCWSTR>(IDC_HAND);   break;  // 可交互（按钮等）
+            case 2: id = reinterpret_cast<LPCWSTR>(IDC_IBEAM);  break;  // 输入框
+            case 3: id = reinterpret_cast<LPCWSTR>(IDC_SIZENS); break;  // 竖直滚动条
+            case 4: id = reinterpret_cast<LPCWSTR>(IDC_SIZEWE); break;  // 水平滚动条
+            default: break;
+        }
+        cache[kind] = LoadCursorW(nullptr, id);
+    }
+    return cache[kind];
+}
+
 LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     BinUIAppGLGdi* app = reinterpret_cast<BinUIAppGLGdi*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (!app) return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -2529,6 +2547,16 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             if (t) return HTTOP;
             if (b) return HTBOTTOM;
             return HTCLIENT;
+        }
+        case WM_SETCURSOR: {
+            // 非客户区（边框/标题栏）交给系统，客户区按"光标下是什么"换形状
+            if (LOWORD(lParam) != HTCLIENT) break;
+            if (!app->cursor_) break;
+            POINT pt;
+            if (!GetCursorPos(&pt) || !ScreenToClient(hwnd, &pt)) break;
+            SetCursor(CursorHandleOf(app->cursor_(static_cast<float>(pt.x),
+                                                  static_cast<float>(pt.y))));
+            return TRUE;   // 处理了这次设置，别让 DefWindowProc 又改回箭头
         }
         case WM_CLOSE:
             app->requestExit();

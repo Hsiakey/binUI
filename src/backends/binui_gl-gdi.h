@@ -112,6 +112,9 @@ public:
     using KeyFn     = std::function<void(int vk)>;
     using WheelFn   = std::function<void(float x, float y, float dy)>;
     using FocusFn   = std::function<void(bool focused)>;
+    // 光标查询：给定客户区坐标，返回 BinUICursorKind（0=箭头 1=手型 2=I 型 3=竖直 4=水平）。
+    // 以前整个库只加载了 IDC_ARROW，文本框里不会变 I 型、按钮上没有手型 —— 用过就发现"不像原生"。
+    using CursorFn  = std::function<int(float x, float y)>;
 
     BinUIAppGLGdi(int width, int height, bool vsync = true);
     ~BinUIAppGLGdi();
@@ -130,6 +133,7 @@ public:
     void setKeyFn(KeyFn fn)         { key_ = std::move(fn); }
     void setWheelFn(WheelFn fn)     { wheel_ = std::move(fn); }
     void setFocusFn(FocusFn fn)     { focus_ = std::move(fn); }
+    void setCursorFn(CursorFn fn)   { cursor_ = std::move(fn); }
 
     void invalidateRect(int x, int y, int w, int h);
     void invalidateAll();
@@ -206,6 +210,7 @@ private:
     KeyFn key_;
     WheelFn wheel_;
     FocusFn focus_;
+    CursorFn cursor_;
 
     bool running_ = false;
     bool childMode_ = false;  // true = WS_CHILD（宿主窗口里的控件），不走自己的消息循环

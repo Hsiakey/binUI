@@ -1412,6 +1412,7 @@ int BinUIRenderer::hitScrollBar(float x, float y, bool& vertical) const {
         float ch = contentHeight(n.id);
         const ScrollState* s = scrollState(n.id);
         float sy = s ? s->y : 0;
+        float sx = s ? s->x : 0;
         // 垂直滚动条（右缘）
         float tp, ts;
         if (ScrollThumbRect(n, ch, sy, true, tp, ts)) {
@@ -1421,8 +1422,8 @@ int BinUIRenderer::hitScrollBar(float x, float y, bool& vertical) const {
                 return n.id;
             }
         }
-        // 水平滚动条（下缘）
-        if (ScrollThumbRect(n, ch, sy, false, tp, ts)) {
+        // 水平滚动条（下缘）：按**内容宽度**判断，不能拿 contentHeight 顶替
+        if (ScrollThumbRect(n, contentWidth(n.id), sx, false, tp, ts)) {
             if (y >= n.y + n.height - barW && y <= n.y + n.height &&
                 x >= n.x && x <= n.x + n.width) {
                 vertical = false;
@@ -1431,6 +1432,23 @@ int BinUIRenderer::hitScrollBar(float x, float y, bool& vertical) const {
         }
     }
     return -1;
+}
+
+// 光标形状：先看是不是压在滚动条上，再看光标下是什么节点
+BinUIRenderer::CursorKind BinUIRenderer::cursorAt(float x, float y) const {
+    bool vertical = true;
+    if (hitScrollBar(x, y, vertical) >= 0)
+        return vertical ? CursorKind::SizeNS : CursorKind::SizeWE;
+
+    const int id = hitTest(x, y);
+    if (id < 0) return CursorKind::Arrow;
+    auto it = nodeIndexById_.find(static_cast<uint16_t>(id));
+    if (it == nodeIndexById_.end()) return CursorKind::Arrow;
+    const auto& n = nodes_[it->second];
+    if (n.flags & BINUI_DISABLED) return CursorKind::Arrow;
+    if (n.type == BINUI_INPUT) return CursorKind::IBeam;
+    if (n.flags & BINUI_INTERACTIVE) return CursorKind::Hand;
+    return CursorKind::Arrow;
 }
 
 bool BinUIRenderer::scrollBarHitTest(float x, float y) const {

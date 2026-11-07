@@ -146,6 +146,32 @@ static void TestIssueRegressions() {
         TEST("06: 显式高度节点保持原高", f1 && std::fabs(f1->height - fh0) < 0.01f);
     }
 
+    // ---- 光标形状（WM_SETCURSOR 用）：按光标下是什么节点给 ----
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014"><body>
+  <input id="fld" style="position:absolute; left:20; top:20; width:200; height:32"/>
+  <button id="btn" style="position:absolute; left:20; top:70; width:120; height:32">按钮</button>
+  <button id="dis" disabled style="position:absolute; left:20; top:120; width:120; height:32">禁用</button>
+  <span id="txt" style="position:absolute; left:20; top:170; width:200; height:20; font-size:13px">纯文本</span>
+  <div style="position:absolute; left:240; top:20; width:140; height:120; overflow:auto">
+    <div style="position:absolute; left:0; top:0; width:140; height:600; background:#222"></div>
+  </div>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("光标: 编译并加载", !bin.empty() && r.loadLayout(bin.data(), bin.size()));
+        using CK = BinUIRenderer::CursorKind;
+        TEST("光标: 输入框是 I 型", r.cursorAt(60, 36) == CK::IBeam);
+        TEST("光标: 按钮是手型", r.cursorAt(60, 86) == CK::Hand);
+        TEST("光标: 禁用按钮是箭头", r.cursorAt(60, 136) == CK::Arrow);
+        TEST("光标: 纯文本是箭头", r.cursorAt(60, 180) == CK::Arrow);
+        TEST("光标: 空白处是箭头", r.cursorAt(200, 260) == CK::Arrow);
+        // 滚动容器 240..380 宽、20..140 高；右侧 8px 是竖直滚动条
+        TEST("光标: 竖直滚动条上是上下箭头", r.cursorAt(374, 60) == CK::SizeNS);
+    }
+
     // ---- 07：setNodeBounds 的边界处理 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

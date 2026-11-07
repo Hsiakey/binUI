@@ -224,6 +224,13 @@ public:
     float contentHeight(uint16_t nodeId) const;                // 内容高度（子节点下界 - 容器顶）
     float contentWidth(uint16_t nodeId) const;                 // 内容宽度（子节点右界 - 容器左）
     int hitScrollBar(float x, float y, bool& vertical) const;  // 命中滚动条/轨道：返回容器 id（-1 无）
+
+    // ============ 光标 ============
+    // 窗口外壳拿它决定鼠标指针形状（WM_SETCURSOR）。按"光标下是什么"给：
+    //   输入框 → I 型；可交互（按钮等）→ 手型；滚动条边缘 → 竖直/水平拖动；其余 → 箭头。
+    // 以前整个库只加载了 IDC_ARROW：文本框里不变 I 型、按钮上没有手型，用过就知道"不像原生"。
+    enum class CursorKind : uint8_t { Arrow = 0, Hand = 1, IBeam = 2, SizeNS = 3, SizeWE = 4 };
+    CursorKind cursorAt(float x, float y) const;
     bool scrollBarHitTest(float x, float y) const;             // 点是否在滚动条区域（测试用）
 
     // ============ 视频（v9：<video> 节点播放状态） ============

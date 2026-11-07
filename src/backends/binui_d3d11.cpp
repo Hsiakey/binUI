@@ -2364,6 +2364,24 @@ void BinUIAppD3D::startResize(int hit) {
 // ============================================================
 // BinUIAppD3D：无边框窗口 + 事件循环
 // ============================================================
+// 光标形状缓存（与 GL 外壳一致）：IDC_* 是系统共享资源，只加载一次
+static HCURSOR D3DCursorHandleOf(int kind) {
+    static HCURSOR cache[5] = {};
+    if (kind < 0 || kind > 4) kind = 0;
+    if (!cache[kind]) {
+        LPCWSTR id = reinterpret_cast<LPCWSTR>(IDC_ARROW);
+        switch (kind) {
+            case 1: id = reinterpret_cast<LPCWSTR>(IDC_HAND);   break;
+            case 2: id = reinterpret_cast<LPCWSTR>(IDC_IBEAM);  break;
+            case 3: id = reinterpret_cast<LPCWSTR>(IDC_SIZENS); break;
+            case 4: id = reinterpret_cast<LPCWSTR>(IDC_SIZEWE); break;
+            default: break;
+        }
+        cache[kind] = LoadCursorW(nullptr, id);
+    }
+    return cache[kind];
+}
+
 LRESULT CALLBACK BinUIAppD3D::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     BinUIAppD3D* app = reinterpret_cast<BinUIAppD3D*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
     if (!app) return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -2450,6 +2468,15 @@ LRESULT CALLBACK BinUIAppD3D::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             if (t) return HTTOP;
             if (b) return HTBOTTOM;
             return HTCLIENT;
+        }
+        case WM_SETCURSOR: {
+            if (LOWORD(lParam) != HTCLIENT) break;
+            if (!app->cursor_) break;
+            POINT pt;
+            if (!GetCursorPos(&pt) || !ScreenToClient(hwnd, &pt)) break;
+            SetCursor(D3DCursorHandleOf(app->cursor_(static_cast<float>(pt.x),
+                                                     static_cast<float>(pt.y))));
+            return TRUE;
         }
         case WM_CLOSE:
             app->requestExit();

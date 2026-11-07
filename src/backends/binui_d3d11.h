@@ -100,6 +100,8 @@ public:
     using KeyFn     = std::function<void(int vk)>;
     using WheelFn   = std::function<void(float x, float y, float dy)>;
     using FocusFn   = std::function<void(bool focused)>;
+    // 光标查询：给定客户区坐标，返回 0=箭头 1=手型 2=I 型 3=竖直 4=水平（与 GL 外壳一致）
+    using CursorFn  = std::function<int(float x, float y)>;
 
     BinUIAppD3D(int width, int height, bool vsync = true);
     ~BinUIAppD3D();
@@ -118,6 +120,7 @@ public:
     void setKeyFn(KeyFn fn)         { key_ = std::move(fn); }
     void setWheelFn(WheelFn fn)     { wheel_ = std::move(fn); }
     void setFocusFn(FocusFn fn)     { focus_ = std::move(fn); }
+    void setCursorFn(CursorFn fn)   { cursor_ = std::move(fn); }
 
     void invalidateRect(int x, int y, int w, int h);
     void invalidateAll();
@@ -164,6 +167,7 @@ private:
     KeyFn key_;
     WheelFn wheel_;
     FocusFn focus_;
+    CursorFn cursor_;
 
     bool running_ = false;
     bool dirty_ = true;
