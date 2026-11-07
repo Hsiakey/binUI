@@ -219,19 +219,6 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
         binui::drawNodesGLGdi(gfx, a->renderer, clip, nullptr);
     });
 
-    // ---- IME：结果串插进输入框 + 候选窗定位 ----
-    // 窗口不是 EDIT 控件，DefWindowProc 不会把组字结果插进来，必须自己接。
-    sh.setImeResultFn([a](const std::string& utf8) {
-        if (!a->renderer.isEditing()) return;
-        const uint16_t id = a->renderer.edit().nodeId;
-        if (a->renderer.insertText(utf8)) {
-            InvalidateNode(a, id);
-            BinUIEvent e = MakeEvent(BINUI_EV_CHAR);
-            e.node_id = static_cast<int32_t>(id);
-            PushEvent(a, e, utf8);   // 与 handleChar 推到宿主的事件保持一致
-        }
-    });
-
     // ---- IME：把候选窗摆到光标下方（中文输入时没有这个，候选窗会飘到屏幕角落） ----
     sh.setImeCaretFn([a](int& ox, int& oy, int& lineH) -> bool {
         if (!a->renderer.isEditing()) return false;

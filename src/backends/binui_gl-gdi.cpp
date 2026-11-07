@@ -191,17 +191,6 @@ std::wstring Utf8ToWide(const std::string& s) {
     return w;
 }
 
-std::string WideToUtf8(const std::wstring& w) {
-    if (w.empty()) return std::string();
-    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
-                                nullptr, 0, nullptr, nullptr);
-    std::string s(static_cast<size_t>(n > 0 ? n : 0), '\0');
-    if (n > 0)
-        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
-                            &s[0], n, nullptr, nullptr);
-    return s;
-}
-
 bool gdiplusReady() {
     static bool ok = [] {
         Gdiplus::GdiplusStartupInput in;
@@ -2569,7 +2558,11 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case WM_IME_KEYDOWN:
         case WM_CHAR:
         case WM_IME_CHAR:
-        case WM_IME_STARTCOMPOSITION:
+            // 结果串由 DefWindowProc 转成这条消息（每个字符一条，非 BMP 会拆成代理对）。
+            // 我们自己插入并返回 0，避免它再转成 WM_CHAR 重复一遍。
+            ImeLog("  ime_char 0x%04X -> insert", static_cast<unsigned>(wParam));
+            app->handleChar(static_cast<wchar_t>(wParam));
+            return 0;
         case WM_IME_ENDCOMPOSITION:
         case WM_IME_COMPOSITION:
         case WM_IME_SETCONTEXT:
@@ -2686,7 +2679,6 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
         case WM_IME_STARTCOMPOSITION: {
             app->composing_ = true;
-            app->imeSkipChars_ = 0;   // 新一轮组字，旧的跳过计数作废
             // 把输入法的组字窗口摆到光标处（不摆的话它会待在窗口左上角）
             if (app->imeCaret_) {
                 int cx = 0, cy = 0, ch = 16;
@@ -2711,57 +2703,14 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             }
             break;   // 组字内容仍然交给 DefWindowProc
         }
-        case WM_IME_COMPOSITION: {
-            // 结果串（用户选完词）必须由**我们**取出来插进输入框：窗口不是 EDIT 控件，
-            // DefWindowProc 不会替我们做这件事 —— 这正是"输入不了"的根因。
-            if ((lParam & GCS_RESULTSTR) && app->imeResult_) {
-                std::string utf8;
-                size_t wlen = 0;
-                if (HIMC himc = ImmGetContext(hwnd)) {
-                    const LONG bytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
-                    if (bytes > 0) {
-                        std::wstring w(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
-                        ImmGetCompositionStringW(himc, GCS_RESULTSTR, &w[0], bytes);
-                        wlen = w.size();
-                        utf8 = WideToUtf8(w);
-                    }
-                    ImmReleaseContext(hwnd, himc);
-                }
-                if (!utf8.empty()) {
-                    app->imeResult_(utf8);
-                    app->composing_ = false;
-                    // 同一批字符 DefWindowProc 还会以 WM_IME_CHAR 再来一遍，跳过它们；
-                    // 但跳过的数量必须能被"新一轮组字"清零，否则会永久吞字。
-                    app->imeSkipChars_ = static_cast<int>(wlen);
-                    ImeLog("  result inserted, skip %d ime_char", app->imeSkipChars_);
-                    return 0;
-                }
-            }
-            break;
-        }
-        case WM_IME_CHAR:
-            // 结果串已经在 WM_IME_COMPOSITION 里插过 → 这里吞掉，否则 DefWindowProc
-            // 会把它转成 WM_CHAR，同一个字进两次。**只吞刚插过的那几个**：没插过就
-            // 落到默认路径（有些输入法直接发 WM_IME_CHAR，不能一律吞）。
-            // 两种来源都要处理：
-            //   · 刚从 GCS_RESULTSTR 插过 → 同一批字符会再来一遍，跳过（imeSkipChars_）
-            //   · 没插过（输入法直接发 WM_IME_CHAR）→ 收下，否则第二个字起就丢了
-            if (app->imeSkipChars_ > 0) {
-                --app->imeSkipChars_;
-                ImeLog("  ime_char skipped (%d left)", app->imeSkipChars_);
-                return 0;
-            }
-            if (app->imeCaret_) {
-                int cx = 0, cy = 0, ch = 16;
-                if (app->imeCaret_(cx, cy, ch)) {
-                    ImeLog("  ime_char -> insert 0x%04X", static_cast<unsigned>(wParam));
-                    app->handleChar(static_cast<wchar_t>(wParam));
-                    return 0;
-                }
-            }
-            break;
-        case WM_IME_ENDCOMPOSITION:
-            app->composing_ = false;
+        case WM_IME_COMPOSITION:
+            // 这里**什么都不做**，全部交给 DefWindowProc。
+            //
+            // 踩过的坑：之前自己 ImmGetCompositionString(GCS_RESULTSTR) 取结果串插入、
+            // 再 return 0 挡掉 DefWindowProc，结果输入法状态机乱了 —— 第一次焦点在窗口上
+            // 只能进第一个字、退格退不掉、候选框不收；第二次焦点干脆不出候选；第三次才正常。
+            // 根因就是"应用和 DefWindowProc 抢同一件事"。
+            // DefWindowProc 会把结果串转成 WM_IME_CHAR 交给窗口，那条路是系统自带的对账。
             break;
         case WM_IME_REQUEST: {
             // 新式 IME 用 IMR_CANDIDATEWINDOW 问"候选窗该放哪"，比 CANDIDATEFORM 可靠
