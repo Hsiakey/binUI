@@ -191,6 +191,17 @@ std::wstring Utf8ToWide(const std::string& s) {
     return w;
 }
 
+std::string WideToUtf8(const std::wstring& w) {
+    if (w.empty()) return std::string();
+    int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
+                                nullptr, 0, nullptr, nullptr);
+    std::string s(static_cast<size_t>(n > 0 ? n : 0), '\0');
+    if (n > 0)
+        WideCharToMultiByte(CP_UTF8, 0, w.c_str(), static_cast<int>(w.size()),
+                            &s[0], n, nullptr, nullptr);
+    return s;
+}
+
 bool gdiplusReady() {
     static bool ok = [] {
         Gdiplus::GdiplusStartupInput in;
@@ -2621,27 +2632,79 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             if (b) return HTBOTTOM;
             return HTCLIENT;
         }
-        case WM_IME_STARTCOMPOSITION:
+        case WM_IME_SETCONTEXT: {
+            // 关键的一行：默认行为是"应用程序自己画组字窗口"，我们要让**输入法自己画**，
+            // 所以要把 ISC_SHOWUICOMPOSITIONWINDOW 这一位清掉再交给 DefWindowProc。
+            // 以前没清 —— 系统以为我们会画，于是自己也不画，表现就是"打了字什么都没出来"。
+            return DefWindowProcW(hwnd, msg, wParam,
+                                  lParam & ~static_cast<LPARAM>(ISC_SHOWUICOMPOSITIONWINDOW));
+        }
+        case WM_IME_STARTCOMPOSITION: {
+            // 把输入法的组字窗口摆到光标处（不摆的话它会待在窗口左上角）
+            if (app->imeCaret_) {
+                int cx = 0, cy = 0, ch = 16;
+                if (app->imeCaret_(cx, cy, ch)) {
+                    if (HIMC himc = ImmGetContext(hwnd)) {
+                        COMPOSITIONFORM cf = {};
+                        cf.dwStyle = CFS_POINT;
+                        cf.ptCurrentPos.x = cx;
+                        cf.ptCurrentPos.y = cy;
+                        ImmSetCompositionWindow(himc, &cf);
+                        // 组字字体跟随输入框行高：不设的话系统用默认 UI 字体，
+                        // 13px 的输入框里会冒出一行明显更大的组字文本，看着像"位置不对"
+                        LOGFONTW lf = {};
+                        lf.lfHeight = -(ch > 0 ? ch : 16);
+                        lf.lfWeight = FW_NORMAL;
+                        lf.lfCharSet = DEFAULT_CHARSET;
+                        wcscpy_s(lf.lfFaceName, L"Microsoft YaHei");
+                        ImmSetCompositionFontW(himc, &lf);
+                        ImmReleaseContext(hwnd, himc);
+                    }
+                }
+            }
+            break;   // 组字内容仍然交给 DefWindowProc
+        }
         case WM_IME_COMPOSITION: {
-            // 把输入法的组字窗口 / 候选窗摆到光标处。以前完全没处理：中文能上字，
-            // 但候选窗飘在屏幕角落，组字期间也没有下划线（docs/issues 里迟早会被提）。
-            // 定位完继续 break 交给 DefWindowProc —— 组字本身是系统画的，别抢。
-            if (!app->imeCaret_) break;
-            int cx = 0, cy = 0, ch = 16;
-            if (!app->imeCaret_(cx, cy, ch)) break;
-            if (HIMC himc = ImmGetContext(hwnd)) {
-                COMPOSITIONFORM cf = {};
-                cf.dwStyle = CFS_POINT;
-                cf.ptCurrentPos.x = cx;
-                cf.ptCurrentPos.y = cy;
-                ImmSetCompositionWindow(himc, &cf);
-                CANDIDATEFORM cdf = {};
-                cdf.dwIndex = 0;
-                cdf.dwStyle = CFS_CANDIDATEPOS;
-                cdf.ptCurrentPos.x = cx;
-                cdf.ptCurrentPos.y = cy + ch;   // 候选窗列在光标下方
-                ImmSetCandidateWindow(himc, &cdf);
-                ImmReleaseContext(hwnd, himc);
+            // 结果串（用户选完词）必须由**我们**取出来插进输入框：窗口不是 EDIT 控件，
+            // DefWindowProc 不会替我们做这件事 —— 这正是"输入不了"的根因。
+            if ((lParam & GCS_RESULTSTR) && app->imeResult_) {
+                std::string utf8;
+                if (HIMC himc = ImmGetContext(hwnd)) {
+                    const LONG bytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
+                    if (bytes > 0) {
+                        std::wstring w(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
+                        ImmGetCompositionStringW(himc, GCS_RESULTSTR, &w[0], bytes);
+                        utf8 = WideToUtf8(w);
+                    }
+                    ImmReleaseContext(hwnd, himc);
+                }
+                if (!utf8.empty()) {
+                    app->imeResult_(utf8);
+                    return 0;   // 已消费：别让 DefWindowProc 再生成一遍 WM_IME_CHAR
+                }
+            }
+            break;
+        }
+        case WM_IME_CHAR:
+            // 结果串已经在 WM_IME_COMPOSITION 里插过了，这里必须吞掉，
+            // 否则 DefWindowProc 会把它转成 WM_CHAR，同一个字进两次。
+            if (app->imeResult_ && app->imeCaret_) {
+                int cx = 0, cy = 0, ch = 16;
+                if (app->imeCaret_(cx, cy, ch)) return 0;
+            }
+            break;
+        case WM_IME_REQUEST: {
+            // 新式 IME 用 IMR_CANDIDATEWINDOW 问"候选窗该放哪"，比 CANDIDATEFORM 可靠
+            if (wParam == IMR_CANDIDATEWINDOW && app->imeCaret_ && lParam) {
+                auto* cdf = reinterpret_cast<CANDIDATEFORM*>(lParam);
+                int cx = 0, cy = 0, ch = 16;
+                if (app->imeCaret_(cx, cy, ch)) {
+                    cdf->dwIndex = 0;
+                    cdf->dwStyle = CFS_CANDIDATEPOS;
+                    cdf->ptCurrentPos.x = cx;
+                    cdf->ptCurrentPos.y = cy + ch;   // 候选窗列在光标下方
+                    return TRUE;
+                }
             }
             break;
         }

@@ -123,6 +123,9 @@ public:
     // IME：返回光标在客户区的位置与行高（用于把输入法候选窗摆到光标下方）。
     // 返回 false = 当前没有正在编辑的输入框。
     using ImeCaretFn = std::function<bool(int& x, int& y, int& lineH)>;
+    // 输入法结果串（用户选完词）：窗口不是 EDIT 控件，DefWindowProc 不会替我们插入，
+    // 必须由宿主接住。utf8 是已经转好的文本。
+    using ImeResultFn = std::function<void(const std::string& utf8)>;
 
     BinUIAppGLGdi(int width, int height, bool vsync = true);
     ~BinUIAppGLGdi();
@@ -144,6 +147,7 @@ public:
     void setCursorFn(CursorFn fn)   { cursor_ = std::move(fn); }
     void setDoubleClickFn(DoubleClickFn fn) { dblclick_ = std::move(fn); }
     void setImeCaretFn(ImeCaretFn fn) { imeCaret_ = std::move(fn); }
+    void setImeResultFn(ImeResultFn fn) { imeResult_ = std::move(fn); }
 
     void invalidateRect(int x, int y, int w, int h);
     void invalidateAll();
@@ -223,6 +227,7 @@ private:
     CursorFn cursor_;
     DoubleClickFn dblclick_;
     ImeCaretFn imeCaret_;
+    ImeResultFn imeResult_;
 
     bool running_ = false;
     bool childMode_ = false;  // true = WS_CHILD（宿主窗口里的控件），不走自己的消息循环

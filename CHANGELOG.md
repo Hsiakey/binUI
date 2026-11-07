@@ -67,6 +67,24 @@
 - 只在 C ABI 这一层做：核心库保持平台无关，`examples/` 里的演示用自己的按键处理，
   没接这个（它们不是产品面）。
 
+### 修复 — IME 组字结果根本不进输入框（"打了字什么都没出来"）
+
+上一版只做了候选窗定位，仍然输不进中文。根因是**我们不是 EDIT 控件**：组字结果串
+（`GCS_RESULTSTR`）必须由窗口自己从 IME 上下文取出来插进文本，`DefWindowProc` 不会替
+应用做这件事。另外默认的 `WM_IME_SETCONTEXT` 行为是"应用程序自己画组字窗口"—— 系统
+以为我们会画，于是它也不画，表现就是打字后屏幕上什么都没有。
+
+- `WM_IME_SETCONTEXT`：清掉 `ISC_SHOWUICOMPOSITIONWINDOW` 再交给 `DefWindowProc`，
+  让输入法自己画组字窗口。
+- `WM_IME_COMPOSITION`：带 `GCS_RESULTSTR` 时用 `ImmGetCompositionStringW` 取结果串，
+  UTF-8 转好交给宿主插入（新增 `setImeResultFn`），并返回 0 防止重复。
+- `WM_IME_CHAR`：结果串已插入，这条**必须吞掉**，否则 `DefWindowProc` 会把它转成
+  `WM_CHAR`，同一个字进两次。
+- `WM_IME_REQUEST` / `IMR_CANDIDATEWINDOW`：新式 IME 走这条问候选窗位置，比
+  `CANDIDATEFORM` 可靠。
+- 顺带设置组字字体高度跟随输入框行高 —— 不设的话系统用默认 UI 字体，13px 输入框里会
+  冒出一行明显更大的组字文本，看着像"位置不对"。
+
 ### 新增 — 光标形状（I 型 / 手型 / 拖动箭头）
 
 整个库以前只加载过 `IDC_ARROW`：文本框里不会变 I 型、按钮上没有手型 —— 用起来第一眼
