@@ -2629,17 +2629,9 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             return 0;
         }
         case WM_CHAR:
-            // 组字期间到来的字符属于输入法（它自己在画组字串），不能同时改我们的文本
-            if (app->composing_) { ImeLog("  char swallowed (composing)"); return 0; }
             app->handleChar(static_cast<wchar_t>(wParam));
             return 0;
         case WM_KEYDOWN:
-            if (app->composing_) {
-                // 组字期间这些键归输入法：**交给 DefWindowProc**，而不是吞掉。
-                // 吞掉会让退格这类键彻底消失（拼音退不掉、候选窗一直挂着）。
-                ImeLog("  key -> DefWindowProc (composing)");
-                return DefWindowProcW(hwnd, msg, wParam, lParam);
-            }
             app->handleKey(static_cast<int>(wParam));
             return 0;
         case WM_KILLFOCUS:
@@ -2689,18 +2681,6 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // 关键的一行：默认行为是"应用程序自己画组字窗口"，我们要让**输入法自己画**，
             // 所以要把 ISC_SHOWUICOMPOSITIONWINDOW 这一位清掉再交给 DefWindowProc。
             // 以前没清 —— 系统以为我们会画，于是自己也不画，表现就是"打了字什么都没出来"。
-            if (!wParam) {
-                // 窗口失活：把没提交的组字取消掉，否则输入法会留一个悬着的候选窗
-                if (app->composing_) {
-                    if (HIMC himc = ImmGetContext(hwnd)) {
-                        ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
-                        ImmReleaseContext(hwnd, himc);
-                    }
-                    app->composing_ = false;
-                    app->imeResultPending_ = 0;
-                }
-                return DefWindowProcW(hwnd, msg, wParam, lParam);
-            }
             return DefWindowProcW(hwnd, msg, wParam,
                                   lParam & ~static_cast<LPARAM>(ISC_SHOWUICOMPOSITIONWINDOW));
         }
@@ -2735,13 +2715,12 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // DefWindowProc 不会替我们做这件事 —— 这正是"输入不了"的根因。
             if ((lParam & GCS_RESULTSTR) && app->imeResult_) {
                 std::string utf8;
-                size_t wlen = 0;
                 if (HIMC himc = ImmGetContext(hwnd)) {
                     const LONG bytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
                     if (bytes > 0) {
                         std::wstring w(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
                         ImmGetCompositionStringW(himc, GCS_RESULTSTR, &w[0], bytes);
-                        wlen = w.size();
+                        (void)w;
                         utf8 = WideToUtf8(w);
                     }
                     ImmReleaseContext(hwnd, himc);
@@ -2749,10 +2728,7 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 if (!utf8.empty()) {
                     app->imeResult_(utf8);
                     app->composing_ = false;
-                    // 结果串已经插过；接下来 DefWindowProc 会把它转成 WM_IME_CHAR，
-                    // 按字数记一笔，让 WM_IME_CHAR 知道要吞几次（而不是无条件全吞）
-                    app->imeResultPending_ = static_cast<int>(wlen);
-                    return 0;
+                    return 0;   // 已消费：别让 DefWindowProc 再生成一遍 WM_IME_CHAR
                 }
             }
             break;
@@ -2761,10 +2737,9 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // 结果串已经在 WM_IME_COMPOSITION 里插过 → 这里吞掉，否则 DefWindowProc
             // 会把它转成 WM_CHAR，同一个字进两次。**只吞刚插过的那几个**：没插过就
             // 落到默认路径（有些输入法直接发 WM_IME_CHAR，不能一律吞）。
-            if (app->imeResultPending_ > 0) {
-                --app->imeResultPending_;
-                ImeLog("  ime_char swallowed (%d left)", app->imeResultPending_);
-                return 0;
+            if (app->imeResult_ && app->imeCaret_) {
+                int cx = 0, cy = 0, ch = 16;
+                if (app->imeCaret_(cx, cy, ch)) return 0;
             }
             break;
         case WM_IME_ENDCOMPOSITION:
