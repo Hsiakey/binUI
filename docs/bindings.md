@@ -170,6 +170,11 @@ Enter 激活，宿主不用重写一遍，结果通过 `BINUI_EV_INPUT` 推出�
 > 这条也算"为什么绑定值得做"的注脚 —— 光靠 C++ demo 发现不了，得真在别的语言里
 > 打一遍字。
 
+**输入法排查（`BINUI_IME_LOG=1`）**：设了这条环境变量，窗口会把收到的
+`WM_KEYDOWN` / `WM_CHAR` / `WM_IME_*` 消息序列追加到工作目录下的 `binui_ime.log`。
+输入法的问题基本只能靠消息序列定位（谁是组字、谁把键吃了、候选窗该不该收），
+日志里只有消息号和参数，不含输入内容。
+
 **输入法候选窗**：GL 外壳处理 `WM_IME_STARTCOMPOSITION` / `WM_IME_COMPOSITION`，
 用 `ImmSetCompositionWindow`（`CFS_POINT`）把组字窗口摆到光标处、
 `ImmSetCandidateWindow` 把候选窗列在光标下方。以前完全没处理 —— 中文能上字，但候选窗

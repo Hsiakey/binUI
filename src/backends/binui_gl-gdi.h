@@ -228,6 +228,11 @@ private:
     DoubleClickFn dblclick_;
     ImeCaretFn imeCaret_;
     ImeResultFn imeResult_;
+    // 输入法正在组字：这期间的按键/字符归 IME，不能拿去改我们自己的文本
+    bool composing_ = false;
+    // 我们刚从 GCS_RESULTSTR 插过文本 → 接下来那串 WM_IME_CHAR 要吞掉（否则进两次）。
+    // 只有真的插过才吞，没插过就按默认路径走。
+    int  imeResultPending_ = 0;
 
     bool running_ = false;
     bool childMode_ = false;  // true = WS_CHILD（宿主窗口里的控件），不走自己的消息循环
