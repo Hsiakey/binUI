@@ -6,6 +6,19 @@
 
 ## [Unreleased]
 
+### 新增 — 输入法候选窗定位（IME）
+
+以前完全没处理 `WM_IME_*`：中文能上字（`WM_CHAR` 会到），但**候选窗不受控**，
+基本飘在屏幕角落；组字期间也没有下划线。
+
+- GL 外壳处理 `WM_IME_STARTCOMPOSITION` / `WM_IME_COMPOSITION`：
+  `ImmSetCompositionWindow(CFS_POINT)` 把组字窗口摆到光标处，
+  `ImmSetCandidateWindow(CFS_CANDIDATEPOS)` 把候选窗列在光标下方一行。
+  定位完继续交给 `DefWindowProc` —— 组字内容本身是系统画的，不抢。
+- C ABI 提供 `setImeCaretFn`：按"输入框左内边距 + 光标前缀文本宽度"算出光标客户区坐标，
+  字体度量复用 GL 后端的 `textWidth` / `fontMetrics`（与绘制同一套，不会错位）。
+- 构建加 `-limm32`（Makefile 的 `GL_LIBS` 与 CMake 的 `gl_shell`）。
+
 ### 新增 — 鼠标拖选与双击选词
 
 以前文本选区只能靠 Shift+方向键，鼠标用户会以为输入框坏了。

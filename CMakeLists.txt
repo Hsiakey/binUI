@@ -73,7 +73,7 @@ if(WIN32)
     # OpenGL 渲染后端（WGL + GL 3.3 core）：无边框窗口 + 字形图集 + 顶点四边形
     add_library(gl_shell STATIC src/backends/binui_gl-gdi.cpp)
     target_include_directories(gl_shell PUBLIC ${CMAKE_SOURCE_DIR}/src)
-    target_link_libraries(gl_shell PUBLIC binui opengl32 gdiplus dwmapi)
+    target_link_libraries(gl_shell PUBLIC binui opengl32 gdiplus dwmapi imm32)
 
     # C ABI：给 Python / Go / Rust 等宿主语言的唯一入口（include/binui_c.h）。
     # 静态库给 C/C++/Rust 直接链，动态库给 ctypes / cgo（免编译，随包分发）。

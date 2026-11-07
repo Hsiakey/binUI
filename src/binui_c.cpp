@@ -219,6 +219,27 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
         binui::drawNodesGLGdi(gfx, a->renderer, clip, nullptr);
     });
 
+    // ---- IME：把候选窗摆到光标下方（中文输入时没有这个，候选窗会飘到屏幕角落） ----
+    sh.setImeCaretFn([a](int& ox, int& oy, int& lineH) -> bool {
+        if (!a->renderer.isEditing()) return false;
+        const auto& ed = a->renderer.edit();
+        const binui::BinUIRenderer::NodeInfo* node = nullptr;
+        for (const auto& n : a->renderer.getNodes())
+            if (n.id == ed.nodeId) { node = &n; break; }
+        if (!node) return false;
+        const int fs = node->fontSize ? node->fontSize : 14;
+        // 前缀宽度：光标位置是 UTF-8 字节偏移，直接量前半段
+        const size_t caret = std::min(std::min(ed.caret, ed.selStart), ed.value.size());
+        const std::string prefix = ed.value.substr(0, caret);
+        const float tw = a->shell->gfx().textWidth(static_cast<float>(fs), 400, prefix, false);
+        int asc = 0, lh = 0;
+        a->shell->gfx().fontMetrics(static_cast<float>(fs), 400, asc, lh);
+        ox = static_cast<int>(node->x + node->padding + 4 + tw);
+        oy = static_cast<int>(node->y + (node->height - lh) * 0.5f);
+        lineH = lh > 0 ? lh : fs + 4;
+        return true;
+    });
+
     // ---- 双击：选中双击位置所在的"词" ----
     sh.setDoubleClickFn([a](float x, float y) {
         if (!a->renderer.isEditing()) return;

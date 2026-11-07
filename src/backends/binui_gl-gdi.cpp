@@ -22,6 +22,7 @@
 #endif
 #include <gdiplus.h>
 #include <dwmapi.h>
+#include <imm.h>
 #include <cstdio>
 #include <cstring>
 #include <cmath>
@@ -2559,6 +2560,30 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             if (t) return HTTOP;
             if (b) return HTBOTTOM;
             return HTCLIENT;
+        }
+        case WM_IME_STARTCOMPOSITION:
+        case WM_IME_COMPOSITION: {
+            // 把输入法的组字窗口 / 候选窗摆到光标处。以前完全没处理：中文能上字，
+            // 但候选窗飘在屏幕角落，组字期间也没有下划线（docs/issues 里迟早会被提）。
+            // 定位完继续 break 交给 DefWindowProc —— 组字本身是系统画的，别抢。
+            if (!app->imeCaret_) break;
+            int cx = 0, cy = 0, ch = 16;
+            if (!app->imeCaret_(cx, cy, ch)) break;
+            if (HIMC himc = ImmGetContext(hwnd)) {
+                COMPOSITIONFORM cf = {};
+                cf.dwStyle = CFS_POINT;
+                cf.ptCurrentPos.x = cx;
+                cf.ptCurrentPos.y = cy;
+                ImmSetCompositionWindow(himc, &cf);
+                CANDIDATEFORM cdf = {};
+                cdf.dwIndex = 0;
+                cdf.dwStyle = CFS_CANDIDATEPOS;
+                cdf.ptCurrentPos.x = cx;
+                cdf.ptCurrentPos.y = cy + ch;   // 候选窗列在光标下方
+                ImmSetCandidateWindow(himc, &cdf);
+                ImmReleaseContext(hwnd, himc);
+            }
+            break;
         }
         case WM_SETCURSOR: {
             // 非客户区（边框/标题栏）交给系统，客户区按"光标下是什么"换形状

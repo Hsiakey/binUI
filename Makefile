@@ -167,7 +167,8 @@ endif
 ifdef ComSpec
 
 # OpenGL 后端（WGL + FreeType/HarfBuzz 静态库）
-GL_LIBS := -lopengl32 -ldwmapi -Lthird_party/freetype/build -lfreetype -Lthird_party/harfbuzz/build-static/src -lharfbuzz
+# imm32：输入法候选窗定位（ImmGetContext / ImmSetCompositionWindow）
+GL_LIBS := -lopengl32 -ldwmapi -limm32 -Lthird_party/freetype/build -lfreetype -Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
 # C ABI 的冒烟测试（无窗口：只测编译/加载/节点查询/改文本，需链 GL 后端对象）
 TEST_BINS += $(BIN_DIR)/test_capi$(EXT)

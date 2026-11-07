@@ -170,6 +170,11 @@ Enter 激活，宿主不用重写一遍，结果通过 `BINUI_EV_INPUT` 推出�
 > 这条也算"为什么绑定值得做"的注脚 —— 光靠 C++ demo 发现不了，得真在别的语言里
 > 打一遍字。
 
+**输入法候选窗**：GL 外壳处理 `WM_IME_STARTCOMPOSITION` / `WM_IME_COMPOSITION`，
+用 `ImmSetCompositionWindow`（`CFS_POINT`）把组字窗口摆到光标处、
+`ImmSetCandidateWindow` 把候选窗列在光标下方。以前完全没处理 —— 中文能上字，但候选窗
+会飘在屏幕角落。组字内容本身仍由系统绘制（不抢 `DefWindowProc`）。
+
 ## 子窗口模式：作为控件嵌进宿主窗口
 
 顶层窗是"binUI 自己当应用"；子窗口模式是"binUI 当你窗口里的一块控件"——
