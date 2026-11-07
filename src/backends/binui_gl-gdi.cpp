@@ -2558,11 +2558,12 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case WM_IME_KEYDOWN:
         case WM_CHAR:
         case WM_IME_CHAR:
-            // 结果串由 DefWindowProc 转成这条消息（每个字符一条，非 BMP 会拆成代理对）。
-            // 我们自己插入并返回 0，避免它再转成 WM_CHAR 重复一遍。
-            ImeLog("  ime_char 0x%04X -> insert", static_cast<unsigned>(wParam));
-            app->handleChar(static_cast<wchar_t>(wParam));
-            return 0;
+            // **不要自己插**：这条消息的 wParam 是输入法按系统代码页给的**字节**
+            //（不是 Unicode 码点），直接当宽字符用会把「啊」变成「å」这种乱码。
+            // 交给 DefWindowProc，它会转成正确的 WM_CHAR（Unicode 窗口下就是 UTF-16），
+            // 再由我们的 WM_CHAR 分支插入。这里只留一行日志方便排查。
+            ImeLog("  ime_char wp=0x%zX (交给 DefWindowProc)", static_cast<size_t>(wParam));
+            break;
         case WM_IME_ENDCOMPOSITION:
         case WM_IME_COMPOSITION:
         case WM_IME_SETCONTEXT:
