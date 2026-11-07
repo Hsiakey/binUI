@@ -230,6 +230,9 @@ private:
     ImeResultFn imeResult_;
     // 输入法正在组字：这期间的按键/字符归 IME，不能拿去改我们自己的文本
     bool composing_ = false;
+    // 刚从 GCS_RESULTSTR 插过 N 个 UTF-16 字符 → 接下来 N 个 WM_IME_CHAR 是同一批，
+    // 跳过；跳完就归零。没插过（N=0）就说明这个字符是输入法直接发的，要收下。
+    int  imeSkipChars_ = 0;
     // 我们刚从 GCS_RESULTSTR 插过文本 → 接下来那串 WM_IME_CHAR 要吞掉（否则进两次）。
     // 只有真的插过才吞，没插过就按默认路径走。
     int  imeResultPending_ = 0;

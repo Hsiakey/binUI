@@ -2686,6 +2686,7 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
         case WM_IME_STARTCOMPOSITION: {
             app->composing_ = true;
+            app->imeSkipChars_ = 0;   // 新一轮组字，旧的跳过计数作废
             // 把输入法的组字窗口摆到光标处（不摆的话它会待在窗口左上角）
             if (app->imeCaret_) {
                 int cx = 0, cy = 0, ch = 16;
@@ -2715,12 +2716,13 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // DefWindowProc 不会替我们做这件事 —— 这正是"输入不了"的根因。
             if ((lParam & GCS_RESULTSTR) && app->imeResult_) {
                 std::string utf8;
+                size_t wlen = 0;
                 if (HIMC himc = ImmGetContext(hwnd)) {
                     const LONG bytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
                     if (bytes > 0) {
                         std::wstring w(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
                         ImmGetCompositionStringW(himc, GCS_RESULTSTR, &w[0], bytes);
-                        (void)w;
+                        wlen = w.size();
                         utf8 = WideToUtf8(w);
                     }
                     ImmReleaseContext(hwnd, himc);
@@ -2728,7 +2730,11 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 if (!utf8.empty()) {
                     app->imeResult_(utf8);
                     app->composing_ = false;
-                    return 0;   // 已消费：别让 DefWindowProc 再生成一遍 WM_IME_CHAR
+                    // 同一批字符 DefWindowProc 还会以 WM_IME_CHAR 再来一遍，跳过它们；
+                    // 但跳过的数量必须能被"新一轮组字"清零，否则会永久吞字。
+                    app->imeSkipChars_ = static_cast<int>(wlen);
+                    ImeLog("  result inserted, skip %d ime_char", app->imeSkipChars_);
+                    return 0;
                 }
             }
             break;
@@ -2737,9 +2743,21 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // 结果串已经在 WM_IME_COMPOSITION 里插过 → 这里吞掉，否则 DefWindowProc
             // 会把它转成 WM_CHAR，同一个字进两次。**只吞刚插过的那几个**：没插过就
             // 落到默认路径（有些输入法直接发 WM_IME_CHAR，不能一律吞）。
-            if (app->imeResult_ && app->imeCaret_) {
+            // 两种来源都要处理：
+            //   · 刚从 GCS_RESULTSTR 插过 → 同一批字符会再来一遍，跳过（imeSkipChars_）
+            //   · 没插过（输入法直接发 WM_IME_CHAR）→ 收下，否则第二个字起就丢了
+            if (app->imeSkipChars_ > 0) {
+                --app->imeSkipChars_;
+                ImeLog("  ime_char skipped (%d left)", app->imeSkipChars_);
+                return 0;
+            }
+            if (app->imeCaret_) {
                 int cx = 0, cy = 0, ch = 16;
-                if (app->imeCaret_(cx, cy, ch)) return 0;
+                if (app->imeCaret_(cx, cy, ch)) {
+                    ImeLog("  ime_char -> insert 0x%04X", static_cast<unsigned>(wParam));
+                    app->handleChar(static_cast<wchar_t>(wParam));
+                    return 0;
+                }
             }
             break;
         case WM_IME_ENDCOMPOSITION:
