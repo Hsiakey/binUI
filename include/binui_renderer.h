@@ -222,6 +222,7 @@ public:
     const ScrollState* scrollState(uint16_t nodeId) const;     // 滚动偏移（非滚动容器返回 nullptr）
     int scrollAt(float x, float y, float dy);                  // 滚轮：滚动光标处最顶层滚动容器，返回其 id
     float contentHeight(uint16_t nodeId) const;                // 内容高度（子节点下界 - 容器顶）
+    float contentWidth(uint16_t nodeId) const;                 // 内容宽度（子节点右界 - 容器左）
     int hitScrollBar(float x, float y, bool& vertical) const;  // 命中滚动条/轨道：返回容器 id（-1 无）
     bool scrollBarHitTest(float x, float y) const;             // 点是否在滚动条区域（测试用）
 

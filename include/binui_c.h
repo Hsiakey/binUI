@@ -242,7 +242,9 @@ BINUI_C_API int32_t BINUI_C_CALL binui_poll_event(void* app, BinUIEvent* out);
  * 都没有 —— 所以本库自己拦了一道：
  *
  *   · binui_pump / binui_render 在非建窗线程上调用时返回 -1（并往 stderr 打一行说明）；
- *   · binui_app_destroy 在非建窗线程上调用时仍会执行（没法返回错误），但先打警告。
+ *   · binui_app_destroy 在非建窗线程上调用时**拒绝执行**（窗口与 GL 上下文会泄漏到
+ *     进程退出），并设置 binui_last_error —— 跨线程拆 Win32/WGL 只会崩，泄漏好过崩溃。
+ *     注意这不会让 app 句柄失效：宿主可以继续持有它（比如直接 os.Exit）。
  *
  * Go 宿主特别注意：`main` goroutine **不是**固定在主线程上的 —— 运行期可能被调度到
  * 别的 M。必须在 main 里显式 `runtime.LockOSThread()`（不是"只加在子 goroutine"），

@@ -305,6 +305,7 @@ struct Atlas {
 struct RoundTex {
     GLuint tex = 0;
     int t = 0;         // 模板边长（RoundTemplateSize：2r+4）
+    uint64_t lastUse = 0;   // LRU 计数（缓存满了按它淘汰）
 };
 
 // ---------- emoji 簇检测（与 D3D11 后端一致） ----------
@@ -490,6 +491,7 @@ struct BinUIGLGdi::Impl {
     std::unordered_map<uint32_t, ColorAtlas*> colorAtlases;
     std::unordered_map<int, RoundTex> rounds;
     RoundTex emptyRound_;   // roundFor 失败时的空返回（调用方据此退回 fillRect）
+    uint64_t roundClock_ = 0;   // 圆角模板缓存 LRU 时钟
 
     std::unordered_map<uint16_t, GLuint> images;
     std::unordered_map<uint16_t, uint32_t> imageGen; // 换图 generation：不匹配时重新上传
@@ -922,7 +924,10 @@ struct BinUIGLGdi::Impl {
         int r = std::max(1, radius);
         int key = stroke ? -r : r;
         auto it = rounds.find(key);
-        if (it != rounds.end()) return it->second;
+        if (it != rounds.end()) {
+            it->second.lastUse = ++roundClock_;
+            return it->second;
+        }
 
         int t = RoundTemplateSize(r);
         // ensureRasterDC 失败时 rasterBits 还是**上一个尺寸**的缓冲，
@@ -965,11 +970,13 @@ struct BinUIGLGdi::Impl {
         rt.tex = CreateTexture2D(t, t, rasterBits, true);
         if (!rt.tex) return emptyRound_;
 
-        // 缓存上限：半径种类一多（动效/多主题）会一路涨显存；超了就淘汰最大的一张
+        // 缓存上限：半径种类一多（动效 / 多主题）会一路涨显存。超了按 **LRU** 淘汰：
+        // 以前淘汰"最大的一张"，可大的那张往往正是最热的主卡片圆角。
+        rt.lastUse = ++roundClock_;
         if (rounds.size() >= 48) {
             auto victim = rounds.begin();
             for (auto k = rounds.begin(); k != rounds.end(); ++k)
-                if (k->second.t > victim->second.t) victim = k;
+                if (k->second.lastUse < victim->second.lastUse) victim = k;
             if (victim->second.tex) glDeleteTextures(1, &victim->second.tex);
             rounds.erase(victim);
         }
@@ -1730,14 +1737,15 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
     for (size_t i = 0; i < nodes.size(); i++) byId[nodes[i].id] = i;
 
     std::unordered_map<uint16_t, binui::BinUIRenderer::ScrollState> scrolls;
-    // 真的要出竖直滚动条的容器 → 给它留 gutter（右侧扣掉滚动条宽度）。
+    // 真的要出滚动条的容器 → 给它留 gutter（右侧 / 底部扣掉滚动条宽度）。
     // 以前滚动条直接压在内容上：最右一列文字/气泡会被盖住一截（docs/issues/05）。
-    std::unordered_map<uint16_t, int32_t> gutterOf;
+    std::unordered_map<uint16_t, int32_t> gutterR, gutterB;
     const int32_t sbW = static_cast<int32_t>(renderer.scrollbarStyle().width);
     for (const auto& node : nodes) {
         if (node.flags & BINUI_SCROLLABLE) {
             if (const auto* s = renderer.scrollState(node.id)) scrolls[node.id] = *s;
-            if (renderer.contentHeight(node.id) > node.height + 0.5f) gutterOf[node.id] = sbW;
+            if (renderer.contentHeight(node.id) > node.height + 0.5f) gutterR[node.id] = sbW;
+            if (renderer.contentWidth(node.id) > node.width + 0.5f) gutterB[node.id] = sbW;
         }
     }
 
@@ -1767,9 +1775,11 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
             vpT[i] = static_cast<int32_t>(par.y);
             vpR[i] = static_cast<int32_t>(par.x + par.width);
             vpB[i] = static_cast<int32_t>(par.y + par.height);
-            // 出竖直滚动条时右侧留 gutter：内容裁在滚动条左边，不再被它压住
-            auto git = gutterOf.find(par.id);
-            if (git != gutterOf.end()) vpR[i] -= git->second;
+            // 出滚动条时右侧/底部留 gutter：内容裁在滚动条内侧，不再被它压住
+            auto gitR = gutterR.find(par.id);
+            if (gitR != gutterR.end()) vpR[i] -= gitR->second;
+            auto gitB = gutterB.find(par.id);
+            if (gitB != gutterB.end()) vpB[i] -= gitB->second;
         } else {
             hasVp[i] = hasVp[pi];
             vpL[i] = vpL[pi]; vpT[i] = vpT[pi];
@@ -2210,27 +2220,45 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
     for (const auto& node : nodes) {
         if (!(node.flags & BINUI_SCROLLABLE) || !(node.flags & BINUI_VISIBLE)) continue;
         float ch = renderer.contentHeight(node.id);
+        float cw = renderer.contentWidth(node.id);
         auto sit = scrolls.find(node.id);
+        float sx = sit != scrolls.end() ? sit->second.x : 0;
         float sy = sit != scrolls.end() ? sit->second.y : 0;
         int x = static_cast<int>(node.x), y = static_cast<int>(node.y);
         int nw = static_cast<int>(node.width), nh = static_cast<int>(node.height);
-        if (ch <= nh + 0.5f) continue;
+        const bool needV = ch > nh + 0.5f;
+        const bool needH = cw > nw + 0.5f;
+        if (!needV && !needH) continue;
 
         // 滚动条配色/宽度由渲染器提供（C ABI 的 binui_set_scrollbar_style 落到同一处）。
         // 以前这里写死 8px + #2E2E2E / #5A5A5A，浅色主题下就是右边一条黑杠，
         // 而且没有任何入口能覆盖。
         const auto& sb = renderer.scrollbarStyle();
         const int barW = sb.width;
-        gfx.fillRect(static_cast<float>(x + nw - barW), static_cast<float>(y),
-                     static_cast<float>(barW), static_cast<float>(nh), sb.track);
-        float thumbH = std::max(24.0f, static_cast<float>(nh) * nh / ch);
-        float maxScroll = ch - nh;
-        // 位置算法（贴右、按滚动比例）保持原样；只有宽度跟着轨道换算
-        float thumbY = maxScroll > 0 ? sy / maxScroll * (nh - thumbH) : 0;
-        // 滑块宽度沿用"轨道一半"的老比例（轨道 8 → 滑块 4），左右各留 (barW-thumbW)/2
-        const float thumbW = static_cast<float>(std::max(2, barW / 2));
-        const float thumbX = static_cast<float>(x + nw - barW) + (barW - thumbW) * 0.5f;
-        gfx.fillRect(thumbX, static_cast<float>(y) + thumbY, thumbW, thumbH, sb.thumb);
+        const float thumbThick = static_cast<float>(std::max(2, barW / 2));
+
+        if (needV) {
+            gfx.fillRect(static_cast<float>(x + nw - barW), static_cast<float>(y),
+                         static_cast<float>(barW), static_cast<float>(nh), sb.track);
+            float thumbH = std::max(24.0f, static_cast<float>(nh) * nh / ch);
+            float maxScroll = ch - nh;
+            // 位置算法（贴右、按滚动比例）保持原样；只有宽度跟着轨道换算
+            float thumbY = maxScroll > 0 ? sy / maxScroll * (nh - thumbH) : 0;
+            // 滑块宽度沿用"轨道一半"的老比例（轨道 8 → 滑块 4），左右各留 (barW-thumbW)/2
+            const float thumbX = static_cast<float>(x + nw - barW) + (barW - thumbThick) * 0.5f;
+            gfx.fillRect(thumbX, static_cast<float>(y) + thumbY, thumbThick, thumbH, sb.thumb);
+        }
+        if (needH) {
+            // 水平条：贴在底边，宽度扣掉竖直条占的那一格，避免两条在右下角打架
+            const int trackW = nw - (needV ? barW : 0);
+            gfx.fillRect(static_cast<float>(x), static_cast<float>(y + nh - barW),
+                         static_cast<float>(trackW), static_cast<float>(barW), sb.track);
+            float thumbW = std::max(24.0f, static_cast<float>(nw) * nw / cw);
+            float maxScroll = cw - nw;
+            float thumbX = maxScroll > 0 ? sx / maxScroll * (nw - thumbW) : 0;
+            const float thumbY = static_cast<float>(y + nh - barW) + (barW - thumbThick) * 0.5f;
+            gfx.fillRect(static_cast<float>(x) + thumbX, thumbY, thumbW, thumbThick, sb.thumb);
+        }
     }
     gfx.popClipTo(sbDepth);
 }

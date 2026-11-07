@@ -1310,6 +1310,19 @@ float BinUIRenderer::contentHeight(uint16_t nodeId) const {
     return bottom;
 }
 
+// 内容宽度：子节点右界 - 容器左（与 contentHeight 同口径，供水平滚动条 / gutter 用）
+float BinUIRenderer::contentWidth(uint16_t nodeId) const {
+    auto it = nodeIndexById_.find(nodeId);
+    if (it == nodeIndexById_.end()) return 0;
+    const auto& c = nodes_[it->second];
+    float right = 0;
+    for (const auto& n : nodes_) {
+        if (n.parentId == nodeId)
+            right = std::max(right, n.x + n.width - c.x);
+    }
+    return right;
+}
+
 // 滚轮：滚动光标处最顶层的滚动容器（命中节点向上找最近滚动祖先；无交互节点时直接找容器）
 int BinUIRenderer::scrollAt(float x, float y, float dy) {
     int id = hitTest(x, y);

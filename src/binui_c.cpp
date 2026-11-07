@@ -502,6 +502,19 @@ int32_t BINUI_C_CALL binui_poll_event(void* appp, BinUIEvent* out) {
 void BINUI_C_CALL binui_app_destroy(void* appp) {
     App* a = A(appp);
     if (!a) return;
+    // 跨线程销毁是未定义行为（DestroyWindow / wglDeleteContext 都要求建窗线程）。
+    // 以前只打警告继续做，症状是随机 AV 或卡死；现在**拒绝执行**并把 App 留着
+    // （泄漏窗口 + GL 上下文，进程退出时一起回收）—— 泄漏好过崩溃，而且宿主能立刻
+    // 从 binui_last_error 知道发生了什么。docs/issues/02 / 08。
+    if (a->shell && !a->shell->onOwnerThread()) {
+        SetErr("binui_app_destroy: 调用线程不是建窗线程，已拒绝销毁"
+               "（窗口/GL 上下文会泄漏到进程退出；Go 宿主请在 main 里 runtime.LockOSThread）");
+        std::fprintf(stderr,
+            "[binui] binui_app_destroy 在**非建窗线程**上被调用，已拒绝销毁。\n"
+            "        Win32 窗口与 WGL 上下文都有线程亲和，跨线程拆它们只会崩。\n"
+            "        宿主错误：建窗、pump、销毁必须在同一个 OS 线程上。\n");
+        return;
+    }
     if (a->shell) {
         a->shell->close();
         a->shell.reset();

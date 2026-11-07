@@ -659,12 +659,13 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
     std::unordered_map<uint16_t, binui::BinUIRenderer::ScrollState> scrolls;
     // 真要出竖直滚动条的容器 → 留 gutter（右侧扣掉滚动条宽度），
     // 否则滚动条直接压住最右一列内容（docs/issues/05）。
-    std::unordered_map<uint16_t, int32_t> gutterOf;
+    std::unordered_map<uint16_t, int32_t> gutterR, gutterB;
     const int32_t sbW = static_cast<int32_t>(renderer.scrollbarStyle().width);
     for (const auto& node : nodes) {
         if (node.flags & BINUI_SCROLLABLE) {
             if (const auto* s = renderer.scrollState(node.id)) scrolls[node.id] = *s;
-            if (renderer.contentHeight(node.id) > node.height + 0.5f) gutterOf[node.id] = sbW;
+            if (renderer.contentHeight(node.id) > node.height + 0.5f) gutterR[node.id] = sbW;
+            if (renderer.contentWidth(node.id) > node.width + 0.5f) gutterB[node.id] = sbW;
         }
     }
 
@@ -695,8 +696,10 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             vpT[i] = static_cast<int32_t>(par.y);
             vpR[i] = static_cast<int32_t>(par.x + par.width);
             vpB[i] = static_cast<int32_t>(par.y + par.height);
-            auto git = gutterOf.find(par.id);   // 出滚动条时右侧留 gutter
-            if (git != gutterOf.end()) vpR[i] -= git->second;
+            auto gitR = gutterR.find(par.id);
+            if (gitR != gutterR.end()) vpR[i] -= gitR->second;
+            auto gitB = gutterB.find(par.id);
+            if (gitB != gutterB.end()) vpB[i] -= gitB->second;
         } else {
             hasVp[i] = hasVp[pi];
             vpL[i] = vpL[pi]; vpT[i] = vpT[pi];
@@ -1280,8 +1283,12 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         float ch = renderer.contentHeight(node.id);
         auto sit = scrolls.find(node.id);
         float sy = sit != scrolls.end() ? sit->second.y : 0;
+        float cw = renderer.contentWidth(node.id);
         int x = (int)node.x, y = (int)node.y, nw = (int)node.width, nh = (int)node.height;
-        if (ch <= nh + 0.5f) continue; // 内容未溢出不显示
+        float sx = sit != scrolls.end() ? sit->second.x : 0;
+        const bool needV = ch > nh + 0.5f;
+        const bool needH = cw > nw + 0.5f;
+        if (!needV && !needH) continue; // 两个方向都不溢出就不画
 
         // 滚动条配色/宽度由渲染器提供（C ABI 与编译器 scrollbar-* 落到同一处）。
         // 以前写死 8px + #2E2E2E/#5A5A5A，浅色主题下就是右边一条黑杠，
@@ -1290,22 +1297,36 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         const int barW = sb.width;
         HBRUSH track = CreateSolidBrush(RGB((sb.track >> 16) & 0xFF, (sb.track >> 8) & 0xFF,
                                             sb.track & 0xFF));
-        RECT tr = { x + nw - barW, y, x + nw, y + nh };
-        FillRect(hdc, &tr, track);
-        DeleteObject(track);
-
-        // 滑块：高度 = 视口比例，位置 = 滚动比例（位置算法保持原样）
-        float thumbH = std::max(24.0f, (float)nh * nh / ch);
-        float maxScroll = ch - nh;
-        float thumbY = maxScroll > 0 ? sy / maxScroll * (nh - thumbH) : 0;
-        // 滑块宽度沿用"轨道一半"的老比例（轨道 8 → 滑块 4），左右各留 (barW-thumbW)/2，
-        // 这样 barW=8 时与原来一致（左 2 右 2）
-        const int thumbW = std::max(2, barW / 2);
-        const int thumbX = x + nw - barW + (barW - thumbW) / 2;
         HBRUSH thumb = CreateSolidBrush(RGB((sb.thumb >> 16) & 0xFF, (sb.thumb >> 8) & 0xFF,
                                             sb.thumb & 0xFF));
-        RECT ur = { thumbX, y + (int)thumbY, thumbX + thumbW, y + (int)(thumbY + thumbH) };
-        FillRect(hdc, &ur, thumb);
+
+        if (needV) {
+            RECT tr = { x + nw - barW, y, x + nw, y + nh };
+            FillRect(hdc, &tr, track);
+            // 滑块：高度 = 视口比例，位置 = 滚动比例（位置算法保持原样）
+            float thumbH = std::max(24.0f, (float)nh * nh / ch);
+            float maxScroll = ch - nh;
+            float thumbY = maxScroll > 0 ? sy / maxScroll * (nh - thumbH) : 0;
+            // 滑块宽度沿用"轨道一半"的老比例（轨道 8 → 滑块 4），左右各留 (barW-thumbW)/2
+            const int thumbW = std::max(2, barW / 2);
+            const int thumbX = x + nw - barW + (barW - thumbW) / 2;
+            RECT ur = { thumbX, y + (int)thumbY, thumbX + thumbW, y + (int)(thumbY + thumbH) };
+            FillRect(hdc, &ur, thumb);
+        }
+        if (needH) {
+            // 水平条：贴底边，宽度扣掉竖直条那一格，避免右下角叠在一起
+            const int trackW = nw - (needV ? barW : 0);
+            RECT tr = { x, y + nh - barW, x + trackW, y + nh };
+            FillRect(hdc, &tr, track);
+            float thumbW = std::max(24.0f, (float)nw * nw / cw);
+            float maxScroll = cw - nw;
+            float thumbX = maxScroll > 0 ? sx / maxScroll * (nw - thumbW) : 0;
+            const int thick = std::max(2, barW / 2);
+            const int thumbY = y + nh - barW + (barW - thick) / 2;
+            RECT ur = { x + (int)thumbX, thumbY, x + (int)(thumbX + thumbW), thumbY + thick };
+            FillRect(hdc, &ur, thumb);
+        }
+        DeleteObject(track);
         DeleteObject(thumb);
     }
 }
