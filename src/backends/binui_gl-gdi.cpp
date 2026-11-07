@@ -2532,6 +2532,18 @@ void ImeLog(const char* fmt, ...) {
     std::fclose(f);
 }
 
+// 输入法当前是否正在组字。
+//
+// 用 IME 上下文实时问，不要靠 WM_IME_START/ENDCOMPOSITION 的成对计数 ——
+// 组字被打断时 END 可能不来，标志位一挂死，之后所有按键就再也进不了编辑器。
+static bool ImeComposing(HWND hwnd) {
+    HIMC himc = ImmGetContext(hwnd);
+    if (!himc) return false;
+    const LONG n = ImmGetCompositionStringW(himc, GCS_COMPSTR, nullptr, 0);
+    ImmReleaseContext(hwnd, himc);
+    return n > 0;
+}
+
 // 光标形状缓存：IDC_* 是系统共享资源，LoadCursor 只想加载一次
 static HCURSOR CursorHandleOf(int kind) {
     static HCURSOR cache[5] = {};
@@ -2555,18 +2567,25 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     if (!app) return DefWindowProcW(hwnd, msg, wParam, lParam);
 
     switch (msg) {
-        case WM_KEYDOWN:
-        case WM_IME_KEYDOWN:
-        case WM_CHAR:
-        case WM_IME_CHAR:
-            // **不要自己插**：这条消息的 wParam 是输入法按系统代码页给的**字节**
-            //（不是 Unicode 码点），直接当宽字符用会把「啊」变成「å」这种乱码。
-            // 交给 DefWindowProc，它会转成正确的 WM_CHAR（Unicode 窗口下就是 UTF-16），
-            // 再由我们的 WM_CHAR 分支插入。这里只留一行日志方便排查。
-            ImeLog("  ime_char wp=0x%zX (交给 DefWindowProc)", static_cast<size_t>(wParam));
+        case WM_IME_ENDCOMPOSITION: {
+            app->composing_ = false;
+            ImeLog("msg=WM_IME_ENDCOMPOSITION");
+            // 交给 DefWindowProc 收尾。
+            //
+            // 已知限制（不是没查，是查到了推不动）：微软拼音在"组字被 Esc 或退格
+            // 删空取消"而不是提交时，候选窗会留在屏幕上不走；在记事本这类标准 Edit
+            // 控件上它会自己收，在我们的自绘窗口上不会。NI_CLOSECANDIDATE、
+            // CPS_CANCEL、ImmSetOpenStatus(FALSE/TRUE)、ImmAssociateContextEx
+            // 四种手段实测都推不动它（候选窗属于输入法进程的顶层窗口），
+            // 所以这里不再做无效补救。
             break;
-        case WM_IME_ENDCOMPOSITION:
-        case WM_IME_COMPOSITION:
+        }
+        case WM_IME_NOTIFY:
+            // wParam 是 IMN_*：关闭候选窗是 IMN_CLOSECANDIDATE(0x4)，
+            // 打开是 IMN_OPENCANDIDATE(0x5)。候选窗的生死全在这条消息里。
+            ImeLog("msg=WM_IME_NOTIFY imn=0x%04X lp=0x%zX",
+                   static_cast<unsigned>(wParam), static_cast<size_t>(lParam));
+            break;
         case WM_IME_SETCONTEXT:
         case WM_IME_REQUEST:
             ImeLog("msg=0x%04X wp=0x%zX lp=0x%zX",
@@ -2627,9 +2646,24 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             app->handleChar(static_cast<wchar_t>(wParam));
             return 0;
         case WM_KEYDOWN:
+            // 组字期间的回车/空格/退格/Esc 都是**输入法在用**，我们一个都不能接。
+            // 接了就等于替用户取消组字：IME 发现会话没了，会把还没转换的拼音串
+            // 原样当结果串提交（输 zhongguo 按回车 → 输入框里躺着 "zhongguo"
+            // 而不是"中国"，就是这么来的）。
+            if (app->composing_ && ImeComposing(hwnd)) {
+                ImeLog("  keydown vk=%d (组字中，不归我们处理)", static_cast<int>(wParam));
+                break;   // 交给 DefWindowProc：IME 灌进来的 VK_PROCESSKEY 要在这里走完
+            }
             app->handleKey(static_cast<int>(wParam));
             return 0;
+        case WM_SETFOCUS:
+            ImeLog("msg=SETFOCUS");
+            break;
+        case WM_ACTIVATE:
+            ImeLog("msg=ACTIVATE wp=0x%zX", static_cast<size_t>(wParam));
+            break;
         case WM_KILLFOCUS:
+            ImeLog("msg=KILLFOCUS");
             // 失焦时把**没提交的组字**取消掉。不取消的话输入法会留着一个悬着的
             // 候选窗；而且我们的 blur() 已经把编辑会话结束了，残留的组字之后再提交
             // 就会落到"没有编辑中的输入框"，表现为"只进了第一个字 / 后面全丢"。
@@ -2681,11 +2715,11 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             return HTCLIENT;
         }
         case WM_IME_SETCONTEXT: {
-            // 关键的一行：默认行为是"应用程序自己画组字窗口"，我们要让**输入法自己画**，
-            // 所以要把 ISC_SHOWUICOMPOSITIONWINDOW 这一位清掉再交给 DefWindowProc。
-            // 以前没清 —— 系统以为我们会画，于是自己也不画，表现就是"打了字什么都没出来"。
-            return DefWindowProcW(hwnd, msg, wParam,
-                                  lParam & ~static_cast<LPARAM>(ISC_SHOWUICOMPOSITIONWINDOW));
+            // 这一位**必须留着**：ISC_SHOWUICOMPOSITIONWINDOW 的含义是"允许输入法
+            // 显示组字窗口"。以前这里把它清掉（注释还写反成"清掉才是让输入法自己画"），
+            // 结果系统不画组字、我们也没自己画 —— 打拼音屏幕上什么都没有，只剩候选窗
+            // 孤零零挂着（候选窗不受这一位控制，所以它能出来、拼音却出不来）。
+            break;   // 原样交给 DefWindowProc
         }
         case WM_IME_STARTCOMPOSITION: {
             app->composing_ = true;
@@ -2713,15 +2747,38 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             }
             break;   // 组字内容仍然交给 DefWindowProc
         }
-        case WM_IME_COMPOSITION:
-            // 这里**什么都不做**，全部交给 DefWindowProc。
+        case WM_IME_COMPOSITION: {
+            // 结果串自己取，**不能**交给 DefWindowProc。
             //
-            // 踩过的坑：之前自己 ImmGetCompositionString(GCS_RESULTSTR) 取结果串插入、
-            // 再 return 0 挡掉 DefWindowProc，结果输入法状态机乱了 —— 第一次焦点在窗口上
-            // 只能进第一个字、退格退不掉、候选框不收；第二次焦点干脆不出候选；第三次才正常。
-            // 根因就是"应用和 DefWindowProc 抢同一件事"。
-            // DefWindowProc 会把结果串转成 WM_IME_CHAR 交给窗口，那条路是系统自带的对账。
+            // 交给它的话，它会把结果串折成 WM_IME_CHAR，而那条消息的 wParam 是
+            // **系统代码页里的单个字节**：一个汉字要被拆成两次送过来（0xE5 0x90
+            // 这种），逐字节当宽字符插进去就是「å å å」；再叠上"每次按键都可能带
+            // 一个孤立字节"的兼容行为，就表现为只进第一个字、后面全乱。
+            //
+            // GCS_RESULTSTR 是 UTF-16，取整串直接喂 handleChar 是唯一干净的路。
+            if (lParam & GCS_RESULTSTR) {
+                if (HIMC himc = ImmGetContext(hwnd)) {
+                    const LONG bytes = ImmGetCompositionStringW(himc, GCS_RESULTSTR, nullptr, 0);
+                    if (bytes > 0) {
+                        std::wstring w(static_cast<size_t>(bytes) / sizeof(wchar_t), L'\0');
+                        ImmGetCompositionStringW(himc, GCS_RESULTSTR, &w[0], bytes);
+                        ImeLog("  resultstr bytes=%ld cps=%zu", bytes, w.size());
+                        for (wchar_t ch : w) app->handleChar(ch);
+                    }
+                    ImmReleaseContext(hwnd, himc);
+                }
+                return 0;   // 关键：吞掉，别让 DefWindowProc 再生成逐字节的 WM_IME_CHAR
+            }
+            // 只有组字更新（GCS_COMPSTR 等）：交给 DefWindowProc，它负责让输入法
+            // 重画组字窗口
+            ImeLog("  composition lp=0x%zX (交给 DefWindowProc)", static_cast<size_t>(lParam));
             break;
+        }
+        case WM_IME_CHAR:
+            // 走到这里说明结果串没被 WM_IME_COMPOSITION 接走（某些老输入法只发这条）。
+            // wParam 是单字节 ANSI，绝不能当宽字符插 —— 直接丢弃，日志留痕。
+            ImeLog("  ime_char wp=0x%zX (丢弃)", static_cast<size_t>(wParam));
+            return 0;
         case WM_IME_REQUEST: {
             // 新式 IME 用 IMR_CANDIDATEWINDOW 问"候选窗该放哪"，比 CANDIDATEFORM 可靠
             if (wParam == IMR_CANDIDATEWINDOW && app->imeCaret_ && lParam) {
@@ -2732,6 +2789,43 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     cdf->dwStyle = CFS_CANDIDATEPOS;
                     cdf->ptCurrentPos.x = cx;
                     cdf->ptCurrentPos.y = cy + ch;   // 候选窗列在光标下方
+                    return TRUE;
+                }
+            }
+            // TSF 系输入法（Win11 微软拼音走这条）用 IMR_QUERYCHARPOSITION 问
+            // "字符在屏幕上画哪儿"：不回或回 FALSE，它只能退回老式组字窗口，
+            // 位置和内联排版都对不上。
+            //
+            // **pt / rcDocument 必须是屏幕坐标**（MSDN 对 IMECHARPOSITION 的明确要求）。
+            // 这里一度直接塞了客户区坐标，结果候选窗算出来的位置落到屏幕别处 ——
+            // 表现就是"组字看得见、候选框压根不出来"。
+            if (wParam == IMR_QUERYCHARPOSITION && app->imeCaret_ && lParam) {
+                // 组字串为空（拼音全被退格删掉）时不存在"第几个字符在哪"，回 FALSE
+                // 才是正确应答 —— 硬塞一个光标位置会让输入法以为那个字符还在。
+                // （注意：这并不会让候选窗自己收掉，候选窗是另一个问题，见
+                //  WM_IME_ENDCOMPOSITION 那段的说明。）
+                {
+                    bool empty = true;
+                    if (HIMC himc = ImmGetContext(hwnd)) {
+                        empty = ImmGetCompositionStringW(himc, GCS_COMPSTR, nullptr, 0) <= 0;
+                        ImmReleaseContext(hwnd, himc);
+                    }
+                    if (empty) break;   // → DefWindowProc 返回 FALSE
+                }
+                auto* icp = reinterpret_cast<IMECHARPOSITION*>(lParam);
+                int cx = 0, cy = 0, ch = 16;
+                if (app->imeCaret_(cx, cy, ch)) {
+                    POINT pt = { cx, cy };
+                    ClientToScreen(hwnd, &pt);
+                    icp->dwSize = sizeof(IMECHARPOSITION);
+                    icp->pt = pt;
+                    icp->cLineHeight = static_cast<UINT>(ch > 0 ? ch : 16);
+                    RECT rc;
+                    GetClientRect(hwnd, &rc);          // 客户区 → 屏幕，同样是屏幕坐标
+                    POINT tl = { rc.left, rc.top }, br = { rc.right, rc.bottom };
+                    ClientToScreen(hwnd, &tl);
+                    ClientToScreen(hwnd, &br);
+                    SetRect(&icp->rcDocument, tl.x, tl.y, br.x, br.y);
                     return TRUE;
                 }
             }
