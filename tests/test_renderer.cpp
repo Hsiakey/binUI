@@ -172,6 +172,35 @@ static void TestIssueRegressions() {
         TEST("光标: 竖直滚动条上是上下箭头", r.cursorAt(374, 60) == CK::SizeNS);
     }
 
+    // ---- 剪贴板的文本层动作：selectedText / deleteSelection / selectAll ----
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014"><body>
+  <input id="fld" style="position:absolute; left:20; top:20; width:200; height:32"/>
+  <input id="ro" readonly style="position:absolute; left:20; top:70; width:200; height:32" value="只读文本"/>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("剪贴板: 编译并加载", !bin.empty() && r.loadLayout(bin.data(), bin.size()));
+        const uint16_t fld = r.findNodeByName("fld");
+        const uint16_t ro = r.findNodeByName("ro");
+        r.focus(fld);
+        TEST("剪贴板: 聚焦输入框", r.isEditing() && r.edit().nodeId == fld);
+        TEST("剪贴板: 没选区时 selectedText 为空", r.selectedText().empty());
+        TEST("剪贴板: 没选区时 deleteSelection 返回 false", !r.deleteSelection());
+        r.insertText("hello 中文");
+        TEST("剪贴板: 插入后全选", r.selectAll());
+        TEST("剪贴板: 全选取到整串", r.selectedText() == "hello 中文");
+        TEST("剪贴板: 删选区清空", r.deleteSelection() && r.edit().value.empty());
+        // 只读框：能全选/复制，但不能删
+        r.focus(ro);
+        TEST("剪贴板: 只读框可聚焦", r.isEditing() && r.edit().nodeId == ro);
+        TEST("剪贴板: 只读框可全选", r.selectAll() && !r.selectedText().empty());
+        TEST("剪贴板: 只读框拒绝删选区", !r.deleteSelection());
+        r.blur();
+    }
+
     // ---- 07：setNodeBounds 的边界处理 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

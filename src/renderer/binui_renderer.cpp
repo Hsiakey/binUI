@@ -2051,6 +2051,37 @@ void BinUIRenderer::commitTextEvent() {
     eventCallback_(ev);
 }
 
+// 剪贴板三件套的文本层动作（真正的系统剪贴板 I/O 在平台层）
+std::string BinUIRenderer::selectedText() const {
+    if (!edit_.active) return std::string();
+    const size_t a = std::min(edit_.caret, edit_.selStart);
+    const size_t b = std::max(edit_.caret, edit_.selStart);
+    if (b <= a) return std::string();
+    const size_t n = std::min(b - a, edit_.value.size() - std::min(a, edit_.value.size()));
+    return edit_.value.substr(std::min(a, edit_.value.size()), n);
+}
+
+bool BinUIRenderer::deleteSelection() {
+    if (!edit_.active) return false;
+    if (isReadonly(edit_.nodeId)) return false;
+    const size_t a = std::min(edit_.caret, edit_.selStart);
+    const size_t b = std::max(edit_.caret, edit_.selStart);
+    if (b <= a) return false;
+    edit_.value.erase(a, b - a);
+    edit_.caret = a;
+    edit_.selStart = a;
+    commitTextEvent();
+    return true;
+}
+
+// 全选：只读输入框也能选（复制走 Ctrl+C，不改内容）
+bool BinUIRenderer::selectAll() {
+    if (!edit_.active) return false;
+    edit_.selStart = 0;
+    edit_.caret = edit_.value.size();
+    return true;
+}
+
 bool BinUIRenderer::insertText(const std::string& utf8) {
     if (!edit_.active || utf8.empty()) return false;
     if (isReadonly(edit_.nodeId)) return false;   // v14：只读框拒绝一切内容变更

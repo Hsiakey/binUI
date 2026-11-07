@@ -282,6 +282,12 @@ public:
     bool setCaret(size_t byteOffset);                  // 设置光标（钳制到字符边界）
     bool setCaretByUtf16Index(size_t utf16Index);      // 后端测量后按 UTF-16 索引定位
 
+    // 剪贴板编辑（真正的剪贴板 I/O 在平台层：GL/D3D 外壳与 C ABI 各读各的）。
+    // 这三个是"文本层面的动作"：取选中文字、删掉选区、全选。
+    std::string selectedText() const;                  // 无选区返回空串
+    bool deleteSelection();                            // 删掉选区（无选区返回 false）
+    bool selectAll();                                  // 全选（只读输入框也可以选）
+
     struct NodeInfo {
         uint16_t id;
         uint16_t parentId;

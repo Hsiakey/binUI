@@ -10,6 +10,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cwchar>
 #include <deque>
 #include <memory>
 #include <string>
@@ -107,6 +108,74 @@ std::string asDir(std::string d) {
     const char c = d.back();
     if (c != '/' && c != '\\') d += '/';
     return d;
+}
+
+// ============================================================
+// 剪贴板（CF_UNICODETEXT）—— UTF-8 与 UTF-16 之间的往返
+// binUI 的文本一律 UTF-8，Windows 剪贴板是 UTF-16，所以每次都要转。
+// 只在 C ABI 这一层做：核心库保持平台无关，D3D/GDI 外壳各管各的窗口。
+// ============================================================
+std::wstring Utf8ToWide(const std::string& s) {
+    if (s.empty()) return std::wstring();
+    const int n = MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()),
+                                      nullptr, 0);
+    if (n <= 0) return std::wstring();
+    std::wstring w(static_cast<size_t>(n), L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.data(), static_cast<int>(s.size()), &w[0], n);
+    return w;
+}
+
+std::string WideToUtf8(const wchar_t* w, int len) {
+    if (!w || len <= 0) return std::string();
+    const int n = WideCharToMultiByte(CP_UTF8, 0, w, len, nullptr, 0, nullptr, nullptr);
+    if (n <= 0) return std::string();
+    std::string s(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(CP_UTF8, 0, w, len, &s[0], n, nullptr, nullptr);
+    return s;
+}
+
+// 写剪贴板。失败（别的程序占着剪贴板）就静默放弃 —— 粘贴不成功比崩掉好。
+bool ClipboardPut(const std::string& utf8) {
+    if (utf8.empty()) return false;
+    const std::wstring w = Utf8ToWide(utf8);
+    if (w.empty()) return false;
+    if (!OpenClipboard(nullptr)) return false;
+    bool ok = false;
+    if (EmptyClipboard()) {
+        const size_t bytes = (w.size() + 1) * sizeof(wchar_t);
+        if (HGLOBAL h = GlobalAlloc(GMEM_MOVEABLE, bytes)) {
+            if (void* p = GlobalLock(h)) {
+                std::memcpy(p, w.c_str(), bytes);
+                GlobalUnlock(h);
+                // 成功后所有权归系统，不能再 GlobalFree
+                if (SetClipboardData(CF_UNICODETEXT, h)) ok = true;
+                else GlobalFree(h);
+            } else {
+                GlobalFree(h);
+            }
+        }
+    }
+    CloseClipboard();
+    return ok;
+}
+
+// 读剪贴板。去掉 \r\n：binUI 的输入框是单行，粘进来换行会把文本折成多行画到框外。
+std::string ClipboardGet() {
+    std::string out;
+    if (!IsClipboardFormatAvailable(CF_UNICODETEXT)) return out;
+    if (!OpenClipboard(nullptr)) return out;
+    if (HANDLE h = GetClipboardData(CF_UNICODETEXT)) {
+        if (const wchar_t* p = static_cast<const wchar_t*>(GlobalLock(h))) {
+            out = WideToUtf8(p, static_cast<int>(wcslen(p)));
+            GlobalUnlock(h);
+        }
+    }
+    CloseClipboard();
+    for (size_t i = 0; i < out.size();) {
+        if (out[i] == '\r' || out[i] == '\n') out.erase(i, 1);
+        else i++;
+    }
+    return out;
 }
 
 } // namespace
@@ -271,9 +340,22 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
         PushEvent(a, e);
 
         const bool shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
+        const bool ctrl = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
         if (r.isEditing()) {
             const size_t len = r.edit().value.size();
             const uint16_t id = r.edit().nodeId;
+            // 剪贴板四件套：编辑框里才能用（只读框允许复制/全选，库内部会拒绝改内容）
+            if (ctrl) {
+                switch (vk) {
+                    case 'C': ClipboardPut(r.selectedText()); break;
+                    case 'X': ClipboardPut(r.selectedText()); r.deleteSelection(); break;
+                    case 'V': { const std::string s = ClipboardGet(); if (!s.empty()) r.insertText(s); break; }
+                    case 'A': r.selectAll(); break;
+                    default: break;
+                }
+                InvalidateNode(a, id);
+                return;
+            }
             switch (vk) {
                 case VK_BACK:   r.backspace(); break;
                 case VK_DELETE: r.deleteForward(); break;
