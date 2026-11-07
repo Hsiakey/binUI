@@ -168,6 +168,12 @@ add_binui_test(test_compiler tests/test_compiler.cpp)
 add_binui_test(test_anim tests/test_anim.cpp)
 
 # 示例 UI 零警告检查：examples/ 下所有 *.html、*.binui.xml 必须编译成功且无警告
+# pixel_diff：像素回归的比对工具（.cpp 里用 GDI+，只在 Windows 下有用）
+if(WIN32)
+    add_executable(pixel_diff tools/pixel_diff.cpp)
+    target_link_libraries(pixel_diff PRIVATE gdiplus gdi32 user32 ole32)
+endif()
+
 add_executable(check_examples tools/check_examples.cpp)
 target_link_libraries(check_examples PRIVATE binui)
 add_test(NAME check_examples COMMAND check_examples "${CMAKE_SOURCE_DIR}/examples")

@@ -445,7 +445,8 @@ struct BinUIGLGdi::Impl {
     GLuint curTex = 0;
 
     // 字形图集（按 size/weight/字体族）
-    std::unordered_map<uint64_t, Atlas*> atlases;
+    // 每个 key 可以有多个"代"：图集满了就再开一张，而不是丢字（见 getAtlasForCp）
+    std::unordered_map<uint64_t, std::vector<Atlas*>> atlases;
     std::string asciiFont = "Segoe UI";
     static constexpr const char* cjkFont = "Microsoft YaHei";
     static constexpr const char* emojiFont = "Segoe UI Emoji";
@@ -718,17 +719,22 @@ struct BinUIGLGdi::Impl {
         return true;
     }
 
-    Atlas* getAtlas(float size, int weight, int faceIdx, bool italic = false) {
+    uint64_t atlasKey(float size, int weight, int faceIdx, bool italic) const {
         // 斜体与粗体一样是"另一张图集"：合成倾斜发生在光栅化阶段，不能共用缓存。
         // 低 6 位放**面下标**（原来是 cjk / emoji 两个布尔）：同一个码点解析到不同
         // 字体时必须分图集，否则字形会串。
         const uint32_t fidx = static_cast<uint32_t>(faceIdx < 0 ? 0 : faceIdx) & 0x3Fu;
-        uint64_t key = (static_cast<uint64_t>(std::lround(size)) << 32) |
-                       (static_cast<uint64_t>((weight & 0x7FFF) | (italic ? 0x8000 : 0)) << 16) |
-                       fidx;
-        auto it = atlases.find(key);
-        if (it != atlases.end()) return it->second;
+        return (static_cast<uint64_t>(std::lround(size)) << 32) |
+               (static_cast<uint64_t>((weight & 0x7FFF) | (italic ? 0x8000 : 0)) << 16) | fidx;
+    }
 
+    // 某一代还能不能放新字形
+    static bool hasRoom(const Atlas* a) {
+        return a && a->next < a->cols * (a->sizePx / a->cellH);
+    }
+
+    Atlas* makeAtlas(uint64_t key, float size, int weight, int faceIdx, bool italic) {
+        const uint32_t fidx = static_cast<uint32_t>(faceIdx < 0 ? 0 : faceIdx) & 0x3Fu;
         Atlas* a = new Atlas();
         a->size = size;
         a->weight = weight;
@@ -748,8 +754,38 @@ struct BinUIGLGdi::Impl {
         a->ascent = fm.ascent;
         a->descent = fm.descent;
 
-        atlases[key] = a;
+        atlases[key].push_back(a);
         return a;
+    }
+
+    // 主图集（不带码点）：测量用。有空间就用第一代，否则开新一代。
+    Atlas* getAtlas(float size, int weight, int faceIdx, bool italic = false) {
+        const uint64_t key = atlasKey(size, weight, faceIdx, italic);
+        auto it = atlases.find(key);
+        if (it != atlases.end()) {
+            for (Atlas* a : it->second)
+                if (hasRoom(a)) return a;
+            return it->second.back();   // 全满：交给 rasterGlyph 的告警兜底
+        }
+        return makeAtlas(key, size, weight, faceIdx, italic);
+    }
+
+    // 按码点取图集：优先返回**已经含有该字形**的那一代（UV 必须和纹理对得上），
+    // 否则找有空间的一代，都没有就再开一代 —— 这样图集满了是"多占一张纹理"，
+    // 不再是"新字直接不出现"。
+    Atlas* getAtlasForCp(float size, int weight, int faceIdx, bool italic, uint32_t cp) {
+        const uint64_t key = atlasKey(size, weight, faceIdx, italic);
+        auto it = atlases.find(key);
+        if (it != atlases.end()) {
+            for (Atlas* a : it->second)
+                if (a->glyphs.count(cp)) return a;
+            for (Atlas* a : it->second)
+                if (hasRoom(a)) return a;
+            // 全满：开新一代（上限 8 代，再多就说明字号/字重组合失控）
+            if (it->second.size() < 8) return makeAtlas(key, size, weight, faceIdx, italic);
+            return it->second.back();
+        }
+        return makeAtlas(key, size, weight, faceIdx, italic);
     }
 
     // 把单个码点光栅化进图集格子（FreeType 灰度字形 → 白字预乘 alpha）
@@ -927,13 +963,13 @@ struct BinUIGLGdi::Impl {
             }
         }
         if (m.len <= 1) {
-            Atlas* a = getAtlas(size, weight, firstFace, italic);
+            Atlas* a = getAtlasForCp(size, weight, firstFace, italic, cps[0]);
             const Glyph* g = a ? glyphFor(a, cps[0]) : nullptr;
             m.adv = g ? static_cast<float>(g->advW) : fallback;
             return m;
         }
         for (size_t i = 0; i < m.len; i++) {
-            Atlas* a = getAtlas(size, weight, faceIdxForCp(cps[i]), italic);
+            Atlas* a = getAtlasForCp(size, weight, faceIdxForCp(cps[i]), italic, cps[i]);
             const Glyph* g = a ? glyphFor(a, cps[i]) : nullptr;
             m.adv += g ? static_cast<float>(g->advW) : fallback;
         }
@@ -1145,8 +1181,10 @@ struct BinUIGLGdi::Impl {
         }
         if (hdc) { ReleaseDC(hwnd, hdc); hdc = nullptr; }
         for (auto& kv : atlases) {
-            if (kv.second->tex) glDeleteTextures(1, &kv.second->tex);
-            delete kv.second;
+            for (Atlas* a : kv.second) {
+                if (a && a->tex) glDeleteTextures(1, &a->tex);
+                delete a;
+            }
         }
         atlases.clear();
         for (auto& kv : colorAtlases) {
@@ -1519,7 +1557,7 @@ void BinUIGLGdi::drawText(float x, float y, float size, int weight,
     impl_->curTex = impl_->whiteTex;
     float cx = x;
     auto drawGray = [&](uint32_t cp) {
-        Atlas* a = impl_->getAtlas(size, weight, impl_->faceIdxForCp(cp), italic);
+        Atlas* a = impl_->getAtlasForCp(size, weight, impl_->faceIdxForCp(cp), italic, cp);
         if (!a) return;
         const Glyph* g = impl_->glyphFor(a, cp);
         if (!g) return;

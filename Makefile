@@ -283,6 +283,7 @@ TOOL_BINS := \
     $(BIN_DIR)/gl_shot$(EXT) \
     $(BIN_DIR)/window_capture$(EXT) \
     $(BIN_DIR)/enum_windows$(EXT) \
+    $(BIN_DIR)/pixel_diff$(EXT) \
     $(BIN_DIR)/check_examples$(EXT)
 
 # 示例 UI 零警告检查（CMake 也会注册成 ctest 用例）
@@ -308,9 +309,45 @@ $(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -o $@ $< \
 	    $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
 
+$(BIN_DIR)/pixel_diff$(EXT): tools/pixel_diff.cpp
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $< -lgdiplus -lgdi32 -luser32 -lole32
+
 .PHONY: tools
 tools: $(TOOL_BINS)
 	@echo "tools -> $(TOOL_BINS)"
+
+# =============================================
+# 像素回归（本机跑，不入 CI）
+#
+# 为什么不在 CI 里：GitHub 的 Windows runner 是软件光栅化，AA 边缘与真实 GPU 不一致，
+# 同一份代码会稳定地差出百分之几；基准图只在**本机**有意义。
+# 用法：
+#   mingw32-make SHELL=sh pixels           # 渲染 + 与 docs/pixels 基准图比对
+#   mingw32-make SHELL=sh pixels-update    # 改完绘制/布局后重新生成基准图
+# =============================================
+PIXEL_CASES := circle display-none2 probe radius-matrix
+PIXEL_OUT   := $(BUILD_DIR)/pixels
+PIXEL_GOLD  := docs/pixels
+PIXEL_TOL   ?= 0.5
+
+.PHONY: pixels pixels-update
+pixels: tools
+	@mkdir -p $(PIXEL_OUT)
+	@fail=0; \
+	for c in $(PIXEL_CASES); do \
+	    echo "--- $$c ---"; \
+	    $(BIN_DIR)/offscreen_render$(EXT) docs/issues/assets/$$c.html $(PIXEL_OUT)/$$c.png >/dev/null 2>&1 || { echo "渲染失败: $$c"; fail=1; continue; }; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_GOLD)/$$c.png $(PIXEL_OUT)/$$c.png $(PIXEL_TOL) $(PIXEL_OUT)/$$c.diff.png || fail=1; \
+	done; \
+	exit $$fail
+
+pixels-update: tools
+	@mkdir -p $(PIXEL_GOLD)
+	@for c in $(PIXEL_CASES); do \
+	    $(BIN_DIR)/offscreen_render$(EXT) docs/issues/assets/$$c.html $(PIXEL_GOLD)/$$c.png >/dev/null 2>&1 || exit 1; \
+	    echo "更新基准: $(PIXEL_GOLD)/$$c.png"; \
+	done
 
 else
 
