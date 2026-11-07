@@ -61,3 +61,6 @@ __pycache__/
 # ---------- Go / Rust 绑定 ----------
 bindings/rust/target/
 bindings/rust/Cargo.lock
+
+# 本地提交信息临时文件
+commitmsg.txt
