@@ -300,6 +300,7 @@ struct Atlas {
     int faceIdx = 0;          // 回退链上的面下标（0 = 主面；缺字的豆腐块也放这里）
     bool italic = false;
     std::string face;
+    bool warnedFull = false;  // 图集满时只喊一次
     std::unordered_map<uint32_t, Glyph> glyphs;
 };
 
@@ -381,6 +382,7 @@ struct ColorAtlas {
     int cols = 0;
     int next = 0;
     float size = 0;
+    bool warnedFull = false;  // 图集满时只喊一次
     std::unordered_map<uint64_t, ColorGlyph> glyphs;
 };
 
@@ -753,7 +755,19 @@ struct BinUIGLGdi::Impl {
     // 把单个码点光栅化进图集格子（FreeType 灰度字形 → 白字预乘 alpha）
     void rasterGlyph(Atlas* a, uint32_t cp) {
         int total = a->cols * (a->sizePx / a->cellH);
-        if (a->next >= total) return;
+        if (a->next >= total) {
+            // 图集满了：以前这里**静默 return**，新字形直接不出现 —— 用户看到的是
+            // "某些字时有时无"，最难查。至少喊一声（同一张图集只喊一次）。
+            if (!a->warnedFull) {
+                a->warnedFull = true;
+                std::fprintf(stderr,
+                    "[gl] 字形图集已满（%.0fpx / weight %d / face #%d，共 %d 格）："
+                    "该组合下的新字形将被丢弃。\n"
+                    "     这是容量上限，不是排版问题；减少字号/字重组合，或把这一条当 bug 报。\n",
+                    static_cast<double>(a->size), a->weight, a->faceIdx, total);
+            }
+            return;
+        }
         binui_font::GrayGlyph g;
         // 粗体：atlas key 里带 weight，粗体是独立的一张图集；这里按新签名让 FreeType
         // 合成加粗（FT_GlyphSlot_Embolden），否则 font-weight:700 只是换个空图集重复光栅化
@@ -819,7 +833,15 @@ struct BinUIGLGdi::Impl {
     // ---------- 彩色字形（FreeType COLR 合成） ----------
     bool rasterColorCluster(ColorAtlas* a, uint64_t key, const uint32_t* cps, size_t n) {
         int total = a->cols * (a->sizePx / a->cellH);
-        if (a->next >= total) return false;
+        if (a->next >= total) {
+            if (!a->warnedFull) {
+                a->warnedFull = true;
+                std::fprintf(stderr,
+                    "[gl] 彩色字形图集已满（%.0fpx，共 %d 格）：emoji 将退回灰度/豆腐块。\n",
+                    static_cast<double>(a->size), total);
+            }
+            return false;
+        }
 
         binui_font::ColorGlyph cg;
         if (!font.renderColorCluster(emojiFont, a->size, cps, n, cg)) return false;

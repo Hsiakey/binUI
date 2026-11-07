@@ -1044,10 +1044,16 @@ CompileResult CompileBinUIEx(const std::string& source) {
         // 本次编译的警告收集到 res.warnings（同一会话内去重）
         std::unordered_set<std::string> seen;
         DiagGuard guard(&res.warnings, &seen);
-        if (xml)
+        if (xml) {
+            // XML 路径已降级为 legacy：没有 CSS 级联、不认 <use> 组件、也没有 v13/v14 的
+            // 扩展绘制段。能力上全面落后于 HTML 路径，但没有任何地方提示过作者。
+            // 按 CONTRIBUTING 的规矩"认识但不支持必须 Warn"——这里是"支持但落后",照样提醒。
+            Warn("XML 格式（<binui>/<root>）已降级为 legacy：不支持 <style> 级联与 <use> 组件，"
+                 "建议改写为 HTML 格式（.html）；两者编译产物同版本，运行期行为一致");
             res.layout = CompileXML(source, &res.images);
-        else
+        } else {
             res.layout = CompileHTML(source, &res.images);
+        }
     }
     return res;
 }
