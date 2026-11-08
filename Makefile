@@ -188,7 +188,8 @@ DEMO_BINS := \
     $(BIN_DIR)/fontshow$(EXT) \
     $(BIN_DIR)/svgdemo$(EXT) \
     $(BIN_DIR)/cubedemo$(EXT) \
-    $(BIN_DIR)/texturedemo$(EXT)
+    $(BIN_DIR)/texturedemo$(EXT) \
+    $(BIN_DIR)/imeshow$(EXT)
 
 # cmd 的 copy 不识别正斜杠路径，转成反斜杠
 # 资源拷贝一律用 cp + 正斜杠路径。
@@ -242,6 +243,11 @@ $(BIN_DIR)/texturedemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/
 	@mkdir -p $(BIN_DIR)/texturedemo
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/texturedemo/main.html $(WIN_BIN)/texturedemo/main.html
+
+$(BIN_DIR)/imeshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/imeshow/main.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)/imeshow
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/imeshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	cp -f $(EXA_DIR)/imeshow/main.html $(WIN_BIN)/imeshow/main.html
 
 # =============================================
 # C ABI：给 Python / Go / Rust 等宿主语言的绑定入口（include/binui_c.h）

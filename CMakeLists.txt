@@ -135,6 +135,7 @@ if(WIN32)
     add_gl_demo(svgdemo)
     add_gl_demo(cubedemo)
     add_gl_demo(texturedemo)
+    add_gl_demo(imeshow)
 
     # features 额外需要组件文件（源码组件 + 两个 .bum）
     add_gl_demo(features)

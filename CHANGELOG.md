@@ -6,6 +6,39 @@
 
 ## [Unreleased]
 
+### 修复 — IME 组字窗/候选框停在旧位置，打字时屏幕上什么都没有
+
+自绘窗口（Cicero-unaware）上，输入法的组字窗和候选框位置**只有第一次生效**：
+`ImmSetCompositionWindow` / `ImmSetCandidateWindow` 之后一律返回 TRUE 却不理。
+后果是两层：
+
+- 宿主没接 `setImeCaretFn` 时，输入法拿不到光标，组字窗落到**窗口外**
+  （实测窗口在屏幕 (900,376)，组字窗跑到 (1030,151)）。现象是"打拼音屏幕上什么
+  都没有"，但选词照样上屏，极易误判成输入法没工作。
+- 接了钩子也不够：从第一个输入框切到第二个输入框、或在同一个框里接着打下一个词，
+  组字串画对了、候选框还赖在旧位置。
+
+修法：
+
+- 新增 `imeCaretFromRenderer()`（`backends/binui_gl-gdi.h`）：按渲染器编辑态算光标
+  客户区坐标与行高，算式与 `drawNodesGLGdi` 里 BINUI_INPUT 的绘制同源
+  （`padding+4` + `textWidth` + 同一行高），不会差半格。C++ 宿主一行接上：
+  `app.setImeCaretFn([&](int& x, int& y, int& h){ return imeCaretFromRenderer(renderer, app.gfx(), x, y, h); });`
+- 新增 `BinUIAppGLGdi::applyImePlacement()`：组字开始时**重挂一次 IME 上下文**
+  （`ImmAssociateContext(hwnd, nullptr)` 再挂回），强制输入法丢掉旧 UI、重新采纳
+  位置；位置没变就跳过（每次按键都重设会让输入法 UI 闪）。
+- 新增公开方法 `BinUIAppGLGdi::cancelImeComposition()`，`WM_KILLFOCUS` 改用它
+  （同时让位置缓存作废，回来时重新摆）。
+- `WM_IME_COMPOSITION` 拿到 `GCS_RESULTSTR` 后**仍然交给 DefWindowProc**：
+  早期直接 `return 0`，但它要看这条消息才能收尾；结果串已自己插过，随后生成的
+  逐字节 `WM_IME_CHAR` 会被本库吞掉，不会重复上屏。
+- `examples/imeshow`（新增示例）补上 `setImeCaretFn` —— 之前漏了，正好是"打拼音
+  看不见任何东西"的复现。
+
+已知限制（不是本库能修的）：组字期间鼠标点击会被输入法吃掉（它先把拼音当结果串
+提交，点击不送到窗口，连点"退出"按钮都没反应）。要让点击不被吃，得给窗口实现
+TSF 文本存储（`ITextStoreACP`）。
+
 ### 修复 — 字形图集满了会静默丢字
 
 `rasterGlyph()` / `rasterColorCluster()` 里 `if (a->next >= total) return;` —— 图集满了

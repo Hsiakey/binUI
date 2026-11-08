@@ -2386,6 +2386,46 @@ size_t placeCaretAtClickGLGdi(BinUIRenderer& renderer, BinUIGLGdi& gfx, float cx
 }
 
 // ============================================================
+// IME 光标定位
+// ============================================================
+// 输入法要"光标在客户区的哪儿"才能把组字窗和候选框摆对：
+//   · WM_IME_STARTCOMPOSITION → ImmSetCompositionWindow(CFS_POINT)：客户区坐标
+//   · WM_IME_REQUEST/IMR_CANDIDATEWINDOW：客户区坐标（外壳负责转屏幕坐标的是
+//     IMR_QUERYCHARPOSITION 那条，别混）
+// 不给这个位置，微软拼音会把组字窗摆到默认处 —— 实测落在窗口外（窗口在
+// 屏幕 (900,376) 时组字窗跑到 (1030,151)），用户看到的就是"打拼音没反应"。
+//
+// 算式必须和 drawNodesGLGdi 里 BINUI_INPUT 的绘制**同源**（同一个 padding+4、
+// 同一个 textWidth、同一个行高），否则组字文字会和输入框里的文字差半格。
+bool imeCaretFromRenderer(const BinUIRenderer& renderer, BinUIGLGdi& gfx,
+                          int& x, int& y, int& lineH) {
+    if (!renderer.isEditing()) return false;
+    const auto& edit = renderer.edit();
+
+    const binui::BinUIRenderer::NodeInfo* node = nullptr;
+    for (const auto& n : renderer.getNodes()) {
+        if (n.id == edit.nodeId) { node = &n; break; }
+    }
+    if (!node) return false;
+
+    const float fs = static_cast<float>(node->fontSize ? node->fontSize : 14);
+    int asc = 0, lh = 0;
+    gfx.fontMetrics(fs, 400, asc, lh);
+    if (lh <= 0) lh = static_cast<int>(fs) + 2;
+
+    // 光标位置是 UTF-8 字节偏移；有选区时组字从选区左端开始（与绘制光标同一口径）
+    size_t caret = edit.caret < edit.selStart ? edit.caret : edit.selStart;
+    if (caret > edit.value.size()) caret = edit.value.size();
+    const float tw = gfx.textWidth(fs, 400, edit.value.substr(0, caret));
+
+    x = static_cast<int>(static_cast<float>(node->x) + static_cast<float>(node->padding) + 4.0f + tw);
+    y = static_cast<int>(static_cast<float>(node->y) +
+                         (static_cast<float>(node->height) - static_cast<float>(lh)) * 0.5f);
+    lineH = lh;
+    return true;
+}
+
+// ============================================================
 // 光标闪烁
 // ============================================================
 bool caretBlinkOn() {
@@ -2544,6 +2584,70 @@ static bool ImeComposing(HWND hwnd) {
     return n > 0;
 }
 
+// 把输入法的组字窗与候选框摆到光标处（客户区坐标），让它们贴着光标走。
+//
+// 这里有两个坑，都在 Win11 + 微软拼音 + 自绘窗口（Cicero-unaware）上实测过：
+//
+// 1. **不摆就是坏的**：输入法拿不到光标位置，只能把组字窗放到默认位置 —— 实测
+//    落在窗口外（窗口在屏幕 (900,376) 时组字窗跑到 (1030,151)）。现象是"打拼音
+//    屏幕上什么都没有"，但选词照样能上屏，特别容易误判成输入法没工作。
+//
+// 2. **只摆一次也不够**：ImmSetCompositionWindow / ImmSetCandidateWindow 只在
+//    输入法第一次为这个窗口建 UI 时被采纳，之后都返回 TRUE 却不生效。从第一个
+//    输入框切到第二个输入框、或在同一个框里接着打下一个词时，组字串画对了、
+//    候选框还赖在旧位置。解决办法是把 IME 上下文重挂一次（摘掉再挂回），输入法
+//    就会丢掉旧 UI，下一次 ImmSet* 才重新被采纳。
+//
+// 重挂上下文只在**组字开始**时做：组字中途重挂会把正在进行的组字弄断。
+// 位置没变时直接跳过（每次按键都重设 IME UI 会让它闪）。
+bool BinUIAppGLGdi::applyImePlacement(HWND hwnd, bool allowContextReset) {
+    if (!hwnd || !imeCaret_) return false;
+    int cx = 0, cy = 0, ch = 16;
+    if (!imeCaret_(cx, cy, ch)) return false;
+
+    const bool moved = (cx != imePosX_ || cy != imePosY_);
+    if (!moved) return true;
+
+    ImeLog("  ime place (%d,%d) h=%d reset=%d", cx, cy, ch, allowContextReset ? 1 : 0);
+
+    if (allowContextReset) {
+        if (HIMC prev = ImmAssociateContext(hwnd, nullptr)) ImmAssociateContext(hwnd, prev);
+    }
+
+    imePosX_ = cx;
+    imePosY_ = cy;
+
+    HIMC himc = ImmGetContext(hwnd);
+    if (!himc) return false;
+
+    COMPOSITIONFORM cf = {};
+    cf.dwStyle = CFS_POINT;
+    cf.ptCurrentPos.x = cx;
+    cf.ptCurrentPos.y = cy;
+    ImmSetCompositionWindow(himc, &cf);
+
+    // 候选框也显式摆一次（稳健起见：有的输入法认这条，微软拼音的候选框实际跟着
+    // 组字窗走，所以上面那条才是关键）。
+    CANDIDATEFORM cdf = {};
+    cdf.dwIndex = 0;
+    cdf.dwStyle = CFS_CANDIDATEPOS;
+    cdf.ptCurrentPos.x = cx;
+    cdf.ptCurrentPos.y = cy + (ch > 0 ? ch : 16);   // 列在光标下方一行
+    ImmSetCandidateWindow(himc, &cdf);
+
+    // 组字字体跟随输入框行高：不设的话系统用默认 UI 字体，13px 的输入框里会冒出
+    // 一行明显更大的组字文本，看着像"位置不对"。
+    LOGFONTW lf = {};
+    lf.lfHeight = -(ch > 0 ? ch : 16);
+    lf.lfWeight = FW_NORMAL;
+    lf.lfCharSet = DEFAULT_CHARSET;
+    wcscpy_s(lf.lfFaceName, L"Microsoft YaHei");
+    ImmSetCompositionFontW(himc, &lf);
+
+    ImmReleaseContext(hwnd, himc);
+    return true;
+}
+
 // 光标形状缓存：IDC_* 是系统共享资源，LoadCursor 只想加载一次
 static HCURSOR CursorHandleOf(int kind) {
     static HCURSOR cache[5] = {};
@@ -2572,12 +2676,15 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             ImeLog("msg=WM_IME_ENDCOMPOSITION");
             // 交给 DefWindowProc 收尾。
             //
-            // 已知限制（不是没查，是查到了推不动）：微软拼音在"组字被 Esc 或退格
-            // 删空取消"而不是提交时，候选窗会留在屏幕上不走；在记事本这类标准 Edit
-            // 控件上它会自己收，在我们的自绘窗口上不会。NI_CLOSECANDIDATE、
-            // CPS_CANCEL、ImmSetOpenStatus(FALSE/TRUE)、ImmAssociateContextEx
-            // 四种手段实测都推不动它（候选窗属于输入法进程的顶层窗口），
-            // 所以这里不再做无效补救。
+            // 以前这里记着一条"候选窗取消组字后留在屏幕上不走，四种手段都推不动"
+            // 的结论 —— 那是被另一个问题盖住了：组字窗/候选框的位置从来没跟着光标
+            // 走（见 applyImePlacement），输入法一直沿用第一次建好的 UI，看起来就像
+            // "候选窗赖着不走"。位置能跟上之后，提交/取消都会正常收起。
+            //
+            // 真正修不掉的是"组字期间点击被输入法吃掉"：微软拼音遇到鼠标点击会先把
+            // 拼音当结果串提交掉，那一次点击不会送到窗口（实测连点"退出"按钮都没
+            // 反应）。要让点击不被吃，得给窗口实现一套 TSF 文本存储（ITextStoreACP），
+            // 那已经不是这个外壳该管的事了。
             break;
         }
         case WM_IME_NOTIFY:
@@ -2668,10 +2775,7 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // 候选窗；而且我们的 blur() 已经把编辑会话结束了，残留的组字之后再提交
             // 就会落到"没有编辑中的输入框"，表现为"只进了第一个字 / 后面全丢"。
             // （切焦点测出来的那串怪现象，根子在宿主窗口被别的窗口抢了前台。）
-            if (HIMC himc = ImmGetContext(hwnd)) {
-                ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
-                ImmReleaseContext(hwnd, himc);
-            }
+            app->cancelImeComposition();
             app->handleFocusLost();
             return 0;
         case WM_SIZE:
@@ -2723,28 +2827,8 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         }
         case WM_IME_STARTCOMPOSITION: {
             app->composing_ = true;
-            // 把输入法的组字窗口摆到光标处（不摆的话它会待在窗口左上角）
-            if (app->imeCaret_) {
-                int cx = 0, cy = 0, ch = 16;
-                if (app->imeCaret_(cx, cy, ch)) {
-                    if (HIMC himc = ImmGetContext(hwnd)) {
-                        COMPOSITIONFORM cf = {};
-                        cf.dwStyle = CFS_POINT;
-                        cf.ptCurrentPos.x = cx;
-                        cf.ptCurrentPos.y = cy;
-                        ImmSetCompositionWindow(himc, &cf);
-                        // 组字字体跟随输入框行高：不设的话系统用默认 UI 字体，
-                        // 13px 的输入框里会冒出一行明显更大的组字文本，看着像"位置不对"
-                        LOGFONTW lf = {};
-                        lf.lfHeight = -(ch > 0 ? ch : 16);
-                        lf.lfWeight = FW_NORMAL;
-                        lf.lfCharSet = DEFAULT_CHARSET;
-                        wcscpy_s(lf.lfFaceName, L"Microsoft YaHei");
-                        ImmSetCompositionFontW(himc, &lf);
-                        ImmReleaseContext(hwnd, himc);
-                    }
-                }
-            }
+            // 组字开始：把组字窗/候选框摆到光标处（顺带重挂上下文，见 applyImePlacement）
+            app->applyImePlacement(hwnd, /*allowContextReset=*/true);
             break;   // 组字内容仍然交给 DefWindowProc
         }
         case WM_IME_COMPOSITION: {
@@ -2767,10 +2851,20 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     }
                     ImmReleaseContext(hwnd, himc);
                 }
-                return 0;   // 关键：吞掉，别让 DefWindowProc 再生成逐字节的 WM_IME_CHAR
+                // 结果串自己取、自己插，但**仍然交给 DefWindowProc**：让它把 IME
+                // 的收尾流程走完。它随后会为结果串逐字符发 WM_IME_CHAR，那些消息
+                // 由下面那条 case 丢掉（wParam 是单字节 ANSI，绝不能当宽字符插），
+                // 所以不会重复上屏 —— 实测提交「你好」后框里就是两个字。
+                //
+                // 早先这里直接 return 0（理由是"别让它生成 WM_IME_CHAR"），能上屏，
+                // 但候选窗的收尾得靠下面那条 case 兜着，属于两处得配合的隐式约定，
+                // 不如交给系统走完。
+                break;
             }
             // 只有组字更新（GCS_COMPSTR 等）：交给 DefWindowProc，它负责让输入法
-            // 重画组字窗口
+            // 重画组字窗口。顺手补一次位置（组字期间光标可能在框内移动）——
+            // 这里**不**重挂上下文：组字中途重挂会把它弄断。
+            app->applyImePlacement(hwnd, /*allowContextReset=*/false);
             ImeLog("  composition lp=0x%zX (交给 DefWindowProc)", static_cast<size_t>(lParam));
             break;
         }
@@ -2815,6 +2909,7 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 auto* icp = reinterpret_cast<IMECHARPOSITION*>(lParam);
                 int cx = 0, cy = 0, ch = 16;
                 if (app->imeCaret_(cx, cy, ch)) {
+                    ImeLog("  querycharpos -> client(%d,%d) h=%d", cx, cy, ch);
                     POINT pt = { cx, cy };
                     ClientToScreen(hwnd, &pt);
                     icp->dwSize = sizeof(IMECHARPOSITION);
@@ -2895,6 +2990,17 @@ void BinUIAppGLGdi::invalidateRect(int x, int y, int w, int h) {
 void BinUIAppGLGdi::invalidateAll() {
     dirty_ = true;
     dirtyL_ = 0; dirtyT_ = 0; dirtyR_ = width_; dirtyB_ = height_;
+}
+
+void BinUIAppGLGdi::cancelImeComposition() {
+    composing_ = false;
+    imePosX_ = imePosY_ = -1;
+    HWND win = static_cast<HWND>(hwnd_);
+    if (!win) return;
+    if (HIMC himc = ImmGetContext(win)) {
+        ImmNotifyIME(himc, NI_COMPOSITIONSTR, CPS_CANCEL, 0);
+        ImmReleaseContext(win, himc);
+    }
 }
 
 int BinUIAppGLGdi::run() {

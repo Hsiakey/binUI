@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<!--
+  imeshow：中文输入法（IME）演示。
+
+  这个 demo 只干一件事 —— 把 IME 的每一步都摆在屏幕上，方便肉眼确认：
+    · 打拼音时，组字串（ni'hao）内联显示在输入框光标处
+    · 候选框出现在光标下方，位置跟着输入框走
+    · 选词上屏后，中文正确落进输入框（UTF-8，不是逐字节乱码）
+    · 右下角实时打印"最后收到的字符 + 码点"，可以对上是不是一个字
+
+  两个输入框高度/字号不同，是为了看候选框会不会跟着光标跑、组字字体
+  会不会跟着行高走（这两个都曾经是 bug）。
+
+  构建： mingw32-make SHELL=sh all
+  运行： build-mingw/bin/imeshow.exe
+  退出： Esc
+-->
+<app_window width="760" height="648" bg="#0F172A" title="binUI · IME 演示">
+<html width="760" height="648" bg="#0F172A" title="binUI · IME 演示">
+<head>
+    <meta charset="UTF-8">
+    <title>binUI · IME 演示</title>
+    <style>
+        /* 深色底：#0F172A 底 / #1E293B 面 / #334155 线
+           主字 #E2E8F0 / 次字 #94A3B8 / 强调 #38BDF8 */
+        body { font-family: Segoe UI; font-size: 13px; color: #E2E8F0; }
+
+        .title   { font-size: 20px; font-weight: 700; color: #E2E8F0; }
+        .sub     { font-size: 12px; color: #94A3B8; }
+        .card    { background: #1E293B; border: 1px solid #334155; border-radius: 14; }
+        .label   { font-size: 12px; color: #94A3B8; }
+        .hint    { font-size: 11px; color: #64748B; }
+
+        /* 输入框：大号那个用来观察"组字字体是否跟随行高" */
+        .field {
+            background: #0B1220;
+            color: #E2E8F0;
+            border: 1px solid #334155;
+            border-radius: 10;
+            padding: 12;
+        }
+        .field-big { font-size: 24; }   /* 行高明显更大，组字应该跟着变高 */
+        .field-sm  { font-size: 13; }
+
+        .mono    { font-family: Consolas; font-size: 13px; color: #38BDF8; }
+        .cp      { font-family: Consolas; font-size: 12px; color: #94A3B8; }
+
+        .btn {
+            background: #1E293B; color: #94A3B8;
+            border: 1px solid #334155; border-radius: 10;
+            transition: background-color 0.15s ease;
+        }
+        .btn:hover { background: #27364B; color: #E2E8F0; }
+    </style>
+</head>
+<body>
+
+    <!-- 头部 -->
+    <span class="title"  style="position:absolute;left:32;top:28;width:420;height:26">IME 演示 · 中文输入法</span>
+    <span class="sub"    style="position:absolute;left:32;top:58;width:600;height:18">组字 → 候选 → 上屏，每一步都看得见</span>
+    <button id="quit" class="btn" style="position:absolute;left:648;top:26;width:80;height:32;font-size:12">退出</button>
+
+    <!-- ① 大号输入框 -->
+    <div class="card" style="position:absolute;left:24;top:98;width:712;height:150"></div>
+    <span class="label" style="position:absolute;left:44;top:116;width:400;height:18">① 大号输入框　（组字字体应跟随 24px 行高）</span>
+    <input id="in1" class="field field-big"
+           style="position:absolute;left:44;top:146;width:672;height:76"
+           placeholder="在这里打拼音，例如 nihao 然后按空格" />
+
+    <!-- ② 普通输入框 -->
+    <div class="card" style="position:absolute;left:24;top:268;width:712;height:120"></div>
+    <span class="label" style="position:absolute;left:44;top:286;width:400;height:18">② 普通输入框　（候选框应该跳到这个光标处）</span>
+    <input id="in2" class="field field-sm"
+           style="position:absolute;left:44;top:314;width:672;height:44"
+           placeholder="再点这里打，候选框应当跟着跳到这一行" />
+
+    <!-- ③ 回显 -->
+    <div class="card" style="position:absolute;left:24;top:408;width:712;height:150"></div>
+    <span class="label"   style="position:absolute;left:44;top:426;width:300;height:18">③ 上屏回显</span>
+    <span id="echo" class="mono" style="position:absolute;left:44;top:452;width:672;height:22">最后收到的字符：—</span>
+    <span id="codepoint" class="cp" style="position:absolute;left:44;top:478;width:672;height:18">码点：—</span>
+    <span id="stats" class="cp" style="position:absolute;left:44;top:502;width:672;height:18">输入框① 0 字符 · 输入框② 0 字符</span>
+    <span class="hint" style="position:absolute;left:44;top:528;width:672;height:16">拼音在组字阶段不会进到这里 —— 只有选词上屏的字符才会</span>
+
+    <!-- 底部提示 -->
+    <span class="hint" style="position:absolute;left:32;top:586;width:700;height:16">空格 / 数字键 选词　·　退格删拼音　·　Esc 取消组字并退出　·　回车结束编辑</span>
+    <span class="hint" style="position:absolute;left:32;top:608;width:700;height:16">已知限制：组字期间点别处，这一下会被输入法吃掉（先把拼音提交上屏），要再点一次</span>
+
+</body>
+</html>

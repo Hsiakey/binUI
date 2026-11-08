@@ -94,6 +94,17 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
 size_t placeCaretAtClickGLGdi(BinUIRenderer& renderer, BinUIGLGdi& gfx, float cx, float cy,
                               bool extend = false);
 
+// IME 光标定位：按渲染器当前编辑态算出"光标在客户区的位置 + 行高"。
+// 宿主在 setImeCaretFn 里直接调它即可，不用自己量文本宽度：
+//     app.setImeCaretFn([&](int& x, int& y, int& h) {
+//         return imeCaretFromRenderer(renderer, app.gfx(), x, y, h);
+//     });
+// 不接这个钩子时输入法只能把组字窗/候选框摆到默认位置（实测会落到窗口外），
+// 表现为"打拼音屏幕上什么都没有"。
+// 返回 false = 当前没有正在编辑的输入框（IME 侧按"没有光标"处理）。
+bool imeCaretFromRenderer(const BinUIRenderer& renderer, BinUIGLGdi& gfx,
+                          int& x, int& y, int& lineH);
+
 // 光标闪烁相位（500ms 周期），与 GDI/D3D 后端共用语义
 bool caretBlinkOn();
 
@@ -149,6 +160,16 @@ public:
     void invalidateAll();
     void requestExit() { running_ = false; }
 
+    // 取消输入法正在进行的组字（没提交的拼音直接丢掉）。
+    //
+    // 宿主在**自己**把编辑目标换掉时调一次（Tab 切焦点、代码里 blur、隐藏输入框等）：
+    // 编辑会话结束时输入法还不知道，它会把没转换的拼音原样当结果串提交。
+    //
+    // 注意：鼠标点击不用接这个 —— 组字期间的那次点击会被输入法自己吃掉（它先把
+    // 拼音提交掉，窗口根本收不到 WM_LBUTTONDOWN），补救不到。窗口失焦时本库已经
+    // 自动调过一次（WM_KILLFOCUS）。
+    void cancelImeComposition();
+
     // 无边框窗口交互：拖动（在标题栏按下时调用）/ 最小化
     void beginWindowDrag();
     void minimize();
@@ -197,6 +218,10 @@ private:
     void handleKey(int vk);
     void handleFocusLost();
     void handleResize(int w, int h);
+    // IME UI 定位：把组字窗/候选框摆到宿主给出的光标处（客户区坐标）。
+    // allowContextReset = 组字刚开始时重挂一次 IME 上下文 —— 不重挂的话输入法
+    // 会沿用上一次建好的 UI，后续 ImmSetCompositionWindow 返回成功却不生效。
+    bool applyImePlacement(HWND hwnd, bool allowContextReset);
 
     int width_ = 0, height_ = 0;
     bool vsync_ = true;
@@ -225,6 +250,9 @@ private:
     ImeCaretFn imeCaret_;
     // 输入法正在组字：这期间的按键/字符归 IME，不能拿去改我们自己的文本
     bool composing_ = false;
+    // 上一次摆 IME UI 用的客户区坐标（-1 = 还没摆过）。位置没变就不重复摆，
+    // 免得每次按键都惊动输入法 UI。
+    int imePosX_ = -1, imePosY_ = -1;
 
     bool running_ = false;
     bool childMode_ = false;  // true = WS_CHILD（宿主窗口里的控件），不走自己的消息循环
