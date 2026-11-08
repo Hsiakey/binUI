@@ -1,9 +1,20 @@
 <!DOCTYPE html>
-<app_window width="900" height="640" bg="#F4F7FC" title="字体演示">
-<html width="900" height="640" bg="#F4F7FC">
+<!--
+  fontshow：字体与输入法（IME）演示。
+
+  ①–④ 是字体能力（字号 / 字重 / 斜体 / 装饰 / 行高 / 混排与缺字回退），
+  ⑤ 是输入法：组字串内联在光标处、候选框贴着光标、选词上屏成中文。
+  两件事放一组是因为它们共用同一条度量链——切字号的输入框（24px 那个）
+  正好用来验证"组字字体与光标高度是否跟随行高"（这里曾经是 bug）。
+
+  ⑤ 里两个输入框字号/高度不同，是为了看候选框会不会跟着光标跳。
+  已知限制：组字期间点别处，这一下会被输入法吃掉（先把拼音提交上屏），要再点一次。
+-->
+<app_window width="900" height="760" bg="#F4F7FC" title="字体与输入法">
+<html width="900" height="760" bg="#F4F7FC">
 <head>
     <meta charset="UTF-8">
-    <title>字体：字号 / 字重 / 斜体 / 行高 / 装饰 / 缺字回退</title>
+    <title>字体与输入法：字号 / 字重 / 行高 / 装饰 / 混排 / IME</title>
     <style>
         body { font-size: 13px; color: #1F2A37; }
         .card { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16; }
@@ -11,11 +22,24 @@
         .note { font-size: 11px; color: #94A3B8; }
         .lab { font-size: 11px; color: #66768C; }
         .rule { background: #E6EDF7; }
+
+        /* 输入法区：输入框与回显 */
+        .field {
+            background: #F7FAFF;
+            border: 1px solid #E1E9F5;
+            border-radius: 10;
+            padding: 9;
+            font-size: 13;
+            color: #1F2A37;
+        }
+        .field-big { font-size: 24; }   /* 行高明显更大：组字字体与光标高度应跟着变 */
+        .mono { font-family: Consolas; font-size: 13px; color: #3E8BFF; }
+        .dim  { font-family: Consolas; font-size: 11px; color: #94A3B8; }
     </style>
 </head>
 <body>
     <use src="../../components/titlebar.bum.xml" x="0" y="0" w="900" icon="A" iconw="22"
-         title="字体" sub="字号 · 字重 · 斜体 · 行高 · 文字装饰 · 缺字回退"/>
+         title="字体与输入法" sub="字号 · 字重 · 行高 · 装饰 · 混排 · IME"/>
 
     <!-- ① 字号阶梯 -->
     <div class="card" style="position:absolute; left:16; top:56; width:432; height:236">
@@ -65,16 +89,27 @@
         <span style="position:absolute; left:16; top:68; width:400; height:22; font-size:15">符号：− □ ✕ ◆ ♻ ✏ ✱ → ● ★ ▲ ◎</span>
         <span style="position:absolute; left:16; top:96; width:400; height:22; font-size:15">Emoji：🐟 🎨 🚀 ✅ ⚠️</span>
         <span style="position:absolute; left:16; top:124; width:400; height:22; font-size:15; color:#3E8BFF">链接色 #3E8BFF 与正文对比</span>
-        <span class="note" style="position:absolute; left:16; top:156; width:400; height:32">图集分类：ASCII → Segoe UI、非 ASCII → 雅黑、emoji → emoji 字体；两档都缺的字形画不出来，test_font 守着四个符号非空。</span>
+        <span class="note" style="position:absolute; left:16; top:156; width:400; height:32">图集分类：ASCII → Segoe UI、非 ASCII → 雅黑、emoji → emoji 字体；emoji 是代理对，IME 光标换算按 UTF-16 单元走（test_font 守着）。</span>
     </div>
 
-    <!-- ⑤ 与控件配合 -->
-    <div class="card" style="position:absolute; left:16; top:520; width:868; height:104">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:400; height:18">⑤ 控件里的文字：对齐 / 截断 / 输入占位符</span>
-        <button class="cmp-btn" style="position:absolute; left:16; top:40; width:150; height:36; background:#3E8BFF; border-radius:10; font-size:13; color:#FFFFFF">按钮文字居中</button>
-        <span style="position:absolute; left:180; top:44; width:200; height:28; font-size:13; color:#1F2A37">左对齐 · 单行 · 垂直居中</span>
-        <input style="position:absolute; left:400; top:40; width:240; height:36; background:#F7FAFF; border:1px solid #E1E9F5; border-radius:10; padding:9; font-size:13" placeholder="占位符 55% 色，聚焦转白底"/>
-        <span class="note" style="position:absolute; left:660; top:40; width:190; height:18">超长文本按框宽换行</span>
+    <!-- ⑤ 输入法（IME） -->
+    <div class="card" style="position:absolute; left:16; top:524; width:868; height:220">
+        <span class="card-title" style="position:absolute; left:16; top:12; width:420; height:18">⑤ 输入法（IME）：组字 → 候选 → 上屏</span>
+        <button style="position:absolute; left:700; top:8; width:152; height:26; background:#3E8BFF; border-radius:8; font-size:12; color:#FFFFFF">按钮文字居中</button>
+
+        <span class="lab" style="position:absolute; left:16; top:40; width:300; height:16">大号输入框 24px（组字字体与光标高度跟随行高）</span>
+        <input id="in1" class="field field-big" style="position:absolute; left:16; top:60; width:420; height:64"
+               placeholder="在这里打拼音，例如 nihao" />
+
+        <span class="lab" style="position:absolute; left:452; top:40; width:300; height:16">普通输入框 13px（候选框应跳到这个光标处）</span>
+        <input id="in2" class="field" style="position:absolute; left:452; top:60; width:400; height:64"
+               placeholder="再点这里打，候选框要跟着跳" />
+
+        <div class="rule" style="position:absolute; left:16; top:128; width:836; height:1"></div>
+        <span id="echo" class="mono" style="position:absolute; left:16; top:134; width:836; height:20">最后收到的字符：—</span>
+        <span id="codepoint" class="dim" style="position:absolute; left:16; top:156; width:836; height:18">码点：—</span>
+        <span id="stats" class="dim" style="position:absolute; left:16; top:176; width:836; height:18">输入框① 0 字符 · 输入框② 0 字符</span>
+        <span class="note" style="position:absolute; left:16; top:194; width:836; height:16">拼音在组字阶段不会进到这里——只有选词上屏的字符才会；组字期间点别处那一下会被输入法吃掉</span>
     </div>
 </body>
 </html>

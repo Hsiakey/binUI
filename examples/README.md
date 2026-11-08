@@ -1,4 +1,4 @@
-# examples/ —— 8 组使用示例
+# examples/ —— 7 组使用示例
 
 一个组一组示例，一组只演示一件事。所有示例共用同一套浅色主题令牌
 （页面底 `#F4F7FC` / 白卡片 + 1px 边框 / 主字 `#1F2A37` / 次字 `#66768C` /
@@ -8,9 +8,8 @@
 |---|---|---|---|
 | [`features/`](features/) | **功能** | 运行时伪类、v13 扩展绘制（边框/渐变/字重/行高/装饰）、v14 HTML 元素默认语义、组件化三形态（源码 `.bum.xml` / 二进制 `.bum` / `external` 外挂）、数据驱动 `setText` + 局部重绘 | GL |
 | [`animshow/`](animshow/) | **动画** | 缓动曲线、方向与次数、时长、fill 模式、infinite、悬停过渡、运行时 `setColorOf` API | GL |
-| [`fontshow/`](fontshow/) | **字体** | 字号阶梯 12–32、字重 400–800、斜体、行高 100%/170%、下划线/删除线/上划线、中英混排与符号（含缺字回退说明） | GL |
+| [`fontshow/`](fontshow/) | **字体与输入法** | 字号阶梯 12–32、字重 400–800、斜体、行高 100%/170%、下划线/删除线/上划线、中英混排与符号（含缺字回退），以及 IME：组字串内联在光标处、候选框跟着光标跳、选词上屏回显码点、光标高度跟行高走（`BINUI_IME_LOG=1` 出消息日志） | GL |
 | [`buttonshow/`](buttonshow/) | **按钮样式** | 语义色 / 尺寸与图标 / 圆角 / 纯色·渐变·描边·幽灵底 / `:hover`·`:active`·`:checked`·`disabled` / 图标·文本·块级形态（纯 CSS，可直接照抄的按钮色板） | GL |
-| [`imeshow/`](imeshow/) | **输入法（IME）** | 组字窗与候选框跟随光标、选词上屏、消息日志（`BINUI_IME_LOG=1`）、光标高度跟文字行高走 | GL |
 | [`svgdemo/`](svgdemo/) | **2D 渲染** | `<svg>` 声明式矢量（line / polyline / polygon / rect / circle）与 `<canvas>` 命令式绘制面 | GL |
 | [`cubedemo/`](cubedemo/) | **3D 渲染** | 引擎不做 3D：顶点变换 / 透视投影 / 深度调色全在应用里算，只用 `gfx.fillLine` 画线框立方体 | GL |
 | [`texturedemo/`](texturedemo/) | **纹理** | `updateImageRaw` 运行期上传程序化纹理，同一张纹理多尺寸采样；与视频帧同一条通路 | GL |

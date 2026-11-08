@@ -20,7 +20,7 @@
 | [img/features.png](img/features.png) | `examples/features` 的离屏渲染（伪类/扩展绘制/HTML 语义/组件化/数据驱动） |
 | [img/std-components.png](img/std-components.png) | `components/preview.html` 的离屏渲染（标准组件库全览） |
 | [img/animshow.png](img/animshow.png) | `examples/animshow` 的离屏渲染（关键帧 / 过渡；静态呈现，动态需真实运行） |
-| [img/fontshow.png](img/fontshow.png) | `examples/fontshow` 的离屏渲染（字号 / 字重 / 斜体 / 行高 / 文字装饰） |
+| [img/fontshow.png](img/fontshow.png) | `examples/fontshow` 的离屏渲染（字号 / 字重 / 斜体 / 行高 / 文字装饰 + ⑤ 输入法区；组字串与候选框是运行时行为，静态图里看不到） |
 | [img/svgdemo.png](img/svgdemo.png) | `examples/svgdemo` 的离屏渲染（`<svg>` 矢量；`<canvas>` 需真实 GL 窗口才有内容） |
 | [img/cubedemo.png](img/cubedemo.png) | `examples/cubedemo` 的离屏渲染（线框立方体；三角面同样需真实 GL 窗口） |
 | [img/texturedemo.png](img/texturedemo.png) | `examples/texturedemo` 的离屏渲染（程序化纹理多尺寸采样） |

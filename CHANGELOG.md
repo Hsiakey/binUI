@@ -6,6 +6,29 @@
 
 ## [Unreleased]
 
+### 重构 — `imeshow` 并进 `fontshow`：示例收成「字体与输入法」一组
+
+输入法和字体共用同一条度量链（组字字体跟字号、光标高度跟行高），分成两个 demo 反而要来回切窗口看，
+而且 `imeshow` 是全仓库唯一的深色底示例，和"统一浅色主题"的约定本来就打架。
+
+- `examples/fontshow` 扩成**字体与输入法**：①字号阶梯 ②字重/斜体/装饰 ③行高 ④混排与符号不变，
+  ⑤ 换成输入法区（24px 大号输入框 + 13px 普通输入框 + 上屏回显 + 码点/字符数统计），
+  窗口 900×640 → 900×760。
+- 外壳并入 `imeshow` 的 IME 接线：`setImeCaretFn`（组字窗与候选框贴光标）、`setCharFn`
+  （只有选词上屏的字符才进来）、组字期间按键不抢、编辑键（退格/方向/Home/End/回车/Tab）。
+  另外补了热重载后的节点 id 重解析（换树后 `findNodeByName` 要重跑，否则回显会写到空气里）。
+- 删除 `examples/imeshow/`；`Makefile` / `CMakeLists.txt` 的示例列表 8 -> 7。
+- 文档：README 示例表与运行清单、`examples/README.md`、`docs/README.md`（图片说明）、
+  `docs/app_layout.md`、`tests/README.md`（IME 手测入口改到 `examples/fontshow`）同步；
+  `docs/img/fontshow.png` 按新布局重新生成。
+
+验收（真机 + `BINUI_IME_LOG=1`）：
+
+- 点 24px 输入框打 `nihao`：组字串 `n` 内联在光标处、候选框（1 你 2 呢 3 那…）贴在输入框下方；
+  日志 `ime place (45,600) h=32 reset=1` —— 光标高 32 = 24px 字号的行高，与节点几何吻合。
+- 空格选词：`[fontshow] char: 你  U+4F60`（`resultstr bytes=2 cps=1`），输入框变「你」，
+  回显行显示"最后收到的字符：你 / 码点：U+4F60（3 字节 UTF-8） / 输入框① 3 字符 · 输入框② 0 字符"。
+
 ### 重构 — 测试与示例收拢：9 个测试二进制合成 4 个，产物按用途分目录
 
 一根鸡毛一个 `test_xxx.exe` 的老问题积到现在：`tests/` 里躺着 9 个互不相干的可执行文件，

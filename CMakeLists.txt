@@ -149,7 +149,6 @@ if(WIN32)
     add_gl_demo(svgdemo)
     add_gl_demo(cubedemo)
     add_gl_demo(texturedemo)
-    add_gl_demo(imeshow)
     add_gl_demo(buttonshow)
 
     # features 额外需要组件文件（源码组件 + 两个 .bum）
@@ -246,6 +245,6 @@ install(FILES
 message(STATUS "binUI v${PROJECT_VERSION}")
 message(STATUS "  Core lib  -> binui")
 if(WIN32)
-    message(STATUS "  Demos     -> bin/examples: features / animshow / fontshow / buttonshow / imeshow / svgdemo / cubedemo / texturedemo (OpenGL 3.3 borderless)")
+    message(STATUS "  Demos     -> bin/examples: features / animshow / fontshow(字体与输入法) / buttonshow / svgdemo / cubedemo / texturedemo (OpenGL 3.3 borderless)")
 endif()
 message(STATUS "  Tests     -> bin/tests: test_css, test_elements, test_font, test_capi")

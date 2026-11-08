@@ -124,7 +124,7 @@ build-mingw/bin/examples/svgdemo.exe --watch                                   #
 build-mingw/bin/examples/svgdemo.exe --watch --ui examples/svgdemo/main.html   # 直接盯源码树
 ```
 
-保存 UI 后自动重编译并换树，不用重启进程。实现：[`include/binui_hot_reload.h`](../include/binui_hot_reload.h)（header-only）；8 个示例全部接入。
+保存 UI 后自动重编译并换树，不用重启进程。实现：[`include/binui_hot_reload.h`](../include/binui_hot_reload.h)（header-only）；7 个示例全部接入。
 
 | 决策 | 取值与理由 |
 |------|-----------|

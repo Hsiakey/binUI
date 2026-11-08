@@ -29,7 +29,7 @@ ctest --test-dir build --output-on-failure
 
 不能（需要真窗口/真输入法，靠示例手测）：
 
-- 组字窗与候选框的屏幕位置 —— `examples/imeshow`，见该目录 README 的手测清单
+- 组字窗与候选框的屏幕位置 —— `examples/fontshow` 的 ⑤ 输入法小节（`BINUI_IME_LOG=1` 看 `ime place` 行）
 - 组字期间点击被 IME 吞掉（非 TSF 窗口的平台限制，需要 `ITextStoreACP` 才能接管）
 - GL / D3D 后端的实际像素 —— 靠 `docs/pixels/` 的像素回归（`make pixels`，只在本机可信）
 

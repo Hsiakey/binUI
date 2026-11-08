@@ -7,7 +7,7 @@
 //      偏移，`setCaretByUtf16Index` / `insertText` / `blur` 就是后端要走的整条链。
 //      代理对（emoji）与全角字必须落在字符边界上，否则组字窗会飘、候选框会算错位置。
 //      开窗才能测的部分（组字窗/候选框定位、组字期间点击被 IME 吞掉）见
-//      examples/imeshow 的手测清单。
+//      examples/fontshow 的 ⑤ 输入法小节。
 #include <cstdio>
 #include <cmath>
 #include <string>
