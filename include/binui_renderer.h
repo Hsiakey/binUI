@@ -329,6 +329,13 @@ public:
     };
     const WindowDesc& windowDesc() const { return winDesc_; }
 
+    // ============ 裁剪链 ============
+    // 从近到远，把**会裁剪子元素**的祖先 id 追加到 out（不含自身）。
+    // 判定口径只有一条：祖先带 BINUI_SCROLLABLE（编译期由 overflow:auto/scroll/hidden 标出）。
+    // 普通 <div> 与 <use> 展开出的包裹节点按 CSS 语义**不**裁剪 —— 以前后端无条件按每个
+    // 祖先矩形裁剪，hover 放大到 1.04 的组件按钮会被等大的包裹节点切成原来那块。
+    void clippingAncestors(uint16_t nodeId, std::vector<uint16_t>& out) const;
+
     // ============ 动画（v7：@keyframes 动画 + transition 过渡） ============
     // 应用每帧调用：推进动画时钟，返回本帧可视属性发生变化的节点 id（据此 invalidate 重绘）。
     // 无动画/过渡在运行时不产生重绘请求。同时推进视频播放时钟（v9），变化的视频节点

@@ -727,6 +727,8 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
 
     // 绘制顺序：按 z-index 分层（v10），同层流式先于 absolute、DOM 顺序；
     // 由渲染器统一给出，保证与命中测试一致
+    // 裁剪链缓存：每个节点复用，避免逐节点分配
+    std::vector<uint16_t> clipAncs;
     const std::vector<uint32_t> order = renderer.drawOrder();
     for (size_t oi = 0; oi < order.size(); oi++) {
         const size_t i = order[oi];
@@ -869,22 +871,21 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             FillPaintBands(hdc, bb, bn, dc | 0xFF000000u);
         };
 
-        // 层级裁剪：先把裁剪区设为自身（滚动后）范围，再逐层与祖先求交；
-        // 任一祖先不可见或交集为空则跳过绘制
+        // 层级裁剪：先把裁剪区设为自身（滚动后）范围，再与「裁剪容器」祖先求交；
+        // 交集为空则跳过绘制。裁剪容器只有 overflow:auto/scroll/hidden（编译期标 SCROLLABLE）——
+        // 普通 div 与 <use> 展开出的包裹节点按 CSS 语义不裁子元素，否则组件里 hover
+        // 放大 1.04 的按钮会被等大的包裹节点切回原来那块。
         int savedDC = SaveDC(hdc);
         bool draw = true;
         RECT nr = rc;
         if (IntersectClipRect(hdc, nr.left, nr.top, nr.right, nr.bottom) == NULLREGION)
             draw = false;
 
-        size_t cur = i;
-        while (draw) {
-            const auto& anc = nodes[cur];
-            if (anc.parentId == 0xFFFF) break;
-            auto pit = byId.find(anc.parentId);
-            if (pit == byId.end()) break;
-            cur = pit->second;
-            const auto& par = nodes[cur];
+        renderer.clippingAncestors(node.id, clipAncs);
+        for (uint16_t ancId : clipAncs) {
+            auto pit = byId.find(ancId);
+            if (pit == byId.end()) continue;
+            const auto& par = nodes[pit->second];
             if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
             RECT pr = { (int)par.x, (int)par.y, (int)(par.x + par.width), (int)(par.y + par.height) };
             if (IntersectClipRect(hdc, pr.left, pr.top, pr.right, pr.bottom) == NULLREGION) {

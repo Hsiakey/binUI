@@ -1724,6 +1724,8 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
     }
 
     // 绘制顺序：按 z-index 分层（v10）由渲染器统一给出，同层流式先于 absolute、DOM 顺序
+    // 裁剪链缓存：每个节点复用，避免逐节点分配
+    std::vector<uint16_t> clipAncs;
     const std::vector<uint32_t> order = renderer.drawOrder();
     for (size_t oi = 0; oi < order.size(); oi++) {
         const size_t i = order[oi];
@@ -1756,14 +1758,11 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
             gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
                          static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
             bool draw = true;
-            size_t cur = i;
-            while (draw) {
-                const auto& anc = nodes[cur];
-                if (anc.parentId == 0xFFFF) break;
-                auto pit = byId.find(anc.parentId);
-                if (pit == byId.end()) break;
-                cur = pit->second;
-                const auto& par = nodes[cur];
+            renderer.clippingAncestors(node.id, clipAncs);
+            for (uint16_t ancId : clipAncs) {
+                auto pit = byId.find(ancId);
+                if (pit == byId.end()) continue;
+                const auto& par = nodes[pit->second];
                 if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
                 gfx.pushClip(par.x, par.y, par.width, par.height);
             }
@@ -1809,14 +1808,13 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
         gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
                      static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
         bool draw = true;
-        size_t cur = i;
-        while (draw) {
-            const auto& anc = nodes[cur];
-            if (anc.parentId == 0xFFFF) break;
-            auto pit = byId.find(anc.parentId);
-            if (pit == byId.end()) break;
-            cur = pit->second;
-            const auto& par = nodes[cur];
+        // 裁剪链交给渲染器判定（clippingAncestors）：只有 overflow:auto/scroll/hidden
+        // 的祖先才裁子元素。普通 div 与 <use> 包裹节点按 CSS 语义不裁。
+        renderer.clippingAncestors(node.id, clipAncs);
+        for (uint16_t ancId : clipAncs) {
+            auto pit = byId.find(ancId);
+            if (pit == byId.end()) continue;
+            const auto& par = nodes[pit->second];
             if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
             gfx.pushClip(par.x, par.y, par.width, par.height);
         }

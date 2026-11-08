@@ -2568,6 +2568,22 @@ std::vector<uint16_t> BinUIRenderer::stepAnimations() {
     return animChanged_;
 }
 
+void BinUIRenderer::clippingAncestors(uint16_t nodeId, std::vector<uint16_t>& out) const {
+    out.clear();
+    auto it = nodeIndexById_.find(nodeId);
+    if (it == nodeIndexById_.end()) return;
+    size_t cur = it->second;
+    while (true) {
+        const auto& n = nodes_[cur];
+        if (n.parentId == 0xFFFF) break;
+        auto pit = nodeIndexById_.find(n.parentId);
+        if (pit == nodeIndexById_.end()) break;
+        cur = pit->second;
+        const auto& par = nodes_[cur];
+        if (par.flags & BINUI_SCROLLABLE) out.push_back(par.id);
+    }
+}
+
 void BinUIRenderer::restartAnimations() {
     animT0_ = AnimNow();
     animNow_ = animT0_;

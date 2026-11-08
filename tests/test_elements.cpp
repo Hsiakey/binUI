@@ -2074,6 +2074,57 @@ static int run() {
 
 }  // namespace suite_hover_dirty
 
+// ---------------------------------------------------------------------------
+// 裁剪链：只有 overflow:auto/scroll/hidden 的祖先才裁子元素
+//
+// 以前三个后端都无条件按"每个祖先矩形"裁剪。组件 <use> 展开出的包裹节点与按钮等大，
+// 于是组件按钮 hover 放大 1.04 时被切回原来那块 —— 看起来像"按钮被困在盒子里放大"。
+// CSS 语义里普通 div 不裁子元素，要裁得靠 overflow。这条用例把判定口径钉在渲染器上
+// （三个后端都调 clippingAncestors，同一份规则）。
+// ---------------------------------------------------------------------------
+#undef CHECK
+#undef TEST
+namespace suite_clip_chain {
+
+using namespace binui;
+
+static int g_fail = 0;
+#define CHECK(cond, msg) do { if (!(cond)) { std::printf("FAIL: %s\n", (msg)); ++g_fail; } } while (0)
+
+static int run() {
+    const char* html = R"HTML(<html width="600" height="400" bg="#FFFFFF"><body>
+      <div style="position:absolute;left:0;top:0;width:400;height:300">
+        <div style="position:absolute;left:20;top:20;width:300;height:200;overflow:hidden">
+          <button id="inner" style="position:absolute;left:20;top:20;width:120;height:40">裁剪容器里的按钮</button>
+        </div>
+      </div>
+      <button id="loose" style="position:absolute;left:20;top:340;width:120;height:40">普通祖先</button>
+    </body></html>)HTML";
+    auto res = CompileBinUIEx(html);
+    BinUIRenderer r;
+    CHECK(!res.layout.empty() && r.loadLayout(res.layout.data(), res.layout.size()),
+          "clip-chain: 布局编译 / 加载");
+
+    uint16_t inner = 0, loose = 0;
+    for (const auto& n : r.getNodes()) {
+        if (n.text == "裁剪容器里的按钮") inner = n.id;
+        else if (n.text == "普通祖先") loose = n.id;
+    }
+    CHECK(inner != 0 && loose != 0, "clip-chain: 找到两个按钮");
+
+    std::vector<uint16_t> chain;
+    r.clippingAncestors(inner, chain);
+    CHECK(chain.size() == 1, "clip-chain: overflow:hidden 的祖先进裁剪链（且只有它）");
+
+    r.clippingAncestors(loose, chain);
+    CHECK(chain.empty(), "clip-chain: 普通 div 祖先不裁剪子元素（hover 放大不该被切）");
+    return g_fail;
+}
+
+#undef CHECK
+
+}  // namespace suite_clip_chain
+
 // ===========================================================================
 // 汇总入口：任一子套件有失败则整体失败
 // ===========================================================================
@@ -2086,6 +2137,7 @@ int main() {
     fails += suite_anim::run();
     fails += suite_hot_reload::run();
     fails += suite_hover_dirty::run();
+    fails += suite_clip_chain::run();
     std::printf("\n=== test_elements: %s ===\n", fails ? "FAILED" : "全部通过");
     return fails ? 1 : 0;
 }
