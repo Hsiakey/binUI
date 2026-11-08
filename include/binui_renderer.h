@@ -493,6 +493,13 @@ private:
         bool   radiusSet = false; float radius = -1;
     };
     std::unordered_map<uint16_t, AnimResult> animResult_;
+    // 动画扫过的极值（缩放/平移）。当前值不足以描述"刚从放大缩回来"的那一帧：
+    // 放大时在最外沿画过的像素，缩小到原尺寸后没有任何矩形去擦，就成了边缘残影。
+    struct AnimExtent {
+        float smin = 1.0f, smax = 1.0f;
+        float dxmin = 0.0f, dxmax = 0.0f, dymin = 0.0f, dymax = 0.0f;
+    };
+    std::unordered_map<uint16_t, AnimExtent> animExtent_;
     // v11 状态样式：nodeId -> 4 个状态目标（hover/active/focus/checked）
     std::unordered_map<uint16_t, std::array<StateStyle, 4>> stateCSS_;
     std::unordered_set<uint16_t> checkedNodes_;   // :checked 运行时开关

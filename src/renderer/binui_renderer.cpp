@@ -187,6 +187,7 @@ void BinUIRenderer::shutdown() {
     transitions_.clear();
     animState_.clear();
     animResult_.clear();
+    animExtent_.clear();
     animChanged_.clear();
     animTimeInit_ = false;
 }
@@ -342,6 +343,7 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
     transitions_.clear();
     animState_.clear();
     animResult_.clear();
+    animExtent_.clear();
     animTimeInit_ = false;
     {
         const uint8_t* ap = specEnd;
@@ -2513,7 +2515,33 @@ void BinUIRenderer::computeAnimResult(uint16_t nodeId) {
         }
     }
 
+    // 样式目标兜底：没有过渡/关键帧时，"目标值"就是当前值（drawScale / drawOffset* 的
+    // fallback 与此完全一致）。不折进 AnimResult 的话，内置 hover 放大这种**无过渡**的
+    // 变化永远进不了动画包围盒，缩回原尺寸那一帧就没有矩形去擦放大时画过的边缘。
+    if (!res.scaleSet) {
+        auto f = rt.floatTargets.find(ANIM_SCALE);
+        if (f != rt.floatTargets.end()) { res.scaleSet = true; res.scale = f->second; }
+    }
+    if (!res.offSet) {
+        auto f = rt.floatTargets.find(ANIM_TRANSLATE);
+        if (f != rt.floatTargets.end()) { res.offSet = true; res.offX = res.offY = f->second; }
+    }
+
     animResult_[nodeId] = res;
+    // 记下缩放/平移扫过的极值，供 invalidRect 用（见 AnimExtent 的注释）。
+    if (res.scaleSet || res.offSet) {
+        AnimExtent& e = animExtent_[nodeId];
+        if (res.scaleSet) {
+            e.smin = std::min(e.smin, res.scale);
+            e.smax = std::max(e.smax, res.scale);
+        }
+        if (res.offSet) {
+            e.dxmin = std::min(e.dxmin, res.offX);
+            e.dxmax = std::max(e.dxmax, res.offX);
+            e.dymin = std::min(e.dymin, res.offY);
+            e.dymax = std::max(e.dymax, res.offY);
+        }
+    }
 }
 
 std::vector<uint16_t> BinUIRenderer::stepAnimations() {
@@ -2654,9 +2682,13 @@ float BinUIRenderer::drawRadius(uint16_t nodeId) const {
     return -1.0f;
 }
 
-// 失效矩形 = 布局矩形 ∪ 动画（位移/绕中心缩放）后的包围盒 + pad。
-// 少了这一步，:hover 放大 1.05 时只有布局矩形那块被重绘：长出来的边框/底色留在
-// 旧缓冲区里，看上去就是"两边的边框被削掉一半"；缩回时旧位置还会留残影。
+// 失效矩形 = 布局矩形 ∪ 动画（位移/绕中心缩放）扫过的**全部**包围盒 + pad。
+//
+// 只算"当前值"有两个坑：
+//   1. :hover 放大 1.05 时只重绘布局矩形 → 长出来的边框/底色留在旧缓冲区（边缘被削掉一半）；
+//   2. 缩回原尺寸那一帧，当前值恰好等于布局矩形 → 放大时在最外沿画过的像素没人擦，
+//      留一道 1px 残影（宽按钮 + 1.05 时能长出 4~5px，超过 pad 的 2px 就盖不住）。
+// 所以除了当前值，还要并入 animExtent_（这一路动画扫过的缩放/平移极值）。
 bool BinUIRenderer::invalidRect(uint16_t nodeId, float& x, float& y, float& w, float& h,
                                 float pad) const {
     auto it = nodeIndexById_.find(nodeId);
@@ -2681,9 +2713,30 @@ bool BinUIRenderer::invalidRect(uint16_t nodeId, float& x, float& y, float& w, f
     t += std::min(0.0f, dy);
     b += std::max(0.0f, dy);
 
+    // 动画扫过的极值（缩放/平移的整个范围）。只按"当前值"算会漏掉刚缩回来那一帧：
+    // hover 放大到 1.05 时在放大后的边缘画过像素，过渡结束那一帧的矩形回到原尺寸，
+    // 那圈像素就没人擦 —— 表现为按钮 hover 结束后边缘留一道 1px 残影。
+    auto ei = animExtent_.find(nodeId);
+    if (ei != animExtent_.end()) {
+        const AnimExtent& e = ei->second;
+        const float cx = n.x + n.width * 0.5f, cy = n.y + n.height * 0.5f;
+        auto growByScale = [&](float s) {
+            if (!(s > 0.0f) || s == 1.0f) return;
+            l = std::min(l, cx - n.width * s * 0.5f);
+            t = std::min(t, cy - n.height * s * 0.5f);
+            r = std::max(r, cx + n.width * s * 0.5f);
+            b = std::max(b, cy + n.height * s * 0.5f);
+        };
+        growByScale(e.smax);
+        growByScale(e.smin);
+        l += std::min(0.0f, e.dxmin);
+        r += std::max(0.0f, e.dxmax);
+        t += std::min(0.0f, e.dymin);
+        b += std::max(0.0f, e.dymax);
+    }
+
     l -= pad; t -= pad; r += pad; b += pad;
-    x = l; y = t; w = r - l; h = b - t;
-    return true;
+    x = l; y = t; w = r - l; h = b - t;    return true;
 }
 
 } // namespace binui

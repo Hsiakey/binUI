@@ -2018,6 +2018,62 @@ int run() {
 }  // namespace suite_hot_reload
 
 
+// ---------------------------------------------------------------------------
+// 内置悬停放大 -> 缩回：失效矩形必须仍覆盖"放大时画过的范围"
+//
+// 按钮没有 :hover 样式时，引擎给的内置悬停效果是 1.05 倍 + 12% 提亮，而且**没有过渡**：
+// 缩放一帧跳上去、一帧跳回来。缩回那一帧如果只按"当前（=原尺寸）"算失效矩形，
+// 放大时在最外沿画过的像素就没人擦 —— 表现为按钮右边缘留一道 1px 残影。
+// 用 200px 宽的按钮把边界撑到 pad（2px）之外，别让 pad 把问题盖住。
+// ---------------------------------------------------------------------------
+#undef CHECK
+#undef TEST
+namespace suite_hover_dirty {
+
+using namespace binui;
+
+static int g_fail = 0;
+#define CHECK(cond, msg) do { if (!(cond)) { std::printf("FAIL: %s\n", (msg)); ++g_fail; } } while (0)
+
+static int run() {
+    const char* html = R"HTML(<html width="600" height="300" bg="#FFFFFF"><body>
+      <button id="wide" style="position:absolute;left:100;top:100;width:200;height:40;background:#3E8BFF">宽按钮</button>
+    </body></html>)HTML";
+    auto res = CompileBinUIEx(html);
+    BinUIRenderer r;
+    CHECK(!res.layout.empty() && r.loadLayout(res.layout.data(), res.layout.size()),
+          "hover-dirty: 布局编译 / 加载");
+    int id = -1;
+    for (const auto& n : r.getNodes())
+        if (n.type == BINUI_BUTTON) id = n.id;
+    CHECK(id >= 0, "hover-dirty: 找到按钮");
+    if (id < 0) return g_fail;
+
+    float x = 0, y = 0, w = 0, h = 0;
+    r.invalidRect(static_cast<uint16_t>(id), x, y, w, h);
+    CHECK(w <= 204.5f, "hover-dirty: 静止时失效矩形 = 节点 + pad，不该凭空变大");
+
+    r.setHover(110, 120);   // 悬停在按钮上
+    r.stepAnimations();
+    CHECK(r.drawScale(static_cast<uint16_t>(id)) > 1.04f, "hover-dirty: 内置悬停放大生效");
+    float x2 = 0, y2 = 0, w2 = 0, h2 = 0;
+    r.invalidRect(static_cast<uint16_t>(id), x2, y2, w2, h2);
+    CHECK(w2 >= 210.0f, "hover-dirty: 放大后失效矩形覆盖放大范围");
+
+    r.clearHover();         // 移开 -> 立即缩回
+    r.stepAnimations();
+    CHECK(r.drawScale(static_cast<uint16_t>(id)) < 1.001f, "hover-dirty: 移开后回到原尺寸");
+    float x3 = 0, y3 = 0, w3 = 0, h3 = 0;
+    r.invalidRect(static_cast<uint16_t>(id), x3, y3, w3, h3);
+    CHECK(w3 >= 210.0f,
+          "hover-dirty: 缩回那一帧的失效矩形仍覆盖放大过的范围（否则边缘留残影）");
+    return g_fail;
+}
+
+#undef CHECK
+
+}  // namespace suite_hover_dirty
+
 // ===========================================================================
 // 汇总入口：任一子套件有失败则整体失败
 // ===========================================================================
@@ -2029,6 +2085,7 @@ int main() {
     fails += suite_paint::run();
     fails += suite_anim::run();
     fails += suite_hot_reload::run();
+    fails += suite_hover_dirty::run();
     std::printf("\n=== test_elements: %s ===\n", fails ? "FAILED" : "全部通过");
     return fails ? 1 : 0;
 }
