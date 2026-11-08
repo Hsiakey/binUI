@@ -1014,7 +1014,14 @@ struct BinUIGLGdi::Impl {
                     float dx = fx > 0 ? fx : 0.0f;
                     float dy = fy > 0 ? fy : 0.0f;
                     float dist = sqrtf(dx * dx + dy * dy) - static_cast<float>(r);
-                    float cov = stroke ? 1.0f - fabsf(dist) : 0.5f - dist;
+                    // 填充 = 内部（边界处 1px 抗锯齿）；描边 = 贴着**外侧边界往里**
+                    // 1px 的实心带。
+                    //
+                    // 以前描边用的是 1-|dist|，环线是"骑在边界上"的：靠内的那半个像素
+                    // 只有 50% 覆盖率，于是白色的焦点环画出来是一圈灰线（实测 #858990）。
+                    // 现在把带子整体挪到内侧（dist ∈ (-1,0) 满覆盖），并且不再有外侧
+                    // 那一半 —— 边框/焦点环的颜色就和作者写的一致了。
+                    float cov = stroke ? std::min(0.5f - dist, dist + 1.5f) : 0.5f - dist;
                     cov = cov < 0.0f ? 0.0f : (cov > 1.0f ? 1.0f : cov);
                     uint8_t lum = static_cast<uint8_t>(cov * 255.0f + 0.5f);
                     uint32_t v = (static_cast<uint32_t>(lum) << 24) |
@@ -1984,7 +1991,23 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
             };
             auto drawNodeBorder = [&]() {
                 if (!hasBorder) return;
-                binui::PaintBand bb[binui::kMaxPaintBands];
+                // 等宽 1px 边框 + 圆角：走九宫格圆环（有解析式 AA），不用逐行矩形拼。
+                // 逐行拼的条带在 45° 处每行 1.4~2px 宽、且只有亚像素混色没有 AA，
+                // 圆角看起来比直边"更粗更亮"，和旁边 AA 过的填充不搭。
+                const uint8_t* bw = pt->borderW;
+                const bool uniform1px = bw[0] == 1 && bw[1] == 1 && bw[2] == 1 && bw[3] == 1 &&
+                                        pt->borderColor[0] == pt->borderColor[1] &&
+                                        pt->borderColor[0] == pt->borderColor[2] &&
+                                        pt->borderColor[0] == pt->borderColor[3];
+                if (uniform1px && effRadius > 0.5f) {
+                    // 圆角走九宫格圆环（解析式 AA）：弧线是渐变而不是 1px 一格的台阶，
+                    // 直边段模板覆盖率已修成满值，颜色和作者给的一致。
+                    gfx.strokeRounded(static_cast<float>(x), static_cast<float>(y),
+                                      static_cast<float>(nw), static_cast<float>(nh),
+                                      static_cast<float>(effRadius), 1.0f, pt->borderColor[0]);
+                    return;
+                }
+                binui::PaintBand bb[binui::kMaxBorderBands];
                 const int bn = binui::BuildBorderBands(pt, static_cast<float>(x), static_cast<float>(y),
                                                        static_cast<float>(nw), static_cast<float>(nh),
                                                        static_cast<float>(effRadius), bb);
@@ -2264,18 +2287,26 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
             if (renderer.isKeyboardFocused(node.id)) {
                 // 焦点环必须跟随节点自己的圆角：以前写死半径 10、内缩 2，
                 // 圆角 8 的按钮上就会套出一个半径不同的环，看着像"双线框"。
+                // 颜色按节点底色取对比色：写死白色在浅色主题上（白底白环）等于没画。
+                uint32_t ringCol = textCol;
+                if (((dc >> 24) & 0xFFu) >= 0x80u) {
+                    const float bgLum = (0.2126f * static_cast<float>((dc >> 16) & 0xFFu) +
+                                         0.7152f * static_cast<float>((dc >> 8) & 0xFFu) +
+                                         0.0722f * static_cast<float>(dc & 0xFFu)) / 255.0f;
+                    if (bgLum > 0.7f) ringCol = ScaleAlpha(0xFF1A1A1Au, opacity);
+                }
                 const float fr = effRadius > 2 ? static_cast<float>(effRadius) - 1.0f : 0.0f;
                 const float fx = static_cast<float>(x) + 1.0f, fy = static_cast<float>(y) + 1.0f;
                 const float fw = static_cast<float>(nw) - 2.0f, fh = static_cast<float>(nh) - 2.0f;
                 if (fr >= 1.0f) {
-                    gfx.strokeRounded(fx, fy, fw, fh, fr, 1.0f, textCol);
+                    gfx.strokeRounded(fx, fy, fw, fh, fr, 1.0f, ringCol);
                 } else {
                     // 直角节点不能用 strokeRounded：它 r<=0 时会退化成整块填充，
                     // 焦点框会把节点涂白。这里直接画四条 1px 线。
-                    gfx.fillRect(fx, fy, fw, 1.0f, textCol);
-                    gfx.fillRect(fx, fy + fh - 1.0f, fw, 1.0f, textCol);
-                    gfx.fillRect(fx, fy, 1.0f, fh, textCol);
-                    gfx.fillRect(fx + fw - 1.0f, fy, 1.0f, fh, textCol);
+                    gfx.fillRect(fx, fy, fw, 1.0f, ringCol);
+                    gfx.fillRect(fx, fy + fh - 1.0f, fw, 1.0f, ringCol);
+                    gfx.fillRect(fx, fy, 1.0f, fh, ringCol);
+                    gfx.fillRect(fx + fw - 1.0f, fy, 1.0f, fh, ringCol);
                 }
             }
         }

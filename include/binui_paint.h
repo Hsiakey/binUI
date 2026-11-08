@@ -22,8 +22,9 @@
 //     所以圆角渐变卡片也是对的。
 //   · 对角渐变（135deg / to bottom right）按垂直渐变近似 —— 轴对齐条带
 //     画不出真正的斜向过渡，写出来反而更假。
-//   · 边框画在节点内侧，四边可不同宽；四角为方角（圆角+边框的圆环描边
-//     需要路径填充，三个后端的接口都不统一，宁可简单一致）。
+//   · 边框画在节点内侧，四边可不同宽；圆角盒子的边框按行贴着外圆弧走
+//     （1px 步进），直边段合并成一整条 —— 条带数只跟半径有关，与高度无关。
+//     半径大到装不下时退回直角四条（宁可方角，也不要缺边）。
 // ============================================================
 #include <algorithm>
 #include <cmath>
@@ -41,6 +42,9 @@ struct PaintBand {
 };
 
 constexpr int kMaxPaintBands = 128;
+// 边框条带上限：圆角边框按行贴弧，条带数 ≈ 4r+常数（与盒子高度无关），
+// 半径大的胶囊（比如 100px 高的按钮 r=50）也要装得下，所以比填充宽。
+constexpr int kMaxBorderBands = 512;
 
 inline uint32_t PaintLerpArgb(uint32_t a, uint32_t b, float t) {
     if (t <= 0.0f) return a;
@@ -155,11 +159,13 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
 // （截图里那种"白框套圆角"的脏边就是这么来的）。环形边框的做法：
 //   · 圆心角区逐行（1px 一行）算外轮廓内缩 O 与内轮廓内缩 I，
 //     左右各铺一条 [O, I] 的薄条 —— 切片的水平宽度天然随切线方向变宽，几何是对的
-//   · 直边区 O、I 恒定，相邻行自动合并成一条高条（省 draw call）
+//   · 直边区 O、I 恒定，逐行延伸成一条高条（省 draw call）
 //   · 上/下横条区整行铺（含圆角弧），四边颜色各自生效
-// 只用到 fillRect，三个后端共用；合并后条数通常是个位数。
+// 只用到 fillRect，三个后端共用；合并后条数只跟半径有关，与盒子高度无关。
+// （合并要按"这条边上一次的条带"记下标 —— 只看上一条会因左右交替而永远合不上，
+//  高盒子会被 cap 截断，见下方 pushRun 的注释。）
 inline int BuildBorderBands(const BinUIPaintNode* p, float x, float y, float w, float h,
-                            float radius, PaintBand* out, int cap = kMaxPaintBands) {
+                            float radius, PaintBand* out, int cap = kMaxBorderBands) {
     if (!p || !(p->flags & PAINT_BORDER) || cap <= 0) return 0;
     if (w <= 0.0f || h <= 0.0f) return 0;
     const float lim = std::min(w, h) * 0.5f;
@@ -186,35 +192,53 @@ inline int BuildBorderBands(const BinUIPaintNode* p, float x, float y, float w, 
     const float bwMax = std::max(std::max(bt, br), std::max(bb, bl));
     const float ir = std::max(0.0f, r - bwMax);                  // 内轮廓圆角
 
-    auto push = [&](float bx, float by, float bwid, float bh, uint32_t color) {
-        if (bwid <= 0.01f || bh <= 0.01f || n >= cap) return;
-        if (n > 0) {                                             // 与上一段紧邻且同色同宽 → 合并
-            PaintBand& pv = out[n - 1];
-            if (!pv.round && pv.color == color &&
-                std::fabs(pv.x - bx) < 0.02f && std::fabs(pv.w - bwid) < 0.02f &&
-                std::fabs((pv.y + pv.h) - by) < 0.51f) {
+    // 条带数只跟半径有关（≈4r+常数），与盒子高度无关。半径大到装不下时退回直角
+    // 四条 —— 宁可方角，也不要"边框画到一半就没了"。
+    if (4.0f * std::ceil(r) + 16.0f > static_cast<float>(cap)) {
+        const float sh = std::max(0.0f, h - bt - bb);
+        if (bt > 0 && n < cap) out[n++] = { x, y, w, bt, p->borderColor[0], 0, false };
+        if (bb > 0 && n < cap) out[n++] = { x, y + h - bb, w, bb, p->borderColor[2], 0, false };
+        if (bl > 0 && sh > 0 && n < cap) out[n++] = { x, y + bt, bl, sh, p->borderColor[3], 0, false };
+        if (br > 0 && sh > 0 && n < cap) out[n++] = { x + w - br, y + bt, br, sh, p->borderColor[1], 0, false };
+        return n;
+    }
+
+    // 四条边各自记住"上一次那条"的下标，逐行往后延伸。
+    //
+    // **不能只看 out[n-1]**：左右竖条是交替 push 的，上一个永远是另一条边，于是
+    // 每行都新开一条，条带数变成 O(高度) —— 盒子一高就撞 cap 被截断。圆角 14 的
+    // 卡片实测边框只画到盒子顶部约 52 行处，下面整段没有边框（三个后端都中招）。
+    int lastTop = -1, lastBottom = -1, lastLeft = -1, lastRight = -1;
+    auto pushRun = [&](int& last, float bx, float by, float bwid, float bh, uint32_t color) {
+        if (bwid <= 0.01f || bh <= 0.01f) return;
+        if (last >= 0) {                                         // 与这条边的上一段紧邻且同色同宽 → 延伸
+            PaintBand& pv = out[last];
+            if (pv.color == color && std::fabs(pv.x - bx) < 0.02f &&
+                std::fabs(pv.w - bwid) < 0.02f && std::fabs((pv.y + pv.h) - by) < 0.02f) {
                 pv.h = by + bh - pv.y;
                 return;
             }
         }
+        if (n >= cap) return;
+        last = n;
         out[n++] = { bx, by, bwid, bh, color, 0, false };
     };
 
     const int rows = (int)std::ceil(h);
-    for (int i = 0; i < rows && n < cap; i++) {
+    for (int i = 0; i < rows; i++) {
         const float rt = y + (float)i;
         const float rb = std::min(rt + 1.0f, y + h);
         const float O = std::max(PaintRoundInset(rt - y, r), PaintRoundInset((y + h) - rb, r));
         if (rt < iy - 0.01f) {                                   // 上横条（含上圆角弧）
-            push(x + O, rt, w - 2.0f * O, rb - rt, p->borderColor[0]);
+            pushRun(lastTop, x + O, rt, w - 2.0f * O, rb - rt, p->borderColor[0]);
         } else if (rt >= iy + ih - 0.01f) {                      // 下横条
-            push(x + O, rt, w - 2.0f * O, rb - rt, p->borderColor[2]);
+            pushRun(lastBottom, x + O, rt, w - 2.0f * O, rb - rt, p->borderColor[2]);
         } else {                                                 // 左右竖条（含左右圆角弧）
             const float k = std::max(PaintRoundInset(std::max(0.0f, rt - iy), ir),
                                      PaintRoundInset(std::max(0.0f, (iy + ih) - rb), ir));
             const float li = bl + k, ri = br + k;
-            push(x + O, rt, li - O, rb - rt, p->borderColor[3]);
-            push(x + w - ri, rt, ri - O, rb - rt, p->borderColor[1]);
+            pushRun(lastLeft, x + O, rt, li - O, rb - rt, p->borderColor[3]);
+            pushRun(lastRight, x + w - ri, rt, ri - O, rb - rt, p->borderColor[1]);
         }
     }
     return n;

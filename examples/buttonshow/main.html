@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<!--
+  buttonshow：按钮样式一览。
+
+  这个示例只用 CSS（没有任何绘制代码），把一套能直接抄进项目的按钮外观摆出来：
+    ① 语义色   主操作 / 次要 / 成功 / 警告 / 危险 / 信息 / 链接
+    ② 尺寸图标 小 / 中 / 大 + 方形图标按钮
+    ③ 圆角     2 / 9 / 16 / 胶囊
+    ④ 底色     纯色 / 渐变 / 描边 / 幽灵
+    ⑤ 状态     普通 / 悬停 / 选中(:checked) / 禁用(disabled)
+    ⑥ 形态     图标按钮 / 纯文本按钮 / 键盘焦点 / 块级整行按钮
+  底部状态栏会显示"最后点击了哪个按钮"——鼠标点、Tab 选、Enter 触发都算。
+
+  注意（改这里之前先知道）：
+  · 选择器只支持单段：`.b:active` 可以，`.card .b`（后代）不行；
+  · 状态伪类只认 :hover/:active/:focus/:checked，**没有 :disabled** ——
+    禁用靠 disabled 属性（引擎自动压暗到 55% 并退出 Tab 链）；
+  · 状态样式能切的目标只有 background*、transform:scale()、border-radius、
+    opacity（LABEL 另有 color）；所以悬停改文字色是不生效的；
+  · `background:linear-gradient(...)` 只取首尾两色，渐变底没法做 background-color 过渡。
+-->
+<app_window width="1020" height="712" bg="#F4F7FC" title="binUI · 按钮样式">
+<html width="1020" height="712" bg="#F4F7FC">
+<head>
+    <meta charset="UTF-8">
+    <title>按钮样式一览</title>
+    <style>
+        /* 浅色令牌（与 examples/features 同一套）：底 #F4F7FC / 面 #FFFFFF / 线 #E6EDF7 /
+           主字 #1F2A37 / 次字 #66768C / 弱字 #94A3B8 / 主色 #3E8BFF / 薄荷 #2FBF9A */
+        body { font-size: 13px; color: #1F2A37; }
+
+        .title      { font-size: 24px; font-weight: 700; color: #1F2A37; }
+        .sub        { font-size: 12px; color: #66768C; }
+        .card       { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 14; }
+        .card-title { font-size: 12px; font-weight: 700; color: #1F2A37; }
+        .note       { font-size: 11px; color: #94A3B8; }
+        .chip       { background: #EAF1FF; color: #3E8BFF; border: 1px solid #CFE0F8;
+                      border-radius: 12; font-size: 11px; }
+
+        /* ============ 按钮基底 ============ */
+        /* 过渡写在基底上：状态样式切目标值时走过渡，否则瞬时。
+           尺寸类（.sm/.md/.lg）必须排在 .b 后面才盖得住 height/font-size。 */
+        .b { height: 40px; border-radius: 9; font-size: 13px; color: #FFFFFF;
+             transition: background-color 0.16s ease, transform 0.16s ease; }
+        .b:hover  { transform: scale(1.04); }
+        .b:active { transform: scale(0.96); }
+
+        .sm { height: 28px; font-size: 11px; border-radius: 7; }
+        .md { height: 34px; font-size: 12px; border-radius: 8; }
+        .lg { height: 42px; font-size: 14px; border-radius: 11; }
+
+        /* ============ ① 语义色 ============ */
+        .pri  { background: #3E8BFF; }
+        .pri:hover  { background: #5DA0FF; }
+        .pri:active { background: #2F79E8; }
+
+        .sec  { background: #EEF3FA; color: #3E8BFF; border: 1px solid #DFE9F7; }
+        .sec:hover  { background: #E1EBFA; }
+        .sec:active { background: #D2E2F8; }
+
+        .ok   { background: #2FBF9A; }
+        .ok:hover  { background: #40CCAA; }
+        .ok:active { background: #26A583; }
+
+        .warn { background: #F5A524; color: #5C3A00; }
+        .warn:hover  { background: #FFB63D; }
+        .warn:active { background: #D98C12; }
+
+        .dan  { background: #E5484D; }
+        .dan:hover  { background: #F26A6E; }
+        .dan:active { background: #C93A3F; }
+
+        .inf  { background: #0EA5C6; }
+        .inf:hover  { background: #22B8D8; }
+        .inf:active { background: #0B8AA6; }
+
+        .link { background: #FFFFFF; color: #3E8BFF; }
+        .link:hover  { background: #F2F7FF; }
+        .link:active { background: #E4EEFF; }
+
+        /* ============ ② 方形图标按钮 ============ */
+        .icon { width: 36px; height: 36px; border-radius: 9; font-size: 15px;
+                background: #EEF3FA; color: #38445A; border: 1px solid #DFE9F7;
+                transition: background-color 0.16s ease, transform 0.16s ease; }
+        .icon:hover  { background: #E1EBFA; transform: scale(1.06); }
+        .icon:active { background: #D2E2F8; transform: scale(0.94); }
+
+        /* ============ ③ 圆角 ============ */
+        .r0   { border-radius: 2; }
+        .r9   { border-radius: 9; }
+        .r16  { border-radius: 16; }
+        .pill { border-radius: 20; }
+
+        /* ============ ④ 底色 ============ */
+        .solid { background: #6F6AF8; }
+        .solid:hover  { background: #8B87FA; }
+        .solid:active { background: #5A55E8; }
+
+        /* 渐变底：状态只能改 transform（background-color 盖不住 background-image） */
+        .grad { background: linear-gradient(to right, #5DA0FF, #35C4A8); color: #FFFFFF; }
+
+        .outline { background: #FFFFFF; border: 1px solid #3E8BFF; color: #3E8BFF; }
+        .outline:hover  { background: #F2F7FF; }
+        .outline:active { background: #E4EEFF; }
+
+        .ghost { background: #F7FAFF; border: 1px solid #DFE9F7; color: #66768C; }
+        .ghost:hover  { background: #EAF2FD; }
+        .ghost:active { background: #DCE9F9; }
+
+        /* ============ ⑤ 状态：:checked 由外壳 setNodeChecked 维护 ============ */
+        .tog { background: #EEF3FA; color: #66768C; border: 1px solid #DFE9F7; }
+        .tog:hover   { background: #E1EBFA; }
+        .tog:checked { background: #2FBF9A; color: #FFFFFF; }
+
+        /* 禁用：没有 :disabled 伪类，靠 disabled 属性（引擎压暗 55% + 退出 Tab 链） */
+        .dis { background: #EEF3FA; color: #A8B4C4; border: 1px solid #E6EDF7; }
+
+        /* 键盘焦点：:focus 覆盖键盘焦点与正在编辑的输入框 */
+        .focusable { background: #EEF3FA; color: #38445A; border: 1px solid #DFE9F7; }
+        .focusable:hover  { background: #E1EBFA; }
+        .focusable:focus  { background: #DCEBFB; }
+
+        /* ============ ⑥ 纯文本 / 块级 ============ */
+        .textbtn { background: #FFFFFF; color: #3E8BFF; }
+        .textbtn:hover  { background: #F2F7FF; }
+        .textbtn:active { background: #E4EEFF; }
+
+        .block { background: #3E8BFF; border-radius: 10; font-size: 13px; }
+        .block:hover  { background: #5DA0FF; }
+        .block:active { background: #2F79E8; }
+
+        /* ============ 底部状态栏 ============ */
+        .status { font-size: 13px; color: #1F2A37; }
+        .count  { font-size: 11px; color: #94A3B8; }
+    </style>
+</head>
+<body>
+
+    <!-- 头部 -->
+    <span class="title" style="position:absolute;left:28;top:18;width:600;height:32">按钮样式一览</span>
+    <span class="sub"   style="position:absolute;left:28;top:52;width:660;height:18">语义 / 尺寸 / 圆角 / 底色 / 状态 / 形态 —— 全部是 CSS，没有一行绘制代码</span>
+    <span class="chip"  style="position:absolute;left:836;top:22;width:156;height:26">pure CSS · 主色 #3E8BFF</span>
+
+    <!-- ① 语义色 -->
+    <div class="card" style="position:absolute;left:24;top:84;width:972;height:96">
+        <span class="card-title" style="position:absolute;left:16;top:12;width:560;height:16">① 语义色：一套颜色管一类动作</span>
+        <button class="b pri"   style="position:absolute;left:16;top:40;width:118">主操作</button>
+        <button class="b sec"   style="position:absolute;left:146;top:40;width:118">次要操作</button>
+        <button class="b ok"    style="position:absolute;left:276;top:40;width:118">成功</button>
+        <button class="b warn"  style="position:absolute;left:406;top:40;width:118">警告</button>
+        <button class="b dan"   style="position:absolute;left:536;top:40;width:118">危险</button>
+        <button class="b inf"   style="position:absolute;left:666;top:40;width:118">信息</button>
+        <button class="b link"  style="position:absolute;left:796;top:40;width:118">链接按钮</button>
+    </div>
+
+    <!-- ② 尺寸与图标 -->
+    <div class="card" style="position:absolute;left:24;top:192;width:470;height:96">
+        <span class="card-title" style="position:absolute;left:16;top:12;width:420;height:16">② 尺寸（11 / 12 / 14px）与图标按钮</span>
+        <button class="b sm pri" style="position:absolute;left:16;top:44;width:70">小号</button>
+        <button class="b md pri" style="position:absolute;left:100;top:41;width:88">中等</button>
+        <button class="b lg pri" style="position:absolute;left:202;top:37;width:104">大号</button>
+        <button class="icon" style="position:absolute;left:316;top:40">＋</button>
+        <button class="icon" style="position:absolute;left:358;top:40">−</button>
+        <button class="icon" style="position:absolute;left:400;top:40">✓</button>
+    </div>
+
+    <!-- ③ 圆角 -->
+    <div class="card" style="position:absolute;left:506;top:192;width:490;height:96">
+        <span class="card-title" style="position:absolute;left:16;top:12;width:440;height:16">③ 圆角：2 / 9 / 16 / 胶囊</span>
+        <button class="b pri r0"   style="position:absolute;left:16;top:40;width:100">2px</button>
+        <button class="b pri r9"   style="position:absolute;left:134;top:40;width:100">9px</button>
+        <button class="b pri r16"  style="position:absolute;left:252;top:40;width:100">16px</button>
+        <button class="b pri pill" style="position:absolute;left:370;top:40;width:100">胶囊</button>
+    </div>
+
+    <!-- ④ 底色 -->
+    <div class="card" style="position:absolute;left:24;top:300;width:470;height:164">
+        <span class="card-title" style="position:absolute;left:16;top:12;width:430;height:16">④ 底色：纯色 / 渐变 / 描边 / 幽灵</span>
+        <button class="b solid"   style="position:absolute;left:16;top:40;width:200">纯色底</button>
+        <button class="b grad"    style="position:absolute;left:228;top:40;width:200">渐变底</button>
+        <button class="b outline" style="position:absolute;left:16;top:88;width:200">描边</button>
+        <button class="b ghost"   style="position:absolute;left:228;top:88;width:200">幽灵（低对比底）</button>
+        <span class="note" style="position:absolute;left:16;top:136;width:430;height:14">渐变底悬停只缩放、不改底色（background-image 不参与过渡）</span>
+    </div>
+
+    <!-- ⑤ 状态 -->
+    <div class="card" style="position:absolute;left:506;top:300;width:490;height:164">
+        <span class="card-title" style="position:absolute;left:16;top:12;width:460;height:16">⑤ 状态：:hover / :active / :checked / disabled</span>
+        <button class="b sec"  style="position:absolute;left:16;top:40;width:100">普通</button>
+        <button class="b pri"  style="position:absolute;left:130;top:40;width:100">悬停看我</button>
+        <button id="tog" class="b tog" style="position:absolute;left:244;top:40;width:100">选中</button>
+        <button class="b dis" disabled style="position:absolute;left:358;top:40;width:100">已禁用</button>
+        <span class="note" style="position:absolute;left:16;top:92;width:450;height:14">「选中」由外壳调 setNodeChecked 维护；禁用按钮整体变暗并退出 Tab 焦点链</span>
+        <span class="note" style="position:absolute;left:16;top:110;width:450;height:14">同时命中时的优先级：:active &gt; :focus &gt; :checked &gt; :hover</span>
+        <span class="note" style="position:absolute;left:16;top:128;width:450;height:14">键盘 Enter / Space 触发的也是同一个 CLICK 事件</span>
+    </div>
+
+    <!-- ⑥ 形态 -->
+    <div class="card" style="position:absolute;left:24;top:476;width:972;height:130">
+        <span class="card-title" style="position:absolute;left:16;top:12;width:560;height:16">⑥ 形态：图标按钮 / 纯文本按钮 / 键盘焦点 / 块级整行</span>
+        <button class="icon" style="position:absolute;left:16;top:42">✕</button>
+        <button class="icon" style="position:absolute;left:58;top:42">→</button>
+        <button class="icon" style="position:absolute;left:100;top:42">⚙</button>
+        <button class="b textbtn" style="position:absolute;left:156;top:40;width:150">纯文本按钮</button>
+        <button class="b focusable" style="position:absolute;left:316;top:40;width:150">Tab 到这里看焦点</button>
+        <button class="block" style="position:absolute;left:16;top:88;width:940;height:32">块级按钮：占满整行，适合表单提交 / 列表主操作</button>
+    </div>
+
+    <!-- 底部状态栏：点任意按钮都会更新这两行 -->
+    <div class="card" style="position:absolute;left:24;top:618;width:972;height:74">
+        <span id="status" class="status" style="position:absolute;left:16;top:14;width:520;height:20">最后点击：—</span>
+        <span id="count"  class="count"  style="position:absolute;left:16;top:40;width:200;height:16">点击次数 0</span>
+        <span class="note" style="position:absolute;left:420;top:16;width:540;height:40">Tab / 方向键移动焦点　·　Enter 或 Space 触发　·　鼠标点击同样更新状态行　·　Esc 退出</span>
+    </div>
+
+</body>
+</html>

@@ -35,7 +35,7 @@ components/         **标准组件库**：titlebar / button / field / badge / to
 bindings/           **其他语言绑定**：Python(ctypes) / Go(cgo) / Rust(extern "C")，
                     统一对着 include/binui_c.h 的 C ABI（见 docs/bindings.md）
 examples/           演示（每个子目录 = 一个 demo：main.cpp + main.html）
-                      （6 组示例里 features 就是组件化三形态的活示例）
+                      （8 组示例里 features 就是组件化三形态的活示例）
 tests/              测试（轻量自写断言，8 个独立可执行文件）
 tools/              调试工具：离屏渲染 / 窗口抓取 / 窗口枚举 / 示例 UI 检查（见 tools/README.md）
 docs/               设计文档、图片、设计稿（见 docs/README.md；组件规范见 docs/components.md）
@@ -67,15 +67,18 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `examples/features` | **功能**：伪类/扩展绘制/HTML 语义/组件化三形态/数据驱动 setText |
 | `examples/animshow` | **动画**：缓动 / 方向 / 时长 / fill / infinite / 悬停过渡 / 运行时 API |
 | `examples/fontshow` | **字体**：字号阶梯 / 字重 400–800 / 斜体 / 行高 / 文字装饰 / 中英混排与符号 |
+| `examples/buttonshow` | **按钮样式**：语义色 / 尺寸 / 圆角 / 纯色·渐变·描边·幽灵底 / :hover·`:active`·`:checked`·disabled 状态 / 图标·文本·块级形态 |
+| `examples/imeshow` | **输入法（IME）**：组字窗与候选框跟随光标 / 选词上屏 / 消息日志（`BINUI_IME_LOG=1`） |
 | `examples/svgdemo` | **2D 渲染**：`<svg>` 声明式矢量（line/polyline/polygon/rect/circle）+ `<canvas>` 命令式绘制面 |
 | `examples/cubedemo` | **3D 渲染**：应用自己算顶点与透视，只用 `fillLine` 画线框立方体（引擎不做 3D） |
 | `examples/texturedemo` | **纹理**：`updateImageRaw` 运行期上传，同一张纹理多尺寸采样 |
 | `components/` | **标准组件库**：标题栏 / 按钮 / 输入框 / 胶囊 / 开关 / 面板 / 对话框 / 指标 / 头像 / 分隔线 / 状态栏（见 [`components/README.md`](components/README.md)） |
 
 > 所有示例统一使用一套**清新浅色主题**（页面底 `#F4F7FC` / 白卡片 + 1px 边框 / 主字 `#1F2A37` /
-> 次字 `#66768C` / 主色 `#3E8BFF` / 薄荷 `#2FBF9A`）。这套令牌没有引擎级实现（`box-shadow`
-> 这类合成效果仍不支持），就是各示例 `<style>` 里的一段约定 —— 改配色照抄 `examples/features`
-> 开头的令牌注释即可。
+> 次字 `#66768C` / 主色 `#3E8BFF` / 薄荷 `#2FBF9A`；`buttonshow` 直接给了一套按钮色板可照抄）。
+> 这套令牌没有引擎级实现（`box-shadow` 这类合成效果仍不支持），就是各示例 `<style>` 里的一段
+> 约定 —— 改配色照抄 `examples/features` 开头的令牌注释即可。深色底只有 `imeshow`（输入法演示，
+> 深色更容易看清组字）。
 
 
 ## 第三方依赖
@@ -151,13 +154,15 @@ sh scripts/fetch-deps.sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-# 运行演示（6 组各一个，OpenGL 3.3 无边框窗口）
+# 运行演示（8 组各一个，OpenGL 3.3 无边框窗口）
 build/bin/features.exe         # 功能：伪类 / 扩展绘制 / HTML 语义 / 组件化三形态 / 数据驱动
 build/bin/animshow.exe         # 动画：缓动 / 方向 / 时长 / fill / infinite / 悬停过渡 / 运行时 API
 build/bin/fontshow.exe         # 字体：字号 / 字重 / 斜体 / 行高 / 文字装饰 / 中英混排与符号
+build/bin/buttonshow.exe       # 按钮样式：语义色 / 尺寸 / 圆角 / 底色 / 状态 / 形态（纯 CSS）
 build/bin/svgdemo.exe          # 2D 渲染：<svg> 声明式矢量 + <canvas> 命令式绘制面
 build/bin/cubedemo.exe         # 3D 渲染：应用自己算顶点与透视，引擎只提供 fillLine
 build/bin/texturedemo.exe      # 纹理：updateImageRaw 运行期上传，多尺寸采样
+build/bin/imeshow.exe          # 输入法：组字/候选框跟随光标、选词上屏
 
 # 运行测试
 ctest --test-dir build

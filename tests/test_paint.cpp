@@ -125,6 +125,43 @@ int main() {
         CHECK(EstimateLineCount("\xE4\xB8\xAD\xE6\x96\x87", 13.0f, 0.0f) >= 1, "可用宽度为 0 时仍返回正行数");
     }
 
+    // ---------- 边框条带（v13 四边边框） ----------
+    {
+        BinUIPaintNode p{};
+        p.flags = PAINT_BORDER;
+        for (int i = 0; i < 4; i++) { p.borderW[i] = 1; p.borderColor[i] = 0xFFE6EDF7u; }
+
+        PaintBand bb[kMaxBorderBands];
+        const float W = 400.0f, H = 600.0f, R = 16.0f;
+
+        // 高盒子的边框必须一路铺到底：以前逐行 push 左右交替、只看 out[n-1] 合并不了，
+        // 条带数变成 O(高度)，撞上 cap 就在盒子顶部约 64px 处截断（下面整段没边框）。
+        const int n = BuildBorderBands(&p, 0, 0, W, H, R, bb);
+        CHECK(n > 0 && n < kMaxBorderBands, "600px 高卡片边框不撞条带上限");
+
+        float maxBottom = 0.0f, leftStraight = 0.0f;
+        for (int i = 0; i < n; i++) {
+            maxBottom = std::max(maxBottom, bb[i].y + bb[i].h);
+            if (bb[i].x <= 0.51f && bb[i].w <= 1.51f) leftStraight += bb[i].h;  // 直边段左边框
+        }
+        CHECK_NEAR(maxBottom, H, 1.01f, "边框必须画到盒子底边（不能中途截断）");
+        CHECK(leftStraight >= H - 2.0f * R - 1.0f, "左边框直边段要覆盖 H-2r");
+
+        // 条带数只跟半径有关：把盒子拉高一倍，条带数不该跟着涨
+        const int n2 = BuildBorderBands(&p, 0, 0, W, H * 2.0f, R, bb);
+        CHECK(n2 == n, "条带数与盒子高度无关");
+
+        // 直角边框 = 四条
+        BinUIPaintNode sq{};
+        sq.flags = PAINT_BORDER;
+        for (int i = 0; i < 4; i++) { sq.borderW[i] = 2; sq.borderColor[i] = 0xFF000000u; }
+        CHECK(BuildBorderBands(&sq, 0, 0, 100, 40, 0.0f, bb) == 4, "直角边框 = 四条");
+
+        // 半径大到装不下（cap 小）：退回直角四条，宁可方角也不能缺边
+        CHECK(BuildBorderBands(&p, 0, 0, 200, 200, 100.0f, bb, kMaxPaintBands) == 4,
+              "半径超过条带上限时退回直角四条");
+    }
+
     if (g_fail == 0) std::printf("test_paint: 全部通过\n");
     return g_fail;
 }

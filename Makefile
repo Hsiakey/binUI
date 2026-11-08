@@ -181,11 +181,12 @@ $(BIN_DIR)/test_capi$(EXT): tests/test_capi.cpp $(BUILD_DIR)/libbinui_c.a $(LIB_
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(BUILD_DIR)/libbinui_c.a $(LIB_A) $(WINLIBS) $(GL_LIBS)
 
-# 6 个示例 = 6 组：功能 / 动画 / 字体 / 2D 渲染 / 3D 渲染 / 纹理
+# 7 个示例 = 7 组：功能 / 动画 / 字体 / 按钮样式 / 2D 渲染 / 3D 渲染 / 纹理
 DEMO_BINS := \
     $(BIN_DIR)/features$(EXT) \
     $(BIN_DIR)/animshow$(EXT) \
     $(BIN_DIR)/fontshow$(EXT) \
+    $(BIN_DIR)/buttonshow$(EXT) \
     $(BIN_DIR)/svgdemo$(EXT) \
     $(BIN_DIR)/cubedemo$(EXT) \
     $(BIN_DIR)/texturedemo$(EXT) \
@@ -248,6 +249,11 @@ $(BIN_DIR)/imeshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/imes
 	@mkdir -p $(BIN_DIR)/imeshow
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/imeshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/imeshow/main.html $(WIN_BIN)/imeshow/main.html
+
+$(BIN_DIR)/buttonshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)/buttonshow
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	cp -f $(EXA_DIR)/buttonshow/main.html $(WIN_BIN)/buttonshow/main.html
 
 # =============================================
 # C ABI：给 Python / Go / Rust 等宿主语言的绑定入口（include/binui_c.h）

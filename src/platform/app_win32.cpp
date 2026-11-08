@@ -864,7 +864,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         };
         auto drawNodeBorder = [&]() {
             if (!hasBorder) return;
-            binui::PaintBand bb[binui::kMaxPaintBands];
+            binui::PaintBand bb[binui::kMaxBorderBands];
             const int bn = binui::BuildBorderBands(pt, nfx, nfy, nfw, nfh, (float)node.radius, bb);
             FillPaintBands(hdc, bb, bn, dc | 0xFF000000u);
         };
