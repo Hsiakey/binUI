@@ -8,20 +8,22 @@
 
 ### 修复 — 组件里的按钮 hover 放大时被"关在盒子里"（裁剪链按每个祖先矩形无边裁）
 
-`<use src="button.bum.xml">` 展开出的包裹节点与按钮**等大**（190×40）。三个后端绘制节点时，
+组件自己的根 **`div`** 与按钮**等大**（`examples/features/button.bum.xml` 里就写着
+`<div class="cmp-wrap" style="height:40">` 包着按钮，`<use>` 展开后根 div 就是
+190×40，和按钮一模一样）。三个后端绘制节点时，
 除了自身与脏矩形之外，还会**无条件**沿祖先链逐层裁剪：
 
 ```cpp
 while (draw) { ... gfx.pushClip(par.x, par.y, par.width, par.height); }   // 以前
 ```
 
-于是组件按钮 `:hover { transform:scale(1.04) }` 放大出来的那圈（每边 3.8px）被等大的包裹节点
+于是组件按钮 `:hover { transform:scale(1.04) }` 放大出来的那圈（每边 3.8px）被这个等大的根 div
 切掉：按钮看着还是原尺寸、四角变成硬边 —— 就是"被困在一个容器里放大，超出的部分被隐藏"。
 
 CSS 语义里只有 `overflow:auto/scroll/hidden` 的容器才裁子元素。修法：
 
 - 渲染器新增 `clippingAncestors(nodeId, out)`：从近到远返回**带 `BINUI_SCROLLABLE`** 的祖先
-  （编译期由 `overflow:auto/scroll/hidden` 标出），普通 div / `<use>` 包裹节点不入链。
+  （编译期由 `overflow:auto/scroll/hidden` 标出），普通 div（含组件根 div）不入链。
 - 三个后端（GL、D3D11、GDI）的绘制循环都改成调它，删掉各自手写的祖先遍历；
   每帧复用同一个 `std::vector<uint16_t>` 缓冲，不产生逐节点分配。
 - 祖先不可见仍然跳过绘制（`hidden[]` 预计算已经覆盖，这里只补裁剪容器自身的可见性判断）。

@@ -873,8 +873,8 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
 
         // 层级裁剪：先把裁剪区设为自身（滚动后）范围，再与「裁剪容器」祖先求交；
         // 交集为空则跳过绘制。裁剪容器只有 overflow:auto/scroll/hidden（编译期标 SCROLLABLE）——
-        // 普通 div 与 <use> 展开出的包裹节点按 CSS 语义不裁子元素，否则组件里 hover
-        // 放大 1.04 的按钮会被等大的包裹节点切回原来那块。
+        // 普通 div（含组件自己的根 div）按 CSS 语义不裁子元素，否则组件里 hover
+        // 放大 1.04 的按钮会被与它等大的根 div 切回原来那块。
         int savedDC = SaveDC(hdc);
         bool draw = true;
         RECT nr = rc;

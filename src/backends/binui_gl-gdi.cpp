@@ -1951,7 +1951,7 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
                      static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
         bool draw = true;
         // 裁剪链交给渲染器判定（clippingAncestors）：只有 overflow:auto/scroll/hidden
-        // 的祖先才裁子元素。普通 div 与 <use> 包裹节点按 CSS 语义不裁。
+        // 的祖先才裁子元素。普通 div（含组件自己的根 div）按 CSS 语义不裁。
         renderer.clippingAncestors(node.id, clipAncs);
         for (uint16_t ancId : clipAncs) {
             auto pit = byId.find(ancId);
