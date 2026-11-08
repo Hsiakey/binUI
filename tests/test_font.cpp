@@ -1,15 +1,24 @@
-// test_font.cpp - 字体服务回归测试（FreeType + HarfBuzz，无窗口）
+// test_font.cpp - 字体与输入法回归测试（FreeType + HarfBuzz，无窗口）
 //
-// 覆盖：字体发现 -> 灰度光栅化（含小字号轻 hinting / gamma 修正）-> 整形度量 -> 彩色判定。
-// 重点守住"改了 hinting/gamma 之后字形仍然非空、度量仍然合理"这条底线。
+// 覆盖：
+//   1. 字体发现 -> 灰度光栅化（含小字号轻 hinting / gamma 修正）-> 整形度量 -> 彩色判定
+//      重点守住"改了 hinting/gamma 之后字形仍然非空、度量仍然合理"这条底线。
+//   2. 输入法（IME）桥接：Win32 侧组字串与光标索引都是 UTF-16，引擎内部是 UTF-8 字节
+//      偏移，`setCaretByUtf16Index` / `insertText` / `blur` 就是后端要走的整条链。
+//      代理对（emoji）与全角字必须落在字符边界上，否则组字窗会飘、候选框会算错位置。
+//      开窗才能测的部分（组字窗/候选框定位、组字期间点击被 IME 吞掉）见
+//      examples/imeshow 的手测清单。
 #include <cstdio>
 #include <cmath>
 #include <string>
 #include <vector>
 
+#include "binui_compiler.h"
 #include "binui_font_renderer.h"
+#include "binui_renderer.h"
 
 using namespace binui_font;
+using namespace binui;          // 输入法桥接用例要用渲染器的编辑会话 API
 
 static int g_fail = 0;
 
@@ -57,7 +66,99 @@ static InkStat Measure(FontEngine& fe, const char* face, float size, uint32_t cp
     return s;
 }
 
+// 编译一段只有一个输入框的界面，返回该输入框的节点 id（找不到 -1）
+static int LoadInput(BinUIRenderer& r, const char* value) {
+    std::string html = "<html width=\"360\" height=\"120\"><body><input id=\"box\" style=\""
+                       "position:absolute;left:16px;top:16px;width:240px;height:32px;"
+                       "font-size:16px\" value=\"" +
+                       std::string(value) + "\"/></body></html>";
+    auto res = CompileBinUIEx(html);
+    if (res.layout.empty() || !r.loadLayout(res.layout.data(), res.layout.size())) return -1;
+    for (const auto& n : r.getNodes())
+        if (n.type == BINUI_INPUT) return static_cast<int>(n.id);
+    return -1;
+}
+
+// 输入法桥接：UTF-16 索引 -> UTF-8 字节偏移 -> 编辑会话
+static void TestImeBridge() {
+    // ---- 1. 全角字（BMP，1 个 UTF-16 单元 = 3 字节）----
+    {
+        BinUIRenderer r;
+        const int id = LoadInput(r, "ab你好");
+        CHECK(id >= 0, "IME: 输入框布局加载");
+        if (id < 0) return;
+
+        r.focus(static_cast<uint16_t>(id));
+        CHECK(r.isEditing(), "IME: focus 后进入编辑态");
+        CHECK(r.edit().value == "ab你好", "IME: 初值来自 value 属性");
+        CHECK(r.edit().caret == 8, "IME: 初始光标在末尾（2 + 3 + 3 字节）");
+
+        r.setCaretByUtf16Index(2);   // GCS_CURSORPOS 语义：'a','b' 之后
+        CHECK(r.edit().caret == 2, "IME: UTF-16 索引 2 -> 字节 2");
+        r.setCaretByUtf16Index(3);   // '你' 之后
+        CHECK(r.edit().caret == 5, "IME: UTF-16 索引 3 -> 字节 5（全角 3 字节）");
+        r.setCaretByUtf16Index(4);
+        CHECK(r.edit().caret == 8, "IME: UTF-16 索引 4 -> 字节 8（末尾）");
+        r.setCaretByUtf16Index(999);
+        CHECK(r.edit().caret == 8, "IME: 索引越界钳到末尾");
+
+        // 上屏：GCS_RESULTSTR 转 UTF-8 后 insertText，光标停在提交串之后
+        r.setCaretByUtf16Index(2);
+        CHECK(r.insertText("测试"), "IME: 组字结果上屏");
+        CHECK(r.edit().value == "ab测试你好", "IME: 上屏插入位置正确");
+        CHECK(r.edit().caret == 8, "IME: 光标跟在提交串之后（2 + 6）");
+
+        // 失去焦点时提交到节点文本（后端 blur 前会先拿 edit().value）
+        r.blur();
+        bool committed = false;
+        for (const auto& n : r.getNodes())
+            if (n.id == id && n.text == "ab测试你好") committed = true;
+        CHECK(committed, "IME: blur 把编辑中的文本提交到节点");
+    }
+
+    // ---- 2. 代理对（emoji）：1 个 emoji = 2 个 UTF-16 单元 / 4 字节 ----
+    {
+        BinUIRenderer r;
+        const int id = LoadInput(r, "x😀y");
+        CHECK(id >= 0, "IME: emoji 输入框布局加载");
+        if (id < 0) return;
+        r.focus(static_cast<uint16_t>(id));
+        CHECK(r.edit().value == "x😀y", "IME: emoji 初值");
+        CHECK(r.edit().caret == 6, "IME: emoji 末尾 = 1 + 4 + 1 字节");
+
+        r.setCaretByUtf16Index(1);
+        CHECK(r.edit().caret == 1, "IME: 索引 1 -> emoji 起点（字节 1）");
+        r.setCaretByUtf16Index(2);   // 代理对中间：绝不能停在半个 emoji 里
+        CHECK(r.edit().caret == 1, "IME: 索引 2 落在代理对中间 -> 夹到 emoji 起点");
+        r.setCaretByUtf16Index(3);   // emoji 之后（2 个单元）
+        CHECK(r.edit().caret == 5, "IME: 索引 3 -> emoji 之后（字节 5）");
+        r.setCaretByUtf16Index(4);
+        CHECK(r.edit().caret == 6, "IME: 索引 4 -> 末尾（字节 6）");
+
+        // 在 emoji 与 'y' 之间上屏一个全角字
+        r.setCaretByUtf16Index(3);
+        CHECK(r.insertText("字"), "IME: emoji 后上屏");
+        CHECK(r.edit().value == "x😀字y", "IME: emoji 后插入不切坏代理对");
+    }
+
+    // ---- 3. 光标的字符边界（setCaret 传字节偏移时也要夹）----
+    {
+        BinUIRenderer r;
+        const int id = LoadInput(r, "x😀y");
+        if (id < 0) return;
+        r.focus(static_cast<uint16_t>(id));
+        r.setCaret(3);   // emoji 中间（字节 1..4）
+        CHECK(r.edit().caret == 1, "IME: setCaret 落在字符中间 -> 夹到字符起点");
+        r.setCaret(100);
+        CHECK(r.edit().caret == 6, "IME: setCaret 越界 -> 末尾");
+    }
+}
+
 int main() {
+    // 输入法桥接（UTF-16 -> UTF-8 光标）不依赖字体，先跑：
+    // 非 Windows / 无系统字体的环境下字体检查会 skip，但这段必须一直守。
+    TestImeBridge();
+
     FontEngine fe;
     CHECK(fe.init(), "FontEngine 初始化");
     registerSystemFonts(fe);

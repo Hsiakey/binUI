@@ -15,7 +15,13 @@ INC_DIR  := include
 EXA_DIR  := examples
 # MinGW 构建目录与 CMake 的 build/ 分开，避免 make clean 误删 CMake 产物
 BUILD_DIR := build-mingw
+# 产物分三处，别再混在一起看一眼分不清谁是谁：
+#   bin/           库 + 命令行工具（binui_c.dll、binui_compile、offscreen_render…）
+#   bin/tests/     测试用例（只有 test_css / test_elements / test_font / test_capi）
+#   bin/examples/  使用示例（一组一个 exe，UI 在同名子目录里）
 BIN_DIR  := $(BUILD_DIR)/bin
+TEST_DIR := $(BIN_DIR)/tests
+DEMO_DIR := $(BIN_DIR)/examples
 
 # platform detection
 ifdef ComSpec
@@ -90,75 +96,45 @@ deps:
 
 # =============================================
 # tests (cross-platform)
+#
+# 只有三个主题套件 + C ABI 冒烟，一个套件一个二进制；
+# 套件内部按"元素 / 动画 / 热重载…"分节，新增用例往对应文件的 namespace 里加，
+# 不要为一个新特性再开一个 test_xxx.exe（历史包袱见 CHANGELOG 里 8 -> 4 的那次合并）。
 # =============================================
 TEST_BINS := \
-    $(BIN_DIR)/test_binui$(EXT) \
-    $(BIN_DIR)/test_renderer$(EXT) \
-    $(BIN_DIR)/test_renderer_real$(EXT) \
-    $(BIN_DIR)/test_compiler$(EXT) \
-    $(BIN_DIR)/test_anim$(EXT) \
-    $(BIN_DIR)/test_hot_reload$(EXT) \
-    $(BIN_DIR)/test_font$(EXT) \
-    $(BIN_DIR)/test_paint$(EXT)
+    $(TEST_DIR)/test_css$(EXT) \
+    $(TEST_DIR)/test_elements$(EXT) \
+    $(TEST_DIR)/test_font$(EXT)
 
-$(BIN_DIR)/test_binui$(EXT): tests/test_binui.cpp $(LIB_A)
-	@mkdir -p $(BIN_DIR)
+# test_css：CSS 属性 / 选择器 / 伪元素 / 编译器告警（只依赖核心库）
+$(TEST_DIR)/test_css$(EXT): tests/test_css.cpp $(LIB_A)
+	@mkdir -p $(TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
 
-$(BIN_DIR)/test_renderer$(EXT): tests/test_renderer.cpp $(LIB_A)
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
-
-$(BIN_DIR)/test_renderer_real$(EXT): tests/test_renderer_real.cpp $(LIB_A)
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
-
-$(BIN_DIR)/test_compiler$(EXT): tests/test_compiler.cpp $(LIB_A)
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
-
-$(BIN_DIR)/test_anim$(EXT): tests/test_anim.cpp $(LIB_A)
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
-
-# test_hot_reload 需要 examples/ 下的 binui_paths.h / binui_hot_reload.h
-$(BIN_DIR)/test_hot_reload$(EXT): tests/test_hot_reload.cpp $(LIB_A)
-	@mkdir -p $(BIN_DIR)
+# test_elements：二进制格式 / 元素树 / 布局 / 命中 / 交互 / 动画 / 绘制几何 / 热重载
+# 工作目录须为仓库根（用到 tests/fixtures/ 与 build-mingw/tmp/）
+$(TEST_DIR)/test_elements$(EXT): tests/test_elements.cpp $(LIB_A)
+	@mkdir -p $(TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -I$(EXA_DIR) -o $@ $< $(LIB_A)
 
-# test_font 需要 FreeType/HarfBuzz 头与预编译静态库
-$(BIN_DIR)/test_font$(EXT): tests/test_font.cpp $(LIB_A)
-	@mkdir -p $(BIN_DIR)
+# test_font：字体服务（FreeType + HarfBuzz）+ 输入法（IME）的 UTF-16 光标桥接
+$(TEST_DIR)/test_font$(EXT): tests/test_font.cpp $(LIB_A)
+	@mkdir -p $(TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Ithird_party/freetype/include -Ithird_party/harfbuzz/src \
 	    -o $@ $< $(LIB_A) -Lthird_party/freetype/build -lfreetype \
 	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
-# test_paint 只测 header-only 的绘制几何与文本粗估，不依赖库
-$(BIN_DIR)/test_paint$(EXT): tests/test_paint.cpp $(INC_DIR)/binui_paint.h
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $<
-
 .PHONY: test
 test: $(TEST_BINS)
-	@echo "--- test_binui ---"
-	$(BIN_DIR)/test_binui$(EXT)
-	@echo "--- test_renderer ---"
-	$(BIN_DIR)/test_renderer$(EXT)
-	@echo "--- test_renderer_real (run from project root) ---"
-	$(BIN_DIR)/test_renderer_real$(EXT)
-	@echo "--- test_compiler (run from project root) ---"
-	$(BIN_DIR)/test_compiler$(EXT)
-	@echo "--- test_anim ---"
-	$(BIN_DIR)/test_anim$(EXT)
-	@echo "--- test_hot_reload (run from project root) ---"
-	$(BIN_DIR)/test_hot_reload$(EXT)
+	@echo "--- test_css ---"
+	$(TEST_DIR)/test_css$(EXT)
+	@echo "--- test_elements (run from project root) ---"
+	$(TEST_DIR)/test_elements$(EXT)
 	@echo "--- test_font ---"
-	$(BIN_DIR)/test_font$(EXT)
-	@echo "--- test_paint ---"
-	$(BIN_DIR)/test_paint$(EXT)
+	$(TEST_DIR)/test_font$(EXT)
 ifdef ComSpec
 	@echo "--- test_capi ---"
-	$(BIN_DIR)/test_capi$(EXT)
+	$(TEST_DIR)/test_capi$(EXT)
 endif
 
 # =============================================
@@ -171,89 +147,88 @@ ifdef ComSpec
 GL_LIBS := -lopengl32 -ldwmapi -limm32 -Lthird_party/freetype/build -lfreetype -Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
 # C ABI 的冒烟测试（无窗口：只测编译/加载/节点查询/改文本，需链 GL 后端对象）
-TEST_BINS += $(BIN_DIR)/test_capi$(EXT)
-test: $(BIN_DIR)/test_capi$(EXT)
+TEST_BINS += $(TEST_DIR)/test_capi$(EXT)
+test: $(TEST_DIR)/test_capi$(EXT)
 
 # 注意：这里必须直接写 $(BUILD_DIR)/libbinui_c.a，不能写 $(BINUI_C_A) ——
 # 那个变量是后面用 := 定义的，GNU Make 在读到这一行时就展开成了空，
 # 于是 test_capi 永远只依赖 .cpp，库更新后不重链，跑的是旧二进制。
-$(BIN_DIR)/test_capi$(EXT): tests/test_capi.cpp $(BUILD_DIR)/libbinui_c.a $(LIB_A)
-	@mkdir -p $(BIN_DIR)
+$(TEST_DIR)/test_capi$(EXT): tests/test_capi.cpp $(BUILD_DIR)/libbinui_c.a $(LIB_A)
+	@mkdir -p $(TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(BUILD_DIR)/libbinui_c.a $(LIB_A) $(WINLIBS) $(GL_LIBS)
 
-# 7 个示例 = 7 组：功能 / 动画 / 字体 / 按钮样式 / 2D 渲染 / 3D 渲染 / 纹理
+# 8 组使用示例（一组一个 exe，一组只演示一件事）：功能 / 动画 / 字体 / 按钮样式 /
+# 输入法 / 2D 渲染 / 3D 渲染 / 纹理。产物在 $(DEMO_DIR)，与测试彻底分开。
 DEMO_BINS := \
-    $(BIN_DIR)/features$(EXT) \
-    $(BIN_DIR)/animshow$(EXT) \
-    $(BIN_DIR)/fontshow$(EXT) \
-    $(BIN_DIR)/buttonshow$(EXT) \
-    $(BIN_DIR)/svgdemo$(EXT) \
-    $(BIN_DIR)/cubedemo$(EXT) \
-    $(BIN_DIR)/texturedemo$(EXT) \
-    $(BIN_DIR)/imeshow$(EXT)
+    $(DEMO_DIR)/features$(EXT) \
+    $(DEMO_DIR)/animshow$(EXT) \
+    $(DEMO_DIR)/fontshow$(EXT) \
+    $(DEMO_DIR)/buttonshow$(EXT) \
+    $(DEMO_DIR)/svgdemo$(EXT) \
+    $(DEMO_DIR)/cubedemo$(EXT) \
+    $(DEMO_DIR)/texturedemo$(EXT) \
+    $(DEMO_DIR)/imeshow$(EXT)
 
-# cmd 的 copy 不识别正斜杠路径，转成反斜杠
 # 资源拷贝一律用 cp + 正斜杠路径。
 # 原先写 `cmd /c copy /Y examples\x\y build-mingw\bin\x\y`：SHELL=sh 时反斜杠被 sh 当转义吃掉，
 # cmd 收到不存在的路径，只打印 banner 就退出 —— 演示 UI 其实从没被拷到 bin/ 下（静默失败）。
-WIN_BIN := $(BIN_DIR)
 
 # 标准组件库：demo 的 main.html 用 ../../components/xxx.bum.xml 引用，
-# 从 $(BIN_DIR)/<demo>/ 往上两级正好是 $(BUILD_DIR)/，所以拷到这里
+# UI 在 $(DEMO_DIR)/<demo>/main.html，往上两级正好是 $(BIN_DIR)/，所以拷到这里
 STD_LIB_SRCS  := $(wildcard components/*.bum.xml components/*.bum.html)
-STD_LIB_STAMP := $(BUILD_DIR)/components/.stamp
+STD_LIB_STAMP := $(BIN_DIR)/components/.stamp
 
 $(STD_LIB_STAMP): $(STD_LIB_SRCS)
-	@mkdir -p $(BUILD_DIR)/components
-	@cp -f $(STD_LIB_SRCS) $(BUILD_DIR)/components/
+	@mkdir -p $(BIN_DIR)/components
+	@cp -f $(STD_LIB_SRCS) $(BIN_DIR)/components/
 	@touch $@
 
 $(BUILD_DIR)/examples/%.o: $(EXA_DIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -I$(EXA_DIR) -c $< -o $@
 
-$(BIN_DIR)/features$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(COMPONENT_BUMS)
-	@mkdir -p $(BIN_DIR)/features
+$(DEMO_DIR)/features$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(COMPONENT_BUMS)
+	@mkdir -p $(DEMO_DIR)/features
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/features/main.html $(WIN_BIN)/features/main.html
-	cp -f $(EXA_DIR)/features/button.bum.xml $(WIN_BIN)/features/button.bum.xml
-	cp -f $(BUILD_DIR)/assets/components/card.bum $(WIN_BIN)/features/card.bum
-	cp -f $(BUILD_DIR)/assets/components/dock.bum $(WIN_BIN)/features/dock.bum
+	cp -f $(EXA_DIR)/features/main.html $(DEMO_DIR)/features/main.html
+	cp -f $(EXA_DIR)/features/button.bum.xml $(DEMO_DIR)/features/button.bum.xml
+	cp -f $(BUILD_DIR)/assets/components/card.bum $(DEMO_DIR)/features/card.bum
+	cp -f $(BUILD_DIR)/assets/components/dock.bum $(DEMO_DIR)/features/dock.bum
 
-$(BIN_DIR)/animshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/animshow
+$(DEMO_DIR)/animshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A)
+	@mkdir -p $(DEMO_DIR)/animshow
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/animshow/main.html $(WIN_BIN)/animshow/main.html
+	cp -f $(EXA_DIR)/animshow/main.html $(DEMO_DIR)/animshow/main.html
 
-$(BIN_DIR)/fontshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/fontshow
+$(DEMO_DIR)/fontshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A)
+	@mkdir -p $(DEMO_DIR)/fontshow
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/fontshow/main.html $(WIN_BIN)/fontshow/main.html
+	cp -f $(EXA_DIR)/fontshow/main.html $(DEMO_DIR)/fontshow/main.html
 
-$(BIN_DIR)/svgdemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/svgdemo
+$(DEMO_DIR)/svgdemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A)
+	@mkdir -p $(DEMO_DIR)/svgdemo
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/svgdemo/main.html $(WIN_BIN)/svgdemo/main.html
+	cp -f $(EXA_DIR)/svgdemo/main.html $(DEMO_DIR)/svgdemo/main.html
 
-$(BIN_DIR)/cubedemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/cubedemo
+$(DEMO_DIR)/cubedemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIB_A)
+	@mkdir -p $(DEMO_DIR)/cubedemo
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/cubedemo/main.html $(WIN_BIN)/cubedemo/main.html
+	cp -f $(EXA_DIR)/cubedemo/main.html $(DEMO_DIR)/cubedemo/main.html
 
-$(BIN_DIR)/texturedemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/texturedemo
+$(DEMO_DIR)/texturedemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A)
+	@mkdir -p $(DEMO_DIR)/texturedemo
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/texturedemo/main.html $(WIN_BIN)/texturedemo/main.html
+	cp -f $(EXA_DIR)/texturedemo/main.html $(DEMO_DIR)/texturedemo/main.html
 
-$(BIN_DIR)/imeshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/imeshow/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/imeshow
+$(DEMO_DIR)/imeshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/imeshow/main.o $(LIB_A)
+	@mkdir -p $(DEMO_DIR)/imeshow
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/imeshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/imeshow/main.html $(WIN_BIN)/imeshow/main.html
+	cp -f $(EXA_DIR)/imeshow/main.html $(DEMO_DIR)/imeshow/main.html
 
-$(BIN_DIR)/buttonshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIB_A)
-	@mkdir -p $(BIN_DIR)/buttonshow
+$(DEMO_DIR)/buttonshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIB_A)
+	@mkdir -p $(DEMO_DIR)/buttonshow
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
-	cp -f $(EXA_DIR)/buttonshow/main.html $(WIN_BIN)/buttonshow/main.html
+	cp -f $(EXA_DIR)/buttonshow/main.html $(DEMO_DIR)/buttonshow/main.html
 
 # =============================================
 # C ABI：给 Python / Go / Rust 等宿主语言的绑定入口（include/binui_c.h）
@@ -285,6 +260,9 @@ $(BINUI_C_DLL): $(BUILD_DIR)/binui_c_dll.o $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A)
 .PHONY: capi
 capi: $(BINUI_C_A) $(BINUI_C_DLL)
 	@echo "C ABI -> $(BINUI_C_A) $(BINUI_C_DLL)"
+
+.PHONY: examples
+examples: $(DEMO_BINS) $(STD_LIB_STAMP)
 
 all: $(LIB_A) $(TEST_BINS) $(DEMO_BINS) $(STD_LIB_STAMP) $(BINUI_C_A) $(BINUI_C_DLL)
 
@@ -385,5 +363,6 @@ clean:
          $(wildcard $(BUILD_DIR)/platform/*.d) \
          $(wildcard $(BUILD_DIR)/common/*.d) \
          $(wildcard $(BUILD_DIR)/bin/*.d) \
+         $(wildcard $(BUILD_DIR)/bin/tests/*.d) \
          $(wildcard $(BUILD_DIR)/examples/*.d) \
          $(wildcard $(BUILD_DIR)/examples/*/*.d)

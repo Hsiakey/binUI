@@ -34,9 +34,10 @@ components/         **标准组件库**：titlebar / button / field / badge / to
                     （纯 HTML+CSS，<use src="…"> 编译期内联，见 components/README.md）
 bindings/           **其他语言绑定**：Python(ctypes) / Go(cgo) / Rust(extern "C")，
                     统一对着 include/binui_c.h 的 C ABI（见 docs/bindings.md）
-examples/           演示（每个子目录 = 一个 demo：main.cpp + main.html）
-                      （8 组示例里 features 就是组件化三形态的活示例）
-tests/              测试（轻量自写断言，8 个独立可执行文件）
+examples/           **使用示例**（一组一个子目录：main.cpp + main.html，产物落 bin/examples/）
+                      （8 组示例里 features 就是组件化三形态的活示例；设计稿/原型在 docs/mockups/）
+tests/              **测试用例**（按主题分四个套件：CSS / 元素 / 字体与输入法 / C ABI，
+                      产物落 bin/tests/，见 tests/README.md）
 tools/              调试工具：离屏渲染 / 窗口抓取 / 窗口枚举 / 示例 UI 检查（见 tools/README.md）
 docs/               设计文档、图片、设计稿（见 docs/README.md；组件规范见 docs/components.md）
 scripts/            fetch-deps.sh 等辅助脚本
@@ -154,17 +155,17 @@ sh scripts/fetch-deps.sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-# 运行演示（8 组各一个，OpenGL 3.3 无边框窗口）
-build/bin/features.exe         # 功能：伪类 / 扩展绘制 / HTML 语义 / 组件化三形态 / 数据驱动
-build/bin/animshow.exe         # 动画：缓动 / 方向 / 时长 / fill / infinite / 悬停过渡 / 运行时 API
-build/bin/fontshow.exe         # 字体：字号 / 字重 / 斜体 / 行高 / 文字装饰 / 中英混排与符号
-build/bin/buttonshow.exe       # 按钮样式：语义色 / 尺寸 / 圆角 / 底色 / 状态 / 形态（纯 CSS）
-build/bin/svgdemo.exe          # 2D 渲染：<svg> 声明式矢量 + <canvas> 命令式绘制面
-build/bin/cubedemo.exe         # 3D 渲染：应用自己算顶点与透视，引擎只提供 fillLine
-build/bin/texturedemo.exe      # 纹理：updateImageRaw 运行期上传，多尺寸采样
-build/bin/imeshow.exe          # 输入法：组字/候选框跟随光标、选词上屏
+# 运行示例（8 组各一个，OpenGL 3.3 无边框窗口；产物统一在 bin/examples/）
+build/bin/examples/features.exe      # 功能：伪类 / 扩展绘制 / HTML 语义 / 组件化三形态 / 数据驱动
+build/bin/examples/animshow.exe      # 动画：缓动 / 方向 / 时长 / fill / infinite / 悬停过渡 / 运行时 API
+build/bin/examples/fontshow.exe      # 字体：字号 / 字重 / 斜体 / 行高 / 文字装饰 / 中英混排与符号
+build/bin/examples/buttonshow.exe    # 按钮样式：语义色 / 尺寸 / 圆角 / 底色 / 状态 / 形态（纯 CSS）
+build/bin/examples/svgdemo.exe       # 2D 渲染：<svg> 声明式矢量 + <canvas> 命令式绘制面
+build/bin/examples/cubedemo.exe      # 3D 渲染：应用自己算顶点与透视，引擎只提供 fillLine
+build/bin/examples/texturedemo.exe   # 纹理：updateImageRaw 运行期上传，多尺寸采样
+build/bin/examples/imeshow.exe       # 输入法：组字/候选框跟随光标、选词上屏
 
-# 运行测试
+# 运行测试（四个套件；产物在 bin/tests/，也可直接跑其中一个）
 ctest --test-dir build
 ```
 
@@ -176,8 +177,8 @@ ctest --test-dir build
 **UI 开发（热重载）**：所有 demo 支持 `--watch`，改 UI 保存后自动重编译并换树，不用重启进程：
 
 ```bash
-build/bin/svgdemo.exe --watch                                 # 用 exe 同级的 UI
-build/bin/svgdemo.exe --watch --ui examples/svgdemo/main.html  # 直接盯源码树
+build/bin/examples/svgdemo.exe --watch                                 # 用 exe 同级的 UI
+build/bin/examples/svgdemo.exe --watch --ui examples/svgdemo/main.html  # 直接盯源码树
 ```
 
 窗口尺寸/滚动位置/键盘焦点/输入框内容跨重载保留；编译失败保留旧界面。`--ui <path>` 显式指定 UI 文件，也可用 `$BINUI_UI`；默认查找顺序：`<exe>/<appName>/<file>` → `<exe>/<file>` → 已编译的 `.bui`（旧名 `.binui` 也认）→ 源码树 `examples/<appName>/`（规则见 [`docs/app_layout.md`](docs/app_layout.md) §3）。

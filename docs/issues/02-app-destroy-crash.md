@@ -40,7 +40,7 @@ main.main.deferwrap1()                        ← 我的 defer app.Close()
 | B. 发 `WM_CLOSE` 让窗口先关掉 → `pump` 返回 1 → 再 `destroy` | 6 / 6 干净 |
 | C. 完全没有窗口交互，`pump` 1 秒后 `destroy`（等价于 A） | 2 / 6 崩 |
 | D. 项目自带 `binui_c.dll` + Go 绑定演示（`build-mingw/bin/go-demo.exe`），用 `WM_CLOSE` 退出 | 6 / 6 干净 |
-| E. 项目自带 GDI 演示 `build-mingw/bin/features.exe`，用 `WM_CLOSE` 退出 | 6 / 6 干净 |
+| E. 项目自带 GDI 演示 `build-mingw/bin/examples/features.exe`，用 `WM_CLOSE` 退出 | 6 / 6 干净 |
 
 也就是说：**窗口已经关掉时 `destroy` 是安全的；窗口还开着时 `destroy` 有一半概率崩。**
 B/C 的差别只在"关窗是否已经走过 `pump`"。

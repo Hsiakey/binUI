@@ -59,11 +59,19 @@ size_t MoveByChars(const std::string& s, size_t off, int count) {
 }
 
 // 前 n 个 UTF-16 代码单元对应的字节偏移
+//
+// 注意是**代码单元**不是码点：补充平面字符（emoji、罕见汉字）在 UTF-16 里是代理对，
+// 占 2 个单元，而 UTF-8 里是 4 字节。以前这里按 1 个算，于是"输入法（GCS_CURSORPOS）
+// 给的下标"在含 emoji 的输入框里会逐字符偏一位，index 还可能落进代理对中间 ——
+// 组字窗就会挂在半个 emoji 的位置上。落在代理对中间时夹到该字符起点。
 size_t Utf16IndexToBytes(const std::string& s, size_t i16) {
     size_t bytes = 0, count = 0;
     while (bytes < s.size() && count < i16) {
-        bytes += Utf8CharLen(static_cast<uint8_t>(s[bytes]));
-        ++count;
+        const size_t len = Utf8CharLen(static_cast<uint8_t>(s[bytes]));
+        const size_t units = (len == 4) ? 2 : 1; // 补充平面：代理对
+        if (count + units > i16) break;          // 停在代理对中间：夹到字符起点
+        bytes += len;
+        count += units;
     }
     return bytes;
 }

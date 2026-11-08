@@ -88,6 +88,9 @@ if(WIN32)
     function(add_binui_demo name src_dir ui_file)
         add_executable(${name} ${src_dir}/main.cpp)
         target_link_libraries(${name} PRIVATE app_shell binui)
+        # 与 Makefile 同一套产物布局：示例统一落 bin/examples/
+        set_target_properties(${name} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
         if(MSVC)
             set_target_properties(${name} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
         endif()
@@ -118,10 +121,12 @@ if(WIN32)
     endforeach()
     add_custom_target(components_bums ALL DEPENDS ${BINUI_COMPONENT_BUMS})
 
-    # 通用 demo 目标：链接 gl_shell，构建后把 UI 文件拷到 <exe>/<name>/
+    # 通用 demo 目标：链接 gl_shell，产物落 bin/examples/，UI 拷到 <exe 目录>/<name>/
     function(add_gl_demo name)
         add_executable(${name} examples/${name}/main.cpp)
         target_link_libraries(${name} PRIVATE gl_shell)
+        set_target_properties(${name} PROPERTIES
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
         add_custom_command(TARGET ${name} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${name}>/${name}"
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -129,6 +134,15 @@ if(WIN32)
                 "$<TARGET_FILE_DIR:${name}>/${name}/main.html"
         )
     endfunction()
+
+    # 示例 UI 用 ../../components/xxx.bum.xml 引用标准组件（相对 <exe 目录>/<name>/ 往上两级
+    # = bin/），所以把源码组件同步到 bin/components/
+    add_custom_target(std_components ALL
+        COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin/components"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/components" "${CMAKE_BINARY_DIR}/bin/components"
+        COMMENT "binui: components -> bin/components"
+    )
 
     add_gl_demo(animshow)
     add_gl_demo(fontshow)
@@ -155,19 +169,24 @@ endif()
 
 # =============================================
 # Tests
+#
+# 只有四个：test_css / test_elements / test_font / test_capi。
+# 一个主题一个二进制，套件内部分节；别再为一个新特性新开 test_xxx（见 CHANGELOG 的合并记录）。
+# 产物与 Makefile 一致，落 bin/tests/。
 # =============================================
 enable_testing()
 
 function(add_binui_test name source)
     add_executable(${name} ${source})
     target_link_libraries(${name} PRIVATE binui)
+    set_target_properties(${name} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/tests")
     add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
-add_binui_test(test_binui tests/test_binui.cpp)
-add_binui_test(test_renderer tests/test_renderer.cpp)
-add_binui_test(test_compiler tests/test_compiler.cpp)
-add_binui_test(test_anim tests/test_anim.cpp)
+add_binui_test(test_css tests/test_css.cpp)
+add_binui_test(test_elements tests/test_elements.cpp)
+add_binui_test(test_font tests/test_font.cpp)
 
 # 示例 UI 零警告检查：examples/ 下所有 *.html、*.binui.xml 必须编译成功且无警告
 # pixel_diff：像素回归的比对工具（.cpp 里用 GDI+，只在 Windows 下有用）
@@ -180,34 +199,23 @@ add_executable(check_examples tools/check_examples.cpp)
 target_link_libraries(check_examples PRIVATE binui)
 add_test(NAME check_examples COMMAND check_examples "${CMAKE_SOURCE_DIR}/examples")
 
-# test_renderer_real / test_compiler 需要访问源码树下的 examples/
-set_tests_properties(test_compiler PROPERTIES
+# test_css / test_elements 会读写仓库内的相对路径（tests/fixtures、build-mingw/tmp），
+# 工作目录必须是源码树根
+set_tests_properties(test_css test_elements PROPERTIES
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
 
-add_binui_test(test_renderer_real tests/test_renderer_real.cpp)
-set_tests_properties(test_renderer_real PROPERTIES
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-)
+# test_elements 里的热重载用例要 examples/ 下的头（binui_paths.h / binui_hot_reload.h）
+target_include_directories(test_elements PRIVATE ${CMAKE_SOURCE_DIR}/examples)
 
-# test_font：字体服务（FreeType 光栅化 + HarfBuzz 整形）与渲染质量参数
-add_binui_test(test_font tests/test_font.cpp)
-
-# test_paint：圆角九宫格几何 + 文本尺寸粗估（纯 header，不需要链接库）
-add_binui_test(test_paint tests/test_paint.cpp)
+# test_font：字体服务（FreeType 光栅化 + HarfBuzz 整形）+ 输入法（IME）UTF-16 光标桥接
+# 头文件与静态库通过 binui 的 PUBLIC 依赖带进来
 
 # test_capi：C ABI 冒烟测试（不开窗口：编译 / 加载 / 节点查询 / 改文本 / 错误路径）
 if(WIN32)
     add_binui_test(test_capi tests/test_capi.cpp)
     target_link_libraries(test_capi PRIVATE binui_c)
 endif()
-
-# test_hot_reload：路径解析 + 热重载（需要 examples/ 下的 header，工作目录须为源码树根）
-add_binui_test(test_hot_reload tests/test_hot_reload.cpp)
-target_include_directories(test_hot_reload PRIVATE ${CMAKE_SOURCE_DIR}/examples)
-set_tests_properties(test_hot_reload PROPERTIES
-    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
-)
 
 # =============================================
 # Install
@@ -238,6 +246,6 @@ install(FILES
 message(STATUS "binUI v${PROJECT_VERSION}")
 message(STATUS "  Core lib  -> binui")
 if(WIN32)
-    message(STATUS "  Demos     -> features / animshow / fontshow / buttonshow / svgdemo / cubedemo / texturedemo / imeshow (OpenGL 3.3 borderless)")
+    message(STATUS "  Demos     -> bin/examples: features / animshow / fontshow / buttonshow / imeshow / svgdemo / cubedemo / texturedemo (OpenGL 3.3 borderless)")
 endif()
-message(STATUS "  Tests     -> test_binui, test_renderer, test_compiler")
+message(STATUS "  Tests     -> bin/tests: test_css, test_elements, test_font, test_capi")

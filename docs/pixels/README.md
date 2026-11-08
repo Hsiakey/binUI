@@ -19,5 +19,5 @@ CI 的 Windows runner 是软件光栅化，抗锯齿边缘与真实 GPU 不一�
 机器上会稳定地差出百分之几，塞进 CI 只会变成 flaky 红灯。基准图**只在本机有意义**：
 它的用途是"我改完绘制/布局，肉眼看不出的地方有没有被带歪"。
 
-真正要进 CI 的回归，靠 `tests/test_paint.cpp`（纯几何/数学断言）和
+真正要进 CI 的回归，靠 `tests/test_elements.cpp` 的绘制几何小节（纯几何/数学断言）和
 `check_examples`（编译期警告）—— 那些是确定性的。

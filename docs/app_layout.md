@@ -56,7 +56,7 @@ myapp/
 
 ## 3. 路径解析规范
 
-把现在 7 个 demo 各自复制的一份 `ExeDir + ResolveUI` 收敛成一条规则（现状见 `examples/svgdemo/main.cpp:18-33`、`examples/singlewindow/main.cpp:27-75`）。
+把现在 8 个示例各自复制的一份 `ExeDir + ResolveUI` 收敛成一条规则（现状见 `examples/svgdemo/main.cpp:18-33`、`examples/features/main.cpp` 开头的 shell）。
 
 **UI 文件查找顺序**：
 
@@ -120,11 +120,11 @@ myapp/
 ## 5. UI 热重载（开发期）—— ✅ 已实现
 
 ```bash
-build-mingw/bin/svgdemo.exe --watch                                   # 用 exe 同级的 UI
-build-mingw/bin/svgdemo.exe --watch --ui examples/svgdemo/main.html   # 直接盯源码树
+build-mingw/bin/examples/svgdemo.exe --watch                                   # 用 exe 同级的 UI
+build-mingw/bin/examples/svgdemo.exe --watch --ui examples/svgdemo/main.html   # 直接盯源码树
 ```
 
-保存 UI 后自动重编译并换树，不用重启进程。实现：[`include/binui_hot_reload.h`](../include/binui_hot_reload.h)（header-only）；7 个 demo 全部接入。
+保存 UI 后自动重编译并换树，不用重启进程。实现：[`include/binui_hot_reload.h`](../include/binui_hot_reload.h)（header-only）；8 个示例全部接入。
 
 | 决策 | 取值与理由 |
 |------|-----------|
@@ -135,7 +135,7 @@ build-mingw/bin/svgdemo.exe --watch --ui examples/svgdemo/main.html   # 直接�
 | 动态节点 | `addNode` 造的行（galgamechat 的 backlog、图表柱条）换树后消失，属预期；galgamechat 因此选择"重载即重开对话" |
 | 通知后端 | `Tick()` 返回 `Reloaded` 后由 demo 自己 `app.invalidateAll()` + 刷新本 demo 缓存的节点几何（shell 的失效是应用侧的事，库不该知道） |
 
-回归测试：[`tests/test_hot_reload.cpp`](../tests/test_hot_reload.cpp)（无窗口，`build-mingw/bin/test_hot_reload.exe`，工作目录须为仓库根）—— 覆盖路径解析 6 级顺序、未改动不触发、保存即重载、滚动/焦点跨重载保留、坏 UI 不刷空、文件消失不误触发。
+回归测试：`tests/test_elements.cpp` 里的热重载小节（无窗口，`build-mingw/bin/tests/test_elements.exe`，工作目录须为仓库根）—— 覆盖路径解析 6 级顺序、未改动不触发、保存即重载、滚动/焦点跨重载保留、坏 UI 不刷空、文件消失不误触发。
 
 > 未做：只 watch **单个 UI 文件**的 mtime。同目录换图（`updateImage`）仍需自己重新读文件（singlewindow 的"重新载入"按钮就是干这个的）。
 

@@ -5,7 +5,7 @@
 
 ![组件化三种形态](img/components.png)
 
-示例：[`examples/components/`](../examples/components/)（上图就是它渲染出来的）。
+示例：[`examples/features/`](../examples/features/)（上图就是它渲染出来的）。
 标题栏 `titlebar.bum`（二进制）、按钮 `button.bum.xml`（源码 + 参数）、卡片 `card.bum`（二进制，
 内部又引用过源码组件）、状态栏 `dock.bum`（`external`，运行期挂载）。
 
@@ -166,7 +166,7 @@ binui_compile main.html -o build/main.bui      # 单文件界面
 binui_compile titlebar.bum -o dist/titlebar.bum
 ```
 
-构建集成：`make components` 把 `examples/components/*.bum.xml` 编成
+构建集成：`make components` 把 `examples/features/*.bum.xml` 编成
 `build-mingw/assets/components/*.bum`；CMake 里是 `components_bums` 目标
 （`cmake --build . --target components_bums`）。产物不落源码树。
 
@@ -193,8 +193,8 @@ binui_compile titlebar.bum -o dist/titlebar.bum
 **改写成宿主相对路径**：
 
 ```
-examples/components/titlebar.bum.xml 里写 <img src="icon.png">
-  → 合并进 examples/components/main.html 后是 src="titlebar/icon.png"
+components/titlebar.bum.xml 里写 <img src="icon.png">
+  → 合并进 examples/features/main.html 后是 src="titlebar/icon.png"
 ```
 
 图片清单还会写进布局的**资源段**（v12），所以外壳不必再额外保存编译期的图片列表：

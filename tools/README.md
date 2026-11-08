@@ -1,13 +1,14 @@
 # tools —— 调试与验收工具
 
-都是独立小程序，不参与库构建。统一在仓库根目录执行（工具里的相对路径按仓库根解析）。
+都是独立小程序，不参与库构建。产物在 `build-mingw/bin/`（和库、DLL 放一起；测试在
+`bin/tests/`，示例在 `bin/examples/`，三者不混）。统一在仓库根目录执行（工具里的相对路径按仓库根解析）。
 
 ## binui_compile —— UI / 组件源码编译成二进制
 
 ```bash
-make tools && build-mingw/bin/binui_compile.exe examples/components/titlebar.bum.xml
-#   -> examples/components/titlebar.bum
-build-mingw/bin/binui_compile.exe examples/components/main.html -o build/main.bui
+make tools && build-mingw/bin/binui_compile.exe components/titlebar.bum.xml
+#   -> components/titlebar.bum
+build-mingw/bin/binui_compile.exe components/preview.html -o build/main.bui
 build-mingw/bin/binui_compile.exe dist/titlebar.bum -o dist2/titlebar.bum   # 已是二进制 -> 原样拷贝
 ```
 
@@ -47,9 +48,9 @@ g++ -std=c++17 -O2 -Iinclude -Isrc \
 build-mingw/bin/offscreen_render --default docs/img/default-layout.png
 
 # 普通用法
-build-mingw/bin/offscreen_render examples/cssshow/main.html docs/img/cssshow.png
-build-mingw/bin/offscreen_render examples/singlewindow/main.html /tmp/a.png --scrollTo 120
-build-mingw/bin/offscreen_render examples/vision_monitor/main.binui.xml /tmp/b.png --setText log1="hello"
+build-mingw/bin/offscreen_render examples/features/main.html /tmp/a.png
+build-mingw/bin/offscreen_render build-mingw/bin/examples/features/main.html /tmp/b.png   # 验证 bin/ 下的资源布局
+build-mingw/bin/offscreen_render tests/fixtures/vision.binui.xml /tmp/c.png --setText log1="hello"
 ```
 
 注意：离屏渲染只呈现**静态状态**——`::before/::after`、结构伪类、基础样式都能看到，
@@ -59,11 +60,11 @@ build-mingw/bin/offscreen_render examples/vision_monitor/main.binui.xml /tmp/b.p
 
 ```bash
 g++ -std=c++17 -O2 tools/window_capture.cpp -lgdiplus -lgdi32 -luser32 -o build-mingw/bin/window_capture.exe
-build-mingw/bin/window_capture "CSS" docs/img/shot-cssshow.png    # 参数是窗口标题子串
+build-mingw/bin/window_capture "功能演示" /tmp/shot-features.png    # 参数是窗口标题子串
 ```
 
 用 `PrintWindow` 抓，**对 OpenGL/D3D 窗口通常返回空白**（GPU 内容不在 GDI 表面里），
-抓 GDI 后端窗口（如 `vision_monitor`、`offscreen_render` 的结果）才可靠。
+抓 GDI 后端窗口（如 `offscreen_render` 的结果）才可靠。
 
 ## enum_windows —— 列出可见窗口标题
 
@@ -79,7 +80,7 @@ build-mingw/bin/enum_windows.exe
 对 PNG 采样若干坐标并比对期望色，用于检查"某处到底是不是这个颜色"。
 
 ```bash
-python tools/verify_shots.py docs/img/cssshow.png
+python tools/verify_shots.py docs/img/features.png
 ```
 
 需要 Pillow（`pip install pillow`）。

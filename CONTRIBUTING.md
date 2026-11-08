@@ -81,7 +81,7 @@ mingw32-make SHELL=sh test
 - 改编译器/渲染器行为时，跑一遍演示 UI 的编译检查（`warnings` 必须为 0）：
 
   ```bash
-  build-mingw/bin/offscreen_render examples/singlewindow/main.html /tmp/x.png   # 顺带验证能被真实后端画出来
+  build-mingw/bin/offscreen_render examples/features/main.html /tmp/x.png   # 顺带验证能被真实后端画出来
   ```
 
 ## 新增一个演示

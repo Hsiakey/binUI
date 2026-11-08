@@ -1,11 +1,264 @@
+// test_elements.cpp - 元素 / 布局 / 伪元素 / 交互 / 动画 / 热重载（无窗口）
+//
+// test_binui         : 二进制格式 -> 解析 -> 命中测试往返
+// test_renderer      : 元素树 / 布局 / 事件 / docs/issues 回归
+// test_renderer_real : 真实示例 UI 端到端（tests/fixtures/vision.binui.xml）
+// test_paint         : 圆角九宫格 / 边框条带几何 + 文本尺寸粗估
+// test_anim          : @keyframes / transition / 运行时样式 API
+// test_hot_reload    : UI 路径解析 + 保存即重载（工作目录须为仓库根）
+//
+// 由原 tests/test_binui.cpp、test_renderer.cpp、test_renderer_real.cpp、test_paint.cpp、test_anim.cpp、test_hot_reload.cpp 合并而来，逐条用例代码未改（见下面每个 namespace 的分节注释）。
+
+#include "binui_format.h"
 #include "binui_renderer.h"
-#include "binui_compiler.h"
 #include <cstdio>
 #include <cstring>
-#include <cmath>
 #include <vector>
+#include "binui_compiler.h"
+#include <cmath>
 #include <chrono>
 #include <thread>
+#include <string>
+#include "binui_paint.h"
+#include "binui_text_estimate.h"
+#include <filesystem>
+#include <fstream>
+#include <iterator>
+#include "binui_hot_reload.h"
+#include "binui_paths.h"
+
+// ---------------------------------------------------------------------------
+// 原 tests/test_binui.cpp（代码逐字保留，仅包进 namespace 并改名 run()）
+// ---------------------------------------------------------------------------
+#undef CHECK
+#undef TEST
+namespace suite_binui {
+
+static int failed = 0;
+
+#define TEST(name, expr) do { \
+    if (!(expr)) { \
+        fprintf(stderr, "FAIL: %s (%s)\n", name, #expr); \
+        failed++; \
+    } else { \
+        printf("PASS: %s\n", name); \
+    } \
+} while(0)
+
+using namespace binui;
+
+static std::vector<uint8_t> BuildTestBinUI() {
+    const char strings[] = "Hello World\0Button\0User Input\0";
+    uint32_t strSize = static_cast<uint32_t>(sizeof(strings));
+
+    uint32_t nodeCount = 4;
+    size_t bufSize = sizeof(BinUIHeader) + nodeCount * sizeof(BinUINode) + strSize;
+    std::vector<uint8_t> buf(bufSize);
+    uint8_t* ptr = buf.data();
+
+    BinUIHeader hdr;
+    hdr.magic = BINUI_MAGIC;
+    hdr.version = BINUI_VERSION;
+    hdr.nodeCount = nodeCount;
+    hdr.stringSize = strSize;
+    memcpy(ptr, &hdr, sizeof(hdr));
+    ptr += sizeof(hdr);
+
+    // Node 0: root container
+    BinUINode root = {};
+    root.id = 0;
+    root.parentId = 0xFFFF;
+    root.type = BINUI_ROOT;
+    root.flags = BINUI_VISIBLE;
+    root.x = 0; root.y = 0;
+    root.width = 1280; root.height = 720;
+    root.color = 0xFF1A1A2E;
+    root.textOffset = 0;
+    root.imageIndex = 0;
+    root.padding = 0;
+    root.fontSize = 0;
+    memcpy(ptr, &root, sizeof(root));
+    ptr += sizeof(root);
+
+    // Node 1: label
+    BinUINode label = {};
+    label.id = 1;
+    label.parentId = 0;
+    label.type = BINUI_LABEL;
+    label.flags = BINUI_VISIBLE;
+    label.x = 100; label.y = 50;
+    label.width = 400; label.height = 40;
+    label.color = 0xFFFFFFFF;
+    label.textOffset = 0; // "Hello World"
+    label.imageIndex = 0;
+    label.padding = 0;
+    label.fontSize = 24;
+    memcpy(ptr, &label, sizeof(label));
+    ptr += sizeof(label);
+
+    // Node 2: interactive button
+    BinUINode button = {};
+    button.id = 2;
+    button.parentId = 0;
+    button.type = BINUI_BUTTON;
+    button.flags = BINUI_VISIBLE | BINUI_INTERACTIVE;
+    button.x = 100; button.y = 120;
+    button.width = 200; button.height = 50;
+    button.color = 0xFF4A90D9;
+    button.textOffset = 12; // "Button"
+    button.imageIndex = 0;
+    button.padding = 0;
+    button.fontSize = 16;
+    memcpy(ptr, &button, sizeof(button));
+    ptr += sizeof(button);
+
+    // Node 3: input field (interactive)
+    BinUINode input = {};
+    input.id = 3;
+    input.parentId = 0;
+    input.type = BINUI_INPUT;
+    input.flags = BINUI_VISIBLE | BINUI_INTERACTIVE;
+    input.x = 100; input.y = 200;
+    input.width = 300; input.height = 36;
+    input.color = 0xFF333333;
+    input.textOffset = 19; // "User Input"
+    input.imageIndex = 0;
+    input.padding = 0;
+    input.fontSize = 14;
+    memcpy(ptr, &input, sizeof(input));
+    ptr += sizeof(input);
+
+    // String table
+    memcpy(ptr, strings, strSize);
+
+    return buf;
+}
+
+// 构造一个带指定 magic 的最小布局
+static std::vector<uint8_t> BuildLayout(uint32_t magic) {
+    const char str[] = "test\0";
+    uint32_t nodeCount = 1;
+    size_t bufSize = sizeof(BinUIHeader) + nodeCount * sizeof(BinUINode) + sizeof(str);
+    std::vector<uint8_t> buf(bufSize);
+    uint8_t* ptr = buf.data();
+
+    BinUIHeader hdr;
+    hdr.magic = magic;
+    hdr.version = BINUI_VERSION;
+    hdr.nodeCount = nodeCount;
+    hdr.stringSize = sizeof(str);
+    memcpy(ptr, &hdr, sizeof(hdr));
+    ptr += sizeof(hdr);
+
+    BinUINode node = {};
+    node.id = 0;
+    node.parentId = 0xFFFF;
+    node.type = BINUI_ROOT;
+    node.flags = BINUI_VISIBLE;
+    node.x = 0; node.y = 0;
+    node.width = 480; node.height = 800;
+    node.color = 0xFF000000;
+    node.textOffset = 0;
+    node.imageIndex = 0;
+    node.padding = 0;
+    node.fontSize = 0;
+    memcpy(ptr, &node, sizeof(node));
+    ptr += sizeof(node);
+
+    memcpy(ptr, str, sizeof(str));
+    return buf;
+}
+
+int run() {
+    printf("=== test_binui: binUI build / parse / hit-test roundtrip ===\n\n");
+
+    // 两种 magic 均应被渲染器接受（binUI 旧格式 / XHTML 编译格式）
+    BinUIRenderer magicRenderer;
+    TEST("loadLayout BINUI_MAGIC", magicRenderer.loadLayout(BuildLayout(BINUI_MAGIC).data(), BuildLayout(BINUI_MAGIC).size()));
+    TEST("loadLayout BINUI_HTML_MAGIC", magicRenderer.loadLayout(BuildLayout(BINUI_HTML_MAGIC).data(), BuildLayout(BINUI_HTML_MAGIC).size()));
+    magicRenderer.shutdown();
+
+    auto buf = BuildTestBinUI();
+    size_t expectedStrSize = sizeof("Hello World\0Button\0User Input\0");
+    TEST("Buffer size matches expected", buf.size() == sizeof(BinUIHeader) + 4 * sizeof(BinUINode) + expectedStrSize);
+
+    // Parse via renderer
+    BinUIRenderer renderer;
+    TEST("loadLayout", renderer.loadLayout(buf.data(), buf.size()));
+
+    const auto& nodes = renderer.getNodes();
+    TEST("Node count == 4", nodes.size() == 4);
+
+    if (nodes.size() >= 4) {
+        TEST("Node[0] type = ROOT", nodes[0].type == BINUI_ROOT);
+        TEST("Node[0] id = 0", nodes[0].id == 0);
+        TEST("Node[0] visible", nodes[0].flags & BINUI_VISIBLE);
+        TEST("Node[0] size 1280x720",
+             nodes[0].width == 1280 && nodes[0].height == 720);
+
+        TEST("Node[1] type = LABEL", nodes[1].type == BINUI_LABEL);
+        TEST("Node[1] id = 1", nodes[1].id == 1);
+        TEST("Node[1] text = Hello World", nodes[1].text == "Hello World");
+        TEST("Node[1] position (100,50)",
+             nodes[1].x == 100 && nodes[1].y == 50);
+
+        TEST("Node[2] type = BUTTON", nodes[2].type == BINUI_BUTTON);
+        TEST("Node[2] id = 2", nodes[2].id == 2);
+        TEST("Node[2] interactive", nodes[2].flags & BINUI_INTERACTIVE);
+        TEST("Node[2] text = Button", nodes[2].text == "Button");
+
+        TEST("Node[3] type = INPUT", nodes[3].type == BINUI_INPUT);
+        TEST("Node[3] id = 3", nodes[3].id == 3);
+        TEST("Node[3] text = User Input", nodes[3].text == "User Input");
+    }
+
+    // Hit tests
+    TEST("Hit on button (150, 140)", renderer.hitTest(150, 140) == 2);
+    TEST("Hit on input (150, 210)", renderer.hitTest(150, 210) == 3);
+    TEST("Label not hit (non-interactive)", renderer.hitTest(150, 60) == -1);
+    TEST("Miss outside UI (0, 0)", renderer.hitTest(0, 0) == -1);
+    TEST("Miss outside UI (5000, 5000)", renderer.hitTest(5000, 5000) == -1);
+    TEST("Miss between nodes (150, 100)", renderer.hitTest(150, 100) == -1);
+
+    // Update text via renderer API
+    renderer.setText(1, "Updated!");
+    TEST("Node[1] text updated", nodes[1].text == "Updated!");
+
+    // Hide node
+    renderer.setVisible(2, false);
+    TEST("Node[2] hidden", !(nodes[2].flags & BINUI_VISIBLE));
+    TEST("Hit on hidden button fails", renderer.hitTest(150, 140) == -1);
+
+    // Show node again
+    renderer.setVisible(2, true);
+    TEST("Node[2] visible again", nodes[2].flags & BINUI_VISIBLE);
+    TEST("Hit on visible button works", renderer.hitTest(150, 140) == 2);
+
+    // Event callback test
+    int callbackNodeId = -1;
+    renderer.setEventCallback([&](const Event& ev) {
+        callbackNodeId = ev.nodeId;
+    });
+
+    renderer.dispatchClick(150, 140);
+    TEST("Event callback fired with node 2", callbackNodeId == 2);
+
+    renderer.dispatchClick(0, 0);
+    TEST("Event callback not fired on miss", callbackNodeId == 2);
+
+    renderer.shutdown();
+    printf("\n=== Results: %d tests failed ===\n", failed);
+    return failed > 0 ? 1 : 0;
+}
+
+}  // namespace suite_binui
+
+// ---------------------------------------------------------------------------
+// 原 tests/test_renderer.cpp（代码逐字保留，仅包进 namespace 并改名 run()）
+// ---------------------------------------------------------------------------
+#undef CHECK
+#undef TEST
+namespace suite_renderer {
 
 static void sleep_ms(int ms) {
     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
@@ -262,7 +515,7 @@ static void TestIssueRegressions() {
     }
 }
 
-int main() {
+int run() {
     printf("=== test_renderer: BinUIRenderer parse / update / events ===\n\n");
 
     // 1. Default constructor state
@@ -1160,4 +1413,622 @@ int main() {
 
 printf("\n=== Results: %d tests failed ===\n", failed);
     return failed > 0 ? 1 : 0;
+}
+
+}  // namespace suite_renderer
+
+// ---------------------------------------------------------------------------
+// 原 tests/test_renderer_real.cpp（代码逐字保留，仅包进 namespace 并改名 run()）
+// ---------------------------------------------------------------------------
+#undef CHECK
+#undef TEST
+namespace suite_renderer_real {
+// test_renderer_real.cpp - 用真实应用 UI 文件驱动渲染器端到端测试
+// 覆盖：实际 XML 编译 → 加载 → 命中测试 → 点击/悬停 → 运行时更新
+
+static int failed = 0;
+
+#define TEST(name, expr) do { \
+    if (!(expr)) { \
+        fprintf(stderr, "FAIL: %s (%s)\n", name, #expr); \
+        failed++; \
+    } else { \
+        printf("PASS: %s\n", name); \
+    } \
+} while(0)
+
+using namespace binui;
+
+int run() {
+    printf("=== test_renderer_real: real app layouts end-to-end ===\n\n");
+
+    // ============ tests/fixtures/vision.binui.xml（900x680 三面板监控，原 vision_monitor 示例） ============
+    {
+        BinUIRenderer r;
+        int clicks = 0, lastClick = -1;
+        r.setEventCallback([&](const Event& ev) {
+            if (ev.type == EventType::CLICK) { lastClick = (int)ev.nodeId; clicks++; }
+        });
+
+        auto ufl = CompileBinUIFile("tests/fixtures/vision.binui.xml");
+        TEST("vision: compile real xml", !ufl.empty());
+        if (!ufl.empty()) {
+            TEST("vision: layout loads", r.loadLayout(ufl.data(), ufl.size()));
+            const auto& n = r.getNodes();
+            TEST("vision: 72 nodes", n.size() == 72);
+            TEST("vision: root 900x680", n[0].width == 900 && n[0].height == 680);
+
+            // 标题栏三个窗口按钮 ─ □ ✕
+            uint16_t closeId = n[8].id; // ✕ (880,0) 20x30
+            TEST("vision: hit close button", r.hitTest(890, 15) == (int)closeId);
+            TEST("vision: hit minimize", r.hitTest(850, 15) == (int)n[6].id);
+            TEST("vision: hit maximize", r.hitTest(870, 15) == (int)n[7].id);
+            TEST("vision: click close fires", (r.dispatchClick(890, 15), lastClick == (int)closeId && clicks == 1));
+
+            // 面板/日志区为静态卡片，不可交互
+            TEST("vision: panel card not interactive", !(n[1].flags & BINUI_INTERACTIVE));
+            TEST("vision: panel area not hit", r.hitTest(90, 200) == -1);
+            TEST("vision: log area not hit", r.hitTest(450, 500) == -1);
+
+            // 隐藏"识别"面板不影响其他命中
+            r.setVisible(n[14].id, false);
+            TEST("vision: hide recognition panel", !r.isNodeVisible(n[14].id));
+            TEST("vision: title close still hit", r.hitTest(890, 15) == (int)closeId);
+            TEST("vision: hidden panel region not hit", r.hitTest(400, 200) == -1);
+
+            // 运行时更新日志文本
+            r.setText(n[19].id, "[系统] WebSocket 已连接");
+            TEST("vision: update log line", r.getNodes()[19].text == "[系统] WebSocket 已连接");
+            r.setText(n[16].id, "设备: cam-01  帧率: 30fps");
+            TEST("vision: update info label", r.getNodes()[16].text == "设备: cam-01  帧率: 30fps");
+        }
+    }
+
+    printf("\n=== Results: %d tests failed ===\n", failed);
+    return failed > 0 ? 1 : 0;
+}
+
+}  // namespace suite_renderer_real
+
+// ---------------------------------------------------------------------------
+// 原 tests/test_paint.cpp（代码逐字保留，仅包进 namespace 并改名 run()）
+// ---------------------------------------------------------------------------
+#undef CHECK
+#undef TEST
+namespace suite_paint {
+// test_paint.cpp - 圆角九宫格几何（include/binui_paint.h）+ 文本尺寸粗估（binui_text_estimate.h）
+//
+// 这两块都是"三个后端共用的一份数学"，不依赖窗口/字体，所以能纯 CPU 验证。
+// 重点是 docs/issues/01 那条：半径到短边一半时九个块必须仍然精确铺满盒子
+// （正圆/胶囊），中段宽高为 0 而不是负数。
+
+
+using namespace binui;
+
+static int g_fail = 0;
+#define CHECK(cond, msg) do { if (!(cond)) { std::printf("FAIL: %s\n", msg); g_fail++; } } while (0)
+#define CHECK_NEAR(a, b, eps, msg) \
+    do { if (std::fabs((a) - (b)) > (eps)) { \
+        std::printf("FAIL: %s (%.4f vs %.4f)\n", msg, (double)(a), (double)(b)); g_fail++; } } while (0)
+
+// 九块面积之和：等于 w*h 就说明既没有缝也没有重叠（九个块按 (c, mid, c) 正交切分）
+static float SumArea(const PaintQuad* q, int n) {
+    float s = 0;
+    for (int i = 0; i < n; i++) s += q[i].w * q[i].h;
+    return s;
+}
+
+static int CheckTiling(float w, float h, float r, int expectN, const char* tag) {
+    PaintQuad q[9];
+    const int t = RoundTemplateSize(static_cast<int>(r));
+    const int n = BuildRoundedNineSlice(0, 0, w, h, r, t, q, 9);
+    if (n != expectN) {
+        std::printf("FAIL: %s 块数 %d != 期望 %d\n", tag, n, expectN);
+        g_fail++;
+        return n;
+    }
+    for (int i = 0; i < n; i++) {
+        if (!(q[i].w > 0.0f) || !(q[i].h > 0.0f)) {
+            std::printf("FAIL: %s 第 %d 块宽或高不为正 (%.2f x %.2f)\n", tag, i, q[i].w, q[i].h);
+            g_fail++;
+        }
+        if (!(q[i].u0 >= -1e-6f) || !(q[i].u1 <= 1.0f + 1e-6f) ||
+            !(q[i].v0 >= -1e-6f) || !(q[i].v1 <= 1.0f + 1e-6f)) {
+            std::printf("FAIL: %s 第 %d 块 UV 出界\n", tag, i);
+            g_fail++;
+        }
+    }
+    const float area = SumArea(q, n);
+    CHECK_NEAR(area, w * h, 1e-3f, tag);
+    return n;
+}
+
+int run() {
+    // ---------- 模板尺寸 ----------
+    CHECK(RoundTemplateSize(1) == 8, "r=1 时模板至少 8px");
+    CHECK(RoundTemplateSize(50) == 104, "r=50 时模板 = 2r+4 = 104");
+    CHECK(RoundTemplateSize(200) < 4 * 200, "模板不再按 4r 走（省显存）");
+    for (int r = 1; r <= 300; r++)
+        CHECK(RoundTemplateSize(r) >= 2 * r + 4, "模板边长必须 >= 2r+4（中段要有直边可采）");
+
+    // ---------- 常规圆角：九块 ----------
+    CheckTiling(200.0f, 120.0f, 12.0f, 9, "200x120 r12 应九块铺满");
+    // h=120、r=60：纵向中段为 0（左右两块与中心消失），只剩四角 + 上下两条
+    CheckTiling(200.0f, 120.0f, 60.0f, 6, "200x120 r60（=短边一半）纵向中段应消失");
+
+    // ---------- 正圆：只有四个 1/4 圆 ----------
+    {
+        PaintQuad q[9];
+        const int n = BuildRoundedNineSlice(10.0f, 20.0f, 100.0f, 100.0f, 50.0f,
+                                            RoundTemplateSize(50), q, 9);
+        CHECK(n == 4, "100x100 r50 应只剩四块（中段宽高为 0）");
+        CHECK_NEAR(SumArea(q, n), 10000.0f, 1e-3f, "正圆四块面积之和 = 10000");
+        // 四角位置必须贴着盒子四角，边长为半径 r
+        CHECK_NEAR(q[0].x, 10.0f, 1e-6f, "左上块 x");
+        CHECK_NEAR(q[0].y, 20.0f, 1e-6f, "左上块 y");
+        CHECK_NEAR(q[0].w, 50.0f, 1e-6f, "角片边长 = 半径");
+        CHECK_NEAR(q[3].x + q[3].w, 110.0f, 1e-6f, "右下块右边界贴盒子右边");
+        CHECK_NEAR(q[3].y + q[3].h, 120.0f, 1e-6f, "右下块下边界贴盒子下边");
+        // 四个角互不重叠：左上块的右边界 == 右上块的左边界
+        CHECK_NEAR(q[0].x + q[0].w, q[1].x, 1e-6f, "左右两块在 x 方向首尾相接");
+        const float cu = 50.0f / static_cast<float>(RoundTemplateSize(50));
+        CHECK_NEAR(q[0].u1 - q[0].u0, cu, 1e-6f, "角片 UV 跨度 = r/t");
+    }
+
+    // ---------- 胶囊：横向伸直，纵向中段为 0 ----------
+    {
+        PaintQuad q[9];
+        const int n = BuildRoundedNineSlice(0.0f, 0.0f, 200.0f, 40.0f, 20.0f,
+                                            RoundTemplateSize(20), q, 9);
+        CHECK(n == 6, "200x40 r20 胶囊应为 6 块（上下两条中段消失）");
+        CHECK_NEAR(SumArea(q, n), 8000.0f, 1e-3f, "胶囊面积之和 = 200x40");
+    }
+
+    // ---------- 半径超过短边一半：钳到一半，不产生负尺寸 ----------
+    {
+        PaintQuad q[9];
+        const int n = BuildRoundedNineSlice(0.0f, 0.0f, 34.0f, 34.0f, 999.0f,
+                                            RoundTemplateSize(999), q, 9);
+        CHECK(n == 4, "34x34 r999 应钳成 r17 的正圆（四块）");
+        CHECK_NEAR(SumArea(q, n), 34.0f * 34.0f, 1e-3f, "钳制后面积不变");
+    }
+
+    // ---------- 退化输入 ----------
+    {
+        PaintQuad q[9];
+        CHECK(BuildRoundedNineSlice(0, 0, 100, 100, 0.0f, 16, q, 9) == 0, "r=0 不产生块");
+        CHECK(BuildRoundedNineSlice(0, 0, 0, 100, 8.0f, 16, q, 9) == 0, "w=0 不产生块");
+        CHECK(BuildRoundedNineSlice(0, 0, 100, 100, 8.0f, 16, nullptr, 9) == 0, "out 为空不崩");
+    }
+
+    // ---------- 文本尺寸粗估 ----------
+    {
+        // 13px 中文：4 个字 ≈ 52px，300px 宽 → 1 行
+        CHECK(EstimateLineCount("\xE4\xB8\xAD\xE6\x96\x87\xE5\xAD\x97\xE5\xBD\xA2", 13.0f, 300.0f) == 1,
+              "4 个汉字在 300px 里是一行");
+        // 拉丁 0.52×：13*0.52=6.76，55 个字符 ≈ 372px → 需要 2 行
+        const std::string lat(55, 'a');
+        CHECK(EstimateLineCount(lat, 13.0f, 300.0f) == 2, "55 个拉丁字符在 300px 里是两行");
+        // 硬换行
+        CHECK(EstimateLineCount("a\nb\nc", 13.0f, 300.0f) == 3, "两个 \\n 断成三行");
+        // 行距：默认 1.35×，显式 200% 翻倍
+        CHECK_NEAR(EstimateLineStep(20.0f, 0), 27.0f, 1e-4f, "默认行距 1.35×");
+        CHECK_NEAR(EstimateLineStep(20.0f, 200), 40.0f, 1e-4f, "line-height:200% = 2×字号");
+        CHECK_NEAR(EstimateTextHeight("a\nb", 20.0f, 300.0f, 0), 54.0f, 1e-4f, "两行 = 2×27");
+        // 极窄可用宽度不能除零/死循环
+        CHECK(EstimateLineCount("\xE4\xB8\xAD\xE6\x96\x87", 13.0f, 0.0f) >= 1, "可用宽度为 0 时仍返回正行数");
+    }
+
+    // ---------- 边框条带（v13 四边边框） ----------
+    {
+        BinUIPaintNode p{};
+        p.flags = PAINT_BORDER;
+        for (int i = 0; i < 4; i++) { p.borderW[i] = 1; p.borderColor[i] = 0xFFE6EDF7u; }
+
+        PaintBand bb[kMaxBorderBands];
+        const float W = 400.0f, H = 600.0f, R = 16.0f;
+
+        // 高盒子的边框必须一路铺到底：以前逐行 push 左右交替、只看 out[n-1] 合并不了，
+        // 条带数变成 O(高度)，撞上 cap 就在盒子顶部约 64px 处截断（下面整段没边框）。
+        const int n = BuildBorderBands(&p, 0, 0, W, H, R, bb);
+        CHECK(n > 0 && n < kMaxBorderBands, "600px 高卡片边框不撞条带上限");
+
+        float maxBottom = 0.0f, leftStraight = 0.0f;
+        for (int i = 0; i < n; i++) {
+            maxBottom = std::max(maxBottom, bb[i].y + bb[i].h);
+            if (bb[i].x <= 0.51f && bb[i].w <= 1.51f) leftStraight += bb[i].h;  // 直边段左边框
+        }
+        CHECK_NEAR(maxBottom, H, 1.01f, "边框必须画到盒子底边（不能中途截断）");
+        CHECK(leftStraight >= H - 2.0f * R - 1.0f, "左边框直边段要覆盖 H-2r");
+
+        // 条带数只跟半径有关：把盒子拉高一倍，条带数不该跟着涨
+        const int n2 = BuildBorderBands(&p, 0, 0, W, H * 2.0f, R, bb);
+        CHECK(n2 == n, "条带数与盒子高度无关");
+
+        // 直角边框 = 四条
+        BinUIPaintNode sq{};
+        sq.flags = PAINT_BORDER;
+        for (int i = 0; i < 4; i++) { sq.borderW[i] = 2; sq.borderColor[i] = 0xFF000000u; }
+        CHECK(BuildBorderBands(&sq, 0, 0, 100, 40, 0.0f, bb) == 4, "直角边框 = 四条");
+
+        // 半径大到装不下（cap 小）：退回直角四条，宁可方角也不能缺边
+        CHECK(BuildBorderBands(&p, 0, 0, 200, 200, 100.0f, bb, kMaxPaintBands) == 4,
+              "半径超过条带上限时退回直角四条");
+    }
+
+    if (g_fail == 0) std::printf("test_paint: 全部通过\n");
+    return g_fail;
+}
+
+}  // namespace suite_paint
+
+// ---------------------------------------------------------------------------
+// 原 tests/test_anim.cpp（代码逐字保留，仅包进 namespace 并改名 run()）
+// ---------------------------------------------------------------------------
+#undef CHECK
+#undef TEST
+namespace suite_anim {
+// test_anim.cpp - v7 动画引擎测试：@keyframes 关键帧动画 + transition 过渡 + 运行时样式 API
+
+using namespace binui;
+
+static int g_fail = 0;
+#define CHECK(cond, msg) do { if (!(cond)) { std::printf("FAIL: %s\n", msg); g_fail++; } } while (0)
+
+// 轮询直到条件满足或超时
+template <typename F>
+static bool WaitFor(F f, int timeoutMs) {
+    auto end = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (std::chrono::steady_clock::now() < end) {
+        if (f()) return true;
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    return false;
+}
+
+int run() {
+    const char* html = R"HTML(<!DOCTYPE html>
+<html width="400" height="300" bg="#101014">
+<head><style>
+@keyframes fadeUp {
+    from { opacity: 0; transform: translateY(20px); }
+    to   { opacity: 1; transform: translateY(0); }
+}
+@keyframes pulse {
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.08); }
+}
+button { transition: background-color 0.3s ease, transform 0.2s ease; }
+</style></head>
+<body>
+    <div animation="fadeUp 0.5s ease 0.15s 1 normal both"
+         style="position:absolute; left:20; top:40; width:200; height:80; background:#16161D; border-radius:10">Card</div>
+    <button animation="pulse 1s linear 0s infinite"
+            style="position:absolute; left:20; top:140; width:120; height:44; background:#8B5CF6; border-radius:8">Btn</button>
+    <button style="position:absolute; left:160; top:140; width:120; height:44; background:#03DAC6; border-radius:8; transition:opacity 0.4s ease">Btn2</button>
+</body>
+</html>)HTML";
+
+    auto res = CompileBinUIEx(html);
+    CHECK(!res.layout.empty(), "compile");
+    BinUIRenderer r;
+    CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "loadLayout");
+
+    int cardId = -1, btnId = -1, btn2Id = -1;
+    for (const auto& n : r.getNodes()) {
+        if (n.type == BINUI_LIST) cardId = n.id;
+        else if (n.type == BINUI_BUTTON && btnId < 0) btnId = n.id;
+        else if (n.type == BINUI_BUTTON) btn2Id = n.id;
+    }
+    CHECK(cardId >= 0 && btnId >= 0 && btn2Id >= 0, "ids");
+
+    // 关键帧：加载时刻应处于 delay 阶段（backwards fill → opacity 0，translateY 20）
+    CHECK(r.drawOpacity((uint16_t)cardId) < 0.05f, "keyframe initial opacity");
+    CHECK(r.drawOffsetY((uint16_t)cardId) > 19.0f, "keyframe initial translateY");
+
+    // 动画推进：opacity 最终达到 1 并保持（fill forwards）
+    CHECK(WaitFor([&] { r.stepAnimations(); return r.drawOpacity((uint16_t)cardId) > 0.95f; }, 2000),
+          "keyframe reaches end");
+    CHECK(WaitFor([&] { r.stepAnimations(); return r.drawOffsetY((uint16_t)cardId) < 1.0f; }, 2000),
+          "keyframe translate returns to 0");
+    std::this_thread::sleep_for(std::chrono::milliseconds(80));
+    r.stepAnimations();
+    CHECK(r.drawOpacity((uint16_t)cardId) > 0.95f, "keyframe fill forwards holds");
+
+    // 无限循环动画（pulse）：scale 应周期变化
+    bool sawNot1 = false;
+    for (int i = 0; i < 12; i++) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        r.stepAnimations();
+        float s = r.drawScale((uint16_t)btnId);
+        if (s > 1.02f) sawNot1 = true;
+    }
+    CHECK(sawNot1, "infinite keyframe animates scale");
+
+    // hover 过渡：进入按钮 → 背景色/缩放平滑过渡到高亮
+    uint32_t c0 = r.drawColor((uint16_t)btnId);
+    r.setHover(70, 170); // 命中 btn
+    CHECK(WaitFor([&] { r.stepAnimations(); return r.drawScale((uint16_t)btnId) > 1.03f; }, 1000),
+          "hover scale transitions in");
+    std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    r.stepAnimations();
+    uint32_t c1 = r.drawColor((uint16_t)btnId);
+    CHECK(c1 != c0, "hover color transitions in");
+
+    // 离开 → 恢复
+    auto nearColor = [](uint32_t a, uint32_t b, int eps) {
+        int ra = (int)((a >> 16) & 0xFF), ga = (int)((a >> 8) & 0xFF), ba = (int)(a & 0xFF);
+        int rb = (int)((b >> 16) & 0xFF), gb = (int)((b >> 8) & 0xFF), bb = (int)(b & 0xFF);
+        return std::abs(ra - rb) <= eps && std::abs(ga - gb) <= eps && std::abs(ba - bb) <= eps;
+    };
+    r.setHover(300, 170);
+    CHECK(WaitFor([&] { r.stepAnimations(); return r.drawScale((uint16_t)btnId) < 1.01f; }, 1000),
+          "hover scale transitions out");
+    CHECK(WaitFor([&] { r.stepAnimations(); return nearColor(r.drawColor((uint16_t)btnId), c0, 4); }, 1000),
+          "hover color restores");
+
+    // 运行时样式 API：setStyleFloat 触发 opacity 过渡
+    r.setStyleFloat((uint16_t)btn2Id, ANIM_OPACITY, 0.5f);
+    CHECK(WaitFor([&] { r.stepAnimations(); return r.drawOpacity((uint16_t)btn2Id) < 0.9f; }, 2000),
+          "style opacity transition starts");
+    CHECK(WaitFor([&] { r.stepAnimations(); float o = r.drawOpacity((uint16_t)btn2Id); return o > 0.42f && o < 0.58f; }, 2000),
+          "style opacity transition settles");
+
+    if (g_fail == 0) std::printf("=== Results: all animation tests passed ===\n");
+    else std::printf("=== Results: %d FAILED ===\n", g_fail);
+    return g_fail;
+}
+
+}  // namespace suite_anim
+
+// ---------------------------------------------------------------------------
+// 原 tests/test_hot_reload.cpp（代码逐字保留，仅包进 namespace 并改名 run()）
+// ---------------------------------------------------------------------------
+#undef CHECK
+#undef TEST
+namespace suite_hot_reload {
+// test_hot_reload.cpp - UI 路径解析 + 热重载回归测试（无窗口，纯逻辑）
+//
+// 覆盖：
+//   1. exe 真实路径解析（不再依赖 argv[0]）
+//   2. ResolveUI 查找顺序（--ui 优先 / 源码树兜底）
+//   3. 保存即重载：mtime 变化 -> 稳定 250ms 后重新编译 -> 换树成功
+//   4. 换树后状态恢复（滚动偏移 / 键盘焦点）
+//   5. 坏 UI / 文件消失时不把界面刷空、不误触发
+//
+// 为避免污染仓库，所有写操作发生在临时副本上（build-mingw/tmp/）。
+
+
+using namespace binui;
+
+static int g_fail = 0;
+
+#define CHECK(cond, msg)                                \
+    do {                                                \
+        if (!(cond)) {                                  \
+            std::fprintf(stderr, "[FAIL] %s\n", (msg)); \
+            ++g_fail;                                   \
+        } else {                                        \
+            std::printf("[ok] %s\n", (msg));            \
+        }                                               \
+    } while (0)
+
+static void SleepMs(int ms) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+static std::string ReadAll(const std::string& path) {
+    std::ifstream f(path, std::ios::binary);
+    if (!f) return {};
+    return std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+}
+
+static bool WriteAll(const std::string& path, const std::string& body) {
+    SleepMs(20); // 让 mtime 至少跨过一个时钟粒度
+    std::ofstream o(path, std::ios::binary | std::ios::trunc);
+    if (!o) return false;
+    o.write(body.data(), static_cast<std::streamsize>(body.size()));
+    return o.good();
+}
+
+// 反复 Tick 直到重载或超时
+static bool PumpUntilReload(ex::HotReload& hot, BinUIRenderer& r, int maxMs) {
+    for (int waited = 0; waited < maxMs; waited += 30) {
+        if (hot.Tick(r, "svgdemo", 0, 0) == ex::HotReload::Result::Reloaded) return true;
+        SleepMs(30);
+    }
+    return false;
+}
+
+int run() {
+    std::error_code ec;
+    std::filesystem::create_directories("build-mingw/tmp", ec);
+
+    // ---------- 1. exe 真实路径（本次修复的核心） ----------
+    const std::string exePath = ex::ExePath();
+    std::printf("[info] ExePath() = \"%s\"\n", exePath.c_str());
+    CHECK(!exePath.empty(), "ExePath() 非空（不依赖 argv[0]）");
+    CHECK(ex::FileExists(exePath), "ExePath() 指向真实存在的文件");
+    CHECK(!ex::ExeDir().empty(), "ExeDir() 非空");
+
+    // ---------- 2. UI 定位顺序 ----------
+    ex::LaunchArgs none;
+    const std::string repoUI = ex::ResolveUI(none, "svgdemo", "main.html");
+    std::printf("[info] ResolveUI(svgdemo/main.html) = \"%s\"\n", repoUI.c_str());
+    CHECK(ex::FileExists(repoUI), "ResolveUI 返回的 UI 文件真实存在");
+    CHECK(repoUI.find("svgdemo") != std::string::npos &&
+              repoUI.find("main.html") != std::string::npos,
+          "ResolveUI 命中 svgdemo 的 main.html（exe 同级或源码树）");
+
+    // 只在源码树里存在的文件 -> 必须走第 6 级兜底（证明编译目录外也能跑）
+    // 用 main_video_backup.html：它不会被 copy 到 build-mingw/bin/，只能从源码树找到
+    const std::string repoOnly = ex::ResolveUI(none, "features", "NOTES.md");
+    std::printf("[info] ResolveUI(features/NOTES.md) = \"%s\"\n", repoOnly.c_str());
+    CHECK(repoOnly == "examples/features/NOTES.md", "源码树兜底命中 examples/<app>/<file>");
+
+    CHECK(ex::ResolveUI(none, "svgdemo", "no_such_file.html").empty(),
+          "文件不存在时返回空（调用方回退默认布局）");
+
+    ex::LaunchArgs withUi;
+    withUi.ui = "examples/animshow/main.html";
+    CHECK(ex::ResolveUI(withUi, "svgdemo", "main.html") == "examples/animshow/main.html",
+          "--ui 显式指定优先于默认查找");
+
+    // ---------- 3. 首次编译 + 加载 ----------
+    const CompileResult initial = CompileBinUIFileEx(repoUI);
+    CHECK(!initial.layout.empty(), "示例 HTML 编译成功");
+    BinUIRenderer renderer;
+    CHECK(renderer.loadLayout(initial.layout.data(), initial.layout.size()), "布局解析成功");
+    const size_t nodes0 = renderer.getNodes().size();
+    CHECK(nodes0 > 0, "节点树非空");
+
+    // ---------- 4. 临时副本上验证"保存即重载" ----------
+    const std::string tmpPath = "build-mingw/tmp/hot_ui.html";
+    const std::string html = ReadAll(repoUI);
+    CHECK(!html.empty(), "读到示例 HTML");
+    CHECK(WriteAll(tmpPath, html), "临时副本写入成功");
+
+    ex::HotReload hot;
+    hot.Init(true, tmpPath);
+    CHECK(hot.enabled(), "--watch 启用");
+
+    int early = 0;
+    for (int i = 0; i < 20; ++i) {
+        if (hot.Tick(renderer, "svgdemo", 0, 0) == ex::HotReload::Result::Reloaded) ++early;
+        SleepMs(30);
+    }
+    CHECK(early == 0, "文件未改动时不触发重载");
+
+    CHECK(WriteAll(tmpPath, html), "模拟保存（重写同一份内容）");
+    CHECK(PumpUntilReload(hot, renderer, 3000), "保存后自动重载");
+    CHECK(hot.reloads() == 1, "重载计数 == 1");
+    CHECK(renderer.getNodes().size() == nodes0, "重载后节点数一致");
+
+    // ---------- 5. 状态恢复：滚动偏移 / 键盘焦点 ----------
+    uint16_t scrollNode = 0, focusNode = 0;
+    for (const auto& n : renderer.getNodes()) {
+        if (!scrollNode && renderer.isScrollable(n.id)) scrollNode = n.id;
+        if (!focusNode && (n.flags & BINUI_INTERACTIVE)) focusNode = (uint16_t)n.id;
+    }
+
+    float expectedScrollY = 0.0f;
+    int expectedFocus = -1;
+    if (scrollNode) {
+        renderer.scrollTo(scrollNode, 0.0f, 17.0f);
+        const auto* st = renderer.scrollState(scrollNode);
+        expectedScrollY = st ? st->y : 0.0f;
+        std::printf("[info] 滚动容器 %u：requested=17.0 clamped=%.1f\n", scrollNode, expectedScrollY);
+    }
+    if (focusNode) {
+        renderer.setKeyboardFocus(focusNode);
+        expectedFocus = renderer.keyboardNode();
+        std::printf("[info] 键盘焦点节点 %u -> %d\n", focusNode, expectedFocus);
+    }
+
+    CHECK(WriteAll(tmpPath, html), "再次模拟保存");
+    CHECK(PumpUntilReload(hot, renderer, 3000), "第二次重载成功");
+
+    if (scrollNode) {
+        const auto* st = renderer.scrollState(scrollNode);
+        char msg[192];
+        std::snprintf(msg, sizeof(msg), "滚动偏移恢复（节点 %u：期望 %.1f，实际 %.1f）",
+                      scrollNode, expectedScrollY, st ? st->y : -1.0f);
+        CHECK(st && st->y == expectedScrollY, msg);
+    } else {
+        std::printf("[skip] 示例 UI 无滚动容器，跳过滚动恢复\n");
+    }
+
+    if (focusNode) {
+        char msg[192];
+        std::snprintf(msg, sizeof(msg), "键盘焦点恢复（期望 %d，实际 %d）",
+                      expectedFocus, renderer.keyboardNode());
+        CHECK(renderer.keyboardNode() == expectedFocus, msg);
+    } else {
+        std::printf("[skip] 示例 UI 无可交互节点，跳过焦点恢复\n");
+    }
+
+    // ---------- 5b. 滚动恢复：用合成 UI 保证一定溢出 ----------
+    {
+        std::string html2 =
+            "<html><body><div id=\"sc\" style=\"position:absolute;left:0;top:0;"
+            "width:300;height:120;overflow:auto\">";
+        for (int i = 0; i < 40; ++i)
+            html2 += "<p style=\"height:24\">row " + std::to_string(i) + "</p>";
+        html2 += "</div></body></html>";
+
+        const std::string scrollPath = "build-mingw/tmp/hot_scroll.html";
+        CHECK(WriteAll(scrollPath, html2), "合成滚动 UI 写入成功");
+
+        BinUIRenderer r2;
+        const CompileResult cr = CompileBinUIFileEx(scrollPath);
+        CHECK(!cr.layout.empty() && r2.loadLayout(cr.layout.data(), cr.layout.size()),
+              "合成滚动 UI 编译并加载");
+        const uint16_t sc = r2.findNodeByName("sc");
+        CHECK(sc != 0 && r2.isScrollable(sc), "找到滚动容器 #sc");
+        const float contentH = sc ? r2.contentHeight(sc) : 0.0f;
+        std::printf("[info] #sc contentHeight=%.1f\n", contentH);
+        CHECK(contentH > 120.0f, "合成 UI 内容确实溢出（可滚动）");
+
+        r2.scrollTo(sc, 0.0f, 300.0f);
+        const auto* st0 = r2.scrollState(sc);
+        const float wantY = st0 ? st0->y : -1.0f;
+        std::printf("[info] #sc requested=300.0 clamped=%.1f\n", wantY);
+        CHECK(wantY > 0.0f, "滚动偏移已生效（未被钳制为 0）");
+
+        ex::HotReload hot2;
+        hot2.Init(true, scrollPath);
+        CHECK(WriteAll(scrollPath, html2), "模拟保存滚动 UI");
+        CHECK(PumpUntilReload(hot2, r2, 3000), "滚动 UI 重载成功");
+        const auto* st1 = r2.scrollState(sc);
+        char msg[192];
+        std::snprintf(msg, sizeof(msg), "滚动偏移跨重载保留（期望 %.1f，实际 %.1f）",
+                      wantY, st1 ? st1->y : -1.0f);
+        CHECK(st1 && st1->y == wantY, msg);
+    }
+
+    // ---------- 6. 坏 UI：不允许把界面刷空 ----------
+    CHECK(WriteAll(tmpPath, "<div><<<< 垃圾 & 未闭合 <span>"), "写入一份坏 UI");
+    bool reloaded = false;
+    for (int i = 0; i < 60 && !reloaded; ++i) {
+        const auto res = hot.Tick(renderer, "svgdemo", 0, 0);
+        if (res != ex::HotReload::Result::Idle) reloaded = true;
+        SleepMs(30);
+    }
+    std::printf("[info] 坏 UI 处理：%s；当前节点数 %zu\n",
+                reloaded ? "已处理（编译容错则重载，失败则保留旧树）" : "未触发",
+                renderer.getNodes().size());
+    CHECK(renderer.getNodes().size() > 0, "坏 UI 后节点树没有变空（仍可渲染）");
+
+    // ---------- 7. 文件消失：不误触发 ----------
+    std::remove(tmpPath.c_str());
+    ex::HotReload gone;
+    gone.Init(true, "build-mingw/tmp/does_not_exist.html");
+    int bogus = 0;
+    for (int i = 0; i < 20; ++i) {
+        if (gone.Tick(renderer, "svgdemo", 0, 0) != ex::HotReload::Result::Idle) ++bogus;
+        SleepMs(10);
+    }
+    CHECK(bogus == 0, "文件不存在时 20 次 Tick 全 Idle");
+
+    std::printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "PASSED", g_fail,
+                g_fail == 1 ? "" : "s");
+    return g_fail ? 1 : 0;
+}
+
+}  // namespace suite_hot_reload
+
+
+// ===========================================================================
+// 汇总入口：任一子套件有失败则整体失败
+// ===========================================================================
+int main() {
+    int fails = 0;
+    fails += suite_binui::run();
+    fails += suite_renderer::run();
+    fails += suite_renderer_real::run();
+    fails += suite_paint::run();
+    fails += suite_anim::run();
+    fails += suite_hot_reload::run();
+    std::printf("\n=== test_elements: %s ===\n", fails ? "FAILED" : "全部通过");
+    return fails ? 1 : 0;
 }

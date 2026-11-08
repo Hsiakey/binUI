@@ -6,6 +6,42 @@
 
 ## [Unreleased]
 
+### 重构 — 测试与示例收拢：9 个测试二进制合成 4 个，产物按用途分目录
+
+一根鸡毛一个 `test_xxx.exe` 的老问题积到现在：`tests/` 里躺着 9 个互不相干的可执行文件，
+`build-mingw/bin` 里测试、示例、工具、以及几份**既没有源码也没有构建规则**的残留产物
+（`galgamechat` / `cssshow` / `singlewindow` / `multiwindow` / `videodemo` / `minwin` /
+`ime_probe` …）混作一团，双击有的还打不开。
+
+- `tests/` 改成**按主题**分四个套件，代码逐字保留（只做结构重排：每个旧文件的 `main()` 包进
+  `namespace suite_xxx` 并改名为 `run()`，新 TU 的 `main()` 逐个调用并汇总失败数）：
+  - `test_css` ← 原 `test_compiler`（CSS 属性 / 选择器 / 伪元素 / 编译器告警）
+  - `test_elements` ← 原 `test_binui` + `test_renderer` + `test_renderer_real` + `test_paint`
+    + `test_anim` + `test_hot_reload`（元素 / 布局 / 命中 / 交互 / 绘制几何 / 动画 / 热重载）
+  - `test_font` ← 原 `test_font`，并补上**输入法（IME）**用例
+  - `test_capi` 不变（C ABI 契约）
+  合并时用输出逐条比对确认用例没丢：元素组 359 条、CSS 组 373 条，两侧完全一致。
+- `test_font` 新增 IME 桥接用例：UTF-16 索引 → UTF-8 光标字节偏移、全角字、代理对（emoji）、
+  上屏插入（`insertText`）、失焦提交（`blur`）、`setCaret` 夹到字符边界。这段不依赖字体，
+  没有系统字体的环境也会跑（以前整支测试会直接 skip 掉）。
+- **修 `Utf16IndexToBytes()` 把 UTF-16 代码单元当成码点数**
+  （`src/renderer/binui_renderer.cpp`）：补充平面字符（emoji、罕见汉字）在 UTF-16 里是
+  **代理对、占 2 个单元**，旧实现按 1 个算 —— 输入法给的 `GCS_CURSORPOS` 索引在含 emoji 的
+  输入框里逐字符偏一位，索引还可能落进代理对中间，组字窗就挂在半个 emoji 的位置上。
+  现在按单元推进，落在代理对中间时夹到该字符起点（鼠标定位、双击选词走的是同一个转换）。
+- 产物按用途分目录，Makefile 与 CMake 保持一致：
+  - `build-mingw/bin/tests/` —— 四个套件
+  - `build-mingw/bin/examples/` —— 8 组示例（exe + 同名 UI 子目录）
+  - `build-mingw/bin/` —— 库 / DLL / 命令行工具
+  示例 UI 里的 `../../components/xxx.bum.xml` 相应同步到 `bin/components/`；另加 `make examples`
+  只编示例、`make test` 只编跑测试。
+- 删掉 7 个旧测试源文件、`build-mingw/bin` 里的残留产物，以及 tests/README 里说明的边界
+  （哪些必须开窗手测：组字窗/候选框定位、组字期间点击被 IME 吞掉、GL/D3D 真实像素）。
+- 文档同步：新增 [`tests/README.md`](tests/README.md)（套件划分 + 能测/不能测 + 合并记录）；
+  `README.md` / `examples/README.md`（6 组 → 8 组，路径改到 `bin/examples/`）/
+  `tools/README.md` / `docs/{README,app_layout,components,pixels/README}.md` 里的失效路径一并修正
+  （`examples/cssshow`、`examples/singlewindow`、`examples/components` 这些早就搬走/删掉的老路径）。
+
 ### 修复 — 圆角盒子的边框只画到顶部约 64px 就断了
 
 `BuildBorderBands()`（`include/binui_paint.h`，GDI / OpenGL / D3D11 三个后端共用）的圆角分支
@@ -20,7 +56,7 @@
   条带数只跟半径有关（≈4r+常数），与盒子高度无关。
 - 边框条带上限单独提为 `kMaxBorderBands = 512`（半径大的胶囊也装得下）；装不下时**退回直角
   四条**，宁可方角也不能整段缺边。
-- `tests/test_paint.cpp` 补回归用例：600px 高卡片的边框必须画到底边、盒子拉高一倍条带数不变、
+- `tests/test_elements.cpp` 的绘制几何小节补回归用例：600px 高卡片的边框必须画到底边、盒子拉高一倍条带数不变、
   半径超过上限时退回四条、直角仍是四条。
 - 顺带修了圆角**转角比直边更粗更亮**的问题：1px 等宽边框的圆角以前是逐行矩形拼的（45° 处每行
   1.4~2px、只有亚像素混色没有 AA），而紧挨着的填充是 AA 的，转角看起来发虚发粗。现在这种边框的

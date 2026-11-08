@@ -1,3 +1,11 @@
+// test_css.cpp - CSS 属性 / 选择器 / 编译器回归（原 test_compiler）
+//
+// HTML5 style 段 -> binUI 布局：每个 CSS 属性落到节点字段的口径
+// 选择器（单段）、伪元素 ::before/::after、结构伪类
+// 编译器告警（未支持属性 / 非法值），以及 docs/issues 的回归用例
+//
+// 由原 tests/test_compiler.cpp 合并而来，逐条用例代码未改（见下面每个 namespace 的分节注释）。
+
 #include "binui_compiler.h"
 #include "binui_renderer.h"
 #include "binui_format.h"
@@ -9,6 +17,13 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+
+// ---------------------------------------------------------------------------
+// 原 tests/test_compiler.cpp（代码逐字保留，仅包进 namespace 并改名 run()）
+// ---------------------------------------------------------------------------
+#undef CHECK
+#undef TEST
+namespace suite_compiler {
 
 static int failed = 0;
 
@@ -131,7 +146,7 @@ static void TestIssueRegressions() {
     }
 }
 
-int main() {
+int run() {
     printf("=== test_compiler: XML/HTML5 -> binUI -> parse roundtrip ===\n\n");
 
     // 1. XML -> binUI
@@ -1811,4 +1826,17 @@ int main() {
 
     printf("\n=== Results: %d tests failed ===\n", failed);
     return failed > 0 ? 1 : 0;
+}
+
+}  // namespace suite_compiler
+
+
+// ===========================================================================
+// 汇总入口：任一子套件有失败则整体失败
+// ===========================================================================
+int main() {
+    int fails = 0;
+    fails += suite_compiler::run();
+    std::printf("\n=== test_css: %s ===\n", fails ? "FAILED" : "全部通过");
+    return fails ? 1 : 0;
 }
