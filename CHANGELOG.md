@@ -6,6 +6,22 @@
 
 ## [Unreleased]
 
+### 重构 — `examples/features` 的按钮组件去掉多余的根 div
+
+`examples/features/button.bum.xml` 以前写成 `<div class="cmp-wrap"><button …></div>`：这层 div
+与按钮完全重合（宿主 `<use x y w>` 落到它身上，按钮再 absolute 定位到 0,0），除了给按钮
+多一个定位基准与一个祖先之外什么都不做。它还带来一个隐性瑕疵——宿主传的 `bg` 参数会作为属性
+落到 div 上，div 画出一个**方角**底色块，盖住按钮的圆角（离屏渲染里那颗绿按钮四角是方的）。
+
+改成**组件根就是 button**：位置/宽度由宿主 `<use x=… y=… w=…>` 给，参数只写内联 style。
+`docs/components.md` 的示例同步，并补一句"别为了有个容器再套一层 div"。
+
+顺带把 Makefile 里 features 的规则补上 `examples/features/button.bum.xml` 依赖 —— 以前只认
+`main.html`，改组件不会重新拷到 `bin/examples/features/`，跑起来还是旧组件。
+
+验收：8 个示例离屏渲染逐像素比对，只有那颗 `bg` 按钮的四个角变了（方角 → 圆角），其余全同；
+`check_examples` 10 个 UI 0 问题；`make test` 四套全绿。
+
 ### 修复 — 组件里的按钮 hover 放大时被"关在盒子里"（裁剪链按每个祖先矩形无边裁）
 
 组件自己的根 **`div`** 与按钮**等大**（`examples/features/button.bum.xml` 里就写着

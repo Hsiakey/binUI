@@ -87,12 +87,14 @@
     .cmp-btn { color:#F5F5F7; border-radius:10; transition: background-color .18s ease; }
     .cmp-btn:hover { background:#3B2F63; }
 </style>
-<div class="cmp-wrap" style="height:40">
-    <button class="cmp-btn"
-            style="position:absolute; left:0; top:0; width:{{w=132}}; height:40;
-                   background:{{bg=#23232E}}">{{label=按钮}}</button>
-</div>
+<!-- 组件根就是按钮本身：位置/宽度交给宿主 <use x=… y=… w=…>，参数只写内联 style -->
+<button class="cmp-btn"
+        style="position:absolute; width:{{w=132}}; height:40;
+               background:{{bg=#23232E}}">{{label=按钮}}</button>
 ```
+
+> 别为了"有个容器"再套一层 `<div>`：那层 div 与按钮完全重合，只会多一个定位基准与祖先
+> （宿主传给组件的 `bg` 之类属性还会落到它身上，画出个方块角），没有实际作用。
 
 ```cpp
 // 外挂组件：布局里只有占位节点，这一步把它们挂上（幂等，可重复调用）

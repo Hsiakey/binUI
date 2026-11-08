@@ -8,6 +8,11 @@
 
   参数都带默认值：内联时由 <use> 属性覆盖；单独编成 button.bum 时取默认值。
 
+  结构上**组件根就是按钮本身**，不再套一层等大的 div：
+  以前写成 <div class="cmp-wrap"><button …/></div>，那层 div 与按钮完全重合、什么都不做，
+  唯一的效果是给按钮多一个定位基准与祖先（旧后端还把每个祖先矩形当裁剪区，
+  :hover 放大 1.04 会被它切掉一圈）。位置交给宿主传：<use x=… y=… w=…>。
+
   注意：组件自带的 <style> 会并进宿主样式表 —— 是"全局"的，多个实例共享同一条规则。
   所以参数化的样式要写在内联 style 上（每个实例独立），别写在 <style> 里。
 -->
@@ -21,6 +26,4 @@
     .cmp-btn:hover  { background: #5DA0FF; transform: scale(1.04); }
     .cmp-btn:active { background: #2F79E8; transform: scale(0.97); }
 </style>
-<div class="cmp-wrap" style="height:40">
-    <button class="cmp-btn" style="position:absolute; left:0; top:0; width:{{w=132}}; height:40; background:{{bg=#3E8BFF}}">{{label=按钮}}</button>
-</div>
+<button class="cmp-btn" style="position:absolute; width:{{w=132}}; height:40; background:{{bg=#3E8BFF}}">{{label=按钮}}</button>
