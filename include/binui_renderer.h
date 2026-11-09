@@ -212,7 +212,7 @@ public:
     //
     //   · 文本编辑中（isEditing）：退格/删除/左右/Home/End 走光标；Enter 与 Esc 退出编辑
     //     回到焦点控制；Tab 退出并跳到下一个控件。**这个状态下 WASD 不移动焦点** ——
-    //     字母要留给输入法/文本，焦点环也不画（有光标就够）。
+    //     字母要留给输入法/文本；焦点环从虚线换成"编辑中"的实线蓝环（见 focusRingOf）。
     //   · 焦点控制中（默认）：WASD 移动焦点；方向键滚页面（离焦点最近的滚动容器，
     //     焦点不在任何滚动容器里时滚视口内面积最大的那个）；PageUp/PageDown 翻页；
     //     Home/End 到顶/到底；Tab/Shift+Tab 循环；Enter 激活（INPUT 进入编辑、其余
@@ -232,7 +232,18 @@ public:
     };
     KeyResult handleKey(int vk, uint32_t mods = 0);
 
-    // 焦点环（:focus-visible 语义：键盘导航才画）
+    // 焦点环两态（每个节点单独判，后端按它画）：
+    //   None   = 不画
+    //   Dashed = 待编辑：键盘选中的元素，虚线 + 底色对比色（深底浅线/浅底深线），
+    //            2 秒无操作自动消失
+    //   Solid  = 编辑中：正在编辑的输入框，实线 + 强调蓝（kFocusRingEditColor），
+    //            常亮（编辑是持续状态，不该自己消失）
+    // 线型 + 颜色双编码：只靠颜色区分对色弱用户不友好，虚线/实线一眼能看出来。
+    enum class FocusRing { None, Dashed, Solid };
+    FocusRing focusRingOf(uint16_t nodeId) const;
+    static constexpr uint32_t kFocusRingEditColor = 0xFF3E8BFF; // 编辑中实线环（强调蓝）
+
+    // 待编辑态焦点环是否点亮（不含编辑中的实线环）
     bool focusRingVisible() const { return focusRing_ && !edit_.active; }
     void showFocusRing();                 // 主动点亮（同时重置 2 秒计时）
     void hideFocusRing();                 // 立即隐藏（窗口失焦等）

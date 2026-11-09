@@ -2148,30 +2148,41 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
             // 与 drawNodesGDI 的叠放顺序一致
             drawNodeBorder();
 
-            if (renderer.focusRingVisible() && renderer.isKeyboardFocused(node.id)) {
-                // 同 GL/GDI 后端：焦点环只在键盘导航时画，2 秒无操作自动熄灭
-                // 焦点环必须跟随节点自己的圆角：以前写死半径 10、内缩 2，
-                // 圆角 8 的按钮上就会套出一个半径不同的环，看着像"双线框"。
-                // 颜色按节点底色取对比色（浅底画白环等于没画），详见 GL 后端同段注释。
-                uint32_t ringCol = textCol;
-                if (((dc >> 24) & 0xFFu) >= 0x80u) {
-                    const float bgLum = (0.2126f * static_cast<float>((dc >> 16) & 0xFFu) +
-                                         0.7152f * static_cast<float>((dc >> 8) & 0xFFu) +
-                                         0.0722f * static_cast<float>(dc & 0xFFu)) / 255.0f;
-                    if (bgLum > 0.7f) ringCol = ScaleAlpha(0xFF1A1A1Au, opacity);
-                }
-                const float fr = effRadius > 2 ? static_cast<float>(effRadius) - 1.0f : 0.0f;
-                const float fx = static_cast<float>(x) + 1.0f, fy = static_cast<float>(y) + 1.0f;
-                const float fw = static_cast<float>(nw) - 2.0f, fh = static_cast<float>(nh) - 2.0f;
-                if (fr >= 1.0f) {
-                    gfx.strokeRounded(fx, fy, fw, fh, fr, 1.0f, ringCol);
-                } else {
-                    // 直角节点不能用 strokeRounded：它 r<=0 时会退化成整块填充，
-                    // 焦点框会把节点涂白。这里直接画四条 1px 线。
-                    gfx.fillRect(fx, fy, fw, 1.0f, ringCol);
-                    gfx.fillRect(fx, fy + fh - 1.0f, fw, 1.0f, ringCol);
-                    gfx.fillRect(fx, fy, 1.0f, fh, ringCol);
-                    gfx.fillRect(fx + fw - 1.0f, fy, 1.0f, fh, ringCol);
+            // 焦点环两态（见 GL 后端同段与 docs/keyboard_focus.md）：
+            // 待编辑 = 虚线 + 对比色；编辑中 = 实线 + 强调蓝。
+            {
+                const BinUIRenderer::FocusRing ring = renderer.focusRingOf(node.id);
+                if (ring != BinUIRenderer::FocusRing::None) {
+                    const bool editing = ring == BinUIRenderer::FocusRing::Solid;
+                    uint32_t ringCol = textCol;
+                    if (editing) {
+                        ringCol = ScaleAlpha(BinUIRenderer::kFocusRingEditColor, opacity);
+                    } else if (((dc >> 24) & 0xFFu) >= 0x80u) {
+                        const float bgLum = (0.2126f * static_cast<float>((dc >> 16) & 0xFFu) +
+                                             0.7152f * static_cast<float>((dc >> 8) & 0xFFu) +
+                                             0.0722f * static_cast<float>(dc & 0xFFu)) / 255.0f;
+                        if (bgLum > 0.7f) ringCol = ScaleAlpha(0xFF1A1A1Au, opacity);
+                    }
+                    const float fr = effRadius > 2 ? static_cast<float>(effRadius) - 1.0f : 0.0f;
+                    const float fx = static_cast<float>(x) + 1.0f, fy = static_cast<float>(y) + 1.0f;
+                    const float fw = static_cast<float>(nw) - 2.0f, fh = static_cast<float>(nh) - 2.0f;
+                    if (editing) {
+                        if (fr >= 1.0f) {
+                            gfx.strokeRounded(fx, fy, fw, fh, fr, 2.0f, ringCol);
+                        } else {
+                            gfx.fillLine(fx, fy, fx + fw, fy, 2.0f, ringCol);
+                            gfx.fillLine(fx, fy + fh, fx + fw, fy + fh, 2.0f, ringCol);
+                            gfx.fillLine(fx, fy, fx, fy + fh, 2.0f, ringCol);
+                            gfx.fillLine(fx + fw, fy, fx + fw, fy + fh, 2.0f, ringCol);
+                        }
+                    } else {
+                        PaintSegment segs[kMaxFocusDashSegments];
+                        const int n = BuildDashedRoundRing(fx, fy, fw, fh, fr, 6.0f, 4.0f,
+                                                           segs, kMaxFocusDashSegments);
+                        for (int si = 0; si < n; si++)
+                            gfx.fillLine(segs[si].x0, segs[si].y0, segs[si].x1, segs[si].y1,
+                                         1.0f, ringCol);
+                    }
                 }
             }
         }

@@ -1269,19 +1269,48 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         // 边框（v13）：画在节点内侧，四边可不同宽，压在底色之上
         drawNodeBorder();
 
-        // 键盘焦点高亮边框（内缩绘制，避免超出裁剪区）。
-        // 圆角要跟着节点走：以前写死 10，圆角 8 的按钮上会凸出一个半径不同的环。
-        // focusRingVisible() = 键盘导航才画、2 秒无操作自动熄灭；编辑中由光标代替。
-        if (draw && renderer.focusRingVisible() && renderer.isKeyboardFocused(node.id)) {
-            const int fr = node.radius > 2 ? (int)node.radius - 1 : 0;
-            const int th = nh >= 24 ? 2 : 1;
-            HPEN fp = CreatePen(PS_SOLID, th, RGB(0xFF, 0xFF, 0xFF));
-            HGDIOBJ oldFp = SelectObject(hdc, fp);
-            HGDIOBJ oldFb = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-            RoundRect(hdc, x + 1, y + 1, x + nw - 1, y + nh - 1, fr * 2, fr * 2);
-            SelectObject(hdc, oldFb);
-            SelectObject(hdc, oldFp);
-            DeleteObject(fp);
+        // 焦点环两态（与 GL/D3D 后端同一套语义，见 docs/keyboard_focus.md）：
+        //   待编辑（键盘选中） = 虚线 + 底色对比色，2 秒无操作自动消失
+        //   编辑中             = 实线 2px + 强调蓝，常亮
+        // 线型 + 颜色双编码：只换颜色对色弱用户不友好，虚线/实线一眼能分。
+        {
+            const binui::BinUIRenderer::FocusRing ring = renderer.focusRingOf(node.id);
+            if (draw && ring != binui::BinUIRenderer::FocusRing::None) {
+                const bool editing = ring == binui::BinUIRenderer::FocusRing::Solid;
+                const int fr = node.radius > 2 ? (int)node.radius - 1 : 0;
+                uint32_t ringCol = 0xFFFFFFFFu;
+                if (editing) {
+                    ringCol = binui::BinUIRenderer::kFocusRingEditColor;
+                } else if (((dc >> 24) & 0xFFu) >= 0x80u) {
+                    const float bgLum = (0.2126f * static_cast<float>((dc >> 16) & 0xFFu) +
+                                         0.7152f * static_cast<float>((dc >> 8) & 0xFFu) +
+                                         0.0722f * static_cast<float>(dc & 0xFFu)) / 255.0f;
+                    if (bgLum > 0.7f) ringCol = 0xFF1A1A1Au;
+                }
+                HPEN fp = CreatePen(PS_SOLID, editing ? 2 : 1,
+                                    RGB((ringCol >> 16) & 0xFF, (ringCol >> 8) & 0xFF, ringCol & 0xFF));
+                HGDIOBJ oldFp = SelectObject(hdc, fp);
+                if (editing) {
+                    HGDIOBJ oldFb = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                    RoundRect(hdc, x + 1, y + 1, x + nw - 1, y + nh - 1, fr * 2, fr * 2);
+                    SelectObject(hdc, oldFb);
+                } else {
+                    // 虚线：沿圆角路径逐段 LineTo（不依赖 PS_DASH 在不同驱动上的实现差异）
+                    binui::PaintSegment segs[binui::kMaxFocusDashSegments];
+                    const int n = binui::BuildDashedRoundRing(static_cast<float>(x) + 1.0f,
+                                                              static_cast<float>(y) + 1.0f,
+                                                              static_cast<float>(nw) - 2.0f,
+                                                              static_cast<float>(nh) - 2.0f,
+                                                              static_cast<float>(fr), 6.0f, 4.0f,
+                                                              segs, binui::kMaxFocusDashSegments);
+                    for (int si = 0; si < n; si++) {
+                        MoveToEx(hdc, (int)std::lround(segs[si].x0), (int)std::lround(segs[si].y0), nullptr);
+                        LineTo(hdc, (int)std::lround(segs[si].x1), (int)std::lround(segs[si].y1));
+                    }
+                }
+                SelectObject(hdc, oldFp);
+                DeleteObject(fp);
+            }
         }
         }
 

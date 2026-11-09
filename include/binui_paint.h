@@ -349,4 +349,95 @@ inline int BuildTextRuleBands(const BinUIPaintNode* p, float x, float textTop, f
     return n;
 }
 
+// ============================================================
+// 焦点环虚线（"待编辑"态）：沿圆角矩形路径按 实线/空白 交替取线段
+//
+// 三个后端都只有 fillLine / fillRect / strokeRounded，"画虚线"得自己采样。
+// 这里沿路径（上直边 → 右上角 → 右直边 → … → 左上角）按弧长走，每个实线段输出
+// 一条线（两端点）；直边上是水平/竖直线，圆角段上是弦（dash 6px 时弦高误差 < 1px，
+// 1px 细线上看不出来）。后端拿 PaintSegment 逐个 fillLine 即可，三端像素一致。
+//
+// 为什么用虚线而不是"细一点":待编辑 vs 编辑中是**两种状态**，线型 + 颜色双编码
+// （虚线深色 = 待编辑，实线蓝色 = 编辑中）比只换颜色更容易分辨，色弱用户也能看出来。
+// ============================================================
+struct PaintSegment {
+    float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
+};
+
+constexpr int kMaxFocusDashSegments = 96;
+
+// x/y/w/h 为焦点环内缩后的矩形，radius 为圆角半径（0 = 直角）。
+// dash/gap 是实线段长与间隔（像素）；返回线段数。
+inline int BuildDashedRoundRing(float x, float y, float w, float h, float radius,
+                                float dash, float gap,
+                                PaintSegment* out, int cap = kMaxFocusDashSegments) {
+    if (!out || cap <= 0 || w <= 0.0f || h <= 0.0f) return 0;
+    const float r = std::max(0.0f, std::min(radius, std::min(w, h) * 0.5f));
+    if (dash < 1.0f) dash = 1.0f;
+    if (gap < 1.0f) gap = 1.0f;
+
+    const float lw = std::max(0.0f, w - 2.0f * r);   // 直边长度
+    const float lh = std::max(0.0f, h - 2.0f * r);
+    const float arc = 3.14159265358979323846f * r * 0.5f;
+    const float total = 2.0f * lw + 2.0f * lh + 4.0f * arc;
+
+    // 路径上弧长 s 处的点。顺序：上边（从左到右）→ 右上角 → 右边 → 右下角 →
+    // 下边（从右到左）→ 左下角 → 左边（从下到上）→ 左上角。
+    auto pointAt = [&](float s, float& px, float& py) {
+        float a = s;
+        // 上边
+        if (a <= lw) { px = x + r + a; py = y; return; }
+        a -= lw;
+        // 右上角：-90° → 0°
+        if (a <= arc) {
+            const float t = -1.57079632679489661923f + (arc > 0 ? a / r : 0.0f);
+            px = x + w - r + r * std::cos(t);
+            py = y + r + r * std::sin(t);
+            return;
+        }
+        a -= arc;
+        // 右边
+        if (a <= lh) { px = x + w; py = y + r + a; return; }
+        a -= lh;
+        // 右下角：0° → 90°
+        if (a <= arc) {
+            const float t = (arc > 0 ? a / r : 0.0f);
+            px = x + w - r + r * std::cos(t);
+            py = y + h - r + r * std::sin(t);
+            return;
+        }
+        a -= arc;
+        // 下边（从右到左）
+        if (a <= lw) { px = x + w - r - a; py = y + h; return; }
+        a -= lw;
+        // 左下角：90° → 180°
+        if (a <= arc) {
+            const float t = 1.57079632679489661923f + (arc > 0 ? a / r : 0.0f);
+            px = x + r + r * std::cos(t);
+            py = y + h - r + r * std::sin(t);
+            return;
+        }
+        a -= arc;
+        // 左边（从下到上）
+        if (a <= lh) { px = x; py = y + h - r - a; return; }
+        a -= lh;
+        // 左上角：180° → 270°
+        const float t = 3.14159265358979323846f + (arc > 0 ? std::min(a, arc) / r : 0.0f);
+        px = x + r + r * std::cos(t);
+        py = y + r + r * std::sin(t);
+    };
+
+    int n = 0;
+    const float step = dash + gap;
+    for (float s = 0.0f; s < total && n < cap; s += step) {
+        float s1 = s + dash;
+        if (s1 > total) s1 = total;
+        float x0, y0, x1, y1;
+        pointAt(s, x0, y0);
+        pointAt(s1, x1, y1);
+        if (x0 != x1 || y0 != y1) out[n++] = { x0, y0, x1, y1 };
+    }
+    return n;
+}
+
 } // namespace binui

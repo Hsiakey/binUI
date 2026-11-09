@@ -1667,6 +1667,13 @@ void BinUIRenderer::hideFocusRing() { focusRing_ = false; }
 
 void BinUIRenderer::setFocusRingIdleTime(double seconds) { focusRingIdle_ = seconds; }
 
+// 某个节点现在该画什么环：编辑中是实线（只套正在编辑的输入框），待编辑是虚线。
+BinUIRenderer::FocusRing BinUIRenderer::focusRingOf(uint16_t nodeId) const {
+    if (edit_.active) return edit_.nodeId == nodeId ? FocusRing::Solid : FocusRing::None;
+    if (focusRing_ && keyboardId_ == static_cast<int>(nodeId)) return FocusRing::Dashed;
+    return FocusRing::None;
+}
+
 void BinUIRenderer::setKeyboardFocus(int nodeId) {
     if (nodeId < 0) { commitFocus(-1); return; }
     auto it = nodeIndexById_.find(static_cast<uint16_t>(nodeId));

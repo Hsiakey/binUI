@@ -37,10 +37,22 @@ app.setKeyFn([&](int vk) {
 | 文本编辑 | Tab / Shift+Tab | 退出编辑并跳到下一个 / 上一个控件 |
 | 文本编辑 | 退格/删除/左右/Home/End | 光标与选区（字母归输入法，**WASD 不抢键**） |
 
-焦点环改成 `:focus-visible` 语义：**键盘导航才画，鼠标点击不画**；**2 秒没有操作自动熄灭**
-（`setFocusRingIdleTime()` 可调）。熄灭不需要宿主定时 —— `stepAnimations()` 会在熄灭的那一帧
-把焦点节点放进返回值，宿主照常 `invalidateNode()` 擦掉。窗口失焦时宿主调
-`renderer.hideFocusRing()`。
+焦点环不再是"一条常亮白线"，而是把阶段画出来（`renderer.focusRingOf(id)` → `None/Dashed/Solid`）：
+
+| 状态 | 环 | 说明 |
+|---|---|---|
+| 待编辑 | **虚线** 1px + 底色对比色 | 键盘选中元素、还没按 Enter；`:focus-visible` 语义：鼠标点击不画、2 秒无操作自动熄灭 |
+| 编辑中 | **实线** 2px + 强调蓝 `#3E8BFF` | 正在编辑的输入框；常亮（编辑是持续状态，不能自己消失） |
+| 无 | 不画 | 鼠标操作 / 超时 / 窗口失焦 / 没有焦点 |
+
+线型 + 颜色双编码：只靠颜色区分对色弱用户不友好，虚线/实线一眼能分。虚线沿圆角矩形
+路径按弧长采样（`binui_paint.h` 的 `BuildDashedRoundRing`，三个后端共用几何、只负责 fillLine）。
+
+Enter/Esc 的语义也按状态分开、不混：待编辑态 Enter = 激活（输入框进编辑 / 其余 CLICK）；
+编辑态 Enter = 确认（提交并退出，单行输入没有"换行"，要"发送"的宿主在 `INPUT`/`FOCUS`
+事件里做）；编辑态 Esc = 退出编辑回到待编辑态。焦点环熄灭不需要宿主定时 ——
+`stepAnimations()` 会在熄灭的那一帧把焦点节点放进返回值，宿主照常 `invalidateNode()` 擦掉。
+窗口失焦时宿主调 `renderer.hideFocusRing()`。
 
 #### 中文输入法：非编辑态把 IME 摘掉，否则 WASD 一个键都收不到
 
@@ -63,6 +75,11 @@ app.setImeActiveFn([&] { return renderer.isEditing(); });
 8 个示例与 C ABI 都接了；不接 = 保持老行为（IME 常挂），此时中文输入法下 WASD 无效、方向键照常。
 另外 `BINUI_IME_LOG=1` 的日志现在会打每一条 `keydown vk=...`，这类"键被谁吃了"的问题一眼能看出来。
 
+组字中的 Esc 归输入法：实测微软拼音组字时按 Esc 只发 `WM_IME_ENDCOMPOSITION` 取消候选、
+不再放行 `WM_KEYDOWN`，编辑态原样保留；对会放行 Esc 的输入法，外壳把"组字结束后 200ms 内"
+到达的第一个 Esc 吞掉一次（`composeEndMs_`），再按一次才退出编辑 —— "Esc 取消拼音"和
+"Esc 退出编辑"不会互相误伤。
+
 实现要点：
 
 - `handleKey` 返回 `{ handled, changed }`：`handled` 只表示"库消费了这个键"（宿主别再用它当
@@ -73,22 +90,29 @@ app.setImeActiveFn([&] { return renderer.isEditing(); });
 - 鼠标点击只切 `:focus` 状态（`commitFocus(id, false)`），不点亮焦点环；环正亮着时点一下
   也会立刻收掉（`release()` 里清 `focusRing_`）。`setKeyboardFocus` / `moveKeyboardFocus` /
   `cycleKeyboardFocus` / `handleKey` 都会亮环并重置 2 秒计时。
+- 每节点环态由 `focusRingOf(nodeId)` 决定（`None/Dashed/Solid`），三个后端只负责画：
+  实线用 `strokeRounded(2px)` / 四条 2px 线，虚线用 `binui_paint.h` 的
+  `BuildDashedRoundRing` 沿圆角路径按弧长采样出线段再 `fillLine`。编辑环颜色统一取
+  `BinUIRenderer::kFocusRingEditColor`（#3E8BFF），不会三端各调一个蓝。
 - 编辑键不再由宿主复制：`features` 的输入框以前按退格/方向键无效，现在和其它示例一致。
 - C ABI 也切到同一条路径（剪贴板四件套仍留在宿主侧，因为系统剪贴板 I/O 在平台层）。
 
 验收：
 
-- `tests/test_elements.cpp` 新增 9c 节 30 条用例：WASD 移焦点、方向键不移动焦点且无滚动容器时
+- `tests/test_elements.cpp` 新增 9c 节 35 条用例：WASD 移焦点、方向键不移动焦点且无滚动容器时
   不被消费、回车激活/进出编辑、编辑中 WASD 忽略、编辑中 Tab 换控件、方向键滚焦点容器、
-  PgUp/PgDn/Home/End、无焦点时空格翻页、焦点环超时熄灭并回报该节点、鼠标点击只设焦点不亮环。
+  PgUp/PgDn/Home/End、无焦点时空格翻页、焦点环两态（待编辑 `Dashed` / 编辑中 `Solid`，Esc 后
+  回到 `Dashed`）、虚线环几何（线段数 / 端点不出界 / 覆盖周长）、环超时熄灭并回报该节点、
+  鼠标点击只设焦点不亮环。
 - `make all` 0 警告；`make test` 四套全绿；`check_examples` 11 个 UI 0 问题。
 - 真机键盘验收（截图逐帧比对，均值像素差）：
-  - `buttonshow`：WASD 后焦点环出现（差 0.28）→ 2.3 秒后消失（0.18）→ 再按又出现（0.18）；
-    鼠标点按钮只出行状态、不亮环。
+  - `buttonshow`：WASD 后出现**虚线**焦点环 → 2.3 秒后消失 → 再按又出现；鼠标点按钮只出行状态、
+    不亮环。
   - `flexshow`：连按 4 次方向键，右侧列表区差 19.1、左边图表区 0.0（焦点没动、页面只滚了列表）；
-    再按 `a` 焦点环出现在第一颗可聚焦节点（差 6.4）。
-  - `fontshow`：点输入框进编辑 → 数字 “123” → 回车退出（环套在输入框上、光标消失）→ 按 `x`
-    无变化（差 0.0，编辑外的字母被忽略）→ 再回车进编辑 → 按 `4` 插入（差 4.2）。
+    再按 `a` 焦点环出现在第一颗可聚焦节点。
+  - `fontshow`：点输入框进编辑 → 输入框上是**实线蓝环** + 光标 → 数字 “123” → 回车退出
+    （环变虚线、光标消失）→ 按 `x` 无变化（编辑外的字母被忽略）→ 再回车进编辑 → 按 `4` 插入。
+    组字 “ni'hao” 时按 Esc：只取消候选，编辑态与实线蓝环保留；再按一次 Esc 才回到虚线待编辑态。
     `BINUI_IME_LOG=1` 的日志同步显示 `ime detached` / `ime attached` 跟着编辑态切换。
 
 z 序焦点（非输入框按 Enter 下潜到子元素、多层可下沉，`Delete` 上浮）按 master 的要求先记下

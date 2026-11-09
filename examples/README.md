@@ -14,8 +14,9 @@
 `flexshow` 是唯一开窗可缩放的示例（百分比 / flex 自适应），用来验证 resize 实时重排。
 
 **键盘统一走 `renderer.handleKey`**，别在示例里自己 `switch (vk)`：WASD 移焦点、方向键滚页面、
-输入框上回车进/出编辑、Tab 循环、PageUp/PageDown/Home/End 翻页到顶到底；焦点环只在键盘导航时亮，
-2 秒无操作自动消失。宿主只做两件事：按返回的 `changed` 重绘，以及 `handled == false` 时处理 Esc。
+输入框上回车进/出编辑、Tab 循环、PageUp/PageDown/Home/End 翻页到顶到底；焦点环待编辑是虚线、
+编辑中是实线蓝，虚线 2 秒无操作自动消失。宿主只做两件事：按返回的 `changed` 重绘，以及
+`handled == false` 时处理 Esc。
 **另外必须接一行 `app.setImeActiveFn([&]{ return renderer.isEditing(); })`**：不接的话中文输入法会把
 WASD 当拼音吃掉（窗口收到 `VK_PROCESSKEY`），焦点导航全哑。状态与按键表见
 [`docs/keyboard_focus.md`](../docs/keyboard_focus.md)。

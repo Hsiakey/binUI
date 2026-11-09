@@ -43,7 +43,8 @@ binUI 的键盘输入**只有一条入口**：`renderer.handleKey(vk, mods)`。�
 | `←` `→` | 按字符移动光标（`Shift` 扩展选区） |
 | `Home` / `End` | 光标到行首 / 行尾 |
 | `Backspace` / `Delete` | 删除选区或光标前 / 后一个字符 |
-| `Enter` / `Esc` | 提交并退出编辑 → **回到焦点控制**（焦点环重新点亮） |
+| `Enter` | **确认**：提交值、结束编辑、回到待编辑态（环变回虚线）。单行输入没有"换行"；需要"发送"的宿主在 `INPUT`/`FOCUS` 事件里做，别把 Enter 当两种意思 |
+| `Esc` | 退出编辑、回到待编辑态，同样提交值（不丢用户已输入的内容）；组字中先取消候选，见下面"输入法"一节 |
 | `Tab` / `Shift+Tab` | 提交并退出编辑，然后跳到下一个 / 上一个控件（浏览器行为） |
 | `Ctrl+C/X/V/A` | 不归渲染器：剪贴板 I/O 在平台层（C ABI 内部接好了，C++ 示例没接） |
 | 字母、数字、中文 | 走 `WM_CHAR` → 宿主转 `renderer.insertText()`（IME 组字同理） |
@@ -51,17 +52,38 @@ binUI 的键盘输入**只有一条入口**：`renderer.handleKey(vk, mods)`。�
 **WASD 在编辑态不移动焦点** —— 字母要留给输入。这与"用鼠标点开输入框就能打字"的
 习惯一致，也是"回车两段式"存在的意义：先 WASD 选中，回车进编辑，打完再回车出来。
 
-## 焦点环（:focus-visible 语义）
+Enter 在**两个状态下是两件事**，这是有意的：待编辑态 Enter = 激活（进编辑 / 点按钮），
+编辑态 Enter = 确认（只提交，不再触发外边那个元素的点击）。
 
-- 键盘导航才亮；**鼠标点击不亮**（`handleKey` / `setKeyboardFocus` 会亮，`release` 不会）。
-  如果环正亮着，鼠标点任何控件也会立刻收掉（`release` 里 `focusRing_ = false`）—— 改用鼠标了
-  就不再需要键盘焦点提示。
-- **2 秒没有操作自动消失**（`kFocusRingIdleSec`，可用 `setFocusRingIdleTime()` 改）：
-  每按一次导航键都会重置计时，所以持续导航时环一直在。
-- 消失不需要宿主定时：`stepAnimations()` 会在熄灭的那一帧把焦点节点 id 放进返回值，
-  宿主照常 `invalidateNode()` 就擦掉了。
-- 文本编辑中不画环（有光标），环的状态由输入框自己的 `:focus` 样式/光标表达。
-- 窗口失焦时宿主调 `renderer.hideFocusRing()`，别把环留在别人的窗口上。
+### Enter / Esc 语义速查
+
+| 键 | 待编辑（Browsing） | 编辑中（Editing） |
+|---|---|---|
+| `Enter` | 输入框 → 进入编辑；按钮等 → `CLICK` | 确认：提交并退出编辑 |
+| `Esc` | 不消费（宿主可以关窗口） | 退出编辑（提交）→ 回到待编辑 |
+
+## 焦点环：虚线 = 待编辑，实线蓝 = 编辑中
+
+焦点环不是"有焦点就一条线"，而是把"现在处于哪个阶段"画出来。每个节点单独判
+（`renderer.focusRingOf(nodeId)` → `None` / `Dashed` / `Solid`）：
+
+| 状态 | 环 | 什么时候 |
+|---|---|---|
+| 待编辑（Browsing） | **虚线** 1px，颜色 = 节点底色的对比色（深底浅线 / 浅底深线） | 键盘选中元素、还没按 Enter |
+| 编辑中（Editing） | **实线** 2px，强调蓝 `kFocusRingEditColor`（#3E8BFF） | 输入框正在编辑（有光标） |
+| 无 | 不画 | 鼠标操作 / 2 秒无操作 / 窗口失焦 / 没有焦点 |
+
+- **线型 + 颜色双编码**：只靠颜色区分对色弱用户不友好，虚线和实线一眼能分。虚线是
+  沿圆角矩形路径按弧长采样出来的（`binui_paint.h` 的 `BuildDashedRoundRing`，三个
+  后端共用同一份几何，只负责 fillLine）。
+- 待编辑环是 `:focus-visible` 语义：键盘导航才亮；**鼠标点击不亮**（`handleKey` /
+  `setKeyboardFocus` 会亮，`release` 不会）。环正亮着时鼠标点控件会立刻收掉。
+- 待编辑环 **2 秒没有操作自动消失**（`kFocusRingIdleSec`，`setFocusRingIdleTime()` 可改）：
+  每按一次导航键都会重置计时；消失不需要宿主定时 —— `stepAnimations()` 会在熄灭的那一帧
+  把焦点节点放进返回值，宿主照常 `invalidateNode()` 就擦掉。
+- **编辑环常亮**：编辑是持续状态，不能 2 秒自己消失（那时用户在打字，环消失会像"焦点丢了"）。
+  退出编辑（Enter/Esc/Tab）后环回到虚线的待编辑态。
+- 窗口失焦时宿主调 `renderer.hideFocusRing()`（编辑中还会 `blur()`），别把环留在别人的窗口上。
 
 `setKeyboardFocus(-1)` / 窗口失焦 / 按 Esc 关窗都会清掉焦点；焦点节点被隐藏、禁用后
 `stepAnimations` 不会重报，宿主按自己的失效逻辑重绘即可。
@@ -87,6 +109,13 @@ app.setImeActiveFn([&] { return renderer.isEditing(); });
 摘掉/挂回发生在每帧的 `renderFrame()` 里（`syncImeContext()`），组件不可见的开关
 不需要宿主自己判断；摘之前会 `cancelImeComposition()`，不会把半截拼音留成结果串。
 不接这一行 = 保持老行为（IME 常挂），此时中文输入法下 WASD 无效，方向键照常。
+
+**组字中的 Esc 归输入法，不归焦点系统。** 实测微软拼音：组字时按 Esc → IME 先发
+`WM_IME_ENDCOMPOSITION` 取消候选，然后不再把 Esc 放行，编辑态原样保留（日志里能看到
+`msg=WM_IME_ENDCOMPOSITION` 后面没有 `keydown vk=27`）。有的输入法会把 Esc 放行，
+外壳为此兜了一道：组字结束 200ms 内到达的那个 Esc 被窗口吞掉一次（`composeEndMs_`），
+再按一次才退出编辑。所以"Esc 取消拼音"和"Esc 退出编辑"不会互相误伤（`BINUI_IME_LOG=1`
+时日志里有 `esc delta=…` 可查）。
 
 ## 宿主接法
 

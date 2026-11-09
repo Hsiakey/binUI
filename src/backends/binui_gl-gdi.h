@@ -262,6 +262,9 @@ private:
     bool imeAttached_ = true;      // 当前 IME 上下文是否挂在窗口上
     // 输入法正在组字：这期间的按键/字符归 IME，不能拿去改我们自己的文本
     bool composing_ = false;
+    // 组字结束时刻（ms）。组字刚结束时输入法放行的那个 Esc 是"取消候选"，
+    // 窗口吞掉一次，避免连编辑态一起退掉（见 WM_KEYDOWN 处注释）。
+    double composeEndMs_ = -1e9;
     // 上一次摆 IME UI 用的客户区坐标（-1 = 还没摆过）。位置没变就不重复摆，
     // 免得每次按键都惊动输入法 UI。
     int imePosX_ = -1, imePosY_ = -1;

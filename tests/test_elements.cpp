@@ -953,6 +953,37 @@ int run() {
         TEST("ring on before click", rr.focusRingVisible());
         rr.dispatchClick(190, 25);
         TEST("mouse click clears keyboard ring", !rr.focusRingVisible() && rr.keyboardNode() >= 0);
+
+        // 焦点环两态：待编辑 = 虚线，编辑中 = 实线（只套正在编辑的输入框）
+        BinUIRenderer rf;
+        TEST("ring style layout loads", rf.loadLayout(ufl.data(), ufl.size()));
+        uint16_t rfIn = rf.getNodes()[1].id, rfBtn = rf.getNodes()[2].id;
+        TEST("no ring by default", rf.focusRingOf(rfIn) == BinUIRenderer::FocusRing::None);
+        rf.setKeyboardFocus(rfIn);
+        TEST("browse ring is dashed", rf.focusRingOf(rfIn) == BinUIRenderer::FocusRing::Dashed);
+        TEST("other node has no ring", rf.focusRingOf(rfBtn) == BinUIRenderer::FocusRing::None);
+        rf.handleKey(0x0D);   // Enter -> 进入编辑
+        TEST("editing ring is solid", rf.focusRingOf(rfIn) == BinUIRenderer::FocusRing::Solid);
+        TEST("editing ring only on input", rf.focusRingOf(rfBtn) == BinUIRenderer::FocusRing::None);
+        TEST("no dashed ring while editing", !rf.focusRingVisible());
+        rf.handleKey(0x1B);   // Esc -> 回到元素焦点
+        TEST("esc exits editing", !rf.isEditing());
+        TEST("esc restores dashed ring", rf.focusRingOf(rfIn) == BinUIRenderer::FocusRing::Dashed);
+
+        // 虚线环几何（binui_paint.h，三端共用）：线段数合理，端点不跑出环矩形
+        PaintSegment segs[kMaxFocusDashSegments];
+        const int dn = BuildDashedRoundRing(10, 10, 120, 40, 8, 6, 4, segs, kMaxFocusDashSegments);
+        TEST("dashed ring segments", dn > 10 && dn <= kMaxFocusDashSegments);
+        bool inBounds = true;
+        float totalLen = 0;
+        for (int i = 0; i < dn; i++) {
+            const PaintSegment& s = segs[i];
+            if (s.x0 < 9.0f || s.x0 > 131.0f || s.y0 < 9.0f || s.y0 > 51.0f) inBounds = false;
+            if (s.x1 < 9.0f || s.x1 > 131.0f || s.y1 < 9.0f || s.y1 > 51.0f) inBounds = false;
+            totalLen += std::fabs(s.x1 - s.x0) + std::fabs(s.y1 - s.y0);
+        }
+        TEST("dashed ring within bounds", inBounds);
+        TEST("dashed ring covers most of perimeter", totalLen > 0.45f * (120.0f + 40.0f) * 2.0f);
     }
 
     // 10. flexbox（编译期布局）与滚动容器

@@ -2367,31 +2367,45 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
             // 边框（v13）：画在节点内侧，四边可不同宽，压在底色之上
             drawNodeBorder();
 
-            if (renderer.focusRingVisible() && renderer.isKeyboardFocused(node.id)) {
-                // 焦点环 = :focus-visible 语义：键盘导航才画，鼠标点击不画；2 秒无操作
-                // 自动熄灭（渲染器管计时）。编辑中不画环 —— 有光标就够。
-                // 焦点环必须跟随节点自己的圆角：以前写死半径 10、内缩 2，
-                // 圆角 8 的按钮上就会套出一个半径不同的环，看着像"双线框"。
-                // 颜色按节点底色取对比色：写死白色在浅色主题上（白底白环）等于没画。
-                uint32_t ringCol = textCol;
-                if (((dc >> 24) & 0xFFu) >= 0x80u) {
-                    const float bgLum = (0.2126f * static_cast<float>((dc >> 16) & 0xFFu) +
-                                         0.7152f * static_cast<float>((dc >> 8) & 0xFFu) +
-                                         0.0722f * static_cast<float>(dc & 0xFFu)) / 255.0f;
-                    if (bgLum > 0.7f) ringCol = ScaleAlpha(0xFF1A1A1Au, opacity);
-                }
-                const float fr = effRadius > 2 ? static_cast<float>(effRadius) - 1.0f : 0.0f;
-                const float fx = static_cast<float>(x) + 1.0f, fy = static_cast<float>(y) + 1.0f;
-                const float fw = static_cast<float>(nw) - 2.0f, fh = static_cast<float>(nh) - 2.0f;
-                if (fr >= 1.0f) {
-                    gfx.strokeRounded(fx, fy, fw, fh, fr, 1.0f, ringCol);
-                } else {
-                    // 直角节点不能用 strokeRounded：它 r<=0 时会退化成整块填充，
-                    // 焦点框会把节点涂白。这里直接画四条 1px 线。
-                    gfx.fillRect(fx, fy, fw, 1.0f, ringCol);
-                    gfx.fillRect(fx, fy + fh - 1.0f, fw, 1.0f, ringCol);
-                    gfx.fillRect(fx, fy, 1.0f, fh, ringCol);
-                    gfx.fillRect(fx + fw - 1.0f, fy, 1.0f, fh, ringCol);
+            // 焦点环两态：待编辑 = 虚线 + 对比色（2 秒无操作自动消失）；
+            // 编辑中 = 实线 + 强调蓝（常亮）。线型 + 颜色双编码，见 docs/keyboard_focus.md。
+            {
+                const BinUIRenderer::FocusRing ring = renderer.focusRingOf(node.id);
+                if (ring != BinUIRenderer::FocusRing::None) {
+                    // 焦点环必须跟随节点自己的圆角：以前写死半径 10、内缩 2，
+                    // 圆角 8 的按钮上就会套出一个半径不同的环，看着像"双线框"。
+                    const bool editing = ring == BinUIRenderer::FocusRing::Solid;
+                    uint32_t ringCol = textCol;
+                    if (editing) {
+                        ringCol = ScaleAlpha(BinUIRenderer::kFocusRingEditColor, opacity);
+                    } else if (((dc >> 24) & 0xFFu) >= 0x80u) {
+                        // 待编辑环按节点底色取对比色：写死白色在浅色主题上（白底白环）等于没画
+                        const float bgLum = (0.2126f * static_cast<float>((dc >> 16) & 0xFFu) +
+                                             0.7152f * static_cast<float>((dc >> 8) & 0xFFu) +
+                                             0.0722f * static_cast<float>(dc & 0xFFu)) / 255.0f;
+                        if (bgLum > 0.7f) ringCol = ScaleAlpha(0xFF1A1A1Au, opacity);
+                    }
+                    const float fr = effRadius > 2 ? static_cast<float>(effRadius) - 1.0f : 0.0f;
+                    const float fx = static_cast<float>(x) + 1.0f, fy = static_cast<float>(y) + 1.0f;
+                    const float fw = static_cast<float>(nw) - 2.0f, fh = static_cast<float>(nh) - 2.0f;
+                    if (editing) {
+                        if (fr >= 1.0f) {
+                            gfx.strokeRounded(fx, fy, fw, fh, fr, 2.0f, ringCol);
+                        } else {
+                            gfx.fillLine(fx, fy, fx + fw, fy, 2.0f, ringCol);
+                            gfx.fillLine(fx, fy + fh, fx + fw, fy + fh, 2.0f, ringCol);
+                            gfx.fillLine(fx, fy, fx, fy + fh, 2.0f, ringCol);
+                            gfx.fillLine(fx + fw, fy, fx + fw, fy + fh, 2.0f, ringCol);
+                        }
+                    } else {
+                        // 虚线环：沿圆角路径取线段（几何在 binui_paint.h，三端共用）
+                        PaintSegment segs[kMaxFocusDashSegments];
+                        const int n = BuildDashedRoundRing(fx, fy, fw, fh, fr, 6.0f, 4.0f,
+                                                           segs, kMaxFocusDashSegments);
+                        for (int si = 0; si < n; si++)
+                            gfx.fillLine(segs[si].x0, segs[si].y0, segs[si].x1, segs[si].y1,
+                                         1.0f, ringCol);
+                    }
                 }
             }
         }
@@ -2835,6 +2849,7 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
     switch (msg) {
         case WM_IME_ENDCOMPOSITION: {
             app->composing_ = false;
+            app->composeEndMs_ = NowMs();   // 记时刻：紧跟其后的 Esc 是"取消候选"，不是"退出编辑"
             ImeLog("msg=WM_IME_ENDCOMPOSITION");
             // 交给 DefWindowProc 收尾。
             //
@@ -2920,6 +2935,17 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // 原样当结果串提交（输 zhongguo 按回车 → 输入框里躺着 "zhongguo"
             // 而不是"中国"，就是这么来的）。
             ImeLog("  keydown vk=%d composing=%d", static_cast<int>(wParam), (int)app->composing_);
+            // 组字刚结束时输入法会把用户的 Esc 原样放行：这一下是"取消候选"，不是
+            // "退出编辑"。吞掉它（只吞一次、且只吞刚结束组字那一小段时间内的），
+            // 否则编辑态会连同候选窗一起被 Esc 退掉 —— 用户按 Esc 取消拼音，却把
+            // 整个输入状态也丢了。再按一次 Esc 才退出编辑。
+            if (wParam == VK_ESCAPE)
+                ImeLog("  esc delta=%.1fms", NowMs() - app->composeEndMs_);
+            if (wParam == VK_ESCAPE && NowMs() - app->composeEndMs_ < 200.0) {
+                app->composeEndMs_ = -1e9;
+                ImeLog("  keydown ESC (组字刚结束，这一下归输入法，吞掉)");
+                return 0;
+            }
             if (app->composing_ && ImeComposing(hwnd)) {
                 ImeLog("  keydown vk=%d (组字中，不归我们处理)", static_cast<int>(wParam));
                 break;   // 交给 DefWindowProc：IME 灌进来的 VK_PROCESSKEY 要在这里走完
@@ -3158,6 +3184,7 @@ void BinUIAppGLGdi::invalidateAll() {
 
 void BinUIAppGLGdi::cancelImeComposition() {
     composing_ = false;
+    composeEndMs_ = -1e9;   // 程序主动取消不算"用户按 Esc 取消候选"，别吞后续 Esc
     imePosX_ = imePosY_ = -1;
     HWND win = static_cast<HWND>(hwnd_);
     if (!win) return;
