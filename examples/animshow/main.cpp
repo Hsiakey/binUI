@@ -53,6 +53,12 @@ int main(int argc, char* argv[]) {
                          wd.present && wd.transparent(),
                          wd.title.c_str());
 
+    // 标题栏三颗控制按钮（components/titlebar.bum.xml 里的 id：win-min / win-max / win-close）。
+    // 组件只负责外观，动作归宿主：最小化 / 最大化·还原 / 关闭窗口。
+    const uint16_t idWinMin   = renderer.findNodeByName("win-min");
+    const uint16_t idWinMax   = renderer.findNodeByName("win-max");
+    const uint16_t idWinClose = renderer.findNodeByName("win-close");
+
     auto findNode = [&](uint16_t id) -> const binui::BinUIRenderer::NodeInfo* {
         for (const auto& n : renderer.getNodes())
             if (n.id == id) return &n;
@@ -105,9 +111,6 @@ int main(int argc, char* argv[]) {
         if (id >= 0) {
             for (const auto& n : renderer.getNodes()) {
                 if (n.id != (uint16_t)id) continue;
-                if (n.text == "\xE2\x88\x92") app.minimize();
-                else if (n.text == "\xE2\x96\xA1") app.maximize();
-                else if (n.text == "\xE2\x9C\x95") app.requestExit();
                 else if (n.text.find("\xE2\x86\xBB") != std::string::npos) {  // ↻ 重播*
                     renderer.restartAnimations();
                     app.invalidateAll();
@@ -169,8 +172,11 @@ int main(int argc, char* argv[]) {
     app.setResizeFn([&](int w, int h) { winW = w; winH = h; renderer.setSize(w, h); });
 
     renderer.setEventCallback([&](const Event& ev) {
-        if (ev.type == EventType::CLICK)
-            std::printf("[animshow] Click: node=%u (%.1f, %.1f)\n", ev.nodeId, ev.click.x, ev.click.y);
+        if (ev.type != EventType::CLICK) return;
+        if (ev.nodeId == idWinMin)   { app.minimize(); return; }
+        if (ev.nodeId == idWinMax)   { app.maximize(); return; }
+        if (ev.nodeId == idWinClose) { app.requestExit(); return; }
+        std::printf("[animshow] Click: node=%u (%.1f, %.1f)\n", ev.nodeId, ev.click.x, ev.click.y);
     });
 
     std::printf("[animshow] binUI 动画实验室 (OpenGL 3.3)\n");

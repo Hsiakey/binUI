@@ -60,6 +60,19 @@ int main(int argc, char* argv[]) {
                          wd.present && wd.transparent(),
                          wd.title.c_str());
 
+    // 标题栏三颗控制按钮（components/titlebar.bum.xml 里的 id：win-min / win-max / win-close）。
+    // 组件只负责外观，动作归宿主：最小化 / 最大化·还原 / 关闭窗口。
+    const uint16_t idWinMin   = renderer.findNodeByName("win-min");
+    const uint16_t idWinMax   = renderer.findNodeByName("win-max");
+    const uint16_t idWinClose = renderer.findNodeByName("win-close");
+
+    renderer.setEventCallback([&](const Event& ev) {
+        if (ev.type != EventType::CLICK) return;
+        if (ev.nodeId == idWinMin)   { app.minimize(); return; }
+        if (ev.nodeId == idWinMax)   { app.maximize(); return; }
+        if (ev.nodeId == idWinClose) { app.requestExit(); return; }
+    });
+
     auto findNode = [&](uint16_t id) -> const binui::BinUIRenderer::NodeInfo* {
         for (const auto& n : renderer.getNodes())
             if (n.id == id) return &n;
@@ -121,9 +134,6 @@ int main(int argc, char* argv[]) {
         if (id >= 0) {
             for (const auto& n : renderer.getNodes()) {
                 if (n.id != (uint16_t)id) continue;
-                if (n.text == "\xE2\x88\x92") app.minimize();
-                else if (n.text == "\xE2\x96\xA1") app.maximize();
-                else if (n.text == "\xE2\x9C\x95") app.requestExit();
                 break;
             }
             invalidateNode((uint16_t)id);

@@ -50,6 +50,12 @@ int main(int argc, char* argv[]) {
     app.setWindowOptions(wd.present ? wd.resizable() : true, wd.present ? wd.aspect : 0,
                          wd.present && wd.transparent(), wd.present ? wd.title.c_str() : "自适应布局");
 
+    // 标题栏三颗控制按钮（components/titlebar.bum.xml 里的 id：win-min / win-max / win-close）。
+    // 组件只负责外观，动作归宿主：最小化 / 最大化·还原 / 关闭窗口。
+    const uint16_t idWinMin   = renderer.findNodeByName("win-min");
+    const uint16_t idWinMax   = renderer.findNodeByName("win-max");
+    const uint16_t idWinClose = renderer.findNodeByName("win-close");
+
     uint16_t idStatus = renderer.findNodeByName("status");
     if (!idStatus) std::fprintf(stderr, "[flexshow] 布局里找不到 status\n");
     int winW = width, winH = height;   // 当前窗口尺寸（状态栏文案用；resize 时更新）
@@ -75,6 +81,9 @@ int main(int argc, char* argv[]) {
             return;
         }
         if (ev.type != EventType::CLICK) return;
+        if (ev.nodeId == idWinMin)   { app.minimize(); return; }
+        if (ev.nodeId == idWinMax)   { app.maximize(); return; }
+        if (ev.nodeId == idWinClose) { app.requestExit(); return; }
         const std::string* label = nullptr;
         bool isButton = false;
         for (const auto& n : renderer.getNodes()) {

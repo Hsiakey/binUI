@@ -6,6 +6,39 @@
 
 ## [Unreleased]
 
+### 示例 — 标题栏的 − □ ✕ 三颗按钮全部接线，固定布局示例补 `ui_scale="proportional"`
+
+`components/titlebar.bum.xml` 一直只有外观，动作归宿主；之前 8 个示例里：
+`buttonshow` / `flexshow` 完全没接，其余几个是按**字形文本**匹配（`n.text == "−"`）接的 —— 改个字号、
+换成别的图标就悄悄失效，而且它挂在 release 回调里，和 CLICK 各走一半。现在统一改成**按组件声明的
+id** 接（`idmin`/`idmax`/`idclose` 默认 `win-min`/`win-max`/`win-close`）：
+
+```cpp
+const uint16_t idWinMin   = renderer.findNodeByName("win-min");
+const uint16_t idWinMax   = renderer.findNodeByName("win-max");
+const uint16_t idWinClose = renderer.findNodeByName("win-close");
+renderer.setEventCallback([&](const Event& ev) {
+    if (ev.type != EventType::CLICK) return;
+    if (ev.nodeId == idWinMin)   { app.minimize(); return; }
+    if (ev.nodeId == idWinMax)   { app.maximize(); return; }   // 最大化 / 还原
+    if (ev.nodeId == idWinClose) { app.requestExit(); return; }
+});
+```
+
+顺带解决"最大化之后缩在左上角"：固定像素布局的 7 个示例加 `ui_scale="proportional"`，
+按 □ 最大化时整棵节点树按「新窗口 ÷ 设计尺寸」缩放，而不是留一片空白。`window_resize="disable"`
+仍然生效（不能拖边），两者不冲突。
+
+验收（真机，逐个示例点按钮）：
+
+| 示例 | − 最小化 | □ 最大化 / 还原 | ✕ 关闭 |
+|---|---|---|---|
+| animshow / buttonshow / cubedemo / texturedemo | iconic=True | 2560×1440 → 原尺寸 | 进程退出 |
+| features（900×932，纵横比不同） | iconic=True | 2560×1440 → 原尺寸（x/y 分别缩放） | 进程退出 |
+| fontshow / svgdemo / flexshow | iconic=True | 2560×1440 → 原尺寸 | 进程退出 |
+
+`make all` 0 警告；`check_examples` 11 个 UI 0 问题。
+
 ### 修复 — column flex 里 `flex:1` 的"撑满剩余高度"塌成内容高
 
 `<div style="display:flex;flex-direction:column">` 里写 `flex:1` 的子容器，高度**位置**按剩余空间

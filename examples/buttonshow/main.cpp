@@ -46,6 +46,12 @@ int main(int argc, char* argv[]) {
     app.setWindowOptions(wd.present ? wd.resizable() : true, wd.present ? wd.aspect : 0,
                          wd.present && wd.transparent(), wd.present ? wd.title.c_str() : "binUI · 按钮样式");
 
+    // 标题栏三颗控制按钮（components/titlebar.bum.xml 里的 id：win-min / win-max / win-close）。
+    // 组件只负责外观，动作归宿主：最小化 / 最大化·还原 / 关闭窗口。
+    const uint16_t idWinMin   = renderer.findNodeByName("win-min");
+    const uint16_t idWinMax   = renderer.findNodeByName("win-max");
+    const uint16_t idWinClose = renderer.findNodeByName("win-close");
+
     auto invalidateNode = [&](uint16_t id) {
         if (id == 0) return;
         float bx, by, bw, bh;
@@ -62,6 +68,9 @@ int main(int argc, char* argv[]) {
     // ---- 点击：鼠标释放与键盘 Enter/Space 走同一条 CLICK 事件 ----
     renderer.setEventCallback([&](const Event& ev) {
         if (ev.type != EventType::CLICK) return;
+        if (ev.nodeId == idWinMin)   { app.minimize(); return; }
+        if (ev.nodeId == idWinMax)   { app.maximize(); return; }
+        if (ev.nodeId == idWinClose) { app.requestExit(); return; }
 
         const std::string* label = nullptr;
         bool isButton = false;

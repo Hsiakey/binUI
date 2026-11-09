@@ -4,6 +4,11 @@
 （页面底 `#F4F7FC` / 白卡片 + 1px 边框 / 主字 `#1F2A37` / 次字 `#66768C` /
 主色 `#3E8BFF`），并且都用 `components/` 的标准标题栏。
 
+**标题栏三颗按钮**（`− □ ✕`）在所有示例里都接线了：`win-min` → `app.minimize()`、
+`win-max` → `app.maximize()`（最大化/还原）、`win-close` → `app.requestExit()`。组件只画外观，
+动作必须由外壳按 id 接（别按字形文本匹配，改个字号/图标就断了）。固定布局的示例额外写了
+`ui_scale="proportional"`：窗口不能拖边，但按 □ 最大化时整页会等比放大，不会缩在左上角。
+
 **窗口尺寸分两类**：除 `flexshow` 外的 7 个示例都是**固定像素布局**（绝对定位排版），
 所以统一写 `<app_window … window_resize="disable">` —— 能拖边但没有重排能力，拖了只会错位；
 `flexshow` 是唯一开窗可缩放的示例（百分比 / flex 自适应），用来验证 resize 实时重排。
