@@ -364,10 +364,15 @@ struct PaintSegment {
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
 };
 
-constexpr int kMaxFocusDashSegments = 96;
+constexpr int kMaxFocusDashSegments = 256;
 
 // x/y/w/h 为焦点环内缩后的矩形，radius 为圆角半径（0 = 直角）。
 // dash/gap 是实线段长与间隔（像素）；返回线段数。
+//
+// 段数上限是"保险丝"，不是"画到一半就停"：`flex:1` 拉满窗口的输入框周长能到两三千
+// 像素，固定 6px 实线 / 4px 间隔要画一两百段，上限太小就会只剩上半圈（真踩过：
+// flexshow 800 多像素宽的搜索框只画出上边和右边）。所以超限时按周长把实线和间隔
+// 等比拉长，整圈一定画完；正常尺寸下虚线还是 6/4。
 inline int BuildDashedRoundRing(float x, float y, float w, float h, float radius,
                                 float dash, float gap,
                                 PaintSegment* out, int cap = kMaxFocusDashSegments) {
@@ -428,9 +433,11 @@ inline int BuildDashedRoundRing(float x, float y, float w, float h, float radius
     };
 
     int n = 0;
-    const float step = dash + gap;
+    // 段数超上限：等比拉长实线/间隔，保证整圈画完（见函数头注释）
+    const float step = std::max(dash + gap, total / static_cast<float>(cap));
+    const float dashLen = step * dash / (dash + gap);
     for (float s = 0.0f; s < total && n < cap; s += step) {
-        float s1 = s + dash;
+        float s1 = s + dashLen;
         if (s1 > total) s1 = total;
         float x0, y0, x1, y1;
         pointAt(s, x0, y0);

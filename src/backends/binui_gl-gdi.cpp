@@ -1584,24 +1584,32 @@ void BinUIGLGdi::fillRounded(float x, float y, float w, float h, float radius, u
 
 void BinUIGLGdi::strokeRounded(float x, float y, float w, float h, float radius,
                             float thickness, uint32_t color) {
-    (void)thickness;
     if (!impl_->ready || w <= 0 || h <= 0) return;
     int r = static_cast<int>(radius);
     r = std::max(0, std::min(r, static_cast<int>(std::min(w, h) / 2)));
     if (r <= 0) { fillRect(x, y, w, h, color); return; }
 
-    RoundTex& rt = impl_->roundFor(r, true);
-    if (!rt.tex) { fillRect(x, y, w, h, color); return; }
-
-    PaintQuad q[9];
-    const int n = BuildRoundedNineSlice(x, y, w, h, static_cast<float>(r), rt.t, q, 9);
-    if (n <= 0) { fillRect(x, y, w, h, color); return; }
-
+    // 线宽：以前这里 (void)thickness 把参数丢了，所有描边都是 1px（"2px 编辑环"实际
+    // 只有 1px）。stroke 纹理本身就是 1px 的环，所以按厚度画多层同心圆角环叠出粗描边：
+    // 每往里一层缩 1px、半径减 1。thickness<=1 时只有一层，和旧行为一致。
+    int layers = static_cast<int>(std::lround(std::max(1.0f, thickness)));
+    if (layers < 1) layers = 1;
     Premult(color);
-    impl_->curTex = rt.tex;
-    for (int i = 0; i < n; i++)
-        impl_->emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
-                        q[i].u0, q[i].v0, q[i].u1, q[i].v1, color);
+    for (int k = 0; k < layers; k++) {
+        const float ex = x + k, ey = y + k;
+        const float ew = w - 2.0f * k, eh = h - 2.0f * k;
+        if (ew <= 1.0f || eh <= 1.0f) break;
+        const int rr = std::max(1, r - k);
+        RoundTex& rt = impl_->roundFor(rr, true);
+        if (!rt.tex) break;
+        PaintQuad q[9];
+        const int n = BuildRoundedNineSlice(ex, ey, ew, eh, static_cast<float>(rr), rt.t, q, 9);
+        if (n <= 0) break;
+        impl_->curTex = rt.tex;
+        for (int i = 0; i < n; i++)
+            impl_->emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
+                            q[i].u0, q[i].v0, q[i].u1, q[i].v1, color);
+    }
     impl_->curTex = impl_->whiteTex;
 }
 

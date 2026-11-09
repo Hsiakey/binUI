@@ -79,7 +79,8 @@ Enter 在**两个状态下是两件事**，这是有意的：待编辑态 Enter 
 也容易混。线型 + 颜色双编码同时对色弱用户友好。
 
 - 虚线沿圆角矩形路径按弧长采样（`binui_paint.h` 的 `BuildDashedRoundRing`），三个后端
-  共用同一份几何、各自 `fillLine`。
+  共用同一份几何、各自 `fillLine`。**宽输入框（flex 拉满窗口）会按周长自动拉长虚线**，
+  不会因为段数上限把环画成半圈；编辑环 2px 由 `strokeRounded` 的多层同心环叠出来。
 - 虚线和普通实线（待编辑 / 普通焦点）都是 `:focus-visible` 语义：键盘导航才亮；**鼠标点击不亮**
   （`handleKey` / `setKeyboardFocus` 会亮，`release` 不会）。环正亮着时鼠标点控件会立刻收掉。
 - 这两态 **2 秒没有操作自动消失**（`kFocusRingIdleSec`，`setFocusRingIdleTime()` 可改）：

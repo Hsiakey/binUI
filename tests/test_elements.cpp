@@ -987,6 +987,39 @@ int run() {
         }
         TEST("dashed ring within bounds", inBounds);
         TEST("dashed ring covers most of perimeter", totalLen > 0.45f * (120.0f + 40.0f) * 2.0f);
+
+        // 宽输入框（flex:1 拉满窗口）周长很长：段数撞上限时也要整圈画完，
+        // 不能只剩上半圈（flexshow 800+px 搜索框踩过这个坑）
+        PaintSegment wide[kMaxFocusDashSegments];
+        const int wn = BuildDashedRoundRing(0, 0, 1200, 40, 8, 6, 4, wide, kMaxFocusDashSegments);
+        TEST("wide dashed ring capped", wn > 20 && wn <= kMaxFocusDashSegments);
+        bool sawBottom = false, sawLeft = false, sawRight = false;
+        float minX = 1e9f, maxX = -1e9f, maxY = -1e9f;
+        for (int i = 0; i < wn; i++) {
+            const PaintSegment& s = wide[i];
+            if (s.y0 > 38.0f || s.y1 > 38.0f) sawBottom = true;
+            if (s.x0 > 1198.0f || s.x1 > 1198.0f) sawRight = true;
+            if (s.x0 < 2.0f || s.x1 < 2.0f) sawLeft = true;
+            minX = std::min(minX, std::min(s.x0, s.x1));
+            maxX = std::max(maxX, std::max(s.x0, s.x1));
+            maxY = std::max(maxY, std::max(s.y0, s.y1));
+        }
+        TEST("wide dashed ring covers bottom", sawBottom && maxY > 38.0f);
+        TEST("wide dashed ring covers left and right", sawLeft && sawRight);
+        TEST("wide dashed ring spans full width", minX < 8.0f && maxX > 1192.0f);
+
+        // 超宽（最大化窗口 2500+px）：段数撞上限后按周长拉长实线，仍要整圈画完
+        PaintSegment ultra[kMaxFocusDashSegments];
+        const int un = BuildDashedRoundRing(0, 0, 3000, 40, 8, 6, 4, ultra, kMaxFocusDashSegments);
+        TEST("ultra-wide dashed ring capped", un > 20 && un <= kMaxFocusDashSegments);
+        bool ultraBottom = false, ultraLeft = false, ultraRight = false;
+        for (int i = 0; i < un; i++) {
+            const PaintSegment& s = ultra[i];
+            if (s.y0 > 38.0f || s.y1 > 38.0f) ultraBottom = true;
+            if (s.x0 > 2998.0f || s.x1 > 2998.0f) ultraRight = true;
+            if (s.x0 < 2.0f || s.x1 < 2.0f) ultraLeft = true;
+        }
+        TEST("ultra-wide dashed ring covers whole outline", ultraBottom && ultraLeft && ultraRight);
     }
 
     // 10. flexbox（编译期布局）与滚动容器
