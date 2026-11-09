@@ -310,9 +310,10 @@ HTML5 编译规则：
   （不会变成标签），`{{名=默认值}}` 在单独编 `.bum` 时取默认值；组件内可再引用组件（深度上限 8）；
   组件内相对资源路径自动改写成宿主相对路径，图片清单随布局写出（v12 资源段）。
   **组件自带的 `<style>` 是全局的**（可被宿主主题化，也需类名前缀约定），参数化样式请写内联。
-  **目录结构**：`src` 相对"写出这个 `<use>` 的文件"解析，摆哪都行；但 `external` 组件和组件图片
-  必须能跟着 `.bui` 一起搬 —— 推荐 `.bui` 旁边一个 `components/`，让源码树与运行树相对布局镜像。
-  完整契约（含推荐目录结构）见 [docs/components.md](docs/components.md)。
+  **目录**：`src` 相对"写出这个 `<use>` 的文件"解析，所以**全放一个目录就行**（`main.bui`、
+  `main.bui.html`、`button.bum`/`button.bum.html`、图片都搁一起）；只发 `.bum` 还是只发源码随你，
+  两样都给则二进制优先。唯一要守的是：`external` 外挂组件和组件图片别挪到别处 —— 它们的相对
+  路径编译期按源码文件、运行期按 `.bui` 解析。详见 [docs/components.md](docs/components.md) 第十节。
 
 - **长度单位**：`px`（可省略）与 `%` 之外，还支持 `em`（相对该元素 `font-size`）、`rem`（相对根字号，默认 14）、`vw`/`vh`（相对**编译期**视口；不随运行时 resize 重排，需跟随请用 `%`）。**不支持的单位**（`pt/cm/mm/in/ex/ch/vmin/vmax`）与**函数值**（`calc/min/max/clamp`）会**打编译警告并回退默认值**，不再静默当成 px（警告同时收集在 `CompileResult::warnings`）。
 - 颜色：支持 CSS **命名色**（完整 147 色 + `transparent`）、`#RGB`/`#RRGGBB`、`#ARGB`/`#AARRGGBB`（**8 位按 binUI 约定的 AARRGGBB**，与 CSS 的 `#RRGGBBAA` 相反，首次使用会警告）、`rgb()/rgba()`（逗号或空格分隔、通道可写百分比、支持现代 `rgb(0 0 255 / 50%)`）、`hsl()/hsla()`。`!important` 会被剥离。无法识别的颜色**保留默认色并警告**（以前是静默变白/变透明）。

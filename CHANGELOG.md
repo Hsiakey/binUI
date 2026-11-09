@@ -6,18 +6,18 @@
 
 ## [Unreleased]
 
-### 新增 — 文档：推荐的组件目录结构（"运行树必须镜像"有实测数据）
+### 新增 — 文档：目录结构（一个目录全放一起；附"别把组件挪走"的实测）
 
-- `docs/components.md` 新增第十节「目录结构（推荐）」：三种摆法 —— 单目录 / `components/`
-  子目录 / `ui/` 源码 + `binui/` 自包含发行目录，并给出三条硬规则。
-- 说清那条真正会咬人的约束：**相对路径最终相对宿主 UI 文件解析**。编译期宿主是
-  `main.html`，运行期宿主是 `main.bui`（`ex::MountAll(renderer, DirOf(uiPath), …)`）。
-  两者不镜像、组件又没跟着搬时，`external` 外挂组件会静默挂不上。实测三组：
-  不镜像 `mounted=0 failed=1`；按原相对位置拷进 `bin/components/` → `mounted=1`；
-  挪到 `bin/../assets/components/` → 又 `failed=1`。**编译期内联的组件不受影响**
-  （已并进 `.bui`，运行期一个文件都不读）。
-- `README.md`、`components/README.md`、`docs/README.md` 同步一句指引；
-  原「十、已知限制」顺延为十一。
+- `docs/components.md` 新增第十节「目录结构」：`main.bui` + `main.bui.html` + `button.bum.html`
+  + 图片**全放一个目录**就能跑（`input.bui.html` 这种命名与产物对称，`binui_compile` 也按这个
+  约定推默认输出名）。实测：`main.bui.html` 编译出 `main.bui` 810 字节，同级引用
+  `<use src="button.bum.html">`、裸名字 `<use src="button.bum">`、外挂
+  `<use src="dock.bum.html" external>` 全部成立，`MountAll(目录)` → `mounted=1 failed=0`。
+- 分发随意：只给 `.bum`（保护源码）/ 只给 `.bum.html`（可改、就地编译）/ 都给（二进制优先，
+  源码更新时改用源码并告警）。编译期内联的组件运行期一个文件都不读。
+- 唯一约束写清楚了：相对路径最终按**宿主 UI 文件**解析（编译期源码文件、运行期 `.bui`），
+  所以 `external` 组件和组件图片别挪到别处（实测不镜像 `failed=1`、按原相对位置放回 `mounted=1`）。
+- `README.md`、`components/README.md`、`docs/README.md` 同步一句指引；原「十、已知限制」顺延为十一。
 
 ### 变更 — 组件源码统一改名为 `.bum.html`（标准组件库 11 个 + examples/features 3 个）
 

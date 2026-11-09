@@ -215,96 +215,56 @@ renderer.setImageOrder(renderer.imagePaths());
 renderer.loadResources(imgs);
 ```
 
-## 十、目录结构（推荐）
+## 十、目录结构
 
-binUI 对目录**没有硬性要求**：`src` 一律相对"写出这个 `<use>` 的文件"解析，嵌套组件再相对
-组件自己。工程怎么摆都行 —— 但有一条约束会直接决定成败：
-
-> **相对路径最终相对宿主 UI 文件解析。** 编译期宿主是 `main.html`，运行期宿主是 `main.bui`
-> （`ex::MountAll(renderer, DirOf(uiPath), …)`）。两者不在同一目录、而组件又没跟着走时，
-> `external` 外挂组件会**挂不上**：
-
-```
-A  源码树 + 运行目录 bin/，bin/ 下没有 components/
-     [binui] 外挂组件缺失：components/dock.bum.html（锚点 #1）    mounted=0 failed=1
-B  组件按原相对位置拷进 bin/components/
-     mounted=1 failed=0
-C  组件挪到 bin/../assets/components/
-     [binui] 外挂组件缺失：components/dock.bum.html（锚点 #1）    mounted=0 failed=1
-```
-
-（**编译期内联**的组件不受影响：它们已经并进 `.bui`，运行期一个文件都不读。所以只有
-`external` 和组件里的图片/视频路径会在意目录。）
-
-结论：**让"源码树"和"运行树"的相对布局镜像**，最省事。
-
-### 最小可用：单个目录
+**一句话：全放一个目录就行。** `src` 一律相对"写出这个 `<use>` 的文件"解析，同级引用最省事：
 
 ```
 myapp/
-├── main.html            # 源码，改这个
-├── main.bui             # 构建产物（loadLayout 吃这个）
-├── button.bum.html      # 组件源码
-└── button.bum           # 可选：编好的二进制（存在时优先，可保护源码/加速启动）
+├── main.bui.html       # 主结构源码（叫 main.html 也行，都认）
+├── main.bui            # 构建产物：binui_compile main.bui.html
+├── button.bum.html     # 组件源码：命名与产物对称（xxx.bum ↔ xxx.bum.html）
+├── button.bum          # 可选：编好的组件二进制（有就优先）
+├── panel.bum.html
+└── icon.png            # 图片也搁旁边
 ```
 
 ```html
-<use src="button.bum.html" x="16" y="44" w="132" label="确定"/>
+<!-- main.bui.html -->
+<use src="button.bum.html" x="16" y="20" w="160" label="确定"/>
+<use src="button.bum"      x="16" y="70" w="160" label="裸名字也能找到"/>  <!-- 自动探测 -->
+<use src="dock.bum.html" external x="16" y="120" w="200"/>                <!-- 运行期挂载 -->
 ```
 
-### 组件多起来：`components/` 子目录
+这套实测跑通：编译产出 `main.bui` 810 字节，`MountAll(目录)` → `mounted=1 failed=0`，
+两个按钮和外挂组件的坐标都对。
+
+### 分发随你
+
+| 你想 | 就给 | 说明 |
+|---|---|---|
+| 保护源码 | 只给 `button.bum` | 二进制，发行版该给这个 |
+| 让人能改 | 只给 `button.bum.html` | 运行期就地编译（首次启动慢一点） |
+| 两样都给 | 都放 | **二进制优先**；源码 mtime 更新时改用源码并告警（改完保存就见效） |
+
+默认（`<use src="x.bum.html">` 不写 `external`）组件是**编译期内联**进 `.bui` 的，
+此时运行期一个组件文件都不需要 —— 上面这张表只对 `external` 外挂组件有意义（皮肤 / 插件 / 按需加载）。
+
+### 唯一要守的：别把组件挪到别处
+
+相对路径最终按**宿主 UI 文件**解析：编译期是 `main.bui.html`（或 `main.html`），运行期是
+`main.bui`（`ex::MountAll(renderer, DirOf(uiPath), …)`）。同级放 = 两边都成立，什么都不用管。
+真要拆目录，就保持镜像：
 
 ```
-myapp/
-├── main.html
-├── main.bui
-└── components/
-    ├── button.bum.html
-    ├── panel.bum.html
-    └── icon.png          # 组件用到的图片也放这里（编译期会改写成 components/icon.png）
+A  main.bui 放 bin/，组件留在 assets/            mounted=0 failed=1
+   [binui] 外挂组件缺失：components/dock.bum.html（锚点 #1）
+B  组件按原相对位置放进 bin/components/          mounted=1 failed=0
 ```
 
-```html
-<use src="components/button.bum.html" x="16" y="44" w="132" label="确定"/>
-```
-
-编译期写 `components/…`，运行期还是 `components/…` —— **同一个相对路径两边都成立**，不用改。
-
-### 分发布局：`ui/` 源码 + `binui/` 自包含运行目录
-
-源码和发行物分开，发给用户（或打包进安装包）的只有 `binui/`：
-
-```
-myapp/
-├── ui/                          # 源码树（不进发行包）
-│   ├── main.html
-│   └── components/
-│       ├── button.bum.html
-│       └── dock.bum.html        # external 外挂的那一个
-└── binui/                       # 运行目录：整个目录能整体拷走、整体搬盘
-    ├── main.bui
-    └── components/              # 与源码树镜像（相对 main.bui 的位置一模一样）
-        ├── button.bum.html      # 源码也行：就地编译（开发期友好）
-        ├── button.bum           # 或二进制（优先，发行版该给这个）
-        └── dock.bum
-```
-
-`ui/main.html` 里照旧写 `src="components/…"`。编成 `binui/main.bui` 后，运行期从
-`binui/components/…` 找 —— 因为两边都是"UI 文件旁边的 `components/`"，路径不用重写：
-
-```cpp
-renderer.loadLayout(bytes.data(), bytes.size());
-binui::ex::MountAll(renderer, binui::ex::DirOf(uiPath), renderer.layoutBytes());
-// uiPath = "…/binui/main.bui" → 组件从 binui/components/ 找
-```
-
-### 三条规则
-
-1. **`.bui` 和它的组件要能一起搬**：相对关系写死在布局里（含 `external` 的组件引用段），
-   拆开就断。别把 `.bui` 放 `bin/` 而组件留 `assets/`。
-2. **`external` 组件必须相对 `.bui` 可达**：编译期相对 `.html`，运行期相对 `.bui`。
-3. **组件的图片/视频跟着组件目录走**：编译期会被改写成宿主相对路径（见上一节），
-   运行期按同一个相对路径找文件。
+组件多到一屏放不下，就开个 `components/` 子目录（`src="components/panel.bum.html"`）——
+原则不变：**UI 文件和能找到组件的相对路径，编译期和运行期一致**。组件的图片/视频也照着
+这个相对位置放（编译期会被改写成宿主相对路径，见上一节）。
 
 ## 十一、已知限制
 
