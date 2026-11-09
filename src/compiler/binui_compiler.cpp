@@ -4800,6 +4800,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             sp.relW = svgLineX2 - svgLineX1;
             sp.relH = svgLineY2 - svgLineY1;
         }
+        // 元素级 ui_scale="fixed"：这个子树不参与窗口的等比缩放（标题栏这类 chrome 用）
+        if (lowerStr(pick(e.attrs, style, "ui_scale", "ui_scale", "")) == "fixed")
+            sp.flags |= SPEC_FIXED_SCALE;
         // 高度是编译期按文本估算撑开的：运行期 setText 换文本后需要重算（issue 06 的第 1 步）
         if (heightAuto) { sp.heightAuto = 1; sp.autoBase = autoBase; }
         specNodes.push_back(sp);

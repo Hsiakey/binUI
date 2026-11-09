@@ -44,7 +44,7 @@
        这就是把按钮和图标都改成单数的目的：偶数尺寸时中线落在两行交界，1px 线永远差半像素。 */
     .bui-tb-bar   { background:#66768C; }
 </style>
-<titlebar class="bui-tb" style="height:{{h=45}}; display:flex; align-items:center; gap:{{gap=6}}">
+<titlebar class="bui-tb" ui_scale="fixed" style="height:{{h=45}}; display:flex; align-items:center; gap:{{gap=6}}">
     <div style="width:{{pad=16}}; height:1; background:transparent"></div>
     <span class="bui-tb-icon" style="width:{{iconw=1}}; height:22">{{icon=}}</span>
     <span class="bui-tb-title" style="width:{{titlew=content}}; height:20">{{title=标题}}</span>

@@ -1083,6 +1083,37 @@ int run() {
         }
     }
 
+    // 9e. 元素级 ui_scale="fixed"：等比缩放窗口里，固定子树保持形状（标题栏三颗按钮不变形）
+    {
+        auto ufl = CompileHTML(
+            "<app_window width=\"300\" height=\"200\" bg=\"#FFFFFF\" ui_scale=\"proportional\">"
+            "<html width=\"300\" height=\"200\" bg=\"#FFFFFF\"><body>"
+            "<div id=\"chrome\" ui_scale=\"fixed\" style=\"position:absolute; left:0; top:0;"
+            " width:100%; height:20\">"
+            "<div id=\"sq\" style=\"position:absolute; left:10; top:5; width:10; height:10;"
+            " background:#FF0000\"></div></div></body></html></app_window>");
+        BinUIRenderer r;
+        TEST("fixed-scale layout loads", r.loadLayout(ufl.data(), ufl.size()));
+        auto findById = [&](const char* name) -> const BinUIRenderer::NodeInfo* {
+            const uint16_t id = r.findNodeByName(name);
+            for (const auto& n : r.getNodes())
+                if (n.id == id) return &n;
+            return nullptr;
+        };
+        const BinUIRenderer::NodeInfo* sq = findById("sq");
+        TEST("fixed-scale square exists", sq != nullptr);
+        if (sq) {
+            TEST("fixed-scale square 10x10 at design size",
+                 std::fabs(sq->width - 10.0f) < 0.01f && std::fabs(sq->height - 10.0f) < 0.01f);
+            r.setSize(600, 300);   // x 比例 2、y 比例 1.5：非等比缩放
+            sq = findById("sq");
+            TEST("fixed-scale square stays square",
+                 std::fabs(sq->width - sq->height) < 0.01f && sq->width > 10.5f);
+            TEST("fixed-scale square scales by vertical ratio",
+                 std::fabs(sq->width - 15.0f) < 0.51f);
+        }
+    }
+
     // 10. flexbox（编译期布局）与滚动容器
     {
         // flex 等分布局

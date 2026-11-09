@@ -89,6 +89,10 @@ enum BinUISpecFlag : uint16_t {
     SPEC_MAXW_PCT = 1 << 8, // maxW 为父内容盒宽百分比（0..1）
     SPEC_MINH_PCT = 1 << 9, // minH 为父内容盒高百分比（0..1）
     SPEC_MAXH_PCT = 1 << 10,// maxH 为父内容盒高百分比（0..1）
+    // 固定子树（元素属性 ui_scale="fixed"）：ui_scale="proportional" 的窗口里，这个节点**不参与
+    // 等比缩放**——自身尺寸按窗口拉伸/缩放，后代保持原有形状（统一按纵向比例缩放 + 贴边/居中），
+    // 用来保住"标题栏三颗控制按钮"这类必须是正方形的 chrome。旧布局这一位恒为 0，不升格式版本。
+    SPEC_FIXED_SCALE = 1 << 11,
 };
 
 #pragma pack(push, 1)

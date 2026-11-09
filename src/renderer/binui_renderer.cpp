@@ -935,9 +935,62 @@ void BinUIRenderer::relayout(int width, int height) {
         scaleX_ = designW_ > 0 ? (float)width / designW_ : 1.0f;
         scaleY_ = designH_ > 0 ? (float)height / designH_ : 1.0f;
         float fs = scaleY_ > 0 ? scaleY_ : 1.0f;
+        // 固定子树（元素 ui_scale="fixed"，例如标题栏）：不按窗口比例拉伸 —— 否则 29×29 的
+        // 方形按钮会被拉成矩形。子树内部统一按 fs 缩放（保持形状），位置按设计留白贴边/居中。
+        std::vector<uint8_t> fixedSub(nodes_.size(), 0);
+        for (size_t i = 0; i < nodes_.size() && i < designNodes_.size(); i++) {
+            const BinUISpecNode* sp = (i < specOf_.size()) ? specOf_[i] : nullptr;
+            if (sp && (sp->flags & SPEC_FIXED_SCALE)) { fixedSub[i] = 1; continue; }
+            if (nodes_[i].parentId == 0xFFFF) continue;
+            auto pit = nodeIndexById_.find(nodes_[i].parentId);
+            if (pit != nodeIndexById_.end() && pit->second < i) fixedSub[i] = fixedSub[pit->second];
+        }
         // 静态节点：按设计坐标快照等比缩放（坐标/尺寸/圆角/字号）
         for (size_t i = 0; i < designNodes_.size(); i++) {
             const NodeInfo& d = designNodes_[i];
+            const BinUISpecNode* sp = (i < specOf_.size()) ? specOf_[i] : nullptr;
+            const bool fixedRoot = sp && (sp->flags & SPEC_FIXED_SCALE);
+            auto pidxIt = nodeIndexById_.find(nodes_[i].parentId);
+            const size_t pidx = (pidxIt != nodeIndexById_.end()) ? pidxIt->second : 0;
+            const bool fixedChild = fixedSub[i] && !fixedRoot && pidx < i;
+            if (fixedChild) {
+                // 子树内部：等比例（按纵向比例）缩放，保持形状；按设计留白贴最近的一边
+                const NodeInfo& p = nodes_[pidx];
+                const NodeInfo& dp = designNodes_[pidx];
+                const float k = fs;
+                if (nodes_[i].type == BINUI_LINE) {
+                    // 线段：起点/终点一起按 k 缩放
+                    const float sx0 = p.x + (d.x - dp.x) * k;
+                    const float sy0 = p.y + (d.y - dp.y) * k;
+                    nodes_[i].x = sx0;
+                    nodes_[i].y = sy0;
+                    nodes_[i].width = sx0 + (d.width - d.x) * k;
+                    nodes_[i].height = sy0 + (d.height - d.y) * k;
+                    continue;
+                }
+                const float w = d.width * k, h = d.height * k;
+                const float leftGap = d.x - dp.x;
+                const float rightGap = (dp.x + dp.width) - (d.x + d.width);
+                const float topGap = d.y - dp.y;
+                const float botGap = (dp.y + dp.height) - (d.y + d.height);
+                nodes_[i].width = w;
+                nodes_[i].height = h;
+                nodes_[i].x = (rightGap < leftGap) ? (p.x + p.width - rightGap * k - w)
+                                                   : (p.x + leftGap * k);
+                if (std::fabs(topGap - botGap) <= 1.0f)
+                    nodes_[i].y = p.y + (p.height - h) * 0.5f;
+                else
+                    nodes_[i].y = (botGap < topGap) ? (p.y + p.height - botGap * k - h)
+                                                    : (p.y + topGap * k);
+                // chrome 对齐到整像素：缩放系数是小数时，取整才能让 1px 描边不糊
+                nodes_[i].width = std::lround(nodes_[i].width);
+                nodes_[i].height = std::lround(nodes_[i].height);
+                nodes_[i].x = std::lround(nodes_[i].x);
+                nodes_[i].y = std::lround(nodes_[i].y);
+                nodes_[i].radius = (uint16_t)(d.radius * k);
+                nodes_[i].fontSize = (uint16_t)std::max(1.0f, d.fontSize * k);
+                continue;
+            }
             nodes_[i].x = d.x * scaleX_;
             nodes_[i].y = d.y * scaleY_;
             nodes_[i].width = d.width * scaleX_;

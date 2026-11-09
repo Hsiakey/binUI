@@ -27,7 +27,7 @@ build-mingw/bin/offscreen_render components/preview.html docs/img/std-components
 
 | 组件 | 根标签 | 主要参数 | 说明 |
 |---|---|---|---|
-| `titlebar.bum.xml` | `<titlebar>` | `title` `titlew`(默认 `content`) `sub` `icon` `iconw` `h` `pad` `padr` `bs` `gap` `idmin` `idmax` `idclose` | 窗口标题栏：**左**图标/标题/副标题，**右**最小化— 最大化▢ 关闭✕。flex 排版，多宽都不用算按钮坐标；根是 `<titlebar>`，所以拖动窗口照常生效。三颗控制按钮同尺寸（`bs`），**图标是元素画的**（1px 横条 / 1px 边框方框 / svg 两条对角线，都是 10×10 且中心对齐；字形受字体度量摆布，对不齐），左侧图标不做动画。**三颗按钮只有外观，动作归宿主**——按 `idmin`/`idmax`/`idclose` 拿节点 id，在 CLICK 事件里调 `app.minimize()` / `app.maximize()` / `app.requestExit()`（`examples/*/main.cpp` 都是这么接的） |
+| `titlebar.bum.xml` | `<titlebar>` | `title` `titlew`(默认 `content`) `sub` `icon` `iconw` `h` `pad` `padr` `bs` `gap` `idmin` `idmax` `idclose` | 窗口标题栏：**左**图标/标题/副标题，**右**最小化— 最大化▢ 关闭✕。flex 排版，多宽都不用算按钮坐标；根是 `<titlebar>`，所以拖动窗口照常生效。三颗控制按钮同尺寸（`bs`=29），**图标是元素画的**（1px 横条 / 1px 边框方框 / svg 两条对角线，都是 9×9 且中心对齐），左侧图标不做动画。根元素带 **`ui_scale="fixed"`**：`ui_scale="proportional"` 的窗口最大化/拉伸时标题栏不被拉变形（按钮仍是正方形）。**三颗按钮只有外观，动作归宿主**——按 `idmin`/`idmax`/`idclose` 拿节点 id，在 CLICK 事件里调 `app.minimize()` / `app.maximize()` / `app.requestExit()`（`examples/*/main.cpp` 都是这么接的） |
 | `button.bum.xml` | `<button>` | `label` `kind`(primary/secondary/ghost/danger) `w` `h` `fs` `r` | 四套外观，自带 `:hover`/`:active` |
 | `field.bum.xml` | `<input>` | `ph` 占位符 `val` 初值 `w` `h` `fs` `pad` | 单行输入框，聚焦转白底 |
 | `badge.bum.xml` | `<span>` | `text` `kind`(blue/mint/amber/red/gray) `w` | 状态胶囊 |
