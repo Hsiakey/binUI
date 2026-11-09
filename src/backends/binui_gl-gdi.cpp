@@ -38,6 +38,74 @@
 using namespace binui;
 
 // ============================================================
+// 帧耗时统计（BINUI_PERF=1 → 每 60 帧往 stderr 打一行）
+// ------------------------------------------------------------
+// 拖边框重排/重绘的性能验收靠它：avg/max 帧耗 + 分段（重排 / 绘制 / 呈现）。
+// 只统计真正出帧的循环；没开环境变量时只有一个 bool 判断，零额外开销。
+// ============================================================
+namespace {
+struct FramePerf {
+    bool   on      = false;
+    bool   inited  = false;
+    double sumResize = 0, sumDraw = 0, sumPresent = 0;
+    double sumTotal = 0, maxTotal = 0, maxPresent = 0, maxResize = 0;
+    double sumRead = 0, sumBlit = 0;   // presentViaGdi 内部两段（GPU 读回 / GDI 贴屏）
+    double sumPrep = 0, sumDib = 0;    // presentViaGdi：MSAA 解析 / DIB 重建
+    double sumUpdate = 0;              // update_（动画/热重载轮询）耗时
+    double sumCtx = 0;                 // wglMakeCurrent（可能被驱动阻塞）耗时
+    double winStart = 0;               // 本统计窗口的起始时刻（算 fps）
+    int    frames  = 0;
+    long long drawn = 0;               // 累计真正绘制的帧数（不随窗口重置）
+};
+FramePerf& Perf() {
+    static FramePerf p;
+    if (!p.inited) {
+        p.inited = true;
+        const char* e = std::getenv("BINUI_PERF");
+        p.on = (e && *e && std::strcmp(e, "0") != 0);
+    }
+    return p;
+}
+inline double NowMs() {
+    using namespace std::chrono;
+    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+inline void PerfFlush() {
+    FramePerf& p = Perf();
+    if (!p.on || p.frames == 0) return;
+    const double span = NowMs() - p.winStart;
+    std::fprintf(stderr,
+                 "[perf] %3d frames  %.1f fps  total avg=%.2f max=%.2f | 重排 avg=%.2f max=%.2f |"
+                 " update avg=%.2f | 绘制 avg=%.2f | 呈现 avg=%.2f max=%.2f (含 makeCurrent %.2f; 解析 %.2f DIB %.2f 读回 %.2f 贴屏 %.2f)\n",
+                 p.frames, span > 0 ? p.frames * 1000.0 / span : 0.0,
+                 p.sumTotal / p.frames, p.maxTotal,
+                 p.sumResize / p.frames, p.maxResize,
+                 p.sumUpdate / p.frames,
+                 p.sumDraw / p.frames,
+                 p.sumPresent / p.frames, p.maxPresent,
+                 p.sumCtx / p.frames,
+                 p.sumPrep / p.frames, p.sumDib / p.frames,
+                 p.sumRead / p.frames, p.sumBlit / p.frames);
+    p.sumResize = p.sumDraw = p.sumPresent = p.sumTotal = 0;
+    p.maxTotal = p.maxPresent = p.maxResize = 0;
+    p.sumRead = p.sumBlit = p.sumPrep = p.sumDib = p.sumUpdate = p.sumCtx = 0;
+    p.frames = 0;
+    p.winStart = NowMs();
+    std::fflush(stderr);   // stderr 被重定向到文件时是带缓冲的：不刷就看不到行尾
+}
+} // namespace
+
+// 显示器刷新率（拿不到就按 60Hz；>360 视为驱动乱报）。
+// 帧节流（frameBudget_）和拖拽循环都用它当预算。
+static int DisplayRefreshHzFor(HWND hwnd) {
+    HDC dc = GetDC(hwnd);
+    const int hz = dc ? GetDeviceCaps(dc, VREFRESH) : 0;
+    if (dc) ReleaseDC(hwnd, dc);
+    if (hz <= 1 || hz > 360) return 60;
+    return hz;
+}
+
+// ============================================================
 // OpenGL 函数装载（wglGetProcAddress + opengl32 回退；GL 1.1 直接链接）
 // ============================================================
 typedef HGLRC(APIENTRY* PFNWGLCREATECONTEXTATTRIBSARB)(HDC, HGLRC, const int*);
@@ -1394,13 +1462,19 @@ void BinUIGLGdi::present() {
 
 void BinUIGLGdi::presentViaGdi() {
     if (!impl_->ready) return;
-    if (!impl_->makeCurrent()) return;
+    const bool perfOn = Perf().on;
+    const double c0 = perfOn ? NowMs() : 0.0;
+    const bool cur = impl_->makeCurrent();
+    if (perfOn) Perf().sumCtx += NowMs() - c0;
+    if (!cur) return;
+    const double p0 = perfOn ? NowMs() : 0.0;
     impl_->flushAll();
     glBindFramebufferP(GL_READ_FRAMEBUFFER, impl_->msFbo);
     glBindFramebufferP(GL_DRAW_FRAMEBUFFER, impl_->offFbo);
     glScissor(0, 0, impl_->winW, impl_->winH);
     glBlitFramebufferP(0, 0, impl_->winW, impl_->winH,
                        0, 0, impl_->winW, impl_->winH, GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    const double p1 = perfOn ? NowMs() : 0.0;
     int w = impl_->winW, h = impl_->winH;
     if (impl_->layeredDib == nullptr || impl_->layeredW != w || impl_->layeredH != h) {
         if (impl_->layeredDib) DeleteObject(impl_->layeredDib);
@@ -1417,14 +1491,17 @@ void BinUIGLGdi::presentViaGdi() {
         impl_->layeredW = w;
         impl_->layeredH = h;
     }
+    const double p2 = perfOn ? NowMs() : 0.0;
     if (!impl_->layeredDib || !impl_->layeredBits) {
         glBindFramebufferP(GL_FRAMEBUFFER, 0);
         return;
     }
     glBindFramebufferP(GL_FRAMEBUFFER, impl_->offFbo);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    const double t0 = perfOn ? NowMs() : 0.0;
     glReadPixels(0, 0, w, h, GL_BGRA, GL_UNSIGNED_BYTE, static_cast<uint8_t*>(impl_->layeredBits));
     glBindFramebufferP(GL_FRAMEBUFFER, 0);
+    const double t1 = perfOn ? NowMs() : 0.0;
     size_t rowBytes = static_cast<size_t>(w) * 4;
     uint8_t* p = static_cast<uint8_t*>(impl_->layeredBits);
     std::vector<uint8_t> row(rowBytes);
@@ -1443,9 +1520,17 @@ void BinUIGLGdi::presentViaGdi() {
     bi.bmiHeader.biBitCount = 32;
     bi.bmiHeader.biCompression = BI_RGB;
     HDC wdc = GetDC(impl_->hwnd);
-    StretchDIBits(wdc, 0, 0, w, h, 0, 0, w, h,
-                  impl_->layeredBits, &bi, DIB_RGB_COLORS, SRCCOPY);
+    // 1:1 搬运用 SetDIBitsToDevice（不做缩放/拉伸），比 StretchDIBits 少一遍采样
+    SetDIBitsToDevice(wdc, 0, 0, w, h, 0, 0, 0, h,
+                      impl_->layeredBits, &bi, DIB_RGB_COLORS);
     ReleaseDC(impl_->hwnd, wdc);
+    if (perfOn) {
+        const double t2 = NowMs();
+        Perf().sumPrep += p1 - p0;
+        Perf().sumDib += p2 - p1;
+        Perf().sumRead += t1 - t0;
+        Perf().sumBlit += t2 - t1;
+    }
 }
 
 void BinUIGLGdi::setTransparent(bool t) {
@@ -2503,8 +2588,15 @@ void BinUIAppGLGdi::maximize() {
 // 拖拽期间每轮实时渲染到新尺寸离屏 + GDI blit 到窗口（实时重绘、跟手）。
 // 关键：拖拽期间绝不能 SwapBuffers——NVIDIA 驱动在"窗口 resize + SwapBuffers"组合下
 // 必然崩溃（nvoglv64 DrvPresentBuffers），已实测 vsync 开关/上下文 detach/节流呈现
-// 均无法规避；走 presentViaGdi（读回离屏像素 → StretchDIBits）完全绕开驱动 present 路径。
+// 均无法规避；走 presentViaGdi（读回离屏像素 → 贴到窗口 DC）完全绕开驱动 present 路径。
 // 松手时最后再以 GDI 呈现一次清晰帧，然后恢复正常 SwapBuffers（surface 已稳定）。
+//
+// 帧率：按显示器刷新率出帧（浏览器拖窗口时内容也是按刷新率重绘的）。
+// 以前这里是"每轮循环都重排+整屏呈现 + Sleep(1)"：一次拖拽每秒要跑几百帧，
+// CPU 打满、消息队列堆在后面，表现反而是一顿一顿的。节流之后每帧有完整的
+// 16.7ms（60Hz）预算，实测单帧 5~7ms，留足余量。
+// 同时**每帧都调 update_**：拖拽期间元素动画不许停（以前动画帧只在 renderFrame 里走，
+// 拖边时 update_ 被跳过，动画会冻住）。
 void BinUIAppGLGdi::startResize(int hit) {
     const int MIN_W = 320, MIN_H = 240;
     HWND hwnd = static_cast<HWND>(hwnd_);
@@ -2514,6 +2606,17 @@ void BinUIAppGLGdi::startResize(int hit) {
     RECT startRect;
     GetWindowRect(hwnd, &startRect);
     gdiPresent_ = true;
+
+    // 出帧节拍跟 renderFrame() 用同一个时钟（nextFrameTime_），
+    // 这样拖拽期和平时是同一套节奏，不会两个节流器互相打架。
+    RECT applied = startRect;
+    const bool perfOn = Perf().on;
+    const double dragT0 = perfOn ? NowMs() : 0.0;
+    int dragFrames = 0;
+    double dragFrameSum = 0.0, dragFrameMax = 0.0;
+    if (perfOn) std::fprintf(stderr, "[perf] drag start: budget=%.2fms\n",
+                            frameBudget_.count() / 1000.0);
+
     while (GetAsyncKeyState(VK_LBUTTON) & 0x8000) {
         MSG m;
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
@@ -2565,17 +2668,45 @@ void BinUIAppGLGdi::startResize(int hit) {
             else
                 r.right = r.left + wd;
         }
-        SetWindowPos(hwnd, nullptr, r.left, r.top,
-            r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
-        applyPendingResize();
-        renderOnce(); // gdiPresent_ = true → presentViaGdi，不 SwapBuffers
-        Sleep(1);
+        // 窗口边框立刻跟手（SetWindowPos 很便宜），内容按刷新率出帧
+        if (r.left != applied.left || r.top != applied.top ||
+            r.right != applied.right || r.bottom != applied.bottom) {
+            SetWindowPos(hwnd, nullptr, r.left, r.top,
+                r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            applied = r;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= nextFrameTime_) {
+            const double f0 = perfOn ? NowMs() : 0.0;
+            renderFrame();       // update_（动画）+ applyPendingResize + 一帧呈现（内部按同一时钟节流）
+            if (perfOn) {
+                const double dt = NowMs() - f0;
+                ++dragFrames;
+                dragFrameSum += dt;
+                if (dt > dragFrameMax) dragFrameMax = dt;
+            }
+        } else {
+            // 等到下一帧点或新输入（睡眠，不空转）
+            const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(nextFrameTime_ - now);
+            MsgWaitForMultipleObjectsEx(0, nullptr,
+                                        static_cast<DWORD>(std::max<long long>(1, wait.count())),
+                                        QS_ALLINPUT, 0x0004 /* MWMO_INPUTAVAILABLE */);
+        }
     }
     // 松手：应用最终尺寸并以 GDI 呈现清晰帧（surface 可能仍未稳定，不 SwapBuffers）
     applyPendingResize();
-    renderOnce();
+    renderFrame();
     gdiPresent_ = false; // 此后动画帧恢复正常 SwapBuffers（surface 已稳定）
     ReleaseCapture();
+    if (perfOn) {
+        const double span = NowMs() - dragT0;
+        std::fprintf(stderr, "[perf] drag end: %d frames / %.0fms = %.1f fps | 帧耗时 avg=%.2f max=%.2f ms\n",
+                     dragFrames, span,
+                     span > 0 ? dragFrames * 1000.0 / span : 0.0,
+                     dragFrames ? dragFrameSum / dragFrames : 0.0, dragFrameMax);
+        std::fflush(stderr);
+    }
 }
 
 // ============================================================
@@ -3019,6 +3150,7 @@ void BinUIAppGLGdi::invalidateRect(int x, int y, int w, int h) {
 void BinUIAppGLGdi::invalidateAll() {
     dirty_ = true;
     dirtyL_ = 0; dirtyT_ = 0; dirtyR_ = width_; dirtyB_ = height_;
+    requestFrameNow();   // 尺寸变化/热重载/失焦这类"整屏变了"的事件不等下一拍
 }
 
 void BinUIAppGLGdi::cancelImeComposition() {
@@ -3133,6 +3265,14 @@ bool BinUIAppGLGdi::open() {
     invalidateAll(); // 首帧全量绘制（初始脏矩形为空，避免首帧仅动画区域被绘制，其余留白/留黑）
 
     lastTime_ = std::chrono::steady_clock::now();
+    {
+        const int hz = DisplayRefreshHzFor(hwnd);
+        frameBudget_ = std::chrono::microseconds(1000000 / hz);
+        if (Perf().on)
+            std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
+                         hz, frameBudget_.count() / 1000.0);
+    }
+    nextFrameTime_ = std::chrono::steady_clock::now();
     running_ = true;
     ownerThread_ = static_cast<unsigned long>(GetCurrentThreadId());
     return true;
@@ -3179,6 +3319,14 @@ bool BinUIAppGLGdi::openChild(void* parent, int x, int y, int width, int height)
     invalidateAll();
 
     lastTime_ = std::chrono::steady_clock::now();
+    {
+        const int hz = DisplayRefreshHzFor(hwnd);
+        frameBudget_ = std::chrono::microseconds(1000000 / hz);
+        if (Perf().on)
+            std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
+                         hz, frameBudget_.count() / 1000.0);
+    }
+    nextFrameTime_ = std::chrono::steady_clock::now();
     running_ = true;
     ownerThread_ = static_cast<unsigned long>(GetCurrentThreadId());
     return true;
@@ -3209,8 +3357,14 @@ void BinUIAppGLGdi::renderFrame() {
     float dt = std::chrono::duration<float>(now - lastTime_).count();
     lastTime_ = now;
     if (dt > 0.1f) dt = 1.0f / 60.0f;
+    const double u0 = Perf().on ? NowMs() : 0.0;
     if (update_) update_(dt);
+    if (Perf().on) Perf().sumUpdate += NowMs() - u0;
+    // 帧节流：动画每一拍都要推进（dt 按真实时间算，跳帧不会让动画变慢），
+    // 但"出帧"（重排/绘制/呈现）只在到点时候做。
+    if (now < nextFrameTime_) return;
     renderOnce();
+    nextFrameTime_ = std::chrono::steady_clock::now() + frameBudget_;
 }
 
 void BinUIAppGLGdi::setClientSize(int width, int height) {
@@ -3246,12 +3400,26 @@ int BinUIAppGLGdi::pump(int timeoutMs) {
         return running_ ? 0 : 1;
     }
 
-    // 空闲时阻塞到有输入（或超时），省 CPU；有脏区/挂起 resize 时不等待，直接出帧
-    if (timeoutMs > 0 && !dirty_ && pendingW_ <= 0 && pendingH_ <= 0) {
+    // 等待多久：有挂起 resize 就立刻（尺寸要跟手），有脏区就等到下一帧点，
+    // 都没有就阻塞到输入或超时。等的时候是**睡眠**（不烧 CPU），
+    // 以前"脏区就一直满速出帧"是空闲 80% 单核的主因。
 #ifndef MWMO_INPUTAVAILABLE
 #define MWMO_INPUTAVAILABLE 0x0004
 #endif
-        MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(timeoutMs),
+    int waitMs = 0;
+    if (pendingW_ > 0 && pendingH_ > 0) {
+        waitMs = 0;                       // 尺寸变化：这一拍就出帧
+    } else if (dirty_) {
+        const auto now = std::chrono::steady_clock::now();
+        waitMs = nextFrameTime_ > now
+                     ? static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                            nextFrameTime_ - now).count()) + 1
+                     : 0;
+    } else {
+        waitMs = timeoutMs;               // 完全空闲：睡到有输入
+    }
+    if (waitMs > 0) {
+        MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(waitMs),
                                     QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     }
 
@@ -3269,6 +3437,10 @@ int BinUIAppGLGdi::pump(int timeoutMs) {
 
 void BinUIAppGLGdi::close() {
     running_ = false;
+    if (Perf().on && Perf().drawn > 0) {
+        std::fprintf(stderr, "[perf] exit: %lld frames drawn\n", Perf().drawn);
+        std::fflush(stderr);
+    }
     // 销毁顺序：先把窗口过程摘回 DefWindowProc（之后任何消息都不进我们的代码，
     // 也不会有悬垂的 GWLP_USERDATA），再拆 GL，最后 DestroyWindow。
     //
@@ -3331,14 +3503,34 @@ void BinUIAppGLGdi::applyPendingResize() {
 }
 
 void BinUIAppGLGdi::renderOnce() {
+    FramePerf& perf = Perf();
+    const double t0 = perf.on ? NowMs() : 0.0;
     applyPendingResize();
+    const double t1 = perf.on ? NowMs() : 0.0;
     if (dirty_ && gfx_.isReady()) {
         int rc[4] = { dirtyL_, dirtyT_, dirtyR_, dirtyB_ };
         gfx_.beginFrame(rc);
         if (draw_) draw_(gfx_, rc);
+        const double t2 = perf.on ? NowMs() : 0.0;
         if (gdiPresent_ && !transparent_) gfx_.presentViaGdi();
         else gfx_.present();
         dirty_ = false;
+        if (perf.on) {
+            const double t3 = NowMs();
+            if (perf.frames == 0) perf.winStart = t0;
+            ++perf.frames;
+            ++perf.drawn;
+            const double rs = t1 - t0;
+            perf.sumResize += rs;
+            if (rs > perf.maxResize) perf.maxResize = rs;
+            perf.sumDraw += t2 - t1;
+            const double ps = t3 - t2;
+            perf.sumPresent += ps;
+            if (ps > perf.maxPresent) perf.maxPresent = ps;
+            perf.sumTotal += t3 - t0;
+            if (t3 - t0 > perf.maxTotal) perf.maxTotal = t3 - t0;
+            if (perf.frames >= 600) PerfFlush();
+        }
     }
 }
 

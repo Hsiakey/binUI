@@ -2322,6 +2322,11 @@ void BinUIAppD3D::minimize() {
 // 手动 resize 拖拽循环（窗口无 WS_THICKFRAME，系统不提供 resize，这里自行实现）。
 // 关键：拖拽期间每轮消息后立即渲染一帧（与 GDI 的 WM_PAINT 同步重绘一致），
 // 否则窗口尺寸变了却无呈现，松手才补一帧 → 卡顿/花屏。
+// 手动 resize 拖拽循环（窗口无 WS_THICKFRAME，系统不提供 resize，这里自行实现）。
+// 与 GL 外壳同构：边框跟手（SetWindowPos），内容按显示器刷新率出帧，
+// 每帧都走 renderFrame（update_ + 重排 + 呈现），所以拖拽期间动画不会冻住。
+// 以前这里是"每轮循环 renderOnce + Sleep(1)"：一秒几百帧、CPU 打满、
+// 消息队列堆在后面，表现出来反而是一顿一顿的。
 void BinUIAppD3D::startResize(int hit) {
     const int MIN_W = 320, MIN_H = 240;
     HWND hwnd = static_cast<HWND>(hwnd_);
@@ -2330,6 +2335,19 @@ void BinUIAppD3D::startResize(int hit) {
     GetCursorPos(&start);
     RECT startRect;
     GetWindowRect(hwnd, &startRect);
+
+    int refreshHz = 60;
+    {
+        HDC dc = GetDC(hwnd);
+        const int hz = dc ? GetDeviceCaps(dc, VREFRESH) : 0;
+        if (dc) ReleaseDC(hwnd, dc);
+        if (hz > 1) refreshHz = hz;
+        if (refreshHz > 360) refreshHz = 360;
+    }
+    const auto frameBudget = std::chrono::microseconds(1000000 / refreshHz);
+    auto nextFrame = std::chrono::steady_clock::now();
+    RECT applied = startRect;
+
     while (GetAsyncKeyState(VK_LBUTTON) & 0x8000) {
         MSG m;
         while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
@@ -2381,13 +2399,27 @@ void BinUIAppD3D::startResize(int hit) {
             else
                 r.right = r.left + wd;
         }
-        SetWindowPos(hwnd, nullptr, r.left, r.top,
-            r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
-        // 同步渲染：应用本轮的 resize 并绘制/呈现（拖动不卡顿、不花屏）
-        applyPendingResize();
-        renderOnce();
-        Sleep(1);
+        if (r.left != applied.left || r.top != applied.top ||
+            r.right != applied.right || r.bottom != applied.bottom) {
+            SetWindowPos(hwnd, nullptr, r.left, r.top,
+                r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
+            applied = r;
+        }
+
+        const auto now = std::chrono::steady_clock::now();
+        if (now >= nextFrame) {
+            renderFrame();
+            nextFrame = now + frameBudget;
+            if (std::chrono::steady_clock::now() - nextFrame > frameBudget * 2)
+                nextFrame = std::chrono::steady_clock::now();
+        } else {
+            const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(nextFrame - now);
+            MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(wait.count()),
+                                        QS_ALLINPUT, 0x0004 /* MWMO_INPUTAVAILABLE */);
+        }
     }
+    applyPendingResize();
+    renderFrame();   // 松手后的最终帧
     ReleaseCapture();
 }
 
@@ -2611,7 +2643,7 @@ int BinUIAppD3D::run() {
     height_ = winH;
     invalidateAll(); // 首帧全量绘制（初始脏矩形为空，避免透明窗口首帧空白）
 
-    auto lastTime = std::chrono::high_resolution_clock::now();
+    lastTime_ = std::chrono::steady_clock::now();
     running_ = true;
     MSG msg = {};
 
@@ -2621,14 +2653,9 @@ int BinUIAppD3D::run() {
             TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
+        if (!running_) break;
 
-        auto now = std::chrono::high_resolution_clock::now();
-        float dt = std::chrono::duration<float>(now - lastTime).count();
-        lastTime = now;
-        if (dt > 0.1f) dt = 1.0f / 60.0f;
-        if (update_) update_(dt);
-
-        renderOnce();
+        renderFrame();   // update_（动画）+ 挂起 resize + 绘制
         Sleep(1);
     }
 
@@ -2671,6 +2698,17 @@ void BinUIAppD3D::renderOnce() {
         gfx_.present();
         dirty_ = false;
     }
+}
+
+// 一帧 = 推进动画（update_）+ 应用挂起 resize + 绘制呈现。
+// 拖拽 resize 与正常事件循环都走它，保证两条路径的时间/动画口径一致。
+void BinUIAppD3D::renderFrame() {
+    const auto now = std::chrono::steady_clock::now();
+    float dt = std::chrono::duration<float>(now - lastTime_).count();
+    lastTime_ = now;
+    if (dt > 0.1f) dt = 1.0f / 60.0f;
+    if (update_) update_(dt);
+    renderOnce();
 }
 
 void BinUIAppD3D::handleChar(wchar_t ch) {

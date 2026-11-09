@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<!--
+  flexshow：自适应布局（动态窗口尺寸下实时重排）。
+
+  这个示例整份 UI **没有一个绝对定位**，全靠 百分比 / flex:1 / 内容宽 撑开：
+    ① 顶栏     输入框 flex:1 吃掉剩余宽度，右边两颗按钮按文字宽（width:content）
+    ② KPI 行   两张卡 flex:1 平分，第三张 min-width/max-width 钳制
+    ③ 图表     柱高用百分比（相对卡片内容盒高度）
+    ④ 列表     flex:1 + overflow:auto：视口高度跟着窗口走，内容多就自己滚
+    ⑤ 状态栏   C++ 在每次 resize 时把窗口尺寸写进来
+
+  拖窗口边框时：重排 + 重绘按显示器刷新率出帧（拖拽期间动画照跑），
+  所以尺寸一变布局就跟着变，不会"松开鼠标才刷新"。
+
+  写法提醒（binUI 的约束）：
+  · <html>/<body> 不是节点，flex 要写在一个 width:100%;height:100% 的 div 上；
+  · 节点只有一个 padding 字段，四值简写只取第一个；左右不同请用嵌套容器；
+  · 父级是 column flex 且子项写了 flex:N，子项高度就由父级分配（写百分比会被覆盖）；
+  · flex-shrink 未实现：加 min-width 保护，别指望它会自动收缩。
+-->
+<app_window width="1100" height="720" bg="#F4F7FC" title="自适应布局">
+<html width="100%" height="100%" bg="#F4F7FC">
+<head>
+    <meta charset="UTF-8">
+    <title>自适应布局：百分比 · flex:1 · min/max · 内容宽</title>
+    <style>
+        body { font-size: 13px; color: #1F2A37; }
+        .card { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 14; }
+        .card-title { font-size: 12px; font-weight: 700; color: #1F2A37; }
+        .lab { font-size: 11px; color: #66768C; }
+        .note { font-size: 11px; color: #94A3B8; }
+        .kpi { font-size: 26px; font-weight: 700; color: #3E8BFF; }
+        .pill { background: #EAF1FF; color: #3E8BFF; border-radius: 10; font-size: 11px; }
+        .btn { background: #EEF3FA; color: #3E8BFF; border-radius: 8; font-size: 12px;
+               transition: background-color .15s ease, transform .15s ease; }
+        .btn:hover { background: #DCE5F2; transform: scale(1.03); }
+        .bar { background: #3E8BFF; border-radius: 4; }
+        .bar-alt { background: #7FB2FF; border-radius: 4; }
+        .row { background: #F7FAFF; border: 1px solid #EAF0FA; border-radius: 8; }
+        .side-item { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 8; font-size: 12px; color: #38445A; }
+    </style>
+</head>
+<body>
+<div id="app" style="display:flex; flex-direction:column; width:100%; height:100%">
+
+    <!-- 标准标题栏：宽度跟着窗口走（w=100%），拖动它可移动窗口 -->
+    <use src="../../components/titlebar.bum.xml" w="100%" h="44" icon="◧" iconw="22"
+         title="自适应布局" sub="百分比 · flex:1 · min/max · 内容宽 —— 拖窗口边框看实时重排"/>
+
+    <div id="body" style="display:flex; flex:1; flex-direction:column; gap:12; padding:12">
+
+        <!-- ① 顶栏：输入框 flex:1，按钮按文字宽 -->
+        <div id="toolbar" style="display:flex; align-items:center; gap:8; height:40">
+            <input id="search" placeholder="搜索（flex:1，宽度跟着窗口变）"
+                   style="flex:1; height:36; font-size:13; color:#1F2A37; background:#FFFFFF;
+                          border:1px solid #E1E9F5; border-radius:8"/>
+            <button id="b-refresh" class="btn" style="width:72; height:36">刷新</button>
+            <button id="b-export" class="btn" style="width:72; height:36">导出</button>
+            <button id="b-more" class="btn" style="width:96; height:36">更多操作</button>
+        </div>
+
+        <!-- ② KPI 行：两张 flex:1 + 一张 min/max 钳制 -->
+        <div id="kpis" style="display:flex; align-items:stretch; gap:12; height:104">
+            <div id="k1" class="card" style="flex:1; height:100%; padding:14">
+                <span class="lab" style="width:100%; height:16">活跃用户（flex:1）</span>
+                <span class="kpi" style="width:100%; height:34">12,480</span>
+                <span class="note" style="width:100%; height:16">比上周 +8.2%</span>
+            </div>
+            <div id="k2" class="card" style="flex:1; height:100%; padding:14">
+                <span class="lab" style="width:100%; height:16">请求量（flex:1）</span>
+                <span class="kpi" style="width:100%; height:34; color:#2FBF9A">86.4k</span>
+                <span class="note" style="width:100%; height:16">峰值 132k/s</span>
+            </div>
+            <div id="k3" class="card" style="width:26%; height:100%; min-width:240; max-width:380; padding:14">
+                <span class="lab" style="width:100%; height:16">平均延迟（26%，钳 240–380）</span>
+                <span class="kpi" style="width:100%; height:34; color:#F5A524">42 ms</span>
+                <span class="note" style="width:100%; height:16">P99 118ms</span>
+            </div>
+        </div>
+
+        <!-- ③ 图表 + 列表：左 flex:1、右固定 320 -->
+        <div id="main" style="display:flex; flex:1; gap:12">
+            <div id="chart-card" class="card" style="flex:1; height:100%; padding:14; display:flex; flex-direction:column">
+                <span class="card-title" style="width:100%; height:16">① 柱高用百分比（相对这张卡片的内容高度）</span>
+                <span class="note" style="width:100%; height:14">窗口拉高，柱子跟着变高；拉矮就变矮</span>
+                <div id="chart" style="display:flex; align-items:flex-end; gap:10; flex:1; margin-top:10">
+                    <div id="bar1" class="bar" style="flex:1; height:38%"></div>
+                    <div id="bar2" class="bar-alt" style="flex:1; height:62%"></div>
+                    <div id="bar3" class="bar" style="flex:1; height:84%"></div>
+                    <div id="bar4" class="bar-alt" style="flex:1; height:52%"></div>
+                    <div id="bar5" class="bar" style="flex:1; height:96%"></div>
+                    <div id="bar6" class="bar-alt" style="flex:1; height:44%"></div>
+                </div>
+            </div>
+
+            <div id="list-card" class="card" style="width:320; height:100%; padding:14; display:flex; flex-direction:column; gap:6">
+                <span class="card-title" style="width:100%; height:16">② flex:1 + overflow:auto</span>
+                <span class="note" style="width:100%; height:14">视口高度跟窗口走，条目多了自己滚</span>
+                <div id="list" style="display:flex; flex-direction:column; gap:6; flex:1; overflow:auto">
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 01 · 滚动容器里的行</span></div>
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 02 · 高度由内容撑开</span></div>
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 03 · 不影响外层布局</span></div>
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 04 · 滚轮可滚</span></div>
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 05 · 视口 = flex 分配高度</span></div>
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 06 · 窗口一矮就出滚动条</span></div>
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 07 · 内容超出被裁剪</span></div>
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 08 · 不会把窗口撑高</span></div>
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 09 · 试试把窗口拉高</span></div>
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 10 · 滚动范围随之变化</span></div>
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 11 · 只剩这几行时无滚动</span></div>
+                    <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 12 · 最小窗口 320×240</span></div>
+                </div>
+            </div>
+        </div>
+
+        <!-- ④ 状态栏：宽度由 C++ 写入（setText），验证 resizing 事件已到达 -->
+        <div id="statusbar" class="card" style="display:flex; align-items:center; gap:10; height:34; padding:9">
+            <span id="status" style="width:340; height:18; font-size:12px; color:#1F2A37">窗口 —</span>
+            <span class="note" style="flex:1; height:16">拖边框改尺寸：布局实时重排，动画不中断</span>
+            <span class="pill" style="width:content; height:20; padding:3">纯 CSS 布局</span>
+        </div>
+    </div>
+</div>
+</body>
+</html>

@@ -3830,6 +3830,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     // 容器元素索引 -> 已计算的 flex 子项位置（elemIdx -> x/y/w/h）与弹性权重
     std::unordered_map<size_t, std::unordered_map<size_t, float[4]>> flexLayouts;
     std::unordered_map<size_t, std::unordered_map<size_t, float>> flexWeights;
+    // column 方向的 flex 容器（元素索引）。用来判断"本元素的主轴尺寸是不是被 flex 定死的"：
+    // column 下的 flex:N 子项，高度由剩余空间决定，不能再被"未声明高度 → 按内容撑开"改写。
+    std::unordered_set<size_t> columnFlexParents;
 
     // ============================================================
     // HTML 标签/属性体检（只在 HTML 模式跑；XML 允许自定义标签）
@@ -4794,6 +4797,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             auto git = style.find("gap");
             if (git != style.end()) gap = parseLen(git->second, 0);
 
+            // 本元素是不是"column 父级里带 flex:N 的主轴项"——是的话高度已由父级分配，
+            // 这里不能再用内容高度盖掉（见下面 auto 高度那段注释）。
+            bool flexedMainAxis = false;
+            if (auto pw = flexWeights.find(e.parentIdx); pw != flexWeights.end()) {
+                auto wi = pw->second.find(ei);
+                flexedMainAxis = (wi != pw->second.end() && wi->second > 0 &&
+                                  columnFlexParents.count(e.parentIdx) > 0);
+            }
+
             std::unordered_map<size_t, float> wts;
             std::unordered_map<size_t, float[4]> pos;
             float need = layoutFlex(childrenOf[ei], w - 2 * pad, lh - 2 * pad,
@@ -4801,8 +4813,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             flexLayouts[ei] = std::move(pos);
             flexWeights[ei] = std::move(wts);
 
-            // auto 高度（未声明 height）：内容盒高度 = flex 主轴需求
-            if (sh.empty()) {
+            // column 方向要记下来：它的 flex:N 子项高度是父级剩余空间定死的
+            if (dir == "column") columnFlexParents.insert(ei);
+
+            // auto 高度（未声明 height）：内容盒高度 = flex 主轴需求。
+            // 但**column 下的弹性子项例外**：它的主轴高度已经由父级 flexWeights 分配好
+            // （就是上面 lh），这里再按内容撑一次会把 600 改成内容高（比如 40），
+            // 而父级/兄弟的位置仍按 600 排 —— 表现为"撑满剩余高度的容器塌成一条、
+            // 后面的兄弟压上来"，`flex:1` + `overflow:auto` 的滚动视口更是直接消失。
+            if (sh.empty() && !flexedMainAxis) {
                 BinUINode& cn = nodes.back();
                 cn.height = need + 2 * pad;
                 // auto 高同样受 min/max-height 约束钳制
@@ -4816,7 +4835,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             fs.justify = just == "flex-end" ? 1 : just == "center" ? 2
                        : just == "space-between" ? 3 : just == "space-around" ? 4 : 0;
             fs.align = algn == "center" ? 1 : algn == "flex-end" ? 2 : 0;
-            fs.autoH = sh.empty() ? 1 : 0;
+            fs.autoH = (sh.empty() && !flexedMainAxis) ? 1 : 0;
             fs.gap = gap;
             specFlex.push_back(fs);
         }
@@ -4829,6 +4848,14 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     while (stack.size() > 1)
         popAndPropagate();
     growToContent(stack[0]);
+
+    // 视口 = 窗口：给了尺寸就别让内容把根撑大。
+    // 不钳的话，内容比窗口高时根会"长"出窗口（脏矩形、命中、绘制全落到窗口外，
+    // 自适应布局里一缩窗口就错位）；超出的部分应该归滚动容器/裁剪去处理。
+    if (hasAppWindow && wdesc.width > 0 && wdesc.height > 0) {
+        nodes[0].width = rootW;
+        nodes[0].height = rootH;
+    }
 
     if (nodes.empty()) return {};
 

@@ -1134,10 +1134,18 @@ void BinUIRenderer::relayout(int width, int height) {
                 pos += (row ? wv[k] : hv[k]) + f.gap + gap2;
             }
             if (f.autoH) {
-                float need = row ? maxCross : mainTotal + totalGap;
-                node.height = need + 2 * node.padding;
-                if (spec) // auto 高同样受 min/max-height 约束钳制
-                    node.height = ClampSize(node.height, spec, c.ch, SPEC_MINH_PCT, SPEC_MAXH_PCT, spec->minH, spec->maxH);
+                // 与编译器同口径：column 父级里的 flex:N 子项高度已由父级分配，
+                // 不能再按内容撑（否则"撑满剩余高度"的容器会塌成内容高，兄弟错位）。
+                bool parentFixesMainAxis = false;
+                if (auto pit = flexOf_.find(node.parentId); pit != flexOf_.end())
+                    parentFixesMainAxis = (pit->second->dir == 1 && spec && spec->flexWeight > 0);
+                if (!parentFixesMainAxis) {
+                    float need = row ? maxCross : mainTotal + totalGap;
+                    node.height = need + 2 * node.padding;
+                    if (spec) // auto 高同样受 min/max-height 约束钳制
+                        node.height = ClampSize(node.height, spec, c.ch, SPEC_MINH_PCT, SPEC_MAXH_PCT,
+                                                spec->minH, spec->maxH);
+                }
             }
         }
 
@@ -1151,6 +1159,10 @@ void BinUIRenderer::relayout(int width, int height) {
         stack.pop_back();
     }
     growContainer(stack[0]);
+    // 视口 = 窗口：重排后把根钉回窗口尺寸（内容变高/变宽时不许把根撑大，
+    // 否则一次 resize 之后画面会"长"到窗口外，与编译器同口径）。
+    nodes_[0].width = static_cast<float>(width);
+    nodes_[0].height = static_cast<float>(height);
 
     // 滚动偏移按新视口钳制
     for (auto& [id, s] : scroll_) {

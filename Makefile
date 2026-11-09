@@ -157,13 +157,14 @@ $(TEST_DIR)/test_capi$(EXT): tests/test_capi.cpp $(BUILD_DIR)/libbinui_c.a $(LIB
 	@mkdir -p $(TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(BUILD_DIR)/libbinui_c.a $(LIB_A) $(WINLIBS) $(GL_LIBS)
 
-# 7 组使用示例（一组一个 exe，一组只演示一件事）：功能 / 动画 / 字体与输入法 /
-# 按钮样式 / 2D 渲染 / 3D 渲染 / 纹理。产物在 $(DEMO_DIR)，与测试彻底分开。
+# 8 组使用示例（一组一个 exe，一组只演示一件事）：功能 / 动画 / 字体与输入法 /
+# 按钮样式 / 自适应布局 / 2D 渲染 / 3D 渲染 / 纹理。产物在 $(DEMO_DIR)，与测试彻底分开。
 DEMO_BINS := \
     $(DEMO_DIR)/features$(EXT) \
     $(DEMO_DIR)/animshow$(EXT) \
     $(DEMO_DIR)/fontshow$(EXT) \
     $(DEMO_DIR)/buttonshow$(EXT) \
+    $(DEMO_DIR)/flexshow$(EXT) \
     $(DEMO_DIR)/svgdemo$(EXT) \
     $(DEMO_DIR)/cubedemo$(EXT) \
     $(DEMO_DIR)/texturedemo$(EXT) \
@@ -205,6 +206,11 @@ $(DEMO_DIR)/fontshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/fo
 	@mkdir -p $(DEMO_DIR)/fontshow
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/fontshow/main.html $(DEMO_DIR)/fontshow/main.html
+
+$(DEMO_DIR)/flexshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/flexshow/main.o $(LIB_A) $(EXA_DIR)/flexshow/main.html
+	@mkdir -p $(DEMO_DIR)/flexshow
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/flexshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	cp -f $(EXA_DIR)/flexshow/main.html $(DEMO_DIR)/flexshow/main.html
 
 $(DEMO_DIR)/svgdemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A) $(EXA_DIR)/svgdemo/main.html
 	@mkdir -p $(DEMO_DIR)/svgdemo

@@ -4,6 +4,7 @@
 // 无 DWM/系统接口调校，VSync 按需呈现，空闲时 CPU 0%。
 #pragma once
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <string>
 
@@ -180,10 +181,12 @@ private:
     int pendingW_ = 0, pendingH_ = 0; // 挂起的窗口尺寸（WM_SIZE 只记录，帧内应用一次）
     bool trackingLeave_ = false;
     wchar_t pendingHigh_ = 0;
+    std::chrono::steady_clock::time_point lastTime_{}; // 上一帧时间（dt 计算，拖拽循环复用）
 
     void applyPendingResize(); // 应用挂起 resize：渲染器重排 + gfx 重建 + 全量重绘
     void renderOnce();         // 应用挂起 resize 后绘制一帧并呈现
-    void startResize(int hit); // 手动 resize 拖拽循环（每轮同步渲染）
+    void renderFrame();        // update_（动画）+ renderOnce，带 dt 计算（与 GL 外壳同构）
+    void startResize(int hit); // 手动 resize 拖拽循环（按刷新率出帧、动画不停）
 };
 
 } // namespace binui

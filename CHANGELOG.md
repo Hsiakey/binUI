@@ -6,6 +6,50 @@
 
 ## [Unreleased]
 
+### 修复 — column flex 里 `flex:1` 的"撑满剩余高度"塌成内容高
+
+`<div style="display:flex;flex-direction:column">` 里写 `flex:1` 的子容器，高度**位置**按剩余空间
+算对了（`720−44−48−28=600`），节点**高度**却被它自己的"未声明高度 → 按内容撑开"逻辑改回内容高：
+
+```
+id=15 #main   y=92   h=40     ← flex:1 的列内项，高度没被撑开
+id=23 #status y=692           ← 但排位置时按 #main=600 算
+```
+
+于是"撑满剩余高度"的容器塌成一条、后面的兄弟压上来（重叠），`flex:1 + overflow:auto` 的滚动视口
+也变成 0 高（永远不出滚动条）。修法：column 父级下的 `flex:N` 主项，高度由父级分配，**不许**再用
+内容高度覆盖（编译器与渲染器 `relayout` 两处同口径；`autoH` 也一并置 0，否则运行期重排又会塌回去）。
+
+顺带修了一条同源问题：**视口 = 窗口**。重排后根节点不再被内容撑大（以前内容比窗口高时根会"长"出
+窗口，脏矩形/命中/绘制全落到窗口外，自适应布局一缩窗口就错位）。
+
+回归用例（`tests/test_css.cpp`）：`flex column fill`（列内 flex:1 容器 = 528、嵌套 flex:1 = 528、
+兄弟位置跟随、`setSize(400,400)` 后 = 328）+ `flex scroll viewport`（`flex:1 + overflow:auto`
+视口高 = 剩余 260 且带 `BINUI_SCROLLABLE`）。
+
+### 示例 — 7 个固定布局示例固定宽高 + 新增自适应布局示例 `examples/flexshow`
+
+- 固定像素布局的 7 个示例统一在 `<app_window>` 上写 `window_resize="disable"`：以前窗口能拖边，
+  一拖就错位（绝对定位不会跟着重排）。
+- 新增 `examples/flexshow`：整份 UI **没有一个绝对定位**，全靠百分比 / `flex:1` / `min·max-width` /
+  `width:content` / `flex:1 + overflow:auto` 撑开；状态栏由 C++ 在 `RESIZE` 事件里写窗口尺寸，
+  一眼看出"重排用的是新尺寸"。默认 1100×720，实测 820×560 / 1100×720 / 1400×900 三档都正确重排
+  （卡片宽度、柱状图百分比高度、列表滚动视口全部跟随，窗口缩小到 820 时第三张卡被 `min-width:240` 钳住）。
+
+### 性能 — 拖窗口实时重排：按刷新率出帧、动画不停、空闲不再吃满单核
+
+- **拖拽期动画不再冻结**：resize 循环以前只调 `renderOnce()`，`update_` 被跳过，拖边时所有动画停住；
+  现在每帧都走 `renderFrame()`（`update_ + 重排 + 呈现`）。
+- **按显示器刷新率出帧**：以前拖拽循环是"每轮重排 + 整屏呈现 + `Sleep(1)`"，一秒几百帧、CPU 打满、
+  消息队列堆在后面，反而一顿一顿；现在用 `GetDeviceCaps(VREFRESH)` 定额（拿不到按 60Hz），
+  边框 `SetWindowPos` 仍立刻跟手，内容按刷新率出帧。GL 与 D3D11 两个外壳同构。
+- **空闲节流**：`pump()` 以前只要有脏区就满速出帧（一个有常驻小动画的界面能吃掉 ~80% 单核），
+  现在按同一套帧时钟等到下一帧点再出帧、其余时间睡在 `MsgWaitForMultipleObjectsEx` 上。
+  实测 `buttonshow`（标题栏图标常驻呼吸动画）空闲 CPU **82% → ~12%**，6 秒内 413 帧（≈69fps，含启动）。
+- GDI 呈现路径把 `StretchDIBits` 换成 1:1 的 `SetDIBitsToDevice`（不做缩放采样）。
+- 新增 `BINUI_PERF=1`：每 600 帧 + 退出时打印分段耗时（重排 / 绘制 / 呈现，呈现再拆
+  解析 / DIB / 读回 / 贴屏），拖拽结束打印本次拖拽的帧数与平均/最大帧耗时。
+
 ### 示例 — `buttonshow` 补上标准标题栏，7 个示例现在外观统一
 
 之前 6 个示例（features / animshow / fontshow / svgdemo / cubedemo / texturedemo）都用

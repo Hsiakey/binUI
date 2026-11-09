@@ -35,7 +35,7 @@ components/         **标准组件库**：titlebar / button / field / badge / to
 bindings/           **其他语言绑定**：Python(ctypes) / Go(cgo) / Rust(extern "C")，
                     统一对着 include/binui_c.h 的 C ABI（见 docs/bindings.md）
 examples/           **使用示例**（一组一个子目录：main.cpp + main.html，产物落 bin/examples/）
-                      （7 组示例里 features 就是组件化三形态的活示例；设计稿/原型在 docs/mockups/）
+                      （8 组示例里 features 就是组件化三形态的活示例；设计稿/原型在 docs/mockups/）
 tests/              **测试用例**（按主题分四个套件：CSS / 元素 / 字体与输入法 / C ABI，
                       产物落 bin/tests/，见 tests/README.md）
 tools/              调试工具：离屏渲染 / 窗口抓取 / 窗口枚举 / 示例 UI 检查（见 tools/README.md）
@@ -69,6 +69,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `examples/animshow` | **动画**：缓动 / 方向 / 时长 / fill / infinite / 悬停过渡 / 运行时 API |
 | `examples/fontshow` | **字体与输入法**：字号阶梯 / 字重 400–800 / 斜体 / 行高 / 文字装饰 / 中英混排与符号 + IME 组字·候选框跟随光标·选词上屏（`BINUI_IME_LOG=1` 出消息日志） |
 | `examples/buttonshow` | **按钮样式**：语义色 / 尺寸 / 圆角 / 纯色·渐变·描边·幽灵底 / :hover·`:active`·`:checked`·disabled 状态 / 图标·文本·块级形态 |
+| `examples/flexshow` | **自适应布局**：百分比 / `flex:1` / `min·max-width` / `width:content` / `flex:1`+`overflow:auto` —— 整份 UI 无绝对定位，拖窗口边框实时重排（唯一可缩放窗口的示例） |
 | `examples/svgdemo` | **2D 渲染**：`<svg>` 声明式矢量（line/polyline/polygon/rect/circle）+ `<canvas>` 命令式绘制面 |
 | `examples/cubedemo` | **3D 渲染**：应用自己算顶点与透视，只用 `fillLine` 画线框立方体（引擎不做 3D） |
 | `examples/texturedemo` | **纹理**：`updateImageRaw` 运行期上传，同一张纹理多尺寸采样 |
@@ -153,11 +154,12 @@ sh scripts/fetch-deps.sh
 cmake -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 
-# 运行示例（7 组各一个，OpenGL 3.3 无边框窗口；产物统一在 bin/examples/）
+# 运行示例（8 组各一个，OpenGL 3.3 无边框窗口；产物统一在 bin/examples/）
 build/bin/examples/features.exe      # 功能：伪类 / 扩展绘制 / HTML 语义 / 组件化三形态 / 数据驱动
 build/bin/examples/animshow.exe      # 动画：缓动 / 方向 / 时长 / fill / infinite / 悬停过渡 / 运行时 API
 build/bin/examples/fontshow.exe      # 字体与输入法：字号 / 字重 / 行高 / 装饰 / 混排 + IME 组字与上屏
 build/bin/examples/buttonshow.exe    # 按钮样式：语义色 / 尺寸 / 圆角 / 底色 / 状态 / 形态（纯 CSS）
+build/bin/examples/flexshow.exe      # 自适应布局：百分比 / flex:1 / min-max / 内容宽（拖边框看实时重排）
 build/bin/examples/svgdemo.exe       # 2D 渲染：<svg> 声明式矢量 + <canvas> 命令式绘制面
 build/bin/examples/cubedemo.exe      # 3D 渲染：应用自己算顶点与透视，引擎只提供 fillLine
 build/bin/examples/texturedemo.exe   # 纹理：updateImageRaw 运行期上传，多尺寸采样
@@ -481,7 +483,17 @@ DetachVideoEngine();   // 进程退出前停止全部解码/输出线程
 （v4 起 BinUINode 追加 `radius` 圆角字段；元素默认直角，仅 `border-radius` 指定时圆角。v5 追加窗口描述段：`<app_window>` 编译期包裹层定义窗口，外壳据此创建。v6 追加 `minW/maxW/minH/maxH` 尺寸约束与 `relW/relH` 显式声明尺寸基准。v7 追加动画段（`@keyframes`/`animation`/`transition` → 关键帧组 + 动画定义 + 过渡）。v8 追加名称表：HTML `id` 属性 → 节点名（运行时 `findNodeByName`）。v9 追加视频描述段与 `BINUI_VIDEO` 节点类型（增量扩展，旧二进制不受影响）。v10 起 `BinUINode` 追加 `zIndex` 层叠字段——数值越大越靠上，同值下 absolute 高于流式、DOM 后声明者优先。v11 追加状态样式段：`<style>` 里 `:hover/:active/:focus/:checked` 的声明编译成运行时切换目标（结构伪类与 `::before/::after` 在编译期就展开成节点/普通样式，不进段）。v12 追加资源段（`imageIndex` → 图片路径，布局自描述，外壳不必再单独传图片列表）与组件引用段（`external` 组件的占位节点与路径，运行期 `ex::MountAll()` 挂载）；`BINUI_VERSION` 升到 12，旧二进制需重新编译。v13 追加扩展绘制段：文字色（与底色分家、可继承）、四边边框、`linear-gradient` 底色、字重/行高/文字装饰，以及 `overflow:hidden` 的"只裁剪不滚动"标记；同样只需重新编译。v14 给 `BinUIPaintNode` 补 `textFlags`（`BinUIPaintNode` 40 → 44 字节）：斜体、占位符、只读、初始勾选 —— 都是"少数节点才需要"的布尔量，跟着稀疏段走比往定长 `BinUINode` 塞字段便宜；同时 `BINUI_VERSION` 升到 14。）
 ```
 
-窗口缩放重排：应用收到 `WM_SIZE` → `renderer.setSize(w,h)` → 按规格段重排（百分比/flex 权重/流式光标/grow 容器）→ `invalidateAll` 全量重绘。GPU 后端的交换链重建与拖拽同步渲染细节见「绘制后端」的缩放处理要点。
+窗口缩放重排：应用收到 `WM_SIZE` → `renderer.setSize(w,h)` → 按规格段重排（百分比/flex 权重/流式光标/grow 容器）→ 全量重绘。
+
+**实时性（像浏览器那样拖边框就跟着变）**：
+
+- `WM_SIZE` 只**记录**挂起尺寸，重排/重建/绘制每帧最多应用一次（拖拽期 `WM_SIZE` 是高频风暴）；
+- 拖边框走后端自己的 resize 循环（窗口无 `WS_THICKFRAME`）：边框 `SetWindowPos` 立刻跟手，内容按**显示器刷新率**出帧（`GetDeviceCaps(VREFRESH)`，拿不到按 60Hz）；
+- 拖拽期间每帧都调 `update_`——**元素动画不会冻住**（以前动画帧只在正常循环里走，拖边时被跳过）；
+- 拖拽期的呈现走 GDI（读回离屏像素贴到窗口 DC），绕开 NVIDIA 驱动在"resize + SwapBuffers"组合下的崩溃路径；
+- 固定布局的示例统一写 `window_resize="disable"`（拖不了边就不存在错位）；要演示自适应就看 `examples/flexshow`。
+- 自节拍：空闲时按刷新率出帧、其余时间睡在 `MsgWaitForMultipleObjectsEx` 上——不节流的话，一个不停的小动画就能让界面常驻 ~80% 单核。`BINUI_PERF=1` 可打印每帧分段耗时（重排/绘制/呈现/读回/贴屏）。
+
 
 ## 跨平台方向
 

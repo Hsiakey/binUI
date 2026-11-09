@@ -260,6 +260,13 @@ private:
     // pump()/renderFrame() 每次比对；0 = 还没建窗。
     unsigned long ownerThread_ = 0;
     std::chrono::steady_clock::time_point lastTime_;  // pump() 的帧间隔基准
+    // 帧节流（自节拍）：按显示器刷新率出帧，其余时间睡觉。
+    // 不节流的话，只要有动画/悬停这一类"每帧都有脏区"的状态，就会一直满速出帧；
+    // GL 的 SwapBuffers 在垂直同步上会让驱动自旋等待（实测每帧 6~7ms CPU），
+    // 空闲界面也能吃掉 80% 单核。见 renderFrame()/pump() 里注释。
+    std::chrono::steady_clock::time_point nextFrameTime_{};
+    std::chrono::microseconds frameBudget_{16667};   // 1000000 / 刷新率（默认 60Hz）
+    void requestFrameNow() { nextFrameTime_ = std::chrono::steady_clock::time_point{}; }
     bool dirty_ = true;
     int dirtyL_ = 0, dirtyT_ = 0, dirtyR_ = 0, dirtyB_ = 0;
     int pendingW_ = 0, pendingH_ = 0; // 挂起的窗口尺寸（WM_SIZE 只记录，帧内应用一次）

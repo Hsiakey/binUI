@@ -936,6 +936,65 @@ int run() {
         TEST("flex column: undeclared cross size stretches (300)", c2 && std::fabs(c2->width - 300.0f) < 0.5f);
     }
 
+    // 18b. column 里的 flex:1 容器：高度由父级剩余空间分配，不许被"内容撑高"改写
+    //      （回归：撑满剩余高度的容器塌成内容高，后面的兄弟却仍按分配值排 → 错位/重叠；
+    //        flex:1 + overflow:auto 的滚动视口也跟着没了）
+    {
+        auto res = CompileBinUIEx(
+            "<html><body style=\"width:400px;height:600px\">"
+            "<div id=\"col\" style=\"display:flex;flex-direction:column;height:100%\">"
+            "<div id=\"head\" style=\"height:44px\"></div>"
+            "<div id=\"mid\" style=\"flex:1;display:flex;flex-direction:column\">"
+            "<div id=\"fill\" style=\"flex:1\"></div>"
+            "</div>"
+            "<div id=\"foot\" style=\"height:28px\"></div>"
+            "</div></body></html>");
+        BinUIRenderer r;
+        TEST("flex column fill parses", !res.layout.empty() && r.loadLayout(res.layout.data(), res.layout.size()));
+        auto nodeOf2 = [&](const char* name) -> const BinUIRenderer::NodeInfo* {
+            uint16_t nid = r.findNodeByName(name);
+            for (const auto& nd : r.getNodes()) if (nd.id == nid) return &nd;
+            return nullptr;
+        };
+        const auto* mid  = nodeOf2("mid");
+        const auto* fill = nodeOf2("fill");
+        const auto* foot = nodeOf2("foot");
+        TEST("flex column fill: flexed container keeps remainder (528)",
+             mid && std::fabs(mid->height - 528.0f) < 0.5f);
+        TEST("flex column fill: nested flex:1 fills it (528)",
+             fill && std::fabs(fill->height - 528.0f) < 0.5f);
+        TEST("flex column fill: next sibling sits after the flexed box",
+             foot && mid && std::fabs(foot->y - (mid->y + mid->height)) < 0.5f);
+
+        // 运行时改窗口尺寸：同一条规则必须继续成立（重排不能又把它塌回内容高）
+        r.setSize(400, 400);
+        mid = nodeOf2("mid"); fill = nodeOf2("fill"); foot = nodeOf2("foot");
+        TEST("flex column fill: after setSize(400,400) remain = 328",
+             mid && std::fabs(mid->height - 328.0f) < 0.5f);
+        TEST("flex column fill: nested child follows (328)",
+             fill && std::fabs(fill->height - 328.0f) < 0.5f);
+        TEST("flex column fill: footer follows after resize",
+             foot && mid && std::fabs(foot->y - (mid->y + mid->height)) < 0.5f);
+    }
+    {
+        // flex:1 的滚动容器：视口高度 = 分配高度（不是内容高度），否则滚动条永远不出现
+        auto res = CompileBinUIEx(
+            "<html><body style=\"width:300px;height:300px\">"
+            "<div style=\"display:flex;flex-direction:column;height:300px\">"
+            "<div id=\"hdr\" style=\"height:40px\"></div>"
+            "<div id=\"list\" style=\"flex:1;overflow:auto\">"
+            "<div style=\"height:900px\"></div>"
+            "</div></div></body></html>");
+        BinUIRenderer r;
+        TEST("flex scroll viewport parses", !res.layout.empty() && r.loadLayout(res.layout.data(), res.layout.size()));
+        uint16_t lid = r.findNodeByName("list");
+        for (const auto& nd : r.getNodes()) {
+            if (nd.id != lid) continue;
+            TEST("flex scroll viewport: height = remainder (260)", std::fabs(nd.height - 260.0f) < 0.5f);
+            TEST("flex scroll viewport: marked scrollable", (nd.flags & BINUI_SCROLLABLE) != 0);
+        }
+    }
+
     // 19. 命名实体表 / <br> 真实换行 / input 默认标签 / LIST 文本字号
     {
         auto res = CompileBinUIEx(
