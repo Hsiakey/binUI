@@ -456,6 +456,9 @@ private:
     std::vector<ComponentRef> componentRefs_;            // v12 组件引用段：运行期挂载点
     std::vector<BinUIPaintNode> paints_;                 // v13 扩展绘制段
     std::unordered_map<uint16_t, size_t> paintIdx_;      // nodeId -> paints_ 下标
+    // 边框宽度快照（与 paints_ 同下标）：ui_scale="fixed" 子树在等比缩放时按比例重设边框，
+    // 每次都从这份原始值算，避免多次 setSize 累乘
+    std::vector<std::array<uint8_t, 4>> designBorderW_;
     std::unordered_set<uint16_t> clipOnly_;              // PAINT_CLIP_ONLY 的节点（overflow:hidden）
     std::unordered_set<uint16_t> mountedAnchors_;        // 已挂载组件的锚点（幂等）
     uint16_t nextNodeId_ = 0;                            // v8 动态节点 id 分配

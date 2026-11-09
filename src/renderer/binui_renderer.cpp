@@ -578,6 +578,10 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
             }
         }
     }
+    // 边框宽度快照：等比缩放模式下 ui_scale="fixed" 子树要按比例重设边框（每次都从这份改）
+    designBorderW_.assign(paints_.size(), {0, 0, 0, 0});
+    for (size_t i = 0; i < paints_.size(); i++)
+        for (int b = 0; b < 4; b++) designBorderW_[i][b] = paints_[i].borderW[b];
 
     // v14：<input checked> 编译期标记 → 播种运行时勾选状态（:checked 状态样式随之生效）
     checkedNodes_.clear();
@@ -958,17 +962,26 @@ void BinUIRenderer::relayout(int width, int height) {
                 const NodeInfo& p = nodes_[pidx];
                 const NodeInfo& dp = designNodes_[pidx];
                 const float k = fs;
+                // 描边按同一比例缩放（边框 / 线段线宽），否则放大后"横线比方框粗"
+                auto scaleStroke = [&](size_t idx) {
+                    auto pit = paintIdx_.find(nodes_[idx].id);
+                    if (pit == paintIdx_.end() || pit->second >= designBorderW_.size()) return;
+                    BinUIPaintNode& pn = paints_[pit->second];
+                    for (int b = 0; b < 4; b++)
+                        pn.borderW[b] = (uint8_t)std::lround(designBorderW_[pit->second][b] * k);
+                };
                 if (nodes_[i].type == BINUI_LINE) {
-                    // 线段：起点/终点一起按 k 缩放
+                    // 线段：起点/终点一起按 k 缩放，线宽同样按 k
                     const float sx0 = p.x + (d.x - dp.x) * k;
                     const float sy0 = p.y + (d.y - dp.y) * k;
                     nodes_[i].x = sx0;
                     nodes_[i].y = sy0;
                     nodes_[i].width = sx0 + (d.width - d.x) * k;
                     nodes_[i].height = sy0 + (d.height - d.y) * k;
+                    nodes_[i].radius = (uint16_t)std::max(1u, (unsigned)std::lround(d.radius * k));
                     continue;
                 }
-                const float w = d.width * k, h = d.height * k;
+                float w = d.width * k, h = d.height * k;
                 const float leftGap = d.x - dp.x;
                 const float rightGap = (dp.x + dp.width) - (d.x + d.width);
                 const float topGap = d.y - dp.y;
@@ -989,6 +1002,7 @@ void BinUIRenderer::relayout(int width, int height) {
                 nodes_[i].y = std::lround(nodes_[i].y);
                 nodes_[i].radius = (uint16_t)(d.radius * k);
                 nodes_[i].fontSize = (uint16_t)std::max(1.0f, d.fontSize * k);
+                scaleStroke(i);
                 continue;
             }
             nodes_[i].x = d.x * scaleX_;
