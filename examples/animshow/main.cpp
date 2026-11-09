@@ -132,25 +132,26 @@ int main(int argc, char* argv[]) {
         renderer.clearHover();
         if (h >= 0) invalidateNode((uint16_t)h);
     });
+    // 键盘：WASD 移焦点 / 方向键滚页面 / 回车进·出输入态，统一走 renderer.handleKey。
     app.setKeyFn([&](int vk) {
-        if (vk == VK_ESCAPE) { app.requestExit(); return; }
-        if (renderer.isEditing()) {
-            bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-            if (vk == VK_BACK) renderer.backspace();
-            else if (vk == VK_DELETE) renderer.deleteForward();
-            else if (vk == VK_LEFT) renderer.moveCaret(-1, shift);
-            else if (vk == VK_RIGHT) renderer.moveCaret(1, shift);
-            else if (vk == VK_HOME) renderer.setCaret(0);
-            else if (vk == VK_END) renderer.setCaret(renderer.edit().value.size());
-            else if (vk == VK_RETURN || vk == VK_TAB || vk == VK_ESCAPE) renderer.blur();
-        }
-        if (renderer.isEditing()) invalidateNode(renderer.edit().nodeId);
+        uint32_t mods = 0;
+        if (::GetKeyState(VK_SHIFT)   & 0x8000) mods |= BinUIRenderer::KEYMOD_SHIFT;
+        if (::GetKeyState(VK_CONTROL) & 0x8000) mods |= BinUIRenderer::KEYMOD_CTRL;
+        if (::GetKeyState(VK_MENU)    & 0x8000) mods |= BinUIRenderer::KEYMOD_ALT;
+        const auto kr = renderer.handleKey(vk, mods);
+        for (uint16_t id : kr.changed) invalidateNode(id);
+        if (!kr.handled && vk == VK_ESCAPE) app.requestExit();
     });
+
+    // 中文输入法会把字母键变成 VK_PROCESSKEY 自己组字 —— 非编辑态必须把 IME 摘掉，
+    // WASD 焦点导航才收得到；进输入框编辑时窗口会自动挂回去（组字/候选框照旧）。
+    app.setImeActiveFn([&] { return renderer.isEditing(); });
     app.setFocusFn([&](bool focused) {
         if (!focused) {
             renderer.cancelPress();
             renderer.clearHover();
             renderer.blur();
+            renderer.hideFocusRing();
             app.invalidateAll();
         }
     });

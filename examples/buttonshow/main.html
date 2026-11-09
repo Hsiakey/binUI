@@ -9,7 +9,7 @@
     ④ 底色     纯色 / 渐变 / 描边 / 幽灵
     ⑤ 状态     普通 / 悬停 / 选中(:checked) / 禁用(disabled)
     ⑥ 形态     图标按钮 / 纯文本按钮 / 键盘焦点 / 块级整行按钮
-  底部状态栏会显示"最后点击了哪个按钮"——鼠标点、Tab 选、Enter 触发都算。
+  底部状态栏会显示"最后点击了哪个按钮"——鼠标点、WASD 选、Enter 触发都算。
 
   注意（改这里之前先知道）：
   · 选择器只支持单段：`.b:active` 可以，`.card .b`（后代）不行；
@@ -197,7 +197,7 @@
         <button class="icon" style="position:absolute;left:58;top:42">→</button>
         <button class="icon" style="position:absolute;left:100;top:42">⚙</button>
         <button class="b textbtn" style="position:absolute;left:156;top:40;width:150">纯文本按钮</button>
-        <button class="b focusable" style="position:absolute;left:316;top:40;width:150">Tab 到这里看焦点</button>
+        <button class="b focusable" style="position:absolute;left:316;top:40;width:150">WASD 到这里看焦点</button>
         <button class="block" style="position:absolute;left:16;top:88;width:940;height:32">块级按钮：占满整行，适合表单提交 / 列表主操作</button>
     </div>
 
@@ -205,7 +205,7 @@
     <div class="card" style="position:absolute;left:24;top:590;width:972;height:74">
         <span id="status" class="status" style="position:absolute;left:16;top:14;width:520;height:20">最后点击：—</span>
         <span id="count"  class="count"  style="position:absolute;left:16;top:40;width:200;height:16">点击次数 0</span>
-        <span class="note" style="position:absolute;left:420;top:16;width:540;height:40">Tab / 方向键移动焦点　·　Enter 或 Space 触发　·　鼠标点击同样更新状态行　·　Esc 退出</span>
+        <span class="note" style="position:absolute;left:420;top:16;width:540;height:40">WASD 移动焦点　·　方向键滚页面　·　Enter 或 Space 触发　·　Esc 退出</span>
     </div>
 
 </body>

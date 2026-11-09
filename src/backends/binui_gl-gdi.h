@@ -134,6 +134,12 @@ public:
     // IME：返回光标在客户区的位置与行高（用于把输入法候选窗摆到光标下方）。
     // 返回 false = 当前没有正在编辑的输入框。
     using ImeCaretFn = std::function<bool(int& x, int& y, int& lineH)>;
+    // IME 开关：返回 true = 现在需要输入法（通常就是 renderer.isEditing()）。
+    // 中文输入法会把字母键改成 VK_PROCESSKEY 自己组字，没有编辑框时那样会把 WASD
+    // 焦点导航整个吃掉（实测窗口收到的 wParam=229）。所以这个钩子返回 false 时窗口
+    // 把 IME 上下文摘下来（字母原样到达），返回 true 再挂回去。
+    // 不接这个钩子 = 保持老行为（IME 常挂），此时 WASD 在中文输入法下收不到。
+    using ImeActiveFn = std::function<bool()>;
 
     BinUIAppGLGdi(int width, int height, bool vsync = true);
     ~BinUIAppGLGdi();
@@ -155,6 +161,7 @@ public:
     void setCursorFn(CursorFn fn)   { cursor_ = std::move(fn); }
     void setDoubleClickFn(DoubleClickFn fn) { dblclick_ = std::move(fn); }
     void setImeCaretFn(ImeCaretFn fn) { imeCaret_ = std::move(fn); }
+    void setImeActiveFn(ImeActiveFn fn) { imeActive_ = std::move(fn); }
 
     void invalidateRect(int x, int y, int w, int h);
     void invalidateAll();
@@ -169,6 +176,9 @@ public:
     // 拼音提交掉，窗口根本收不到 WM_LBUTTONDOWN），补救不到。窗口失焦时本库已经
     // 自动调过一次（WM_KILLFOCUS）。
     void cancelImeComposition();
+
+    // 每帧调一次：按 imeActive_() 把 IME 上下文挂上/摘下（见 ImeActiveFn 的注释）。
+    void syncImeContext();
 
     // 无边框窗口交互：拖动（在标题栏按下时调用）/ 最小化
     void beginWindowDrag();
@@ -248,6 +258,8 @@ private:
     CursorFn cursor_;
     DoubleClickFn dblclick_;
     ImeCaretFn imeCaret_;
+    ImeActiveFn imeActive_;        // 宿主说"现在要不要输入法"
+    bool imeAttached_ = true;      // 当前 IME 上下文是否挂在窗口上
     // 输入法正在组字：这期间的按键/字符归 IME，不能拿去改我们自己的文本
     bool composing_ = false;
     // 上一次摆 IME UI 用的客户区坐标（-1 = 还没摆过）。位置没变就不重复摆，

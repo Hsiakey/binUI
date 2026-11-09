@@ -2148,7 +2148,8 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
             // 与 drawNodesGDI 的叠放顺序一致
             drawNodeBorder();
 
-            if (renderer.isKeyboardFocused(node.id)) {
+            if (renderer.focusRingVisible() && renderer.isKeyboardFocused(node.id)) {
+                // 同 GL/GDI 后端：焦点环只在键盘导航时画，2 秒无操作自动熄灭
                 // 焦点环必须跟随节点自己的圆角：以前写死半径 10、内缩 2，
                 // 圆角 8 的按钮上就会套出一个半径不同的环，看着像"双线框"。
                 // 颜色按节点底色取对比色（浅底画白环等于没画），详见 GL 后端同段注释。

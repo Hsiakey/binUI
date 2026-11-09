@@ -159,9 +159,13 @@ Python 用户不会撞上经典的 `OSError: [WinError 126] 找不到指定模�
 
 ## 键盘与中文输入
 
-文本框的编辑**由库内部处理**：退格 / 删除 / 方向键 / Home / End / Tab 循环焦点 /
-Enter 激活，宿主不用重写一遍，结果通过 `BINUI_EV_INPUT` 推出（编辑过程中逐字推，
-失焦时提交）。
+文本框的编辑**由库内部处理**：WASD 移动焦点、方向键滚页面、输入框上 Enter 进入编辑、
+再按 Enter/Esc 退出回到焦点控制、Tab 退出并跳到下一个控件，宿主不用重写一遍，结果通过
+`BINUI_EV_INPUT` 推出（编辑过程中逐字推，失焦时提交）。焦点环是 focus-visible 语义：
+键盘导航才画、鼠标点击不画、2 秒无操作自动熄灭；`BINUI_EV_KEY` 照旧推给宿主（Esc 关窗这类
+库不消费的键由宿主自己处理）。C ABI 内部已经把 IME 开关接在编辑态上（非编辑态摘掉输入法，
+否则中文输入法会把 WASD 变成 `VK_PROCESSKEY` 自己组字、焦点导航全哑）。完整按键表见
+[`keyboard_focus.md`](keyboard_focus.md)。
 
 > 2026-10 修的一个真 bug：三个窗口外壳原来用 ANSI 窗口类（`RegisterClassA` +
 > `DispatchMessageA`），在 CP936 系统上 Windows 会把一个中文字符拆成**两个**

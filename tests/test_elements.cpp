@@ -14,6 +14,7 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
+#include <algorithm>
 #include "binui_compiler.h"
 #include <cmath>
 #include <chrono>
@@ -845,6 +846,113 @@ int run() {
         auto ufl3 = CompileXML("<binui width=\"100\" height=\"100\"><text x=\"0\" y=\"0\" w=\"80\" h=\"20\">hi</text></binui>");
         TEST("empty nav layout loads", r3.loadLayout(ufl3.data(), ufl3.size()));
         TEST("no interactive -> cycle -1", r3.cycleKeyboardFocus(true) == -1 && r3.keyboardNode() == -1);
+    }
+
+    // 9c. 键盘路由（handleKey）：WASD 移焦点 / 方向键滚页面 / 回车进·出输入态 / 焦点环超时
+    {
+        auto ufl = CompileXML(
+            "<binui width=\"300\" height=\"300\">"
+            "<input  x=\"10\"  y=\"10\" w=\"120\" h=\"30\"></input>"
+            "<button x=\"150\" y=\"10\" w=\"80\"  h=\"30\">b</button>"
+            "<button x=\"10\"  y=\"60\" w=\"80\"  h=\"30\">c</button>"
+            "</binui>");
+        BinUIRenderer r;
+        TEST("key layout loads", r.loadLayout(ufl.data(), ufl.size()));
+        uint16_t inId = r.getNodes()[1].id, bId = r.getNodes()[2].id, cId = r.getNodes()[3].id;
+        auto kd = [&](int vk, uint32_t mods = 0) { return r.handleKey(vk, mods); };
+
+        // WASD 移焦点
+        TEST("focus starts empty", r.keyboardNode() == -1);
+        BinUIRenderer::KeyResult kr = kd('D');
+        TEST("D moves focus to first", kr.handled && r.keyboardNode() == (int)inId);
+        TEST("ring visible after keyboard focus", r.focusRingVisible());
+        TEST("D again -> button", (kd('D'), r.keyboardNode() == (int)bId));
+        TEST("S moves down", (kd('S'), r.keyboardNode() == (int)cId));
+
+        // 方向键：没有滚动内容 -> 不消费、焦点不动（以前是移焦点）
+        kr = kd(0x28);   // VK_DOWN
+        TEST("arrow without scroller unhandled", !kr.handled);
+        TEST("arrow does not move focus", r.keyboardNode() == (int)cId);
+
+        // 回车激活按钮 = CLICK
+        int clicks = 0;
+        r.setEventCallback([&](const Event& ev) { if (ev.type == EventType::CLICK) clicks++; });
+        kr = kd(0x0D);
+        TEST("enter activates button", kr.handled && clicks == 1);
+
+        // 选中输入框 -> 回车进入编辑；编辑中 WASD 不动焦点；再回车退出
+        r.setKeyboardFocus(inId);
+        TEST("enter input -> editing", (kd(0x0D), r.isEditing() && r.isFocused(inId)));
+        TEST("editing hides ring", !r.focusRingVisible());
+        kr = kd('D');
+        TEST("WASD ignored while editing", !kr.handled && r.keyboardNode() == (int)inId);
+        r.insertText("abc");
+        TEST("backspace in edit", kd(0x08).handled && r.edit().value == "ab");
+        TEST("enter exits editing", kd(0x0D).handled && !r.isEditing());
+        TEST("ring back after editing", r.focusRingVisible());
+        TEST("WASD works after editing", (kd('D'), r.keyboardNode() == (int)bId));
+
+        // 编辑中 Tab：退出编辑并跳到下一个控件（浏览器行为）
+        r.setKeyboardFocus(inId);
+        r.handleKey(0x0D);
+        TEST("tab exits editing", kd(0x09).handled && !r.isEditing());
+        TEST("tab moved focus on", r.keyboardNode() != (int)inId);
+
+        // 方向键滚页面：焦点在滚动容器里 -> 滚那个容器，焦点不动
+        auto scrollUI = CompileHTML(
+            "<html width=\"200\" height=\"200\" bg=\"#000000\">"
+            "<body>"
+            "<div style=\"position:absolute; left:10; top:10; width:180; height:100; overflow:auto\">"
+            "<button style=\"position:absolute; left:0; top:0; width:100; height:30\">top</button>"
+            "<button style=\"position:absolute; left:0; top:300; width:100; height:30\">low</button>"
+            "</div>"
+            "</body>"
+            "</html>");
+        BinUIRenderer rs;
+        TEST("scroll key layout loads", rs.loadLayout(scrollUI.data(), scrollUI.size()));
+        uint16_t cont = rs.getNodes()[1].id, topBtn = rs.getNodes()[2].id;
+        rs.setKeyboardFocus(topBtn);
+        TEST("arrow scrolls focused container",
+             rs.handleKey(0x28).handled && rs.scrollState(cont) &&
+             rs.scrollState(cont)->y > 0.0f && rs.keyboardNode() == (int)topBtn);
+        TEST("arrow up goes back", rs.handleKey(0x26).handled && rs.scrollState(cont)->y == 0.0f);
+        TEST("PageDown pages", rs.handleKey(0x22).handled && rs.scrollState(cont)->y >= 90.0f);
+        TEST("Home goes to top", rs.handleKey(0x24).handled && rs.scrollState(cont)->y == 0.0f);
+        TEST("End goes to bottom",
+             rs.handleKey(0x23).handled && rs.scrollState(cont)->y >= rs.contentHeight(cont) - 100.0f);
+        // 没有焦点时方向键滚视口内面积最大的容器（浏览器"方向键滚页面"）
+        rs.setKeyboardFocus(-1);
+        TEST("arrow without focus scrolls page", rs.handleKey(0x24).handled);
+        TEST("space without focus pages down",
+             rs.handleKey(' ').handled && rs.scrollState(cont)->y > 0.0f);
+
+        // 焦点环 2 秒无操作自动熄灭（测试里把时限压到 50ms）
+        BinUIRenderer r2;
+        TEST("ring layout loads", r2.loadLayout(ufl.data(), ufl.size()));
+        uint16_t b2 = r2.getNodes()[2].id;
+        r2.setFocusRingIdleTime(0.05);
+        r2.setKeyboardFocus(b2);
+        TEST("ring on after setKeyboardFocus", r2.focusRingVisible());
+        std::this_thread::sleep_for(std::chrono::milliseconds(80));
+        auto changed = r2.stepAnimations();
+        TEST("ring expires after idle",
+             !r2.focusRingVisible() &&
+             std::find(changed.begin(), changed.end(), b2) != changed.end());
+
+        // 鼠标点击不点亮焦点环（focus-visible 语义）
+        BinUIRenderer rm;
+        TEST("ring mouse layout loads", rm.loadLayout(ufl.data(), ufl.size()));
+        rm.dispatchClick(190, 25);   // 按钮 b
+        TEST("mouse click sets focus but no ring",
+             rm.keyboardNode() >= 0 && !rm.focusRingVisible());
+
+        // 先键盘亮环、再用鼠标点：环立刻收掉（鼠标接管）
+        BinUIRenderer rr;
+        TEST("ring takeover layout loads", rr.loadLayout(ufl.data(), ufl.size()));
+        rr.setKeyboardFocus(rr.getNodes()[2].id);
+        TEST("ring on before click", rr.focusRingVisible());
+        rr.dispatchClick(190, 25);
+        TEST("mouse click clears keyboard ring", !rr.focusRingVisible() && rr.keyboardNode() >= 0);
     }
 
     // 10. flexbox（编译期布局）与滚动容器

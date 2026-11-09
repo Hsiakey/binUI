@@ -1,0 +1,163 @@
+# 键盘焦点系统
+
+binUI 的键盘输入**只有一条入口**：`renderer.handleKey(vk, mods)`。宿主把 Win32 的
+`WM_KEYDOWN`（`VK_*`）原样丢进来，再按返回的 `changed` 节点做局部重绘即可；焦点、
+页面滚动、文本框编辑三件事的优先级全在渲染器内部定好，8 个示例、C ABI 走的是同一套。
+
+## 三种状态
+
+| 状态 | 进入方式 | 键盘归谁 |
+|---|---|---|
+| **焦点控制**（默认） | 启动即此态；文本编辑按 Enter/Esc/Tab 退出后回到此态 | 导航键：WASD / Tab / 方向键 / PgUp·PgDn / Home·End / Enter / 空格 |
+| **文本编辑** | 焦点落在 `<input>` 上时按 Enter（鼠标点输入框也直接进入） | 编辑键：退格 / 删除 / 左右 / Home·End / Shift 选区；字母数字归输入法（`WM_CHAR`） |
+| **鼠标操作** | 点击 | 只切 `:focus` 样式，**不点亮焦点环** |
+
+### 焦点控制中
+
+| 键 | 行为 |
+|---|---|
+| `W` / `A` / `S` / `D` | 上 / 左 / 下 / 右移动焦点（同行同列优先，其次加权距离；跳过隐藏/禁用节点） |
+| `Tab` / `Shift+Tab` | 按文档顺序在可交互节点间循环（环绕） |
+| `↑` `↓` `←` `→` | **滚页面**，不移动焦点。目标 = 离焦点最近的滚动容器；焦点不在任何滚动容器里时，取视口内面积最大的那个 |
+| `PageUp` / `PageDown` | 按视口 0.9 倍翻页 |
+| `Home` / `End` | 滚到顶 / 到底 |
+| `Enter` | 激活焦点：`<input>` → 进入文本编辑；`<video>` → 播放/暂停；其余 → 派发 `CLICK` |
+| `空格` | 有焦点时同 Enter；没有焦点时向下翻页（浏览器语义） |
+| `Esc` | **不消费**（宿主可以拿它关窗口）。文本编辑中按 Esc 才是"退出编辑" |
+
+方向键的目标容器按这个顺序找（`scrollTargetNode()`）：
+
+1. 从焦点节点沿 `parentId` 往上，第一个 `overflow:auto/scroll`（且不是 `overflow:hidden`
+   的只裁剪容器）的祖先；
+2. 没有 → 视口中心落入的那个可滚动容器；
+3. 还没有 → 视口内面积最大的可滚动容器；
+4. 全没有（例如整页固定布局）→ 返回 `-1`，方向键**不被消费**，宿主可以自己用。
+
+只有真有两轴溢出的容器才算目标（`contentHeight/contentWidth` 大于视口），
+否则方向键会永远被"消费"掉、宿主收不到。
+
+### 文本编辑中
+
+| 键 | 行为 |
+|---|---|
+| `←` `→` | 按字符移动光标（`Shift` 扩展选区） |
+| `Home` / `End` | 光标到行首 / 行尾 |
+| `Backspace` / `Delete` | 删除选区或光标前 / 后一个字符 |
+| `Enter` / `Esc` | 提交并退出编辑 → **回到焦点控制**（焦点环重新点亮） |
+| `Tab` / `Shift+Tab` | 提交并退出编辑，然后跳到下一个 / 上一个控件（浏览器行为） |
+| `Ctrl+C/X/V/A` | 不归渲染器：剪贴板 I/O 在平台层（C ABI 内部接好了，C++ 示例没接） |
+| 字母、数字、中文 | 走 `WM_CHAR` → 宿主转 `renderer.insertText()`（IME 组字同理） |
+
+**WASD 在编辑态不移动焦点** —— 字母要留给输入。这与"用鼠标点开输入框就能打字"的
+习惯一致，也是"回车两段式"存在的意义：先 WASD 选中，回车进编辑，打完再回车出来。
+
+## 焦点环（:focus-visible 语义）
+
+- 键盘导航才亮；**鼠标点击不亮**（`handleKey` / `setKeyboardFocus` 会亮，`release` 不会）。
+  如果环正亮着，鼠标点任何控件也会立刻收掉（`release` 里 `focusRing_ = false`）—— 改用鼠标了
+  就不再需要键盘焦点提示。
+- **2 秒没有操作自动消失**（`kFocusRingIdleSec`，可用 `setFocusRingIdleTime()` 改）：
+  每按一次导航键都会重置计时，所以持续导航时环一直在。
+- 消失不需要宿主定时：`stepAnimations()` 会在熄灭的那一帧把焦点节点 id 放进返回值，
+  宿主照常 `invalidateNode()` 就擦掉了。
+- 文本编辑中不画环（有光标），环的状态由输入框自己的 `:focus` 样式/光标表达。
+- 窗口失焦时宿主调 `renderer.hideFocusRing()`，别把环留在别人的窗口上。
+
+`setKeyboardFocus(-1)` / 窗口失焦 / 按 Esc 关窗都会清掉焦点；焦点节点被隐藏、禁用后
+`stepAnimations` 不会重报，宿主按自己的失效逻辑重绘即可。
+
+## 中文输入法与 WASD（必须接的一行）
+
+中文输入法**默认挂在窗口上**：按 `d` 时 Windows 会把 `WM_KEYDOWN` 的 `wParam` 改成
+`VK_PROCESSKEY`（229），字母交给输入法组字。这样 WASD 焦点导航一个键都收不到 ——
+实测窗口日志：
+
+```
+keydown vk=229 composing=0     ← 按 d，输入法把键吃了
+keydown vk=229 composing=1
+```
+
+所以外壳提供 `setImeActiveFn`：非编辑态把 IME 上下文从窗口上摘下来（字母原样到达），
+进了输入框再挂回去（组字/候选框/光标定位照旧）：
+
+```cpp
+app.setImeActiveFn([&] { return renderer.isEditing(); });
+```
+
+摘掉/挂回发生在每帧的 `renderFrame()` 里（`syncImeContext()`），组件不可见的开关
+不需要宿主自己判断；摘之前会 `cancelImeComposition()`，不会把半截拼音留成结果串。
+不接这一行 = 保持老行为（IME 常挂），此时中文输入法下 WASD 无效，方向键照常。
+
+## 宿主接法
+
+```cpp
+app.setKeyFn([&](int vk) {
+    uint32_t mods = 0;
+    if (::GetKeyState(VK_SHIFT)   & 0x8000) mods |= BinUIRenderer::KEYMOD_SHIFT;
+    if (::GetKeyState(VK_CONTROL) & 0x8000) mods |= BinUIRenderer::KEYMOD_CTRL;
+    if (::GetKeyState(VK_MENU)    & 0x8000) mods |= BinUIRenderer::KEYMOD_ALT;
+    const auto kr = renderer.handleKey(vk, mods);
+    for (uint16_t id : kr.changed) invalidateNode(id);
+    if (!kr.handled && vk == VK_ESCAPE) app.requestExit();   // 库不消费 Esc，宿主决定
+});
+app.setFocusFn([&](bool focused) {
+    if (!focused) {
+        renderer.cancelPress(); renderer.clearHover(); renderer.blur();
+        renderer.hideFocusRing();
+        app.invalidateAll();
+    }
+});
+// 非编辑态摘掉输入法，否则中文输入法会把 WASD 吃成拼音（见上一节）
+app.setImeActiveFn([&] { return renderer.isEditing(); });
+```
+
+`KeyResult::handled` 只表示"库消费了这个键"；宿主自己的全局快捷键应当在
+`handled == false` 时再处理，否则会和编辑/导航抢键。
+
+## 已知取舍
+
+- 单击输入框直接进入编辑（浏览器行为）；"回车两段式"只约束键盘导航，鼠标用户不用多按一次。
+- `:focus` 与焦点环是两件事：`release()` 会把点击的节点设为键盘焦点（`:focus` 样式因此生效），
+  但环是 focus-visible，鼠标不亮。
+- 方向键滚动是"最近滚动容器"而不是"整页滚动"：binUI 布局常常是一整屏卡片，把滚动交给
+  焦点所在的卡片更符合预期；整页滚动的布局（根容器 `overflow:auto`）同样成立。
+- 没有 `tabindex` / `focus-within`：可聚焦集合 = `BINUI_INTERACTIVE` 且可见、未禁用的节点。
+- IME 开关只有 GL/GDI 外壳有（`BinUIAppGLGdi::setImeActiveFn`）：D3D11 外壳本来就没有
+  IME 处理（它那边 WASD 不会被输入法吃，但中文输入也不可用）；旧演示外壳 `BinUIApp`
+  两者都没有，新代码别再用它。
+
+## 设计存档：z 序焦点（下潜 / 上浮，**未实现**）
+
+目标：非输入框按 Enter 可以"进到子元素里"继续用 WASD 选，多层可下潜；`Delete` 回退
+上一层级。用来解决"一个卡片里有 20 个按钮，WASD 在整页里跳来跳去"的问题。
+
+拟定语义：
+
+| 操作 | 行为 |
+|---|---|
+| `Enter`（非输入框、且有可聚焦子节点） | 焦点下潜到该节点的**第一个子焦点**（按文档顺序）；焦点作用域收窄为这个节点 |
+| `Enter`（没有可聚焦子节点） | 维持现状：派发 `CLICK` |
+| `WASD` / `Tab` | 只在当前作用域内移动；作用域外节点不可达 |
+| `Delete` | 上浮一层；已在顶层则清焦点 |
+| `Esc` | 直接回到顶层（不清焦点）；文本编辑中仍是退出编辑 |
+| 焦点环 | 作用域边框 + 当前焦点环两级指示（外层细框、内层实心环），或只画内层 + 状态栏提示 |
+
+实现要点（记下来，做的时候照这个走）：
+
+1. 渲染器加 `std::vector<uint16_t> focusScopes_`（根在前）和 `focusDepth()`；
+   `moveKeyboardFocus` / `cycleKeyboardFocus` 的候选集合先过滤 `isAncestorOf(scope, node)`。
+2. `Enter` 的下潜判定要排在 INPUT/VIDEO 分支之后：输入框仍是"进入编辑"，不再是下潜。
+3. `Delete` 与文本编辑的"删除后一个字符"冲突 —— 只在**非编辑态**且 `focusDepth() > 0`
+   时才是上浮；编辑态保持删除字符。
+4. 下潜目标节点自己要不要成为焦点？建议不：作用域节点只作为容器高亮，焦点落在它的
+   第一个可聚焦子节点；没有子节点就点击它（`CLICK`），语义和现在的 Enter 一致。
+5. 作用域节点被隐藏/禁用时，`focusScopes_` 自动回退到最近的可见祖先（和 `setVisible`
+   一样在每帧检查，代价很小：只在焦点链变化时查）。
+6. 与滚动的关系：方向键仍滚"焦点最近的滚动容器"，作用域不改变这条。
+7. 对外 API：`focusDepth()`、`focusScope()`、`descendFocus()` / `ascendFocus()`（给
+   手柄/自定义键位用），`handleKey` 只是它们的默认绑定。
+8. 兼容：现有 `moveKeyboardFocus` 不加作用域参数时行为不变（作用域 = 根），
+   这样 C ABI 和旧宿主不用改。
+
+没实现的原因：当前 8 个示例的布局层级都很浅，WASD 已经够用；等真正出现"卡片里几十个
+可聚焦元素"的界面再做，避免过早给焦点链加状态（多一层状态就多一处失效路径）。

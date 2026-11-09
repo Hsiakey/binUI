@@ -181,26 +181,28 @@ int main(int argc, char* argv[]) {
         if (hv >= 0) invalidateNode((uint16_t)hv);
     });
     // ---- 按键：组字期间的键由库拦在窗口层，走不到这里 ----
+    // WASD 移焦点、方向键滚页面、回车进/出输入态 —— 全在 renderer.handleKey 里；
+    // 两个输入框的内容缓存（valueOf）要在每次按键后同步一次。
     app.setKeyFn([&](int vk) {
-        if (vk == VK_ESCAPE) { app.requestExit(); return; }
-        if (!renderer.isEditing()) return;
-        const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        switch (vk) {
-            case VK_BACK:   renderer.backspace(); break;
-            case VK_DELETE: renderer.deleteForward(); break;
-            case VK_LEFT:   renderer.moveCaret(-1, shift); break;
-            case VK_RIGHT:  renderer.moveCaret(1, shift); break;
-            case VK_HOME:   renderer.setCaret(0); break;
-            case VK_END:    renderer.setCaret(renderer.edit().value.size()); break;
-            case VK_RETURN:
-            case VK_TAB:    renderer.blur(); break;
-            default: break;
-        }
-        invalidateNode(renderer.isEditing() ? renderer.edit().nodeId : h.in1);
+        uint32_t mods = 0;
+        if (::GetKeyState(VK_SHIFT)   & 0x8000) mods |= BinUIRenderer::KEYMOD_SHIFT;
+        if (::GetKeyState(VK_CONTROL) & 0x8000) mods |= BinUIRenderer::KEYMOD_CTRL;
+        if (::GetKeyState(VK_MENU)    & 0x8000) mods |= BinUIRenderer::KEYMOD_ALT;
+        const auto kr = renderer.handleKey(vk, mods);
+        for (uint16_t id : kr.changed) invalidateNode(id);
         syncValue();
+        if (!kr.handled && vk == VK_ESCAPE) app.requestExit();
     });
+
+    // 中文输入法会把字母键变成 VK_PROCESSKEY 自己组字 —— 非编辑态必须把 IME 摘掉，
+    // WASD 焦点导航才收得到；进输入框编辑时窗口会自动挂回去（组字/候选框照旧）。
+    app.setImeActiveFn([&] { return renderer.isEditing(); });
     app.setFocusFn([&](bool focused) {
-        if (!focused) { renderer.cancelPress(); renderer.clearHover(); renderer.blur(); app.invalidateAll(); }
+        if (!focused) {
+            renderer.cancelPress(); renderer.clearHover(); renderer.blur();
+            renderer.hideFocusRing();
+            app.invalidateAll();
+        }
     });
 
     binui::ex::HotReload hot;

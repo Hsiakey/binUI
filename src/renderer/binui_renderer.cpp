@@ -176,6 +176,8 @@ void BinUIRenderer::shutdown() {
     hoverId_ = -1;
     pressedId_ = -1;
     keyboardId_ = -1;
+    focusRing_ = false;
+    focusRingHideAt_ = 0;
     scroll_.clear();
     scrollDragNode_ = -1;
     specOf_.clear();
@@ -1625,7 +1627,8 @@ int BinUIRenderer::release(float x, float y) {
         ev.click.y = y;
         eventCallback_(ev);
     }
-    commitFocus(id);        // 点击过的节点成为键盘焦点（:focus 状态样式随之切换）
+    commitFocus(id, false);  // 点击过的节点成为键盘焦点（:focus 状态样式随之切换）；鼠标不点亮焦点环
+    focusRing_ = false;      // 改用鼠标了：把键盘导航留下的焦点环收掉
     return id;
 }
 
@@ -1642,13 +1645,27 @@ void BinUIRenderer::cancelPress() {
 // ============ 键盘导航（方向键） ============
 
 // 键盘焦点变更（同时刷新受影响节点的状态样式：:focus）
-void BinUIRenderer::commitFocus(int newId) {
+void BinUIRenderer::commitFocus(int newId, bool showRing) {
     const int old = keyboardId_;
     keyboardId_ = newId;
+    if (newId < 0) focusRing_ = false;              // 焦点清空：环也别留着
+    else if (showRing) bumpFocusRing();
     if (old == newId) return;
     refreshNodeStyle(old);
     refreshNodeStyle(newId);
 }
+
+// 焦点环（:focus-visible 语义）：键盘导航点亮，鼠标点击不点亮；2 秒无操作自动熄灭
+void BinUIRenderer::bumpFocusRing() {
+    focusRing_ = true;
+    focusRingHideAt_ = AnimNow() + focusRingIdle_;
+}
+
+void BinUIRenderer::showFocusRing() { bumpFocusRing(); }
+
+void BinUIRenderer::hideFocusRing() { focusRing_ = false; }
+
+void BinUIRenderer::setFocusRingIdleTime(double seconds) { focusRingIdle_ = seconds; }
 
 void BinUIRenderer::setKeyboardFocus(int nodeId) {
     if (nodeId < 0) { commitFocus(-1); return; }
@@ -1781,6 +1798,212 @@ bool BinUIRenderer::activateKeyboardFocus() {
         eventCallback_(ev);
     }
     return true;
+}
+
+// ============ 键盘路由（焦点 / 滚动 / 文本编辑） ============
+
+// Win32 虚拟键码（渲染器不包含 windows.h，这里只用数值；宿主传的就是 VK_*）
+namespace {
+constexpr int kVkBack   = 0x08;
+constexpr int kVkTab    = 0x09;
+constexpr int kVkReturn = 0x0D;
+constexpr int kVkEscape = 0x1B;
+constexpr int kVkPgUp   = 0x21;
+constexpr int kVkPgDn   = 0x22;
+constexpr int kVkEnd    = 0x23;
+constexpr int kVkHome   = 0x24;
+constexpr int kVkLeft   = 0x25;
+constexpr int kVkUp     = 0x26;
+constexpr int kVkRight  = 0x27;
+constexpr int kVkDown   = 0x28;
+constexpr int kVkDelete = 0x2E;
+constexpr float kArrowScrollStep = 40.0f;  // 方向键一次滚 40px，和滚轮一格同口径
+constexpr float kPageScrollRatio = 0.9f;   // PageUp/PageDown 翻页比例
+} // namespace
+
+// 方向键滚谁：从焦点（编辑中则是输入框）向上找最近的可滚动祖先；都不在滚动容器里时，
+// 取视口中心所在的那个，否则取视口内面积最大的 —— 对应浏览器"方向键滚页面"。
+int BinUIRenderer::scrollTargetNode() const {
+    int start = edit_.active ? static_cast<int>(edit_.nodeId) : keyboardId_;
+    if (start >= 0) {
+        auto it = nodeIndexById_.find(static_cast<uint16_t>(start));
+        if (it != nodeIndexById_.end()) {
+            uint16_t pid = nodes_[it->second].parentId;
+            while (pid != 0xFFFF) {
+                auto pit = nodeIndexById_.find(pid);
+                if (pit == nodeIndexById_.end()) break;
+                const NodeInfo& p = nodes_[pit->second];
+                if (isUserScrollable(p.id)) return p.id;
+                pid = p.parentId;
+            }
+        }
+    }
+
+    float vx = 0.0f, vy = 0.0f;
+    if (!nodes_.empty()) {
+        vx = nodes_[0].x + nodes_[0].width * 0.5f;
+        vy = nodes_[0].y + nodes_[0].height * 0.5f;
+    }
+    int best = -1, centre = -1;
+    float bestArea = -1.0f, centreArea = -1.0f;
+    for (const auto& n : nodes_) {
+        if (!isUserScrollable(n.id) || !isNodeVisible(n.id)) continue;
+        if (n.width <= 0 || n.height <= 0) continue;
+        // 只有真有溢出才值得滚（否则方向键永远被"消费"，宿主收不到）
+        if (contentHeight(n.id) <= n.height + 0.5f && contentWidth(n.id) <= n.width + 0.5f) continue;
+        const float area = n.width * n.height;
+        if (area > bestArea) { bestArea = area; best = n.id; }
+        if (vx >= n.x && vx <= n.x + n.width && vy >= n.y && vy <= n.y + n.height &&
+            area > centreArea) {
+            centreArea = area;
+            centre = n.id;
+        }
+    }
+    return centre >= 0 ? centre : best;
+}
+
+int BinUIRenderer::scrollFocused(float dx, float dy) {
+    const int id = scrollTargetNode();
+    if (id < 0) return -1;
+    scrollBy(static_cast<uint16_t>(id), dx, dy);
+    return id;
+}
+
+// 键盘路由：见头文件的状态说明。宿主只管把 VK_* 丢进来，再按 changed 重绘。
+BinUIRenderer::KeyResult BinUIRenderer::handleKey(int vk, uint32_t mods) {
+    KeyResult out;
+    auto touch = [&out](int id) {
+        if (id < 0) return;
+        const uint16_t u = static_cast<uint16_t>(id);
+        if (std::find(out.changed.begin(), out.changed.end(), u) == out.changed.end())
+            out.changed.push_back(u);
+    };
+    const bool shift = (mods & KEYMOD_SHIFT) != 0;
+
+    // ---- 文本编辑态：字母/数字归输入法，只有编辑键和退出键 ----
+    if (edit_.active) {
+        const uint16_t nodeId = edit_.nodeId;
+        // Ctrl 组合键留给宿主（剪贴板 I/O 在平台层）
+        if (mods & KEYMOD_CTRL) return out;
+        switch (vk) {
+            case kVkBack:   out.handled = backspace(); break;
+            case kVkDelete: out.handled = deleteForward(); break;
+            case kVkLeft:   out.handled = moveCaret(-1, shift); break;
+            case kVkRight:  out.handled = moveCaret(1, shift); break;
+            case kVkHome:   out.handled = setCaret(0); break;
+            case kVkEnd:    out.handled = setCaret(edit_.value.size()); break;
+            case kVkReturn:
+            case kVkEscape:
+                blur();          // 提交并结束会话 → 回到焦点控制（焦点环点亮）
+                out.handled = true;
+                break;
+            case kVkTab: {
+                blur();
+                const int old = keyboardId_;
+                cycleKeyboardFocus(!shift);   // 浏览器行为：Tab 退出编辑并跳到下一个控件
+                touch(old);
+                touch(keyboardId_);
+                out.handled = true;
+                break;
+            }
+            default: break;
+        }
+        // 光标/内容/焦点的变化只影响这个输入框
+        touch(edit_.active ? static_cast<int>(edit_.nodeId) : static_cast<int>(nodeId));
+        return out;
+    }
+
+    // ---- 焦点控制（非编辑）----
+    switch (vk) {
+        // WASD 移动焦点。用字母键，方向键留给滚动。
+        case 'W': case 'A': case 'S': case 'D': {
+            BinUIRenderer::KeyDirection dir =
+                vk == 'W' ? KeyDirection::UP : vk == 'A' ? KeyDirection::LEFT
+              : vk == 'S' ? KeyDirection::DOWN : KeyDirection::RIGHT;
+            const int old = keyboardId_;
+            moveKeyboardFocus(dir);
+            touch(old);
+            touch(keyboardId_);
+            out.handled = true;
+            break;
+        }
+        case kVkTab: {
+            const int old = keyboardId_;
+            cycleKeyboardFocus(!shift);
+            touch(old);
+            touch(keyboardId_);
+            out.handled = true;
+            break;
+        }
+        case kVkLeft: case kVkRight: case kVkUp: case kVkDown: {
+            const float dx = vk == kVkLeft ? -kArrowScrollStep
+                           : vk == kVkRight ? kArrowScrollStep : 0.0f;
+            const float dy = vk == kVkUp ? -kArrowScrollStep
+                           : vk == kVkDown ? kArrowScrollStep : 0.0f;
+            const int id = scrollFocused(dx, dy);
+            if (id >= 0) { touch(id); out.handled = true; }
+            break;
+        }
+        case kVkPgUp: case kVkPgDn: {
+            const int id = scrollTargetNode();
+            if (id >= 0) {
+                const float viewport = nodes_[nodeIndexById_.at(static_cast<uint16_t>(id))].height;
+                scrollBy(static_cast<uint16_t>(id), 0,
+                         (vk == kVkPgUp ? -1.0f : 1.0f) * viewport * kPageScrollRatio);
+                touch(id);
+                out.handled = true;
+            }
+            break;
+        }
+        case kVkHome: case kVkEnd: {
+            // 非编辑态：Home/End 是页面的顶/底（编辑态在上一段里已经走光标）
+            const int id = scrollTargetNode();
+            if (id >= 0) {
+                scrollBy(static_cast<uint16_t>(id), 0, vk == kVkHome ? -1e7f : 1e7f);
+                touch(id);
+                out.handled = true;
+            }
+            break;
+        }
+        case kVkReturn: {
+            const int old = keyboardId_;
+            if (activateKeyboardFocus()) {
+                touch(old);
+                touch(keyboardId_);
+                touch(edit_.active ? static_cast<int>(edit_.nodeId) : -1);
+                out.handled = true;
+            }
+            break;
+        }
+        case ' ': {
+            if (keyboardId_ >= 0) {
+                const int old = keyboardId_;
+                if (activateKeyboardFocus()) {
+                    touch(old);
+                    touch(keyboardId_);
+                    touch(edit_.active ? static_cast<int>(edit_.nodeId) : -1);
+                    out.handled = true;
+                }
+            } else {
+                // 没有焦点时空格 = 向下翻页（浏览器行为）
+                const int id = scrollTargetNode();
+                if (id >= 0) {
+                    const float viewport = nodes_[nodeIndexById_.at(static_cast<uint16_t>(id))].height;
+                    scrollBy(static_cast<uint16_t>(id), 0, viewport * kPageScrollRatio);
+                    touch(id);
+                    out.handled = true;
+                }
+            }
+            break;
+        }
+        default: break;   // Esc 不消费：宿主可以拿它关窗口
+    }
+
+    if (out.handled) {
+        if (edit_.active) focusRing_ = false;   // Enter 进入编辑：环换成光标
+        else bumpFocusRing();                   // 任何导航键都算"刚操作过"，重置 2 秒计时
+    }
+    return out;
 }
 
 // ============ 视频（v9） ============
@@ -1946,7 +2169,8 @@ bool BinUIRenderer::videoRelease(float x, float y, int nodeId) {
     // 进度条拖动已在 press/move 中定位；画面体/按钮需松开时仍在节点上
     if (!scrub && reg != 2 && hitTest(x, y) != nodeId) return true;
     if (reg != 2) toggleVideo(static_cast<uint16_t>(nodeId)); // 体点击=播放/暂停切换
-    commitFocus(nodeId);
+    commitFocus(nodeId, false);
+    focusRing_ = false;
     return true;
 }
 
@@ -2012,6 +2236,7 @@ void BinUIRenderer::focus(uint16_t nodeId) {
     // 占位符不是真实值：进入编辑时从空串开始（否则用户会把提示语当内容改）
     edit_.value = isPlaceholder(nodeId) ? std::string() : nodes_[it->second].text;
     edit_.caret = edit_.selStart = edit_.value.size();
+    focusRing_ = false;                           // 编辑中画光标，不画焦点环
     refreshNodeStyle(static_cast<int>(nodeId));   // :focus 状态样式（正在编辑也算聚焦）
 
     if (eventCallback_) {
@@ -2031,6 +2256,8 @@ void BinUIRenderer::blur() {
     edit_.active = false;
     edit_.value.clear();
     edit_.caret = edit_.selStart = 0;
+    // 退出编辑 = 回到焦点控制：把焦点环点亮（再 2 秒不动才消失）
+    if (keyboardId_ >= 0) bumpFocusRing();
     refreshNodeStyle(static_cast<int>(nodeId));   // 结束编辑：:focus 状态样式回退
 
     auto it = nodeIndexById_.find(nodeId);
@@ -2560,6 +2787,13 @@ std::vector<uint16_t> BinUIRenderer::stepAnimations() {
     animChanged_.clear();
     if (!animTimeInit_) return animChanged_;
     animNow_ = AnimNow();
+
+    // 焦点环 2 秒无操作自动熄灭：宿主每帧会遍历这里的返回值做局部重绘，
+    // 所以只要在熄灭的那一帧把焦点节点报回去，宿主不用自己定时。
+    if (focusRing_ && focusRingIdle_ > 0.0 && animNow_ >= focusRingHideAt_) {
+        focusRing_ = false;
+        if (keyboardId_ >= 0) animChanged_.push_back(static_cast<uint16_t>(keyboardId_));
+    }
 
     stepVideos(animNow_); // 视频播放时钟推进（变化的视频节点 id 一并返回）
 

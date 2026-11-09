@@ -1,7 +1,7 @@
 // buttonshow/main.cpp - 按钮样式一览
 //
 // 外观全在 examples/buttonshow/main.html 里（纯 CSS），这个外壳只做三件事：
-//   1. 把 Tab / 方向键 / Enter 接到渲染器的键盘焦点与激活上（键盘也能"点"按钮）；
+//   1. 把键盘丢给渲染器的 handleKey（WASD 移动焦点、方向键滚页面、回车激活/进出输入态）；
 //   2. 接 CLICK 事件，把"最后点击了哪个按钮 + 点击次数"写到底部状态行；
 //   3. 维护一个 :checked 切换按钮（核心库不认勾选语义，得外壳自己 setNodeChecked）。
 #include <cstdio>
@@ -129,26 +129,27 @@ int main(int argc, char* argv[]) {
         renderer.clearHover();
         if (h >= 0) invalidateNode((uint16_t)h);
     });
+    // 键盘：焦点 / 滚动 / 编辑三态全交给渲染器 —— WASD 移焦点、方向键滚页面、
+    // 回车进/出输入状态、Tab 循环，焦点环 2 秒无操作自动熄灭。示例只管重绘和 Esc 退出。
     app.setKeyFn([&](int vk) {
-        if (vk == VK_ESCAPE) { app.requestExit(); return; }
-        const int old = renderer.keyboardNode();
-        switch (vk) {
-            case VK_TAB:   renderer.cycleKeyboardFocus(!(::GetKeyState(VK_SHIFT) & 0x8000)); break;
-            case VK_RIGHT: renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::RIGHT); break;
-            case VK_LEFT:  renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::LEFT); break;
-            case VK_DOWN:  renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::DOWN); break;
-            case VK_UP:    renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::UP); break;
-            case VK_RETURN:
-            case VK_SPACE: renderer.activateKeyboardFocus(); break;
-            default: break;
-        }
-        if (old != renderer.keyboardNode()) {
-            if (old >= 0) invalidateNode((uint16_t)old);
-            if (renderer.keyboardNode() >= 0) invalidateNode((uint16_t)renderer.keyboardNode());
-        }
+        uint32_t mods = 0;
+        if (::GetKeyState(VK_SHIFT)   & 0x8000) mods |= BinUIRenderer::KEYMOD_SHIFT;
+        if (::GetKeyState(VK_CONTROL) & 0x8000) mods |= BinUIRenderer::KEYMOD_CTRL;
+        if (::GetKeyState(VK_MENU)    & 0x8000) mods |= BinUIRenderer::KEYMOD_ALT;
+        const auto kr = renderer.handleKey(vk, mods);
+        for (uint16_t id : kr.changed) invalidateNode(id);
+        if (!kr.handled && vk == VK_ESCAPE) app.requestExit();
     });
+
+    // 中文输入法会把字母键变成 VK_PROCESSKEY 自己组字 —— 非编辑态必须把 IME 摘掉，
+    // WASD 焦点导航才收得到；进输入框编辑时窗口会自动挂回去（组字/候选框照旧）。
+    app.setImeActiveFn([&] { return renderer.isEditing(); });
     app.setFocusFn([&](bool focused) {
-        if (!focused) { renderer.cancelPress(); renderer.clearHover(); renderer.blur(); app.invalidateAll(); }
+        if (!focused) {
+            renderer.cancelPress(); renderer.clearHover(); renderer.blur();
+            renderer.hideFocusRing();
+            app.invalidateAll();
+        }
     });
 
     binui::ex::HotReload hot;

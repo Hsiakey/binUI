@@ -352,6 +352,9 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
     });
 
     // ---- 按键：先告知宿主，再做库内约定处理 ----
+    // 焦点 / 滚动 / 编辑三态的判断全在 renderer.handleKey 里（WASD 移焦点、方向键滚页面、
+    // 回车进/出输入状态、焦点环 2 秒自动熄灭），宿主这边只补两件它做不了的事：
+    // 系统剪贴板 I/O（宿主负责），以及把 KEY 事件推给调用方。
     sh.setKeyFn([a](int vk) {
         binui::BinUIRenderer& r = a->renderer;
 
@@ -360,53 +363,25 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
         e.node_id = r.isEditing() ? static_cast<int32_t>(r.edit().nodeId) : r.keyboardNode();
         PushEvent(a, e);
 
-        const bool shift = (::GetKeyState(VK_SHIFT) & 0x8000) != 0;
-        const bool ctrl = (::GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        if (r.isEditing()) {
-            const size_t len = r.edit().value.size();
-            const uint16_t id = r.edit().nodeId;
-            // 剪贴板四件套：编辑框里才能用（只读框允许复制/全选，库内部会拒绝改内容）
-            if (ctrl) {
-                switch (vk) {
-                    case 'C': ClipboardPut(r.selectedText()); break;
-                    case 'X': ClipboardPut(r.selectedText()); r.deleteSelection(); break;
-                    case 'V': { const std::string s = ClipboardGet(); if (!s.empty()) r.insertText(s); break; }
-                    case 'A': r.selectAll(); break;
-                    default: break;
-                }
-                InvalidateNode(a, id);
-                return;
-            }
+        // 剪贴板四件套：编辑框里才能用（只读框允许复制/全选，库内部会拒绝改内容）
+        if (r.isEditing() && (::GetKeyState(VK_CONTROL) & 0x8000)) {
             switch (vk) {
-                case VK_BACK:   r.backspace(); break;
-                case VK_DELETE: r.deleteForward(); break;
-                case VK_LEFT:   r.moveCaret(-1, shift); break;
-                case VK_RIGHT:  r.moveCaret(1, shift); break;
-                case VK_HOME:   r.setCaret(0); break;
-                case VK_END:    r.setCaret(len); break;
-                case VK_RETURN:
-                case VK_ESCAPE: r.blur(); break;
+                case 'C': ClipboardPut(r.selectedText()); break;
+                case 'X': ClipboardPut(r.selectedText()); r.deleteSelection(); break;
+                case 'V': { const std::string s = ClipboardGet(); if (!s.empty()) r.insertText(s); break; }
+                case 'A': r.selectAll(); break;
                 default: break;
             }
-            InvalidateNode(a, id);
+            InvalidateNode(a, r.edit().nodeId);
             return;
         }
 
-        const int oldFocus = r.keyboardNode();
-        switch (vk) {
-            case VK_TAB:    r.cycleKeyboardFocus(!shift); break;
-            case VK_LEFT:   r.moveKeyboardFocus(binui::BinUIRenderer::KeyDirection::LEFT); break;
-            case VK_RIGHT:  r.moveKeyboardFocus(binui::BinUIRenderer::KeyDirection::RIGHT); break;
-            case VK_UP:     r.moveKeyboardFocus(binui::BinUIRenderer::KeyDirection::UP); break;
-            case VK_DOWN:   r.moveKeyboardFocus(binui::BinUIRenderer::KeyDirection::DOWN); break;
-            case VK_RETURN:
-            case VK_SPACE:  r.activateKeyboardFocus(); break;
-            default: break;
-        }
-        if (oldFocus != r.keyboardNode()) {
-            InvalidateNode(a, oldFocus);
-            InvalidateNode(a, r.keyboardNode());
-        }
+        uint32_t mods = 0;
+        if (::GetKeyState(VK_SHIFT)   & 0x8000) mods |= binui::BinUIRenderer::KEYMOD_SHIFT;
+        if (::GetKeyState(VK_CONTROL) & 0x8000) mods |= binui::BinUIRenderer::KEYMOD_CTRL;
+        if (::GetKeyState(VK_MENU)    & 0x8000) mods |= binui::BinUIRenderer::KEYMOD_ALT;
+        const binui::BinUIRenderer::KeyResult kr = r.handleKey(vk, mods);
+        for (uint16_t id : kr.changed) InvalidateNode(a, static_cast<int32_t>(id));
     });
 
     sh.setFocusFn([a](bool focused) {
@@ -414,8 +389,13 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
         a->renderer.cancelPress();
         a->renderer.clearHover();
         a->renderer.blur();
+        a->renderer.hideFocusRing();   // 窗口失焦：焦点环别留在别人窗口上
         if (a->shell) a->shell->invalidateAll();
     });
+
+    // 非编辑态把 IME 摘掉：中文输入法会把 WASD 变成 VK_PROCESSKEY 自己组字，
+    // 焦点导航就全哑了；进入输入框编辑时再挂回去。
+    sh.setImeActiveFn([a] { return a->renderer.isEditing(); });
 
     // ---- 布局自带的图片资源（v12 资源段记录了 imageIndex -> 路径） ----
     if (!a->assetDir.empty()) {

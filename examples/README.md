@@ -13,6 +13,13 @@
 所以统一写 `<app_window … window_resize="disable">` —— 能拖边但没有重排能力，拖了只会错位；
 `flexshow` 是唯一开窗可缩放的示例（百分比 / flex 自适应），用来验证 resize 实时重排。
 
+**键盘统一走 `renderer.handleKey`**，别在示例里自己 `switch (vk)`：WASD 移焦点、方向键滚页面、
+输入框上回车进/出编辑、Tab 循环、PageUp/PageDown/Home/End 翻页到顶到底；焦点环只在键盘导航时亮，
+2 秒无操作自动消失。宿主只做两件事：按返回的 `changed` 重绘，以及 `handled == false` 时处理 Esc。
+**另外必须接一行 `app.setImeActiveFn([&]{ return renderer.isEditing(); })`**：不接的话中文输入法会把
+WASD 当拼音吃掉（窗口收到 `VK_PROCESSKEY`），焦点导航全哑。状态与按键表见
+[`docs/keyboard_focus.md`](../docs/keyboard_focus.md)。
+
 | 目录 | 组 | 演示什么 | 后端 |
 |---|---|---|---|
 | [`features/`](features/) | **功能** | 运行时伪类、v13 扩展绘制（边框/渐变/字重/行高/装饰）、v14 HTML 元素默认语义、组件化三形态（源码 `.bum.xml` / 二进制 `.bum` / `external` 外挂）、数据驱动 `setText` + 局部重绘 | GL |
@@ -61,5 +68,8 @@ CMake 构建同理（`cmake --build build`，产物同样落 `build/bin/examples
 4. 颜色照抄上面的令牌，别另发明一套。
 5. 加进 `Makefile` 的 `DEMO_BINS` 与 `CMakeLists.txt` 的 `add_gl_demo(...)`，
    并保证 `check_examples` 跑完 0 问题（CI 会把警告也算成问题）。
-6. 一个特性顺手写个 demo 就够，别为一个属性再开一组；**要验证行为请写进 `tests/` 的对应套件**，
+6. 键盘别自己实现：`setKeyFn` 里调 `renderer.handleKey(vk, mods)`，按 `changed` 重绘，
+   `handled == false` 时才处理自己的快捷键（通常是 Esc 关窗）；再接一行
+   `app.setImeActiveFn([&]{ return renderer.isEditing(); })`。
+7. 一个特性顺手写个 demo 就够，别为一个属性再开一组；**要验证行为请写进 `tests/` 的对应套件**，
    示例只负责"让人看见"。

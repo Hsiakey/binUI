@@ -352,8 +352,18 @@ BINUI_C_API int32_t BINUI_C_CALL binui_mount_components(void* app, const char* l
 /* ============================ 键码 ============================ */
 
 /* BINUI_EV_KEY 的 key 值：Win32 虚拟键码（VK_*）。
- * 宿主不要自己处理文本框编辑 —— 库内部已经吃掉退格/删除/方向键/Home/End/Tab，
- * 并把结果通过 BINUI_EV_INPUT 推出来。这里收到的 KEY 事件是"同时告知"。 */
+ *
+ * 焦点 / 滚动 / 编辑三态由库自己路由（渲染器 BinUIRenderer::handleKey），宿主不要自己
+ * 处理文本框编辑和焦点移动：
+ *   · 编辑中：退格/删除/左右/Home/End 走光标；回车或 Esc 退出编辑回到焦点控制；
+ *     Tab 退出并跳到下一个控件。字母归输入法，WASD 在这个状态下不移动焦点。
+ *   · 非编辑：WASD 移动焦点（W 上 / A 左 / S 下 / D 右），方向键滚页面
+ *     （离焦点最近的滚动容器，没有就滚视口内面积最大的那个），PageUp/PageDown 翻页，
+ *     Home/End 到顶/到底，Tab/Shift+Tab 循环，回车激活焦点（输入框进入编辑、其余触发点击），
+ *     空格有焦点时激活、无焦点时向下翻页。
+ *   · 焦点环只在键盘导航时画，2 秒没有操作自动消失（鼠标点击不画）。
+ * 清空后 KEY 事件照旧推给宿主，宿主只做库做不了的事（Esc 关窗、Ctrl+C/V 由库内部接
+ * 系统剪贴板）。 */
 #define BINUI_KEY_BACK   0x08
 #define BINUI_KEY_TAB    0x09
 #define BINUI_KEY_RETURN 0x0D

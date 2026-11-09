@@ -6,6 +6,94 @@
 
 ## [Unreleased]
 
+### 键盘焦点系统重做：WASD 移焦点、方向键滚页面、回车两段式、焦点环 2 秒自动消失
+
+以前方向键在可交互节点间移动焦点、焦点环画上就一直在、8 个示例各自 `switch (vk)` 复制一份
+编辑键处理（`features` 干脆没有编辑分支）。现在键盘输入只有一条入口
+`renderer.handleKey(vk, mods)`，焦点 / 滚动 / 编辑的优先级由渲染器统一决定：
+
+```cpp
+app.setKeyFn([&](int vk) {
+    uint32_t mods = 0;
+    if (::GetKeyState(VK_SHIFT)   & 0x8000) mods |= BinUIRenderer::KEYMOD_SHIFT;
+    if (::GetKeyState(VK_CONTROL) & 0x8000) mods |= BinUIRenderer::KEYMOD_CTRL;
+    if (::GetKeyState(VK_MENU)    & 0x8000) mods |= BinUIRenderer::KEYMOD_ALT;
+    const auto kr = renderer.handleKey(vk, mods);
+    for (uint16_t id : kr.changed) invalidateNode(id);
+    if (!kr.handled && vk == VK_ESCAPE) app.requestExit();   // 库不消费 Esc
+});
+```
+
+三种状态与按键：
+
+| 状态 | 键 | 行为 |
+|---|---|---|
+| 焦点控制 | `WASD` | 上/左/下/右移动焦点（Tab 仍按文档顺序循环） |
+| 焦点控制 | 方向键 | **滚页面**：离焦点最近的滚动容器；焦点不在滚动容器里时，滚视口内面积最大的那个 |
+| 焦点控制 | PgUp/PgDn、Home/End | 按视口 0.9 倍翻页、到顶/到底 |
+| 焦点控制 | Enter | `<input>` 进入文本编辑；`<video>` 播放/暂停；其余派发 `CLICK` |
+| 焦点控制 | 空格 | 有焦点时同 Enter；没有焦点时向下翻页（浏览器语义） |
+| 文本编辑 | Enter / Esc | 提交并退出编辑，**回到焦点控制** |
+| 文本编辑 | Tab / Shift+Tab | 退出编辑并跳到下一个 / 上一个控件 |
+| 文本编辑 | 退格/删除/左右/Home/End | 光标与选区（字母归输入法，**WASD 不抢键**） |
+
+焦点环改成 `:focus-visible` 语义：**键盘导航才画，鼠标点击不画**；**2 秒没有操作自动熄灭**
+（`setFocusRingIdleTime()` 可调）。熄灭不需要宿主定时 —— `stepAnimations()` 会在熄灭的那一帧
+把焦点节点放进返回值，宿主照常 `invalidateNode()` 擦掉。窗口失焦时宿主调
+`renderer.hideFocusRing()`。
+
+#### 中文输入法：非编辑态把 IME 摘掉，否则 WASD 一个键都收不到
+
+这一步不做的话上面的 WASD 在中文环境里等于没接。中文输入法默认挂在窗口上，按 `d` 时
+Windows 会把 `WM_KEYDOWN` 的 `wParam` 换成 `VK_PROCESSKEY`（229）交给输入法组字。真机日志：
+
+```
+keydown vk=229 composing=0     ← 按 d，输入法把键吃掉
+keydown vk=229 composing=1
+```
+
+于是外壳加 `setImeActiveFn`：返回 false 时把 IME 上下文从窗口上摘下来（`ImmAssociateContextEx(hwnd, nullptr, 0)`，
+摘之前先 `cancelImeComposition()`），返回 true 再挂回默认上下文（组字/候选框/光标定位照旧）。
+每帧在 `renderFrame()` 里同步，宿主只需一行：
+
+```cpp
+app.setImeActiveFn([&] { return renderer.isEditing(); });
+```
+
+8 个示例与 C ABI 都接了；不接 = 保持老行为（IME 常挂），此时中文输入法下 WASD 无效、方向键照常。
+另外 `BINUI_IME_LOG=1` 的日志现在会打每一条 `keydown vk=...`，这类"键被谁吃了"的问题一眼能看出来。
+
+实现要点：
+
+- `handleKey` 返回 `{ handled, changed }`：`handled` 只表示"库消费了这个键"（宿主别再用它当
+  快捷键），`changed` 是焦点环/光标/滚动容器的变化集合，宿主按它做局部重绘。
+- 方向键的目标容器 `scrollTargetNode()`：先沿焦点节点向上找最近的 `overflow:auto/scroll`
+  祖先；没有则取视口中心所在的可滚动容器；再没有取视口内面积最大者。只有真有两轴溢出的
+  容器才算数，否则方向键不被消费（宿主可以自己用）。
+- 鼠标点击只切 `:focus` 状态（`commitFocus(id, false)`），不点亮焦点环；环正亮着时点一下
+  也会立刻收掉（`release()` 里清 `focusRing_`）。`setKeyboardFocus` / `moveKeyboardFocus` /
+  `cycleKeyboardFocus` / `handleKey` 都会亮环并重置 2 秒计时。
+- 编辑键不再由宿主复制：`features` 的输入框以前按退格/方向键无效，现在和其它示例一致。
+- C ABI 也切到同一条路径（剪贴板四件套仍留在宿主侧，因为系统剪贴板 I/O 在平台层）。
+
+验收：
+
+- `tests/test_elements.cpp` 新增 9c 节 30 条用例：WASD 移焦点、方向键不移动焦点且无滚动容器时
+  不被消费、回车激活/进出编辑、编辑中 WASD 忽略、编辑中 Tab 换控件、方向键滚焦点容器、
+  PgUp/PgDn/Home/End、无焦点时空格翻页、焦点环超时熄灭并回报该节点、鼠标点击只设焦点不亮环。
+- `make all` 0 警告；`make test` 四套全绿；`check_examples` 11 个 UI 0 问题。
+- 真机键盘验收（截图逐帧比对，均值像素差）：
+  - `buttonshow`：WASD 后焦点环出现（差 0.28）→ 2.3 秒后消失（0.18）→ 再按又出现（0.18）；
+    鼠标点按钮只出行状态、不亮环。
+  - `flexshow`：连按 4 次方向键，右侧列表区差 19.1、左边图表区 0.0（焦点没动、页面只滚了列表）；
+    再按 `a` 焦点环出现在第一颗可聚焦节点（差 6.4）。
+  - `fontshow`：点输入框进编辑 → 数字 “123” → 回车退出（环套在输入框上、光标消失）→ 按 `x`
+    无变化（差 0.0，编辑外的字母被忽略）→ 再回车进编辑 → 按 `4` 插入（差 4.2）。
+    `BINUI_IME_LOG=1` 的日志同步显示 `ime detached` / `ime attached` 跟着编辑态切换。
+
+z 序焦点（非输入框按 Enter 下潜到子元素、多层可下沉，`Delete` 上浮）按 master 的要求先记下
+设计，见 [`docs/keyboard_focus.md`](docs/keyboard_focus.md) 末节，本次未实现。
+
 ### 示例 — 标题栏的 − □ ✕ 三颗按钮全部接线，固定布局示例补 `ui_scale="proportional"`
 
 `components/titlebar.bum.xml` 一直只有外观，动作归宿主；之前 8 个示例里：

@@ -1271,7 +1271,8 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
 
         // 键盘焦点高亮边框（内缩绘制，避免超出裁剪区）。
         // 圆角要跟着节点走：以前写死 10，圆角 8 的按钮上会凸出一个半径不同的环。
-        if (draw && renderer.isKeyboardFocused(node.id)) {
+        // focusRingVisible() = 键盘导航才画、2 秒无操作自动熄灭；编辑中由光标代替。
+        if (draw && renderer.focusRingVisible() && renderer.isKeyboardFocused(node.id)) {
             const int fr = node.radius > 2 ? (int)node.radius - 1 : 0;
             const int th = nh >= 24 ? 2 : 1;
             HPEN fp = CreatePen(PS_SOLID, th, RGB(0xFF, 0xFF, 0xFF));

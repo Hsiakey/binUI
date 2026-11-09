@@ -137,26 +137,27 @@ int main(int argc, char* argv[]) {
         renderer.clearHover();
         if (h >= 0) invalidateNode((uint16_t)h);
     });
+    // 键盘：WASD 移焦点、方向键滚页面（这里就是列表卡片）、回车进/出输入态。
+    // 全部由 renderer.handleKey 决定，示例只重绘返回的节点 + 没被消费的 Esc 关窗。
     app.setKeyFn([&](int vk) {
-        if (vk == VK_ESCAPE) { app.requestExit(); return; }
-        const int old = renderer.keyboardNode();
-        switch (vk) {
-            case VK_TAB:   renderer.cycleKeyboardFocus(!(::GetKeyState(VK_SHIFT) & 0x8000)); break;
-            case VK_RIGHT: renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::RIGHT); break;
-            case VK_LEFT:  renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::LEFT); break;
-            case VK_DOWN:  renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::DOWN); break;
-            case VK_UP:    renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::UP); break;
-            case VK_RETURN:
-            case VK_SPACE: renderer.activateKeyboardFocus(); break;
-            default: break;
-        }
-        if (old != renderer.keyboardNode()) {
-            if (old >= 0) invalidateNode((uint16_t)old);
-            if (renderer.keyboardNode() >= 0) invalidateNode((uint16_t)renderer.keyboardNode());
-        }
+        uint32_t mods = 0;
+        if (::GetKeyState(VK_SHIFT)   & 0x8000) mods |= BinUIRenderer::KEYMOD_SHIFT;
+        if (::GetKeyState(VK_CONTROL) & 0x8000) mods |= BinUIRenderer::KEYMOD_CTRL;
+        if (::GetKeyState(VK_MENU)    & 0x8000) mods |= BinUIRenderer::KEYMOD_ALT;
+        const auto kr = renderer.handleKey(vk, mods);
+        for (uint16_t id : kr.changed) invalidateNode(id);
+        if (!kr.handled && vk == VK_ESCAPE) app.requestExit();
     });
+
+    // 中文输入法会把字母键变成 VK_PROCESSKEY 自己组字 —— 非编辑态必须把 IME 摘掉，
+    // WASD 焦点导航才收得到；进输入框编辑时窗口会自动挂回去（组字/候选框照旧）。
+    app.setImeActiveFn([&] { return renderer.isEditing(); });
     app.setFocusFn([&](bool focused) {
-        if (!focused) { renderer.cancelPress(); renderer.clearHover(); renderer.blur(); app.invalidateAll(); }
+        if (!focused) {
+            renderer.cancelPress(); renderer.clearHover(); renderer.blur();
+            renderer.hideFocusRing();
+            app.invalidateAll();
+        }
     });
 
     binui::ex::HotReload hot;

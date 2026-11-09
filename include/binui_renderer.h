@@ -195,15 +195,54 @@ public:
     int release(float x, float y);    // 松开：仍在原节点上则触发 CLICK；返回点击节点 id（-1 无）
     void cancelPress();               // 取消按下（如窗口失焦），不触发点击
 
-    // ============ 键盘导航（方向键） ============
+    // ============ 键盘导航（焦点） ============
+    // 方向键**不再**移动焦点：它和浏览器一样滚页面（见下面 handleKey）。
+    // 移动焦点用 WASD（W 上 / A 左 / S 下 / D 右），Tab 仍按文档顺序循环。
     enum class KeyDirection { UP, DOWN, LEFT, RIGHT };
 
     int keyboardNode() const { return keyboardId_; }           // 当前键盘焦点节点（-1 无）
     bool isKeyboardFocused(uint16_t nodeId) const { return keyboardId_ == (int)nodeId; }
     void setKeyboardFocus(int nodeId);                         // 直接设置焦点（-1 清除）
-    int moveKeyboardFocus(KeyDirection dir);                   // 向方向键移动焦点，返回新焦点（-1 无候选）
+    int moveKeyboardFocus(KeyDirection dir);                   // 向指定方向移动焦点，返回新焦点（-1 无候选）
     int cycleKeyboardFocus(bool forward = true);               // Tab 循环：按文档顺序在可交互节点间移动（Shift+Tab 反向），返回新焦点
     bool activateKeyboardFocus();                              // Enter/Space：INPUT 进入编辑，其余触发 CLICK
+
+    // ============ 键盘路由（焦点 / 滚动 / 文本编辑） ============
+    // 宿主把 WM_KEYDOWN 的 VK_* 直接丢进 handleKey 就行，库按当前状态决定谁消费：
+    //
+    //   · 文本编辑中（isEditing）：退格/删除/左右/Home/End 走光标；Enter 与 Esc 退出编辑
+    //     回到焦点控制；Tab 退出并跳到下一个控件。**这个状态下 WASD 不移动焦点** ——
+    //     字母要留给输入法/文本，焦点环也不画（有光标就够）。
+    //   · 焦点控制中（默认）：WASD 移动焦点；方向键滚页面（离焦点最近的滚动容器，
+    //     焦点不在任何滚动容器里时滚视口内面积最大的那个）；PageUp/PageDown 翻页；
+    //     Home/End 到顶/到底；Tab/Shift+Tab 循环；Enter 激活（INPUT 进入编辑、其余
+    //     触发 CLICK）；空格有焦点时激活、无焦点时向下翻页（浏览器语义）。
+    //   · 鼠标点击：只切 :focus 状态，**不点亮焦点环**（focus-visible 语义）。
+    //
+    // 焦点环在 2 秒没有操作后自动消失（kFocusRingIdleSec）：宿主不用自己定时，
+    // stepAnimations() 会在隐藏的那一帧把焦点节点报回来，照常 invalidate 即可。
+    enum : uint32_t {
+        KEYMOD_SHIFT = 1u,
+        KEYMOD_CTRL  = 2u,
+        KEYMOD_ALT   = 4u,
+    };
+    struct KeyResult {
+        bool handled = false;              // 库消费了这个键（宿主别再当快捷键用）
+        std::vector<uint16_t> changed;     // 需要重绘的节点（焦点环 / 光标 / 滚动容器）
+    };
+    KeyResult handleKey(int vk, uint32_t mods = 0);
+
+    // 焦点环（:focus-visible 语义：键盘导航才画）
+    bool focusRingVisible() const { return focusRing_ && !edit_.active; }
+    void showFocusRing();                 // 主动点亮（同时重置 2 秒计时）
+    void hideFocusRing();                 // 立即隐藏（窗口失焦等）
+    // 焦点环无操作后自动消失的秒数（默认 2.0；小于等于 0 = 一直显示）
+    void setFocusRingIdleTime(double seconds);
+    static constexpr double kFocusRingIdleSec = 2.0;
+
+    // 方向键滚动：滚动"焦点所在的滚动容器"（无焦点时取视口内面积最大的可滚动容器），
+    // 返回被滚动的容器 id（-1 = 没有可滚动的容器）。dx/dy 是像素；正值 = 内容上移/左移。
+    int scrollFocused(float dx, float dy);
 
     // ============ 滚动容器 ============
     struct ScrollState { float x = 0, y = 0; };
@@ -414,6 +453,8 @@ private:
     int hoverId_ = -1;
     int pressedId_ = -1;
     int keyboardId_ = -1;
+    bool   focusRing_ = false;         // 焦点环是否点亮（2 秒无操作自动熄灭）
+    double focusRingHideAt_ = 0;       // 自动熄灭时刻（AnimNow 时钟）
     std::unordered_map<uint16_t, ScrollState> scroll_;
     int scrollDragNode_ = -1;   // 正在拖动滚动条（thumb 位置偏移）
     float scrollDragGrab_ = 0;
@@ -516,7 +557,10 @@ private:
     std::vector<uint16_t> animChanged_; // stepAnimations 输出缓存
 
     void refreshNodeStyle(int nodeId); // hover/按下/焦点变化后重算颜色/缩放/圆角目标
-    void commitFocus(int newId);       // 键盘焦点变更（同时刷新两端的 :focus 状态样式）
+    void commitFocus(int newId, bool showRing = true); // 键盘焦点变更（同时刷新两端的 :focus 状态样式）
+    void bumpFocusRing();              // 点亮焦点环并重置无操作计时
+    int scrollTargetNode() const;      // 方向键滚谁：最近的可滚动祖先，否则视口内面积最大者
+    double focusRingIdle_ = kFocusRingIdleSec;
     bool hasTransition(uint16_t nodeId, uint16_t prop) const;
     void startTransition(uint16_t nodeId, uint16_t prop, double now,
                          float fromX, float fromY, float toX, float toY,

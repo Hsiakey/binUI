@@ -153,22 +153,26 @@ int main(int argc, char* argv[]) {
         renderer.clearHover();
         if (h >= 0) invalidateNode((uint16_t)h);
     });
+    // 键盘：WASD 移焦点、方向键滚页面、回车进/出输入态 —— 全在 renderer.handleKey 里。
     app.setKeyFn([&](int vk) {
-        if (vk == VK_ESCAPE) { app.requestExit(); return; }
-        // Tab / 方向键：焦点移动 → :focus 状态切换
-        int old = renderer.keyboardNode();
-        if (vk == VK_TAB)         renderer.cycleKeyboardFocus(!(::GetKeyState(VK_SHIFT) & 0x8000));
-        else if (vk == VK_RIGHT)  renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::RIGHT);
-        else if (vk == VK_LEFT)   renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::LEFT);
-        else if (vk == VK_DOWN)   renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::DOWN);
-        else if (vk == VK_UP)     renderer.moveKeyboardFocus(BinUIRenderer::KeyDirection::UP);
-        if (old != renderer.keyboardNode()) {
-            if (old >= 0) invalidateNode((uint16_t)old);
-            if (renderer.keyboardNode() >= 0) invalidateNode((uint16_t)renderer.keyboardNode());
-        }
+        uint32_t mods = 0;
+        if (::GetKeyState(VK_SHIFT)   & 0x8000) mods |= BinUIRenderer::KEYMOD_SHIFT;
+        if (::GetKeyState(VK_CONTROL) & 0x8000) mods |= BinUIRenderer::KEYMOD_CTRL;
+        if (::GetKeyState(VK_MENU)    & 0x8000) mods |= BinUIRenderer::KEYMOD_ALT;
+        const auto kr = renderer.handleKey(vk, mods);
+        for (uint16_t id : kr.changed) invalidateNode(id);
+        if (!kr.handled && vk == VK_ESCAPE) app.requestExit();
     });
+
+    // 中文输入法会把字母键变成 VK_PROCESSKEY 自己组字 —— 非编辑态必须把 IME 摘掉，
+    // WASD 焦点导航才收得到；进输入框编辑时窗口会自动挂回去（组字/候选框照旧）。
+    app.setImeActiveFn([&] { return renderer.isEditing(); });
     app.setFocusFn([&](bool focused) {
-        if (!focused) { renderer.cancelPress(); renderer.clearHover(); renderer.blur(); app.invalidateAll(); }
+        if (!focused) {
+            renderer.cancelPress(); renderer.clearHover(); renderer.blur();
+            renderer.hideFocusRing();
+            app.invalidateAll();
+        }
     });
     app.setWheelFn([&](float x, float y, float dy) {
         int id = renderer.scrollAt(x, y, dy);

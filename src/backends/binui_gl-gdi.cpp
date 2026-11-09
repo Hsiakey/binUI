@@ -2367,7 +2367,9 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
             // 边框（v13）：画在节点内侧，四边可不同宽，压在底色之上
             drawNodeBorder();
 
-            if (renderer.isKeyboardFocused(node.id)) {
+            if (renderer.focusRingVisible() && renderer.isKeyboardFocused(node.id)) {
+                // 焦点环 = :focus-visible 语义：键盘导航才画，鼠标点击不画；2 秒无操作
+                // 自动熄灭（渲染器管计时）。编辑中不画环 —— 有光标就够。
                 // 焦点环必须跟随节点自己的圆角：以前写死半径 10、内缩 2，
                 // 圆角 8 的按钮上就会套出一个半径不同的环，看着像"双线框"。
                 // 颜色按节点底色取对比色：写死白色在浅色主题上（白底白环）等于没画。
@@ -2917,6 +2919,7 @@ LRESULT CALLBACK BinUIAppGLGdi::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // 接了就等于替用户取消组字：IME 发现会话没了，会把还没转换的拼音串
             // 原样当结果串提交（输 zhongguo 按回车 → 输入框里躺着 "zhongguo"
             // 而不是"中国"，就是这么来的）。
+            ImeLog("  keydown vk=%d composing=%d", static_cast<int>(wParam), (int)app->composing_);
             if (app->composing_ && ImeComposing(hwnd)) {
                 ImeLog("  keydown vk=%d (组字中，不归我们处理)", static_cast<int>(wParam));
                 break;   // 交给 DefWindowProc：IME 灌进来的 VK_PROCESSKEY 要在这里走完
@@ -3164,6 +3167,27 @@ void BinUIAppGLGdi::cancelImeComposition() {
     }
 }
 
+void BinUIAppGLGdi::syncImeContext() {
+    if (!imeActive_) return;              // 宿主没接：保持 IME 常挂（老行为）
+    HWND win = static_cast<HWND>(hwnd_);
+    if (!win) return;
+    const bool want = imeActive_();
+    if (want == imeAttached_) return;
+    if (want) {
+        // 重新挂回默认输入法上下文：进入编辑框时中文输入法要能组字
+        ImmAssociateContextEx(win, nullptr, IACE_DEFAULT);
+        imeAttached_ = true;
+        imePosX_ = imePosY_ = -1;         // 重挂后组字窗要重新摆一次
+    } else {
+        // 没有编辑框时把 IME 摘掉：否则中文输入法把 WASD 当拼音吃掉（wParam=VK_PROCESSKEY），
+        // 焦点导航就全哑了。摘之前先把可能残留的组字取消掉。
+        cancelImeComposition();
+        ImmAssociateContextEx(win, nullptr, 0);
+        imeAttached_ = false;
+    }
+    ImeLog("  ime %s", imeAttached_ ? "attached" : "detached");
+}
+
 int BinUIAppGLGdi::run() {
     if (!open()) return 1;
     while (running_) pump(1);
@@ -3357,6 +3381,7 @@ void BinUIAppGLGdi::renderFrame() {
     float dt = std::chrono::duration<float>(now - lastTime_).count();
     lastTime_ = now;
     if (dt > 0.1f) dt = 1.0f / 60.0f;
+    syncImeContext();   // 编辑态变了就把 IME 挂上/摘下（非编辑态不能让 IME 吃掉 WASD）
     const double u0 = Perf().on ? NowMs() : 0.0;
     if (update_) update_(dt);
     if (Perf().on) Perf().sumUpdate += NowMs() - u0;
