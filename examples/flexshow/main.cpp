@@ -117,6 +117,12 @@ int main(int argc, char* argv[]) {
         renderer.release(x, y);
         if (pressed >= 0) invalidateNode((uint16_t)pressed);
     });
+    // 滚轮：找光标下最近的可滚动容器滚它（这个示例里就是那段 flex:1 + overflow:auto 的列表）。
+    // 不接这一条，滚动条画出来了却滚不动 —— 拖条子走的是 press/setHover 那条路，滚轮是另一条。
+    app.setWheelFn([&](float x, float y, float dy) {
+        int id = renderer.scrollAt(x, y, dy);
+        if (id >= 0) invalidateNode((uint16_t)id);
+    });
     app.setLeaveFn([&]() {
         int h = renderer.hoveredNode();
         renderer.clearHover();
