@@ -1859,7 +1859,22 @@ int run() {
              r.findNodeByName("imin") != 0 && r.findNodeByName("imax") != 0 &&
              r.findNodeByName("iclose") != 0);
         TEST("std: titlebar 关闭按钮文案是 ✕", byText("\xE2\x9C\x95") != 0xFFFF);
-        TEST("std: titlebar 最大化按钮文案是 □", byText("\xE2\x96\xA1") != 0xFFFF);
+        TEST("std: titlebar 最大化文案是 ▢", byText("\xE2\x96\xA2") != 0xFFFF);
+        TEST("std: titlebar 最小化文案是 —", byText("\xE2\x80\x94") != 0xFFFF);
+        {
+            const uint16_t nMin = r.findNodeByName("imin"), nMax = r.findNodeByName("imax");
+            const uint16_t nClose = r.findNodeByName("iclose");
+            const auto* bMin = nodeOf(nMin); const auto* bMax = nodeOf(nMax);
+            const auto* bClose = nodeOf(nClose);
+            // 三颗按钮必须同尺寸；字形墨迹宽度不一样，靠各调字号凑成一样大（横线比 ▢/✕ 小）
+            TEST("std: titlebar 三颗控制按钮同宽高",
+                 bMin && bMax && bClose && bMin->width == bMax->width &&
+                 bMax->width == bClose->width && bMin->height == bMax->height &&
+                 bMax->height == bClose->height);
+            TEST("std: titlebar 横线字号比 ▢/✕ 小",
+                 bMin && bMax && bClose && bMin->fontSize < bMax->fontSize &&
+                 bMax->fontSize == bClose->fontSize);
+        }
 
         // 2) button：根标签搬过来 → 真的是 BINUI_BUTTON（可点击、居中、粗体）
         const uint16_t btnId = r.findNodeByName("btn");

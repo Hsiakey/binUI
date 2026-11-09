@@ -16,7 +16,9 @@
     pad        左内边距      16
     padr       右内边距      12
     bs         按钮边长      28
-    bsym       按钮符号字号  13            三颗按钮的字形：− □ ✕
+    bsym       按钮符号字号  13            最大化 ▢ / 关闭 ✕ 的字号
+    bsymmin    横线字号      11            最小化那条横线单独用：em dash 的墨迹宽度≈1.0 字号，
+                                          13px 的 ▢ 也才 10px 宽，所以横线给 11px 才和它们一样宽
     gap        元素间距      6
     idmin      最小化按钮 id win-min
     idmax      最大化按钮 id win-max
@@ -26,11 +28,6 @@
     所有可调值都走内联 style；<style> 里只放"同一套皮肤"的固定规则。
 -->
 <style>
-    @keyframes bui-tb-icon-pulse {
-        from { transform: scale(1.0); opacity: 1.0; }
-        50%  { transform: scale(1.15); opacity: 0.75; }
-        to   { transform: scale(1.0); opacity: 1.0; }
-    }
     .bui-tb       { background:#FFFFFF; border-bottom:1px solid #E6EDF7; }
     .bui-tb-icon  { color:#3E8BFF; font-size:18px; }
     .bui-tb-title { color:#1F2A37; font-size:14px; font-weight:700; }
@@ -46,11 +43,13 @@
 </style>
 <titlebar class="bui-tb" style="height:{{h=44}}; display:flex; align-items:center; gap:{{gap=6}}">
     <div style="width:{{pad=16}}; height:1; background:transparent"></div>
-    <span class="bui-tb-icon" style="width:{{iconw=1}}; height:22; animation:bui-tb-icon-pulse 2s ease-in-out 0s infinite">{{icon=}}</span>
+    <span class="bui-tb-icon" style="width:{{iconw=1}}; height:22">{{icon=}}</span>
     <span class="bui-tb-title" style="width:{{titlew=content}}; height:20">{{title=标题}}</span>
     <span class="bui-tb-sub" style="flex:1; height:16">{{sub=}}</span>
-    <button id="{{idmin=win-min}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; font-size:{{bsym=13}}">−</button>
-    <button id="{{idmax=win-max}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; font-size:{{bsym=13}}">□</button>
+    <!-- 三颗控制图标：字形墨迹宽度不同（横线 11px≈10px 宽、▢ 13px=10px、✕ 13px=8px），
+         各自调字号凑成"看起来一样大"，见文件头 bsym / bsymmin 说明。 -->
+    <button id="{{idmin=win-min}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; font-size:{{bsymmin=11}}">—</button>
+    <button id="{{idmax=win-max}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; font-size:{{bsym=13}}">▢</button>
     <button id="{{idclose=win-close}}" class="bui-tb-close" style="width:{{bs=28}}; height:{{bs=28}}; font-size:{{bsym=13}}">✕</button>
     <div style="width:{{padr=12}}; height:1; background:transparent"></div>
 </titlebar>
