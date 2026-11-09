@@ -1369,7 +1369,7 @@ int run() {
     }
 
     {
-        // ---- 组件内联：<use src="x.bum.xml"> ----
+        // ---- 组件内联：<use src="x.bum.html"> ----
         namespace fs = std::filesystem;
         const fs::path dir = fs::temp_directory_path() / "binui_test_cmp";
         fs::create_directories(dir);
@@ -1379,23 +1379,23 @@ int run() {
         };
 
         // 组件：内联参数 + 带默认值的参数
-        writeFile("btn.bum.xml",
+        writeFile("btn.bum.html",
             "<div style=\"height:40\">"
             "<button style=\"position:absolute; left:0; top:0; width:{{w}}; height:40;"
             " background:{{bg=#101010}}\">{{label}}</button></div>");
-        // 组合组件：内部再引用 btn.bum.xml
-        writeFile("card.bum.xml",
+        // 组合组件：内部再引用 btn.bum.html
+        writeFile("card.bum.html",
             "<div style=\"height:80\">"
             "<span style=\"height:20\">{{heading}}</span>"
-            "<use src=\"btn.bum.xml\" x=\"0\" y=\"24\" w=\"100\" label=\"卡片按钮\"/>"
+            "<use src=\"btn.bum.html\" x=\"0\" y=\"24\" w=\"100\" label=\"卡片按钮\"/>"
             "</div>");
         writeFile("host.html",
             "<html><body>"
-            "<use src=\"btn.bum.xml\" x=\"10\" y=\"10\" w=\"120\" label=\"确定\" bg=\"#FF0000\"/>"
-            "<use src=\"btn.bum.xml\" x=\"10\" y=\"60\" w=\"120\" label=\"默认底色\"/>"
-            "<use src=\"card.bum.xml\" x=\"10\" y=\"110\" w=\"200\" heading=\"卡片标题\"/>"
+            "<use src=\"btn.bum.html\" x=\"10\" y=\"10\" w=\"120\" label=\"确定\" bg=\"#FF0000\"/>"
+            "<use src=\"btn.bum.html\" x=\"10\" y=\"60\" w=\"120\" label=\"默认底色\"/>"
+            "<use src=\"card.bum.html\" x=\"10\" y=\"110\" w=\"200\" heading=\"卡片标题\"/>"
             "<use x=\"10\" y=\"200\"/>"
-            "<use src=\"missing.bum.xml\" x=\"10\" y=\"240\"/>"
+            "<use src=\"missing.bum.html\" x=\"10\" y=\"240\"/>"
             "</body></html>");
 
         auto res = CompileBinUIFileEx((dir / "host.html").generic_string());
@@ -1428,12 +1428,12 @@ int run() {
         // ---- 多根组件：顶层元素 > 1 → 用合成的 <div> 承载（与二进制组件的链接器口径一致）----
         // 修复前：第二个顶层元素的 parentIdx 是 SIZE_MAX，被当成索引查 cremap → 越界
         // （debug 断言 abort，release 挂到垃圾父节点或整个丢掉）。
-        writeFile("multi.bum.xml",
+        writeFile("multi.bum.html",
             "<div style=\"width:80; height:20\"><span style=\"height:20\">多根甲</span></div>"
             "<div style=\"width:80; height:20\"><span style=\"height:20\">多根乙</span></div>");
         writeFile("host2.html",
             "<html><body>"
-            "<use src=\"multi.bum.xml\" x=\"10\" y=\"10\" w=\"200\"/>"
+            "<use src=\"multi.bum.html\" x=\"10\" y=\"10\" w=\"200\"/>"
             "</body></html>");
         auto res3 = CompileBinUIFileEx((dir / "host2.html").generic_string());
         BinUIRenderer r3;
@@ -1457,9 +1457,9 @@ int run() {
         }
 
         // ---- v12：二进制组件 .bum（编译期由链接器离线合并）----
-        writeFile("pack.bum.xml",
+        writeFile("pack.bum.html",
             "<div style=\"height:30\"><span style=\"height:20; color:#00FF00\">打包组件</span></div>");
-        const auto packRes = CompileBinUIFileEx((dir / "pack.bum.xml").generic_string());
+        const auto packRes = CompileBinUIFileEx((dir / "pack.bum.html").generic_string());
         TEST("component: binary build produces layout", !packRes.layout.empty());
         {
             std::ofstream f(dir / "pack.bum", std::ios::binary);
@@ -1507,11 +1507,11 @@ int run() {
 
         // ---- 二进制与源码并存：二进制优先；源码更新则改用源码并告警 ----
         {
-            std::ofstream f(dir / "pack.bum.xml", std::ios::binary);
+            std::ofstream f(dir / "pack.bum.html", std::ios::binary);
             f << "<div style=\"height:30\"><span style=\"height:20\">源码更新版</span></div>";
         }
         std::filesystem::last_write_time(
-            dir / "pack.bum.xml",
+            dir / "pack.bum.html",
             std::filesystem::last_write_time(dir / "pack.bum") + std::chrono::seconds(5));
         const auto nres = CompileBinUIFileEx((dir / "binhost.html").generic_string());
         bool staleWarn = false;
@@ -1536,10 +1536,10 @@ int run() {
              ri.imagePaths()[0] == ires.images[0]);
 
         // 参数值按纯文本注入：传进来的标签不能变成真节点
-        writeFile("inject.bum.xml", "<div style=\"height:20\"><span>{{body}}</span></div>");
+        writeFile("inject.bum.html", "<div style=\"height:20\"><span>{{body}}</span></div>");
         writeFile("inject.html",
-            "<html><body><use src=\"inject.bum.xml\" x=\"0\" y=\"0\" w=\"300\""
-            " body=\"a &lt;use src=&quot;btn.bum.xml&quot;&gt; b\"/></body></html>");
+            "<html><body><use src=\"inject.bum.html\" x=\"0\" y=\"0\" w=\"300\""
+            " body=\"a &lt;use src=&quot;btn.bum.html&quot;&gt; b\"/></body></html>");
         auto res2 = CompileBinUIFileEx((dir / "inject.html").generic_string());
         BinUIRenderer r2;
         TEST("component: inject parses", !res2.layout.empty() && r2.loadLayout(res2.layout.data(), res2.layout.size()));
@@ -1821,7 +1821,7 @@ int run() {
         TEST("v14: 深底默认白色文字", tn && tn->color == 0xFFFFFFFFu);
     }
 
-    // ---- 组件源码的 HTML 写法（.bum.html）：和 .bum.xml 等价 ----
+    // ---- 组件源码的 HTML 写法（.bum.html）：和 .bum.html 等价 ----
     {
         const char* html =
             "<app_window width=\"420\" height=\"200\" bg=\"#F4F7FC\"><html><body>\n"
@@ -1851,15 +1851,15 @@ int run() {
     {
         const char* html =
             "<app_window width=\"760\" height=\"420\" bg=\"#F4F7FC\"><html><body>\n"
-            "  <use src=\"components/titlebar.bum.xml\" x=\"0\" y=\"0\" w=\"760\"\n"
+            "  <use src=\"components/titlebar.bum.html\" x=\"0\" y=\"0\" w=\"760\"\n"
             "       title=\"标题A\" sub=\"提示B\" idmin=\"imin\" idmax=\"imax\" idclose=\"iclose\"/>\n"
-            "  <use id=\"btn\" src=\"components/button.bum.xml\" x=\"16\" y=\"60\"\n"
+            "  <use id=\"btn\" src=\"components/button.bum.html\" x=\"16\" y=\"60\"\n"
             "       w=\"120\" h=\"36\" kind=\"secondary\" label=\"次按钮\"/>\n"
-            "  <use id=\"fld\" src=\"components/field.bum.xml\" x=\"16\" y=\"110\"\n"
+            "  <use id=\"fld\" src=\"components/field.bum.html\" x=\"16\" y=\"110\"\n"
             "       w=\"240\" ph=\"请输入关键字\"/>\n"
-            "  <use id=\"bdg\" src=\"components/badge.bum.xml\" x=\"300\" y=\"118\"\n"
+            "  <use id=\"bdg\" src=\"components/badge.bum.html\" x=\"300\" y=\"118\"\n"
             "       w=\"60\" text=\"在线\" kind=\"mint\"/>\n"
-            "  <use src=\"components/panel.bum.xml\" x=\"16\" y=\"170\" w=\"320\" title=\"面板标题\">\n"
+            "  <use src=\"components/panel.bum.html\" x=\"16\" y=\"170\" w=\"320\" title=\"面板标题\">\n"
             "    <span id=\"inner\" style=\"height:20; color:#66768C; font-size:12\">面板内容</span>\n"
             "  </use>\n"
             "</body></html></app_window>\n";

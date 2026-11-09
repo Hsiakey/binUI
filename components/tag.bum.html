@@ -1,16 +1,16 @@
 <!--
-  tag.bum.html —— 标准组件库里的「HTML 写法」组件
+  tag.bum.html —— 标准组件库里的最小组件（2 行 + 3 条 class 就能说明写法）
 
-  组件源码有两种等价写法：
-      titlebar.bum.xml    XML 写法（注释写在 XML 注释里，长得更像配置）
-      tag.bum.html        这份，HTML 写法（和内联主 UI 完全一样）
+  组件源码的推荐写法就是 .bum.html —— 和主 UI 的 main.html 同一套语法、同一个元素
+  解析器：<style> 会并入宿主样式表、class / 伪类 / attr() 都能用、参数占位一样替换、
+  <use> 嵌套一样生效。
 
-  能力没有任何区别 —— 组件源码本来就是交给 HTML 元素解析器处理的：
-  <style> 会并入宿主样式表、class / 伪类 / attr() 都能用、参数占位 一样替换、
-  <use> 嵌套一样生效。选哪个只看作者习惯：界面全是 HTML 的就用 .bum.html，
-  想强调"这是 XML 源"就用 .bum.xml。
+  历史写法 .bum.xml 继续被识别，能力完全一样（编译器按内容选解析器，不看扩展名）；
+  新写的组件用 .bum.html 就行。
 
-  <use src="tag.bum" .../> 两种都能找到（同一个候选表，.bum.xml 优先）。
+  <use src="tag.bum.html" .../>  显式扩展名
+  <use src="tag.bum" .../>       写 .bum（二进制名，源码在就回落到 tag.bum.html）
+  <use src="tag" .../>           只写名字，自动探测
 
   参数：text 文案 / kind 配色（blue 默认, mint, amber, gray）/ w 宽 / fs 字号
 -->

@@ -10,7 +10,7 @@
 //   binui::ex::MountAll(renderer, uiDir, renderer.layoutBytes());
 //
 // 组件的来源按 include/binui_asset.h 的规则解析：二进制 .bum 直接挂；
-// 只有 .bum.xml 源码时就地编译（开发期友好，慢一点）；两者都有且源码更新
+// 只有 .bum.html 源码时就地编译（开发期友好，慢一点）；两者都有且源码更新
 // 时优先源码 —— 改组件源码 + 热重载即可看到效果，不用重编 .bum。
 #pragma once
 

@@ -6,6 +6,26 @@
 
 ## [Unreleased]
 
+### 变更 — 组件源码统一改名为 `.bum.html`（标准组件库 11 个 + examples/features 3 个）
+
+- 事实：**组件源码的扩展名从来不影响任何行为**。编译器按**内容**选解析器
+  （`CompileBinUIEx`：只有首个标签是 `<binui>` / `<root>`，或裸 `<app_window>` 且正文不含
+  `DOCTYPE`/`<html>`/`<body>`/`<head>`，才走 legacy XML 路径）；组件内联更是直接交给 HTML
+  元素解析器（`ExpandComponents` → `ParseElements`）。所以 `.bum.xml` 里的 "xml" 是一个
+  不产生任何能力的后缀。
+- 但它会误导：旧 README 写着"`.bui.xml` / `.bum.xml` 同样按 XML 解析"（**错的**），
+  作者也会以为存在两种组件格式。主 UI 一直是 `main.html`，组件却叫 `.bum.xml`，两边对不上。
+- 改名：`components/*.bum.xml`（11 个）与 `examples/features/*.bum.xml`（3 个）→ `.bum.html`；
+  示例 UI、文档、Makefile / CMakeLists、`binui_compile` / `check_examples`、测试同步。
+- **`.bum.xml` 仍然识别**（`ProbeAsset` 候选表里排在 `.bum.html` 之后），旧引用不会突然失效；
+  只是文档和新代码不再这么写。裸名字候选顺序相应改为
+  `.bum` → `.bum.html` → `.bum.xml` → `.bui.html` → `.bui.xml` → `.html` → `.xml`。
+- 顺带修一个被改名暴露的 bug：`binui_compile x.bum.html` 的默认输出名算成了 **`x.bum.bui`**
+  （`.html` 分支直接把后缀换成 `.bui`，没先判断是不是组件名）。现在正确输出 `x.bum`。
+- 验证：`check_examples` 11 个 UI 0 问题；9 张离屏渲染图与改名前逐像素对比，8 张**零差异**，
+  features 只差那三颗演示 `<use>` 写法的 tag（文案同时改成 `xxx.bum.html` / `xxx.bum` / `xxx`）；
+  `make all` 0 警告，四套测试全绿。
+
 ### 修复 — 多根组件让编译器崩溃（`<use>` 展开时 `cremap[SIZE_MAX]` 越界）
 
 - 现象：组件文件里写了**两个顶层元素**、宿主 `<use src="…">` 引用它，编译直接崩

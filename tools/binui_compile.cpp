@@ -3,7 +3,7 @@
 // 用法:
 //   binui_compile <src> [-o <out>] [-q]
 //
-//   <src>  .bui.xml / .bum.xml / .html / .xml / 已编译的 .bui|.bum
+//   <src>  .bui.xml / .bum.html / .html / .xml / 已编译的 .bui|.bum
 //   -o     输出路径（默认：与源文件同目录，去掉 .xml 换成 .bui/.bum）
 //   -q     静默（只打错误）
 //
@@ -25,7 +25,7 @@ namespace {
 
 void Usage() {
     std::printf("用法: binui_compile <src> [-o <out>] [-q]\n"
-                "  <src>  .bui.xml / .bum.xml / .html / .xml\n"
+                "  <src>  .bui.xml / .bum.html / .html / .xml\n"
                 "  -o     输出路径（默认同目录，.xml -> .bui/.bum）\n"
                 "  -q     静默（只打错误）\n");
 }
@@ -35,7 +35,7 @@ bool EndsWith(const std::string& s, const char* tail) {
     return s.size() > n && s.compare(s.size() - n, n, tail) == 0;
 }
 
-// 默认输出名：x.bum.xml -> x.bum；x.bui.xml -> x.bui；x.html -> x.bui
+// 默认输出名：x.bum.html -> x.bum；x.bui.xml -> x.bui；x.html -> x.bui
 std::string DefaultOut(const std::string& in) {
     std::string base = in;
     if (EndsWith(base, ".xml")) {
@@ -46,6 +46,10 @@ std::string DefaultOut(const std::string& in) {
     }
     if (EndsWith(base, ".html") || EndsWith(base, ".htm")) {
         base.resize(base.find_last_of('.'));
+        // x.bum.html / x.bui.html / x.binui.html：组件源码，去掉的是 .html 而不是
+        // 整段后缀（以前这里直接把 ".html" 换成 ".bui"，x.bum.html 会输出 x.bum.bui）。
+        if (EndsWith(base, ".bum") || EndsWith(base, ".bui") || EndsWith(base, ".binui"))
+            return base;
         return base + ".bui";
     }
     if (EndsWith(base, ".bum")) return base;

@@ -1,4 +1,4 @@
-# 组件化：`.bui` / `.bum` / `.bum.xml`
+# 组件化：`.bui` / `.bum` / `.bum.html`
 
 > 一句话：**一个界面 = 一个 `.bui`（单文件，组件全内联）；想拆开就拆成 `.bui` + 若干 `.bum`，
 > 二进制和源码可以混放，加载时二进制优先、源码用于改和热更新。**
@@ -6,13 +6,13 @@
 ![组件化三种形态](img/components.png)
 
 示例：[`examples/features/`](../examples/features/)（上图就是它渲染出来的）。
-标题栏 `titlebar.bum`（二进制）、按钮 `button.bum.xml`（源码 + 参数）、卡片 `card.bum`（二进制，
+标题栏 `titlebar.bum`（二进制）、按钮 `button.bum.html`（源码 + 参数）、卡片 `card.bum`（二进制，
 内部又引用过源码组件）、状态栏 `dock.bum`（`external`，运行期挂载）。
 
 ## 标准组件库（`components/`）
 
 `examples/` 里的组件是"组件机制"的演示；**通用组件**放在仓库根的 `components/`，
-不含任何 C++ 代码，用 `<use src="…/xxx.bum.xml" .../>` 编译期内联：
+不含任何 C++ 代码，用 `<use src="…/xxx.bum.html" .../>` 编译期内联：
 
 | 组件 | 根标签 | 参数 |
 |---|---|---|
@@ -26,7 +26,7 @@
 | `stat` | `<div>` | `k` `v` `w` `h` |
 | `avatar` | `<img>` | `src` `size` |
 | `divider` | `<div>` | `len` `color` |
-| `tag` | `<span>` | `text` `kind`(blue/mint/amber/gray) `w` `fs`（`.bum.html` 写法样板） |
+| `tag` | `<span>` | `text` `kind`(blue/mint/amber/gray) `w` `fs` |
 | `statusbar` | `<div>` | `text` `b1` `b2` `h` `bw` |
 
 三条约定（细节见 [`components/README.md`](../components/README.md)）：
@@ -53,7 +53,7 @@
 | `main.bui` | 完整界面布局（**应用入口**，`loadLayout` 直接吃） | 外壳 |
 | `main.bui.xml` | 上面那份的源码（也接受 `main.html`） | 编译器 |
 | `titlebar.bum` | 组件二进制布局 | 链接器（编译期内联）/ 渲染器（运行期挂载） |
-| `titlebar.bum.xml` | 组件源码（可读、可编辑、可热重载） | 编译器 |
+| `titlebar.bum.html` | 组件源码（可读、可编辑、可热重载） | 编译器 |
 | `.binui` | `.bui` 的旧名，仍然识别（兼容历史示例） | 同 `.bui` |
 
 三种分发方式都成立，作者按需选：
@@ -61,8 +61,8 @@
 ```
 单个 UI（内嵌，一个文件）        main.bui
 组件式（外挂）                  main.bui + titlebar.bum + button.bum
-混放（部分二进制、部分源码）     main.bui + titlebar.bum + button.bum.xml
-双份（二进制优先，源码可改）     main.bui + button.bum + button.bum.xml
+混放（部分二进制、部分源码）     main.bui + titlebar.bum + button.bum.html
+双份（二进制优先，源码可改）     main.bui + button.bum + button.bum.html
 ```
 
 “组件全内联”的 `main.bui` 运行时**不需要任何外部文件**（图片仍在外面，路径记在布局自带的资源段里）。
@@ -71,7 +71,7 @@
 
 | 写法 | 组装时机 | 用什么 | 特点 |
 |---|---|---|---|
-| `<use src="x.bum.xml">` | 编译期 | 源码内联（文本替换 + 元素合并） | 支持 `{{参数}}`；宿主能主题化组件 |
+| `<use src="x.bum.html">` | 编译期 | 源码内联（文本替换 + 元素合并） | 支持 `{{参数}}`；宿主能主题化组件 |
 | `<use src="x.bum">` | 编译期 | 链接器离线合并 | 不暴露源码；参数在编 `.bum` 时已固化 |
 | `<use src="x.bum" external>` | **运行期** | `binui::ex::MountAll()` | 换组件不用重编主 `.bui`（皮肤/插件） |
 
@@ -83,13 +83,13 @@
 ```html
 <!-- 宿主 main.html（编译成 main.bui） -->
 <use src="titlebar.bum"    x="0" y="0" w="720"/>                        <!-- 二进制，编译期内联 -->
-<use src="button.bum.xml"  x="16" y="44" w="132" label="确定"/>          <!-- 源码，可传参 -->
+<use src="button.bum.html"  x="16" y="44" w="132" label="确定"/>          <!-- 源码，可传参 -->
 <use src="card.bum"        x="16" y="96" w="304"/>                      <!-- 二进制，编译期内联 -->
 <use src="dock.bum" external x="0" y="412" w="720"/>                    <!-- 外挂，运行期挂载 -->
 ```
 
 ```html
-<!-- button.bum.xml：参数 + 自己的 :hover 过渡 -->
+<!-- button.bum.html：参数 + 自己的 :hover 过渡 -->
 <style>
     .cmp-btn { color:#F5F5F7; border-radius:10; transition: background-color .18s ease; }
     .cmp-btn:hover { background:#3B2F63; }
@@ -109,7 +109,7 @@ renderer.loadLayout(bytes.data(), bytes.size());
 binui::ex::MountAll(renderer, binui::ex::DirOf(uiPath), renderer.layoutBytes());
 ```
 
-`MountAll` 会按第二节的规则解析每个引用：`.bum` 直接读、只有 `.bum.xml` 时就地编译，
+`MountAll` 会按第二节的规则解析每个引用：`.bum` 直接读、只有 `.bum.html` 时就地编译，
 并打印挂载统计。`--watch` 热重载后重新调用一次即可（示例就是这么做的）。
 
 ## 四、加载优先级（二进制优先，源码优先更新）
@@ -120,13 +120,14 @@ binui::ex::MountAll(renderer, binui::ex::DirOf(uiPath), renderer.layoutBytes());
 | 情况 | 用哪个 | 说明 |
 |---|---|---|
 | 只有 `.bum` | 二进制 | 直接合并 |
-| 只有 `.bum.xml` | 源码 | 编译期内联（可传参） |
+| 只有 `.bum.html` | 源码 | 编译期内联（可传参） |
 | 两者都在，`.bum` 不旧 | **二进制** | “优先加载二进制的” |
 | 两者都在，源码 mtime 更新 | **源码** + 告警 | 防止“改了源码没重编 `.bum` → 改了没反应” |
-| 写 `src="x"`（无扩展名） | 依次探测 | `x.bum` → `x.bui` → `x.bum.xml` → `x.bui.xml` → `x.html` → `x.xml` |
+| 写 `src="x"`（无扩展名） | 依次探测 | `x.bum` → `x.bum.html` → `x.bum.xml`（旧写法）→ `x.bui.html` → `x.html` → `x.xml` |
 
 扩展名只作提示，最终按文件头 magic（`BINU` / `XHTM`）判定——把 `.bum` 改名成 `.xml`
-也不会误把二进制当源码解析。
+也不会误把二进制当源码解析。**组件源码的推荐写法是 `.bum.html`**（和主 UI 的 `main.html`
+同一套语法、同一个元素解析器）；`.bum.xml` 是历史写法，能力完全一样、继续识别。
 
 ## 五、参数
 
@@ -168,14 +169,14 @@ binui::ex::MountAll(renderer, binui::ex::DirOf(uiPath), renderer.layoutBytes());
 
 ```bash
 # 组件源码 -> 二进制组件
-binui_compile titlebar.bum.xml                 # -> titlebar.bum（同目录）
+binui_compile titlebar.bum.html                 # -> titlebar.bum（同目录）
 binui_compile main.html -o build/main.bui      # 单文件界面
 
 # 已经是二进制就原样拷贝，方便两条流水线共用一条命令
 binui_compile titlebar.bum -o dist/titlebar.bum
 ```
 
-构建集成：`make components` 把 `examples/features/*.bum.xml` 编成
+构建集成：`make components` 把 `examples/features/*.bum.html` 编成
 `build-mingw/assets/components/*.bum`；CMake 里是 `components_bums` 目标
 （`cmake --build . --target components_bums`）。产物不落源码树。
 
@@ -202,7 +203,7 @@ binui_compile titlebar.bum -o dist/titlebar.bum
 **改写成宿主相对路径**：
 
 ```
-components/titlebar.bum.xml 里写 <img src="icon.png">
+components/titlebar.bum.html 里写 <img src="icon.png">
   → 合并进 examples/features/main.html 后是 src="titlebar/icon.png"
 ```
 

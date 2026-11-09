@@ -104,7 +104,7 @@ if(WIN32)
     endfunction()
 
     # 6 个示例 = 6 组：功能 / 动画 / 字体 / 2D 渲染 / 3D 渲染 / 纹理
-    # .bum 由 binui_compile 在构建期从 .bum.xml 生成，不进源码树
+    # .bum 由 binui_compile 在构建期从 .bum.html 生成，不进源码树
     set(BINUI_COMPONENT_BUMS "")
     foreach(cname card dock)
         set(bum_out "${CMAKE_BINARY_DIR}/assets/components/${cname}.bum")
@@ -112,9 +112,9 @@ if(WIN32)
             OUTPUT "${bum_out}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/assets/components"
             COMMAND $<TARGET_FILE:binui_compile>
-                    "${CMAKE_SOURCE_DIR}/examples/features/${cname}.bum.xml" -o "${bum_out}"
-            DEPENDS binui_compile "${CMAKE_SOURCE_DIR}/examples/features/${cname}.bum.xml"
-            COMMENT "binui: ${cname}.bum.xml -> ${cname}.bum"
+                    "${CMAKE_SOURCE_DIR}/examples/features/${cname}.bum.html" -o "${bum_out}"
+            DEPENDS binui_compile "${CMAKE_SOURCE_DIR}/examples/features/${cname}.bum.html"
+            COMMENT "binui: ${cname}.bum.html -> ${cname}.bum"
             VERBATIM
         )
         list(APPEND BINUI_COMPONENT_BUMS "${bum_out}")
@@ -135,7 +135,7 @@ if(WIN32)
         )
     endfunction()
 
-    # 示例 UI 用 ../../components/xxx.bum.xml 引用标准组件（相对 <exe 目录>/<name>/ 往上两级
+    # 示例 UI 用 ../../components/xxx.bum.html 引用标准组件（相对 <exe 目录>/<name>/ 往上两级
     # = bin/），所以把源码组件同步到 bin/components/
     add_custom_target(std_components ALL
         COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/bin/components"
@@ -157,7 +157,7 @@ if(WIN32)
     add_dependencies(features components_bums)
     add_custom_command(TARGET features POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/examples/features/button.bum.xml"
+            "${CMAKE_SOURCE_DIR}/examples/features/button.bum.html"
             "${CMAKE_BINARY_DIR}/assets/components/card.bum"
             "${CMAKE_BINARY_DIR}/assets/components/dock.bum"
             "$<TARGET_FILE_DIR:features>/features/"

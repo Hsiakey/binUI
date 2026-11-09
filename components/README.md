@@ -1,11 +1,11 @@
 # components/ —— binUI 标准组件库
 
 一批**与具体界面无关**的通用组件，全部用 HTML 标签 + CSS 写成，不含任何 C++ 代码。
-在布局里用 `<use src="路径/xxx.bum.xml" .../>` 引用，编译期内联成一个普通节点树
+在布局里用 `<use src="路径/xxx.bum.html" .../>` 引用，编译期内联成一个普通节点树
 （运行期零开销、零依赖）。
 
 ```html
-<use src="../../components/titlebar.bum.xml" x="0" y="0" w="960" z="100"
+<use src="../../components/titlebar.bum.html" x="0" y="0" w="960" z="100"
      icon="◆" iconw="22" title="我的应用" sub="按 ESC 退出"
      idmin="btnMin" idmax="btnMax" idclose="btnClose"/>
 ```
@@ -29,33 +29,35 @@ build-mingw/bin/offscreen_render components/preview.html docs/img/std-components
 
 | 组件 | 根标签 | 主要参数 | 说明 |
 |---|---|---|---|
-| `titlebar.bum.xml` | `<titlebar>` | `title` `titlew`(默认 `content`) `sub` `icon` `iconw` `h` `pad` `padr` `bs` `gap` `idmin` `idmax` `idclose` | 窗口标题栏：**左**图标/标题/副标题，**右**最小化— 最大化▢ 关闭✕。flex 排版，多宽都不用算按钮坐标；根是 `<titlebar>`，所以拖动窗口照常生效。三颗控制按钮同尺寸（`bs`=29），**图标是元素画的**（1px 横条 / 1px 边框方框 / svg 两条对角线，都是 9×9 且中心对齐），左侧图标不做动画。根元素带 **`ui_scale="fixed"`**：`ui_scale="proportional"` 的窗口最大化/拉伸时标题栏不被拉变形（按钮仍是正方形）。**三颗按钮只有外观，动作归宿主**——按 `idmin`/`idmax`/`idclose` 拿节点 id，在 CLICK 事件里调 `app.minimize()` / `app.maximize()` / `app.requestExit()`（`examples/*/main.cpp` 都是这么接的） |
-| `button.bum.xml` | `<button>` | `label` `kind`(primary/secondary/ghost/danger) `w` `h` `fs` `r` | 四套外观，自带 `:hover`/`:active` |
-| `field.bum.xml` | `<input>` | `ph` 占位符 `val` 初值 `w` `h` `fs` `pad` | 单行输入框，聚焦转白底 |
-| `badge.bum.xml` | `<span>` | `text` `kind`(blue/mint/amber/red/gray) `w` | 状态胶囊 |
-| `toggle.bum.xml` | `<button>` | `label` `w` `h` | 勾选胶囊，`:checked` 变薄荷底（外壳调 `setNodeChecked`） |
-| `panel.bum.xml` | `<div>` | `title` `pad` `w` `h` | 卡片面板；**宿主子元素会排进面板里**（见下） |
-| `dialogue.bum.xml` | `<div>` | `name` `text` `ok` `cancel` `w` `h` | 对话气泡卡：角色名胶囊 + 自动换行正文 + 两个按钮 |
-| `stat.bum.xml` | `<div>` | `k` `v` `w` `h` | 指标单元（小标签 + 加粗数值） |
-| `avatar.bum.xml` | `<img>` | `src` `size` | 圆形头像，缺图退化成浅色圆 |
-| `divider.bum.xml` | `<div>` | `len` `color` | 1px 分隔线 |
-| `tag.bum.html` | `<span>` | `text` `kind`(blue/mint/amber/gray) `w` `fs` | 小标签。**HTML 写法**的样板（见下） |
-| `statusbar.bum.xml` | `<div>` | `text` `b1` `b2` `h` `bw` | 底部状态栏（左灰字 + 右两枚次要按钮） |
+| `titlebar.bum.html` | `<titlebar>` | `title` `titlew`(默认 `content`) `sub` `icon` `iconw` `h` `pad` `padr` `bs` `gap` `idmin` `idmax` `idclose` | 窗口标题栏：**左**图标/标题/副标题，**右**最小化— 最大化▢ 关闭✕。flex 排版，多宽都不用算按钮坐标；根是 `<titlebar>`，所以拖动窗口照常生效。三颗控制按钮同尺寸（`bs`=29），**图标是元素画的**（1px 横条 / 1px 边框方框 / svg 两条对角线，都是 9×9 且中心对齐），左侧图标不做动画。根元素带 **`ui_scale="fixed"`**：`ui_scale="proportional"` 的窗口最大化/拉伸时标题栏不被拉变形（按钮仍是正方形）。**三颗按钮只有外观，动作归宿主**——按 `idmin`/`idmax`/`idclose` 拿节点 id，在 CLICK 事件里调 `app.minimize()` / `app.maximize()` / `app.requestExit()`（`examples/*/main.cpp` 都是这么接的） |
+| `button.bum.html` | `<button>` | `label` `kind`(primary/secondary/ghost/danger) `w` `h` `fs` `r` | 四套外观，自带 `:hover`/`:active` |
+| `field.bum.html` | `<input>` | `ph` 占位符 `val` 初值 `w` `h` `fs` `pad` | 单行输入框，聚焦转白底 |
+| `badge.bum.html` | `<span>` | `text` `kind`(blue/mint/amber/red/gray) `w` | 状态胶囊 |
+| `toggle.bum.html` | `<button>` | `label` `w` `h` | 勾选胶囊，`:checked` 变薄荷底（外壳调 `setNodeChecked`） |
+| `panel.bum.html` | `<div>` | `title` `pad` `w` `h` | 卡片面板；**宿主子元素会排进面板里**（见下） |
+| `dialogue.bum.html` | `<div>` | `name` `text` `ok` `cancel` `w` `h` | 对话气泡卡：角色名胶囊 + 自动换行正文 + 两个按钮 |
+| `stat.bum.html` | `<div>` | `k` `v` `w` `h` | 指标单元（小标签 + 加粗数值） |
+| `avatar.bum.html` | `<img>` | `src` `size` | 圆形头像，缺图退化成浅色圆 |
+| `divider.bum.html` | `<div>` | `len` `color` | 1px 分隔线 |
+| `tag.bum.html` | `<span>` | `text` `kind`(blue/mint/amber/gray) `w` `fs` | 小标签 |
+| `statusbar.bum.html` | `<div>` | `text` `b1` `b2` `h` `bw` | 底部状态栏（左灰字 + 右两枚次要按钮） |
 
-## 两种写法：`.bum.xml` 与 `.bum.html`
+## 源码格式：`.bum.html`（推荐）
 
-组件源码可以写成两种扩展名，**能力完全一样** —— 组件文件本来就是交给 HTML 元素解析器
-处理的，`<style>` 并表、`class`/伪类/`attr()`、`{{参数}}`、嵌套 `<use>` 全都一样：
+组件源码一律用 **`.bum.html`** —— 和主 UI 的 `main.html` 同一套语法、同一个元素解析器：
+`<style>` 并表、`class`/伪类/`attr()`、`{{参数}}`、嵌套 `<use>` 全都一样。
 
 ```html
-<use src="../../components/tag.bum.html" text="HTML 写法" kind="mint"/>  <!-- 显式扩展名 -->
-<use src="../../components/tag.bum"      text="裸名字也行"/>              <!-- 自动找 -->
+<use src="../../components/tag.bum.html" x="16" y="20" w="90" text="显式扩展名"/>
+<use src="../../components/tag.bum"      x="16" y="60" w="90" text="裸名字也行"/>
 ```
 
-裸名字时的候选顺序：`<名字>.bum`（二进制）→ `<名字>.bum.xml` → `<名字>.bum.html`
-→ …（二进制优先，源码比二进制新则用源码）。`tag.bum.html` 就是库里的 HTML 写法样板：
-界面全用 HTML 写的项目，组件也照着 HTML 写就行；XML 源项目想强调"这是 XML 源"就用
-`.bum.xml`。
+裸名字时的候选顺序：`<名字>.bum`（二进制）→ `<名字>.bum.html` → `<名字>.bum.xml`（旧写法）
+→ …（二进制优先，源码比二进制新则用源码）。
+
+> `.bum.xml` **仍然识别、能力完全一样**，只是历史写法：编译器从不按扩展名选解析器
+> （看内容，见 `binui_compiler.cpp` 的 `CompileBinUIEx`），所以 "xml" 这个名字不带任何
+> 额外能力。新写的组件用 `.bum.html` 就行 —— 别被后缀骗了。
 
 ## 三条使用约定
 
@@ -71,7 +73,7 @@ build-mingw/bin/offscreen_render components/preview.html docs/img/std-components
    断言守着这件事（四个 UI 符号至少有一个候选字体画得出笔画）。
 4. **宿主子元素会落进组件根容器**。`panel` 就是靠这条工作的：
    ```html
-   <use src="../../components/panel.bum.xml" x="16" y="56" w="320" title="统计">
+   <use src="../../components/panel.bum.html" x="16" y="56" w="320" title="统计">
        <span style="height:20">一行内容</span>
    </use>
    ```
@@ -88,7 +90,7 @@ build-mingw/bin/offscreen_render components/preview.html docs/img/std-components
 ## 已知限制
 
 - 组件不能条件渲染（没有 `if`）：`titlebar` 的 ─ 和 ✕ 永远成对出现、同尺寸（`bs`）。
-  不想要最小化按钮，就把 `titlebar.bum.xml` 复制一份删掉那一行 —— 这也正是"组件是源码"的好处。
+  不想要最小化按钮，就把 `titlebar.bum.html` 复制一份删掉那一行 —— 这也正是"组件是源码"的好处。
 - 组件没有插槽语法，宿主子元素只能落在根容器的流式末尾（不能塞进某个具名位置）。
 - `:hover` / `:active` 的状态样式只能改底色/缩放/圆角，不能改文字色 —— 所以次按钮的悬停是"底色加深"。
 - 不支持 `box-shadow`，层次只能靠 1px 边框 + 色差。

@@ -4,15 +4,16 @@
 //
 //   单个 UI：      main.bui                                   （内嵌式，一个文件）
 //   组件式：       main.bui + titlebar.bum + button.bum       （外挂式）
-//   混放：         main.bui + titlebar.bum + button.bum.xml   （二进制 + 源码）
-//   双份：         button.bum + button.bum.xml                （二进制优先，源码可改/可热更新）
+//   混放：         main.bui + titlebar.bum + button.bum.html  （二进制 + 源码）
+//   双份：         button.bum + button.bum.html               （二进制优先，源码可改/可热更新）
 //
 // 本头文件只做"给定目录与 src，选出该用哪个文件"，不依赖任何平台 API
 // （纯 <filesystem>/<fstream>），编译器与运行期加载器共用同一份规则。
 //
 // 规则：
 //   1. 显式扩展名按扩展名：.bum/.bui/.binui = 二进制；.xml/.html/.htm = 源码；
-//      无扩展名则依次探测 <src>.bum / <src>.bui → <src>.bum.xml / <src>.bui.xml / <src>.html / <src>.xml
+//      无扩展名则依次探测 <src>.bum / <src>.bui → <src>.bum.html / <src>.bum.xml（旧写法）
+//      → <src>.bui.html / <src>.bui.xml → <src>.html / <src>.xml
 //   2. 二进制存在 → 用二进制（快、可发行、保护源码）
 //   3. 但源码 mtime 比二进制新 → 改用源码（"改了没重新编译"不该是静默陷阱），
 //      并置 sourceNewer 让调用方给一条告警
@@ -81,19 +82,19 @@ inline AssetFile ProbeAsset(const std::string& dir, const std::string& src) {
     const std::string low = AssetLower(src);
     std::vector<std::string> binCands, srcCands;
     if (AssetEndsWith(low, ".bum") || AssetEndsWith(low, ".bui") || AssetEndsWith(low, ".binui")) {
-        // src="card.bum" -> 二进制 card.bum，源码 card.bum.xml / card.bum.html 都认
+        // src="card.bum" -> 二进制 card.bum，源码 card.bum.html / card.bum.xml 都认
         binCands.push_back(src);
-        srcCands.push_back(src + ".xml");
         srcCands.push_back(src + ".html");
+        srcCands.push_back(src + ".xml");
     } else if (AssetEndsWith(low, ".xml") || AssetEndsWith(low, ".html") || AssetEndsWith(low, ".htm")) {
         srcCands.push_back(src);
     } else {
         binCands = {src + ".bum", src + ".bui", src + ".binui"};
-        // 组件源码两种写法等价：.bum.xml（XML 写法）与 .bum.html（HTML 写法，
-        // 和主 UI 同一套语法）。两种都在同一个候选表里，就近优先、按顺序命中。
-        srcCands = {src + ".bum.xml", src + ".bum.html",
-                    src + ".bui.xml", src + ".bui.html",
-                    src + ".binui.xml", src + ".binui.html",
+        // 组件源码的**推荐写法是 .bum.html**（和主 UI 的 main.html 同一套语法、同一个
+        // 元素解析器）。.bum.xml 是历史写法，能力完全一样，继续识别但排在后面。
+        srcCands = {src + ".bum.html", src + ".bum.xml",
+                    src + ".bui.html", src + ".bui.xml",
+                    src + ".binui.html", src + ".binui.xml",
                     src + ".html", src + ".xml"};
     }
     auto pick = [&](const std::vector<std::string>& cands, bool wantBinary) -> std::string {

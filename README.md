@@ -284,9 +284,13 @@ with binui.App(layout) as app:
 
 | 源码格式 | 说明 |
 |----------|------|
-| `.xml`   | 手写 XML，节点标签映射为节点类型（见 `tests/fixtures/vision.binui.xml`）；`.bui.xml` / `.bum.xml` 同样按 XML 解析 |
-| `.html`  | HTML5 语法，支持流式布局与 `style` 绝对定位（见 `examples/animshow/main.html`） |
+| `.xml`   | 手写 XML，节点标签映射为节点类型（见 `tests/fixtures/vision.binui.xml`）；**legacy**：不支持 `<style>` 级联与 `<use>` 组件 |
+| `.html`  | HTML5 语法，支持流式布局与 `style` 绝对定位（见 `examples/animshow/main.html`）——**组件源码也用这个**（`xxx.bum.html`） |
 | `.bui` / `.bum` | 已编译好的 binUI 二进制（`loadLayout` 直接吃；`.bui` = 界面，`.bum` = 组件） |
+
+> **格式按内容判，不按扩展名**：只有首个标签是 `<binui>` / `<root>`（或裸 `<app_window>`
+> 且不含 `DOCTYPE`/`<html>`/`<body>`/`<head>`）才走 legacy XML 路径，其余一律 HTML 元素
+> 解析器。所以 `.bum.xml`（历史写法）和 `.bum.html` 编译结果完全一样。
 
 HTML5 编译规则：
 - 标签映射：`html/body`→根，`button`→按钮，`input[type=text]`→输入框，`input[type=button/submit/reset]`→按钮（未写 `value` 时用内置文案 Submit / Reset / Button），`img`→图片，其余（`div/section/header/footer/nav/` 等）→容器。
@@ -297,9 +301,9 @@ HTML5 编译规则：
 - 边距：`margin`（及 `margin-top/right/bottom/left`，支持 1~4 值简写）影响流式间距与左右内缩。
 - 内边距：`padding`（及 `padding-top`）存入节点，绘制文本时内缩，并作为子元素的偏移基准。
 - 百分比尺寸：`width/height/left/top` 支持 `N%`（相对父容器内容盒宽/高解析）；根 `width/height:100%` 即铺满窗口（编译期按默认窗口 1280x720 解析，运行时由 `setSize` 驱动）。编译产物（v3）追加缩放规格段，渲染器 `setSize(w,h)` 时对百分比/流式/flex/自动宽节点重排，滚动偏移按新视口钳制；静态布局仅同步根尺寸。
-- **组件化（`.bui` / `.bum` / `.bum.xml`）**：一个界面 = 一个 `.bui`（组件全内联，运行期零依赖）；
+- **组件化（`.bui` / `.bum` / `.bum.html`）**：一个界面 = 一个 `.bui`（组件全内联，运行期零依赖）；
   想拆开就拆成 `.bui` + 若干 `.bum`，二进制与源码可混放。三条路线：
-  `<use src="x.bum.xml">` 源码内联（可传 `{{参数}}`）、`<use src="x.bum">` 二进制内联（链接器离线合并，
+  `<use src="x.bum.html">` 源码内联（可传 `{{参数}}`）、`<use src="x.bum">` 二进制内联（链接器离线合并，
   同一套合并规则，不暴露源码）、`<use src="x.bum" external>` 运行期挂载（布局里只留占位节点 +
   组件引用段，`binui::ex::MountAll()` 挂上，换组件不用重编主 `.bui`）。加载优先级：**二进制优先，
   源码 mtime 更新时改用源码并告警**（改源码保存即热重载，不会“改了没反应”）。参数值按纯文本注入

@@ -60,7 +60,7 @@ int main(int argc, char* argv[]) {
                          wd.present && wd.transparent(),
                          wd.title.c_str());
 
-    // 标题栏三颗控制按钮（components/titlebar.bum.xml 里的 id：win-min / win-max / win-close）。
+    // 标题栏三颗控制按钮（components/titlebar.bum.html 里的 id：win-min / win-max / win-close）。
     // 组件只负责外观，动作归宿主：最小化 / 最大化·还原 / 关闭窗口。
     const uint16_t idWinMin   = renderer.findNodeByName("win-min");
     const uint16_t idWinMax   = renderer.findNodeByName("win-max");

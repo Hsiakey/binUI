@@ -4,7 +4,7 @@
 //   · v11 运行时伪类 :hover / :active / :focus / :checked(状态样式段)
 //   · v13 扩展绘制: 边框 / 渐变 / 字重 / 行高 / 文字装饰
 //   · v14 HTML 元素默认语义(UA 样式表 / 占位符 / disabled / checkbox)
-//   · v12 组件链接三形态: 源码 .bum.xml 内联 / 二进制 .bum / external 运行期挂载
+//   · v12 组件链接三形态: 源码 .bum.html 内联 / 二进制 .bum / external 运行期挂载
 //   · 数据驱动: 定时 setText + invalidateNode 局部重绘(不是整窗重画)
 #include <cstdio>
 #include <string>
@@ -73,7 +73,7 @@ int main(int argc, char* argv[]) {
                          wd.present && wd.transparent(),
                          wd.title.c_str());
 
-    // 标题栏三颗控制按钮（components/titlebar.bum.xml 里的 id：win-min / win-max / win-close）。
+    // 标题栏三颗控制按钮（components/titlebar.bum.html 里的 id：win-min / win-max / win-close）。
     // 组件只负责外观，动作归宿主：最小化 / 最大化·还原 / 关闭窗口。
     const uint16_t idWinMin   = renderer.findNodeByName("win-min");
     const uint16_t idWinMax   = renderer.findNodeByName("win-max");

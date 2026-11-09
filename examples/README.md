@@ -23,7 +23,7 @@ WASD 当拼音吃掉（窗口收到 `VK_PROCESSKEY`），焦点导航全哑。�
 
 | 目录 | 组 | 演示什么 | 后端 |
 |---|---|---|---|
-| [`features/`](features/) | **功能** | 运行时伪类、v13 扩展绘制（边框/渐变/字重/行高/装饰）、v14 HTML 元素默认语义、组件化三形态（源码 `.bum.xml` / 二进制 `.bum` / `external` 外挂）、数据驱动 `setText` + 局部重绘 | GL |
+| [`features/`](features/) | **功能** | 运行时伪类、v13 扩展绘制（边框/渐变/字重/行高/装饰）、v14 HTML 元素默认语义、组件化三形态（源码 `.bum.html` / 二进制 `.bum` / `external` 外挂）、数据驱动 `setText` + 局部重绘 | GL |
 | [`animshow/`](animshow/) | **动画** | 缓动曲线、方向与次数、时长、fill 模式、infinite、悬停过渡、运行时 `setColorOf` API | GL |
 | [`fontshow/`](fontshow/) | **字体与输入法** | 字号阶梯 12–32、字重 400–800、斜体、行高 100%/170%、下划线/删除线/上划线、中英混排与符号（含缺字回退），以及 IME：组字串内联在光标处、候选框跟着光标跳、选词上屏回显码点、光标高度跟行高走（`BINUI_IME_LOG=1` 出消息日志） | GL |
 | [`buttonshow/`](buttonshow/) | **按钮样式** | 语义色 / 尺寸与图标 / 圆角 / 纯色·渐变·描边·幽灵底 / `:hover`·`:active`·`:checked`·`disabled` / 图标·文本·块级形态（纯 CSS，可直接照抄的按钮色板） | GL |
@@ -47,7 +47,7 @@ CMake 构建同理（`cmake --build build`，产物同样落 `build/bin/examples
 会被拷到 `<exe 目录>/<name>/main.html`，程序默认在那里找；加 `--ui <path>` 或 `--watch`
 可以直接盯源码树（保存即热重载）。
 
-示例 UI 用 `../../components/xxx.bum.xml` 引用标准组件 —— 相对 `bin/examples/<name>/` 往上两级
+示例 UI 用 `../../components/xxx.bum.html` 引用标准组件 —— 相对 `bin/examples/<name>/` 往上两级
 就是 `bin/components/`，构建期会从仓库根 `components/` 同步过去，所以单拷 exe 出去要连
 `components/` 一起带。
 
@@ -60,7 +60,7 @@ CMake 构建同理（`cmake --build build`，产物同样落 `build/bin/examples
 3. 标题栏用标准组件（`icon` + `iconw="22"` 给个字形，`title` / `sub` 写标题与一句话说明）：
 
    ```html
-   <use src="../../components/titlebar.bum.xml" x="0" y="0" w="<窗口宽>" icon="◆" iconw="22"
+   <use src="../../components/titlebar.bum.html" x="0" y="0" w="<窗口宽>" icon="◆" iconw="22"
         title="…" sub="…"/>
    ```
 

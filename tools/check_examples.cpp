@@ -1,6 +1,6 @@
 // check_examples.cpp - 示例 UI 零警告检查
 // 用法: check_examples [目录...]（默认 examples）
-// 对目录下所有 UI 源码（*.html / *.bum.xml / *.bui.xml / *.binui.xml）逐个编译：
+// 对目录下所有 UI 源码（*.html / *.bum.html / 旧写法 *.bum.xml 等）逐个编译：
 // 编译为空或产生任何编译警告都算失败。
 // "写了没效果" 是 bug —— 这条检查就是防止示例 UI 里悄悄积累不支持的写法。
 #include <cstdio>

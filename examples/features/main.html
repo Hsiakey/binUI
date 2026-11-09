@@ -69,7 +69,7 @@
     </style>
 </head>
 <body>
-    <use src="../../components/titlebar.bum.xml" x="0" y="0" w="900" icon="◆" iconw="22"
+    <use src="../../components/titlebar.bum.html" x="0" y="0" w="900" icon="◆" iconw="22"
          title="功能" sub="样式 · 语义 · 组件化 · 数据驱动"/>
 
     <!-- ① 运行时伪类 -->
@@ -122,20 +122,20 @@
         </div>
         <span class="note" style="position:absolute; left:340; top:180; width:520; height:20">同权重规则按文档序层叠；::before / ::after 的 content 会并入宿主文本</span>
         <span class="tag" data-tag="attr(data-tag)" style="position:absolute; left:340; top:206; width:140; height:20; font-size:12; color:#3E8BFF"></span>
-        <use src="../../components/tag.bum" x="340" y="236" w="86" text=".bum.html" kind="mint"/>
-        <use src="../../components/tag.bum.html" x="436" y="236" w="96" text="HTML 写法" kind="amber"/>
-        <use src="../../components/tag.bum" x="542" y="236" w="96" text="裸名字也行" kind="gray"/>
-        <span class="note" style="position:absolute; left:648; top:240; width:212; height:16">三种 &lt;use&gt; 写法打到同一个组件</span>
+        <use src="../../components/tag.bum.html" x="340" y="236" w="92" text="xxx.bum.html" kind="mint"/>
+        <use src="../../components/tag.bum" x="442" y="236" w="88" text="xxx.bum" kind="amber"/>
+        <use src="../../components/tag" x="540" y="236" w="78" text="xxx" kind="gray"/>
+        <span class="note" style="position:absolute; left:628; top:240; width:232; height:16">三种 &lt;use&gt; src 写法打到同一个组件</span>
         <span class="note" style="position:absolute; left:492; top:208; width:368; height:18">属性值直接当内容：content: attr(data-tag)，编译期取值</span>
     </div>
 
     <!-- ④ 组件化：源码组件 -->
     <div class="card" style="position:absolute; left:16; top:572; width:428; height:180">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:390; height:18">④ 组件化：源码组件 .bum.xml（可传参）</span>
-        <use src="button.bum.xml" x="16"  y="40" w="190" label="普通按钮"/>
-        <use src="button.bum.xml" x="222" y="40" w="190" label="第二个实例"/>
-        <use src="button.bum.xml" x="16"  y="88" w="190" label="第三份"/>
-        <use src="button.bum.xml" x="222" y="88" w="190" label="宿主改底色（bg）" bg="#2FBF9A"/>
+        <span class="card-title" style="position:absolute; left:16; top:12; width:390; height:18">④ 组件化：源码组件 .bum.html（可传参）</span>
+        <use src="button.bum.html" x="16"  y="40" w="190" label="普通按钮"/>
+        <use src="button.bum.html" x="222" y="40" w="190" label="第二个实例"/>
+        <use src="button.bum.html" x="16"  y="88" w="190" label="第三份"/>
+        <use src="button.bum.html" x="222" y="88" w="190" label="宿主改底色（bg）" bg="#2FBF9A"/>
         <span class="note" style="position:absolute; left:16; top:140; width:396; height:28">参数与 &lt;use&gt; 属性合并；组件自带的 :hover 过渡一并生效</span>
     </div>
 

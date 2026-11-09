@@ -2345,7 +2345,7 @@ static int run() {
 // 裁剪链：只有 overflow:auto/scroll/hidden 的祖先才裁子元素
 //
 // 以前三个后端都无条件按"每个祖先矩形"裁剪。组件若写了一层与按钮等大的根 div
-// （早期 features 的 button.bum.xml 就是这样），按钮 hover 放大 1.04 时会被切回
+// （早期 features 的 button.bum.html 就是这样），按钮 hover 放大 1.04 时会被切回
 // 原来那块 —— 看起来像"按钮被困在盒子里放大"。
 // CSS 语义里普通 div 不裁子元素，要裁得靠 overflow。这条用例把判定口径钉在渲染器上
 // （三个后端都调 clippingAncestors，同一份规则）。

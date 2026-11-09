@@ -68,7 +68,7 @@ $(LIB_A): $(LIB_OBJS)
 	ar rcs $@ $^
 
 # =============================================
-# 组件二进制：.bum.xml -> .bum（产物落 build 目录，不污染源码树）
+# 组件二进制：.bum.html -> .bum（产物落 build 目录，不污染源码树）
 # =============================================
 COMPONENT_BUMS := \
     $(BUILD_DIR)/assets/components/card.bum \
@@ -80,7 +80,7 @@ $(BIN_DIR)/binui_compile$(EXT): tools/binui_compile.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
 
-$(BUILD_DIR)/assets/components/%.bum: $(EXA_DIR)/features/%.bum.xml $(BIN_DIR)/binui_compile$(EXT)
+$(BUILD_DIR)/assets/components/%.bum: $(EXA_DIR)/features/%.bum.html $(BIN_DIR)/binui_compile$(EXT)
 	@mkdir -p $(dir $@)
 	$(BIN_DIR)/binui_compile$(EXT) $< -o $@
 
@@ -173,9 +173,9 @@ DEMO_BINS := \
 # 原先写 `cmd /c copy /Y examples\x\y build-mingw\bin\x\y`：SHELL=sh 时反斜杠被 sh 当转义吃掉，
 # cmd 收到不存在的路径，只打印 banner 就退出 —— 演示 UI 其实从没被拷到 bin/ 下（静默失败）。
 
-# 标准组件库：demo 的 main.html 用 ../../components/xxx.bum.xml 引用，
+# 标准组件库：demo 的 main.html 用 ../../components/xxx.bum.html 引用，
 # UI 在 $(DEMO_DIR)/<demo>/main.html，往上两级正好是 $(BIN_DIR)/，所以拷到这里
-STD_LIB_SRCS  := $(wildcard components/*.bum.xml components/*.bum.html)
+STD_LIB_SRCS  := $(wildcard components/*.bum.html components/*.bum.xml)
 STD_LIB_STAMP := $(BIN_DIR)/components/.stamp
 
 $(STD_LIB_STAMP): $(STD_LIB_SRCS)
@@ -189,11 +189,11 @@ $(BUILD_DIR)/examples/%.o: $(EXA_DIR)/%.cpp
 
 # UI 源文件也算依赖：不然改完 main.html，exe 不用重链，构建期那次 cp 不会重跑，
 # 跑起来还是旧界面（只有 --ui 指到源码树才看到新界面）。
-$(DEMO_DIR)/features$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.xml
+$(DEMO_DIR)/features$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
 	@mkdir -p $(DEMO_DIR)/features
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/features/main.html $(DEMO_DIR)/features/main.html
-	cp -f $(EXA_DIR)/features/button.bum.xml $(DEMO_DIR)/features/button.bum.xml
+	cp -f $(EXA_DIR)/features/button.bum.html $(DEMO_DIR)/features/button.bum.html
 	cp -f $(BUILD_DIR)/assets/components/card.bum $(DEMO_DIR)/features/card.bum
 	cp -f $(BUILD_DIR)/assets/components/dock.bum $(DEMO_DIR)/features/dock.bum
 

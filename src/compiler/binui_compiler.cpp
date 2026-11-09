@@ -2475,7 +2475,7 @@ static std::vector<HNode> ParseElements(const std::string& html, std::string& st
 }
 
 // ============================================================
-// 组件内联：<use src="路径.bum.xml"> / <component src=…>
+// 组件内联：<use src="路径.bum.html"> / <component src=…>
 //
 // 语义（见 docs/components.md）：
 //   · src 相对"当前 UI 文件所在目录"解析；按 include/binui_asset.h 的规则选文件
@@ -2634,17 +2634,17 @@ static std::string SubstituteParams(const std::string& src,
 }
 
 // 单独编译组件源码时：{{param=默认}} 取默认值（裸 {{param}} 留给内联时替换）。
-// 这样 .bum.xml 既能被 <use> 内联传参，也能自己编成 .bum —— 两种形态语义一致。
+// 这样 .bum.html 既能被 <use> 内联传参，也能自己编成 .bum —— 两种形态语义一致。
 static std::string ApplyParamDefaults(const std::string& src) {
     static const std::unordered_map<std::string, std::string> kNoParams;
     return SubstituteParams(src, kNoParams, /*defaultsOnly=*/true);
 }
 
 // ============================================================
-// 组件来源解析：.bum/.bui 二进制 与 .bum.xml/.bui.xml 源码
+// 组件来源解析：.bum/.bui 二进制 与 .bum.html/.bum.xml（旧）/.bui.html/.bui.xml 源码
 //
 // 作者可以只放二进制、只放源码，或两种都放（甚至按组件混放）：
-//   · 无扩展名的 src 依次探测 x.bum / x.bui → x.bum.xml / x.bui.xml / x.html / x.xml
+//   · 无扩展名的 src 依次探测 x.bum / x.bui → x.bum.html / x.bum.xml → x.html / x.xml
 //   · 二进制优先；但源码比二进制新（mtime）时按源码内联并告警 —— 改源码保存后
 //     热重载就能看到效果，不会因为忘了重编 .bum 而"改了没反应"
 //   · <use src="x.bum" external> 表示运行期挂载：编译期只留占位节点 + 组件引用段
@@ -2720,7 +2720,7 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
         if (srcRel.empty()) {
             failReason = "缺少 src 属性";
         } else if (!af.valid()) {
-            failReason = "读不到组件文件「" + srcRel + "」（.bum / .bui / .bum.xml 都不存在）";
+            failReason = "读不到组件文件「" + srcRel + "」（.bum / .bum.html / .bum.xml 都不存在）";
         } else {
             compDir = std::filesystem::path(af.path).parent_path().generic_string();
             const bool binary = (af.kind == AssetKind::BinaryLayout);
@@ -2863,7 +2863,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::string styleSheets; // <style> 文本（@keyframes 与 transition/animation 规则）
     std::vector<HNode> elems = ParseElements(ApplyParamDefaults(html), styleSheets);
 
-    // ---- 1.5 组件内联：<use src="x.bum.xml"> 展开成真实元素 ----
+    // ---- 1.5 组件内联：<use src="x.bum.html"> 展开成真实元素 ----
     ExpandComponents(elems, styleSheets, tl_uiBaseDir, 0);
 
     if (elems.empty()) return {};
@@ -3893,9 +3893,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             { "meter", "<meter> 没有内置外观，建议用图表 API 的 ProgressBar" },
             { "dialog", "<dialog> 不支持模态，按普通容器渲染" },
             { "output", "<output> 不支持，按普通容器渲染" },
-            { "include", "<include> 不生效：组件内联用 <use src=\"x.bum.xml\">（成对写法也可以，"
+            { "include", "<include> 不生效：组件内联用 <use src=\"x.bum.html\">（成对写法也可以，"
                          "宿主子元素会落进组件根容器）" },
-            { "import", "<import> 不生效：组件内联用 <use src=\"x.bum.xml\">" },
+            { "import", "<import> 不生效：组件内联用 <use src=\"x.bum.html\">" },
         };
         // 真正被编译器消费的属性（其余一律视为"写了没效果"）
         const auto& kUsedAttrs = UsedHtmlAttrs();
