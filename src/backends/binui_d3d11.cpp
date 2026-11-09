@@ -2148,12 +2148,14 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
             // 与 drawNodesGDI 的叠放顺序一致
             drawNodeBorder();
 
-            // 焦点环两态（见 GL 后端同段与 docs/keyboard_focus.md）：
-            // 待编辑 = 虚线 + 对比色；编辑中 = 实线 + 强调蓝。
+            // 焦点环三态（见 GL 后端同段与 docs/keyboard_focus.md）：
+            // 输入元素待编辑 = 虚线 + 对比色；普通焦点 = 实线 + 对比色；编辑中 = 实线加粗 + 蓝。
             {
                 const BinUIRenderer::FocusRing ring = renderer.focusRingOf(node.id);
                 if (ring != BinUIRenderer::FocusRing::None) {
-                    const bool editing = ring == BinUIRenderer::FocusRing::Solid;
+                    const bool editing = ring == BinUIRenderer::FocusRing::Editing;
+                    const bool dashed = ring == BinUIRenderer::FocusRing::Dashed;
+                    const float thick = editing ? 2.0f : 1.0f;
                     uint32_t ringCol = textCol;
                     if (editing) {
                         ringCol = ScaleAlpha(BinUIRenderer::kFocusRingEditColor, opacity);
@@ -2166,22 +2168,20 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                     const float fr = effRadius > 2 ? static_cast<float>(effRadius) - 1.0f : 0.0f;
                     const float fx = static_cast<float>(x) + 1.0f, fy = static_cast<float>(y) + 1.0f;
                     const float fw = static_cast<float>(nw) - 2.0f, fh = static_cast<float>(nh) - 2.0f;
-                    if (editing) {
-                        if (fr >= 1.0f) {
-                            gfx.strokeRounded(fx, fy, fw, fh, fr, 2.0f, ringCol);
-                        } else {
-                            gfx.fillLine(fx, fy, fx + fw, fy, 2.0f, ringCol);
-                            gfx.fillLine(fx, fy + fh, fx + fw, fy + fh, 2.0f, ringCol);
-                            gfx.fillLine(fx, fy, fx, fy + fh, 2.0f, ringCol);
-                            gfx.fillLine(fx + fw, fy, fx + fw, fy + fh, 2.0f, ringCol);
-                        }
-                    } else {
+                    if (dashed) {
                         PaintSegment segs[kMaxFocusDashSegments];
                         const int n = BuildDashedRoundRing(fx, fy, fw, fh, fr, 6.0f, 4.0f,
                                                            segs, kMaxFocusDashSegments);
                         for (int si = 0; si < n; si++)
                             gfx.fillLine(segs[si].x0, segs[si].y0, segs[si].x1, segs[si].y1,
                                          1.0f, ringCol);
+                    } else if (fr >= 1.0f) {
+                        gfx.strokeRounded(fx, fy, fw, fh, fr, thick, ringCol);
+                    } else {
+                        gfx.fillLine(fx, fy, fx + fw, fy, thick, ringCol);
+                        gfx.fillLine(fx, fy + fh, fx + fw, fy + fh, thick, ringCol);
+                        gfx.fillLine(fx, fy, fx, fy + fh, thick, ringCol);
+                        gfx.fillLine(fx + fw, fy, fx + fw, fy + fh, thick, ringCol);
                     }
                 }
             }

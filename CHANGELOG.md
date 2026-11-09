@@ -37,13 +37,18 @@ app.setKeyFn([&](int vk) {
 | 文本编辑 | Tab / Shift+Tab | 退出编辑并跳到下一个 / 上一个控件 |
 | 文本编辑 | 退格/删除/左右/Home/End | 光标与选区（字母归输入法，**WASD 不抢键**） |
 
-焦点环不再是"一条常亮白线"，而是把阶段画出来（`renderer.focusRingOf(id)` → `None/Dashed/Solid`）：
+焦点环不再是"一条常亮白线"，而是把状态画出来（`renderer.focusRingOf(id)` →
+`None/Dashed/Solid/Editing`）：
 
 | 状态 | 环 | 说明 |
 |---|---|---|
-| 待编辑 | **虚线** 1px + 底色对比色 | 键盘选中元素、还没按 Enter；`:focus-visible` 语义：鼠标点击不画、2 秒无操作自动熄灭 |
-| 编辑中 | **实线** 2px + 强调蓝 `#3E8BFF` | 正在编辑的输入框；常亮（编辑是持续状态，不能自己消失） |
+| 待编辑（**只有输入元素**） | **虚线** 1px + 底色对比色 | 键盘选中输入框、还没按 Enter；`:focus-visible` 语义：鼠标点击不画、2 秒无操作自动熄灭 |
+| 普通焦点（按钮等） | **实线** 1px + 底色对比色 | 键盘选中非输入元素；同样 2 秒无操作自动熄灭 |
+| 编辑中（输入元素） | **实线** 2px + 强调蓝 `#3E8BFF` | 正在编辑的输入框；常亮（编辑是持续状态，不能自己消失） |
 | 无 | 不画 | 鼠标操作 / 超时 / 窗口失焦 / 没有焦点 |
+
+虚线只用来标记输入元素的"待编辑"状态，不是通用焦点样式 —— 否则按钮上也套虚线，满屏看起来
+像"所有东西都在等你编辑"，和禁用/占位之类的虚线语义也容易混。
 
 线型 + 颜色双编码：只靠颜色区分对色弱用户不友好，虚线/实线一眼能分。虚线沿圆角矩形
 路径按弧长采样（`binui_paint.h` 的 `BuildDashedRoundRing`，三个后端共用几何、只负责 fillLine）。
@@ -90,7 +95,8 @@ app.setImeActiveFn([&] { return renderer.isEditing(); });
 - 鼠标点击只切 `:focus` 状态（`commitFocus(id, false)`），不点亮焦点环；环正亮着时点一下
   也会立刻收掉（`release()` 里清 `focusRing_`）。`setKeyboardFocus` / `moveKeyboardFocus` /
   `cycleKeyboardFocus` / `handleKey` 都会亮环并重置 2 秒计时。
-- 每节点环态由 `focusRingOf(nodeId)` 决定（`None/Dashed/Solid`），三个后端只负责画：
+- 每节点环态由 `focusRingOf(nodeId)` 决定（`None/Dashed/Solid/Editing`）：输入元素待编辑给
+  `Dashed`、其余元素给 `Solid`、正在编辑的输入框给 `Editing`。三个后端只负责画：
   实线用 `strokeRounded(2px)` / 四条 2px 线，虚线用 `binui_paint.h` 的
   `BuildDashedRoundRing` 沿圆角路径按弧长采样出线段再 `fillLine`。编辑环颜色统一取
   `BinUIRenderer::kFocusRingEditColor`（#3E8BFF），不会三端各调一个蓝。
@@ -101,8 +107,8 @@ app.setImeActiveFn([&] { return renderer.isEditing(); });
 
 - `tests/test_elements.cpp` 新增 9c 节 35 条用例：WASD 移焦点、方向键不移动焦点且无滚动容器时
   不被消费、回车激活/进出编辑、编辑中 WASD 忽略、编辑中 Tab 换控件、方向键滚焦点容器、
-  PgUp/PgDn/Home/End、无焦点时空格翻页、焦点环两态（待编辑 `Dashed` / 编辑中 `Solid`，Esc 后
-  回到 `Dashed`）、虚线环几何（线段数 / 端点不出界 / 覆盖周长）、环超时熄灭并回报该节点、
+  PgUp/PgDn/Home/End、无焦点时空格翻页、焦点环三态（输入框待编辑 `Dashed` / 按钮 `Solid` /
+  编辑中 `Editing`，Esc 后回到 `Dashed`）、虚线环几何（线段数 / 端点不出界 / 覆盖周长）、环超时熄灭并回报该节点、
   鼠标点击只设焦点不亮环。
 - `make all` 0 警告；`make test` 四套全绿；`check_examples` 11 个 UI 0 问题。
 - 真机键盘验收（截图逐帧比对，均值像素差）：

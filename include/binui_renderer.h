@@ -232,14 +232,16 @@ public:
     };
     KeyResult handleKey(int vk, uint32_t mods = 0);
 
-    // 焦点环两态（每个节点单独判，后端按它画）：
-    //   None   = 不画
-    //   Dashed = 待编辑：键盘选中的元素，虚线 + 底色对比色（深底浅线/浅底深线），
-    //            2 秒无操作自动消失
-    //   Solid  = 编辑中：正在编辑的输入框，实线 + 强调蓝（kFocusRingEditColor），
-    //            常亮（编辑是持续状态，不该自己消失）
+    // 焦点环三态（每个节点单独判，后端按它画）：
+    //   None    = 不画
+    //   Dashed  = 待编辑：**只有输入元素**在键盘选中、还没按 Enter 时用。虚线是给
+    //             输入框的状态标记（"再按一下 Enter 才能打字"），别拿它当通用焦点样式；
+    //             颜色 = 底色对比色，2 秒无操作自动消失
+    //   Solid   = 普通焦点：按钮等非输入元素被键盘选中时用，实线 + 对比色，
+    //             同样 2 秒无操作自动消失
+    //   Editing = 编辑中：正在编辑的输入框，实线加粗 + 强调蓝，常亮（有光标）
     // 线型 + 颜色双编码：只靠颜色区分对色弱用户不友好，虚线/实线一眼能看出来。
-    enum class FocusRing { None, Dashed, Solid };
+    enum class FocusRing { None, Dashed, Solid, Editing };
     FocusRing focusRingOf(uint16_t nodeId) const;
     static constexpr uint32_t kFocusRingEditColor = 0xFF3E8BFF; // 编辑中实线环（强调蓝）
 

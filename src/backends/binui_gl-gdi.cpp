@@ -2367,19 +2367,22 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
             // 边框（v13）：画在节点内侧，四边可不同宽，压在底色之上
             drawNodeBorder();
 
-            // 焦点环两态：待编辑 = 虚线 + 对比色（2 秒无操作自动消失）；
-            // 编辑中 = 实线 + 强调蓝（常亮）。线型 + 颜色双编码，见 docs/keyboard_focus.md。
+            // 焦点环三态：输入元素待编辑 = 虚线 + 对比色；按钮等普通焦点 = 实线 + 对比色
+            // （两者都 2 秒无操作自动消失）；编辑中 = 实线加粗 + 强调蓝（常亮）。
+            // 线型 + 颜色双编码，见 docs/keyboard_focus.md。
             {
                 const BinUIRenderer::FocusRing ring = renderer.focusRingOf(node.id);
                 if (ring != BinUIRenderer::FocusRing::None) {
                     // 焦点环必须跟随节点自己的圆角：以前写死半径 10、内缩 2，
                     // 圆角 8 的按钮上就会套出一个半径不同的环，看着像"双线框"。
-                    const bool editing = ring == BinUIRenderer::FocusRing::Solid;
+                    const bool editing = ring == BinUIRenderer::FocusRing::Editing;
+                    const bool dashed = ring == BinUIRenderer::FocusRing::Dashed;
+                    const float thick = editing ? 2.0f : 1.0f;
                     uint32_t ringCol = textCol;
                     if (editing) {
                         ringCol = ScaleAlpha(BinUIRenderer::kFocusRingEditColor, opacity);
                     } else if (((dc >> 24) & 0xFFu) >= 0x80u) {
-                        // 待编辑环按节点底色取对比色：写死白色在浅色主题上（白底白环）等于没画
+                        // 对比色：写死白色在浅色主题上（白底白环）等于没画
                         const float bgLum = (0.2126f * static_cast<float>((dc >> 16) & 0xFFu) +
                                              0.7152f * static_cast<float>((dc >> 8) & 0xFFu) +
                                              0.0722f * static_cast<float>(dc & 0xFFu)) / 255.0f;
@@ -2388,16 +2391,7 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
                     const float fr = effRadius > 2 ? static_cast<float>(effRadius) - 1.0f : 0.0f;
                     const float fx = static_cast<float>(x) + 1.0f, fy = static_cast<float>(y) + 1.0f;
                     const float fw = static_cast<float>(nw) - 2.0f, fh = static_cast<float>(nh) - 2.0f;
-                    if (editing) {
-                        if (fr >= 1.0f) {
-                            gfx.strokeRounded(fx, fy, fw, fh, fr, 2.0f, ringCol);
-                        } else {
-                            gfx.fillLine(fx, fy, fx + fw, fy, 2.0f, ringCol);
-                            gfx.fillLine(fx, fy + fh, fx + fw, fy + fh, 2.0f, ringCol);
-                            gfx.fillLine(fx, fy, fx, fy + fh, 2.0f, ringCol);
-                            gfx.fillLine(fx + fw, fy, fx + fw, fy + fh, 2.0f, ringCol);
-                        }
-                    } else {
+                    if (dashed) {
                         // 虚线环：沿圆角路径取线段（几何在 binui_paint.h，三端共用）
                         PaintSegment segs[kMaxFocusDashSegments];
                         const int n = BuildDashedRoundRing(fx, fy, fw, fh, fr, 6.0f, 4.0f,
@@ -2405,6 +2399,13 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
                         for (int si = 0; si < n; si++)
                             gfx.fillLine(segs[si].x0, segs[si].y0, segs[si].x1, segs[si].y1,
                                          1.0f, ringCol);
+                    } else if (fr >= 1.0f) {
+                        gfx.strokeRounded(fx, fy, fw, fh, fr, thick, ringCol);
+                    } else {
+                        gfx.fillLine(fx, fy, fx + fw, fy, thick, ringCol);
+                        gfx.fillLine(fx, fy + fh, fx + fw, fy + fh, thick, ringCol);
+                        gfx.fillLine(fx, fy, fx, fy + fh, thick, ringCol);
+                        gfx.fillLine(fx + fw, fy, fx + fw, fy + fh, thick, ringCol);
                     }
                 }
             }

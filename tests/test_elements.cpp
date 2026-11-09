@@ -954,16 +954,19 @@ int run() {
         rr.dispatchClick(190, 25);
         TEST("mouse click clears keyboard ring", !rr.focusRingVisible() && rr.keyboardNode() >= 0);
 
-        // 焦点环两态：待编辑 = 虚线，编辑中 = 实线（只套正在编辑的输入框）
+        // 焦点环三态：输入元素待编辑 = 虚线；按钮等普通焦点 = 实线；编辑中 = Editing（蓝）
         BinUIRenderer rf;
         TEST("ring style layout loads", rf.loadLayout(ufl.data(), ufl.size()));
         uint16_t rfIn = rf.getNodes()[1].id, rfBtn = rf.getNodes()[2].id;
         TEST("no ring by default", rf.focusRingOf(rfIn) == BinUIRenderer::FocusRing::None);
         rf.setKeyboardFocus(rfIn);
-        TEST("browse ring is dashed", rf.focusRingOf(rfIn) == BinUIRenderer::FocusRing::Dashed);
+        TEST("input browse ring is dashed", rf.focusRingOf(rfIn) == BinUIRenderer::FocusRing::Dashed);
         TEST("other node has no ring", rf.focusRingOf(rfBtn) == BinUIRenderer::FocusRing::None);
+        rf.setKeyboardFocus(rfBtn);
+        TEST("button browse ring is solid", rf.focusRingOf(rfBtn) == BinUIRenderer::FocusRing::Solid);
+        rf.setKeyboardFocus(rfIn);
         rf.handleKey(0x0D);   // Enter -> 进入编辑
-        TEST("editing ring is solid", rf.focusRingOf(rfIn) == BinUIRenderer::FocusRing::Solid);
+        TEST("editing ring is Editing", rf.focusRingOf(rfIn) == BinUIRenderer::FocusRing::Editing);
         TEST("editing ring only on input", rf.focusRingOf(rfBtn) == BinUIRenderer::FocusRing::None);
         TEST("no dashed ring while editing", !rf.focusRingVisible());
         rf.handleKey(0x1B);   // Esc -> 回到元素焦点

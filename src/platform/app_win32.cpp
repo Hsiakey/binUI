@@ -1269,14 +1269,16 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         // 边框（v13）：画在节点内侧，四边可不同宽，压在底色之上
         drawNodeBorder();
 
-        // 焦点环两态（与 GL/D3D 后端同一套语义，见 docs/keyboard_focus.md）：
-        //   待编辑（键盘选中） = 虚线 + 底色对比色，2 秒无操作自动消失
-        //   编辑中             = 实线 2px + 强调蓝，常亮
+        // 焦点环三态（与 GL/D3D 后端同一套语义，见 docs/keyboard_focus.md）：
+        //   输入元素待编辑 = 虚线 + 对比色（2 秒无操作自动消失）
+        //   按钮等普通焦点 = 实线 + 对比色（同样 2 秒自动消失）
+        //   编辑中         = 实线加粗 + 强调蓝（常亮）
         // 线型 + 颜色双编码：只换颜色对色弱用户不友好，虚线/实线一眼能分。
         {
             const binui::BinUIRenderer::FocusRing ring = renderer.focusRingOf(node.id);
             if (draw && ring != binui::BinUIRenderer::FocusRing::None) {
-                const bool editing = ring == binui::BinUIRenderer::FocusRing::Solid;
+                const bool editing = ring == binui::BinUIRenderer::FocusRing::Editing;
+                const bool dashed = ring == binui::BinUIRenderer::FocusRing::Dashed;
                 const int fr = node.radius > 2 ? (int)node.radius - 1 : 0;
                 uint32_t ringCol = 0xFFFFFFFFu;
                 if (editing) {
@@ -1290,11 +1292,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 HPEN fp = CreatePen(PS_SOLID, editing ? 2 : 1,
                                     RGB((ringCol >> 16) & 0xFF, (ringCol >> 8) & 0xFF, ringCol & 0xFF));
                 HGDIOBJ oldFp = SelectObject(hdc, fp);
-                if (editing) {
-                    HGDIOBJ oldFb = SelectObject(hdc, GetStockObject(NULL_BRUSH));
-                    RoundRect(hdc, x + 1, y + 1, x + nw - 1, y + nh - 1, fr * 2, fr * 2);
-                    SelectObject(hdc, oldFb);
-                } else {
+                if (dashed) {
                     // 虚线：沿圆角路径逐段 LineTo（不依赖 PS_DASH 在不同驱动上的实现差异）
                     binui::PaintSegment segs[binui::kMaxFocusDashSegments];
                     const int n = binui::BuildDashedRoundRing(static_cast<float>(x) + 1.0f,
@@ -1307,6 +1305,10 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                         MoveToEx(hdc, (int)std::lround(segs[si].x0), (int)std::lround(segs[si].y0), nullptr);
                         LineTo(hdc, (int)std::lround(segs[si].x1), (int)std::lround(segs[si].y1));
                     }
+                } else {
+                    HGDIOBJ oldFb = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+                    RoundRect(hdc, x + 1, y + 1, x + nw - 1, y + nh - 1, fr * 2, fr * 2);
+                    SelectObject(hdc, oldFb);
                 }
                 SelectObject(hdc, oldFp);
                 DeleteObject(fp);
