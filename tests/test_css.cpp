@@ -1425,6 +1425,37 @@ int run() {
         TEST("component: missing src warns", noSrc == 1);
         TEST("component: missing file warns", missingFile == 1);
 
+        // ---- 多根组件：顶层元素 > 1 → 用合成的 <div> 承载（与二进制组件的链接器口径一致）----
+        // 修复前：第二个顶层元素的 parentIdx 是 SIZE_MAX，被当成索引查 cremap → 越界
+        // （debug 断言 abort，release 挂到垃圾父节点或整个丢掉）。
+        writeFile("multi.bum.xml",
+            "<div style=\"width:80; height:20\"><span style=\"height:20\">多根甲</span></div>"
+            "<div style=\"width:80; height:20\"><span style=\"height:20\">多根乙</span></div>");
+        writeFile("host2.html",
+            "<html><body>"
+            "<use src=\"multi.bum.xml\" x=\"10\" y=\"10\" w=\"200\"/>"
+            "</body></html>");
+        auto res3 = CompileBinUIFileEx((dir / "host2.html").generic_string());
+        BinUIRenderer r3;
+        TEST("component: multi-root parses",
+             !res3.layout.empty() && r3.loadLayout(res3.layout.data(), res3.layout.size()));
+        // html / 合成容器 / 甲 + span / 乙 + span
+        TEST("component: multi-root keeps all top-level elements", r3.getNodes().size() == 6);
+        {
+            const auto& nodes3 = r3.getNodes();
+            const bool haveBoth = nodes3.size() == 6 &&
+                                  nodes3[2].parentId == nodes3[1].id &&
+                                  nodes3[4].parentId == nodes3[1].id &&
+                                  nodes3[1].parentId == nodes3[0].id;
+            TEST("component: multi-root 两个顶层元素都挂在合成容器下", haveBoth);
+        }
+        {
+            int multiWarn = 0;
+            for (const auto& w : res3.warnings)
+                if (w.find("顶层元素") != std::string::npos) multiWarn++;
+            TEST("component: multi-root 给出提示", multiWarn == 1);
+        }
+
         // ---- v12：二进制组件 .bum（编译期由链接器离线合并）----
         writeFile("pack.bum.xml",
             "<div style=\"height:30\"><span style=\"height:20; color:#00FF00\">打包组件</span></div>");

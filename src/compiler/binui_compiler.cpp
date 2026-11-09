@@ -2751,8 +2751,19 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
         //   · 以 <span> 为根的组件实例变成块级 LIST（文字带 12px 内缩且顶部对齐）。
         HNode root;
         root.tag = "div";
+        // 顶层元素个数 > 1 = 多根组件（"片段"写法）：用一个合成的 div 承载所有顶层元素。
+        // 口径与二进制组件一致 —— binui_link 把组件里所有无父节点都挂到锚点节点下。
+        size_t topCount = 0;
+        for (size_t k = 0; k < compElems.size(); k++)
+            if (compElems[k].parentIdx == SIZE_MAX) topCount++;
+        const bool multiRoot = (topCount > 1);
         size_t compRootIdx = SIZE_MAX;
-        if (!compElems.empty()) {
+        if (multiRoot) {
+            // 合成容器不带组件的任何属性（属性归宿主 <use>）：否则第一个根元素的
+            // 样式会变成"容器的样式"，两个根元素互相挤在一起
+            Warn("组件 " + label + " 有 " + std::to_string(topCount) +
+                 " 个顶层元素，已用隐式 <div> 容器包裹（建议合并为单一根元素）");
+        } else if (!compElems.empty()) {
             for (size_t k = 0; k < compElems.size(); k++)
                 if (compElems[k].parentIdx == SIZE_MAX) { compRootIdx = k; break; }
             if (compRootIdx != SIZE_MAX) {
@@ -2824,9 +2835,14 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
         if (!compElems.empty()) {
             std::vector<size_t> cremap(compElems.size(), SIZE_MAX);
             for (size_t k = 0; k < compElems.size(); k++) {
-                if (k == compRootIdx) continue;   // 组件根已被替换节点取代
+                if (!multiRoot && k == compRootIdx) continue;   // 单根：根已被替换节点取代
                 HNode ce = compElems[k];
-                ce.parentIdx = (ce.parentIdx == compRootIdx) ? remap[oi] : cremap[ce.parentIdx];
+                // 顶层节点（parentIdx == SIZE_MAX）与"根的直接子节点"都挂到替换节点上；
+                // 其余按组件内部索引重映射。多根时 parentIdx == SIZE_MAX 是常态，必须显式
+                // 分支 —— 以前直接查 cremap[SIZE_MAX]，越界读（debug 断言 abort，release
+                // 把元素挂到垃圾父节点上或整个丢掉）。
+                if (ce.parentIdx == SIZE_MAX || ce.parentIdx == compRootIdx) ce.parentIdx = remap[oi];
+                else ce.parentIdx = cremap[ce.parentIdx];
                 cremap[k] = out.size();
                 out.push_back(std::move(ce));
             }
@@ -3877,6 +3893,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             { "meter", "<meter> 没有内置外观，建议用图表 API 的 ProgressBar" },
             { "dialog", "<dialog> 不支持模态，按普通容器渲染" },
             { "output", "<output> 不支持，按普通容器渲染" },
+            { "include", "<include> 不生效：组件内联用 <use src=\"x.bum.xml\">（成对写法也可以，"
+                         "宿主子元素会落进组件根容器）" },
+            { "import", "<import> 不生效：组件内联用 <use src=\"x.bum.xml\">" },
         };
         // 真正被编译器消费的属性（其余一律视为"写了没效果"）
         const auto& kUsedAttrs = UsedHtmlAttrs();
