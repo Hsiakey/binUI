@@ -39,6 +39,10 @@
     .bui-tb-close:active { background:#FFC6CE; }
     /* 最大化图标：10×10 的空心方框（1px 边框画在节点内侧，和最小化的 1px 横线同粗细） */
     .bui-tb-sq    { border:1px solid #66768C; }
+    /* 最小化图标：10×2 实心横条。为什么是 2px 高：28px 的偶数高按钮里 1px 只能落在第 21
+       或 22 行，必然偏离中线半像素；2px 落在 21+22 行，上下各留 13 行，正好居中且不发虚
+       （试过 1px + top:13.5，会半边覆盖一行，又灰又高半像素）。 */
+    .bui-tb-bar   { background:#66768C; }
 </style>
 <titlebar class="bui-tb" style="height:{{h=44}}; display:flex; align-items:center; gap:{{gap=6}}">
     <div style="width:{{pad=16}}; height:1; background:transparent"></div>
@@ -51,7 +55,7 @@
          按钮本身负责点击/悬停/焦点环，图标是它内部的绝对定位子节点（不参与命中测试，
          鼠标事件照样落到按钮上）。 -->
     <button id="{{idmin=win-min}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; padding:0">
-        <div style="position:absolute; left:9; top:13.5; width:10; height:1; background:#66768C"></div>
+        <div class="bui-tb-bar" style="position:absolute; left:9; top:13; width:10; height:2"></div>
     </button>
     <button id="{{idmax=win-max}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; padding:0">
         <div class="bui-tb-sq" style="position:absolute; left:9; top:9; width:10; height:10"></div>
