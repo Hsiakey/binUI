@@ -24,9 +24,9 @@
 | [img/std-components.png](img/std-components.png) | `components/preview.html` 的离屏渲染（标准组件库全览） |
 | [img/animshow.png](img/animshow.png) | `examples/animshow` 的离屏渲染（关键帧 / 过渡；静态呈现，动态需真实运行） |
 | [img/fontshow.png](img/fontshow.png) | `examples/fontshow` 的离屏渲染（字号 / 字重 / 斜体 / 行高 / 文字装饰 + ⑤ 输入法区；组字串与候选框是运行时行为，静态图里看不到） |
-| [img/svgdemo.png](img/svgdemo.png) | `examples/svgdemo` 的离屏渲染（`<svg>` 矢量；`<canvas>` 需真实 GL 窗口才有内容） |
-| [img/cubedemo.png](img/cubedemo.png) | `examples/cubedemo` 的离屏渲染（线框立方体；三角面同样需真实 GL 窗口） |
-| [img/texturedemo.png](img/texturedemo.png) | `examples/texturedemo` 的离屏渲染（程序化纹理多尺寸采样） |
+| [img/svgdemo.png](img/svgdemo.png) | `examples/svgdemo` 的**GL 真机截屏**（`<svg>` 矢量 + `<canvas>` 频谱；canvas 内容离屏渲染看不到） |
+| [img/cubedemo.png](img/cubedemo.png) | `examples/cubedemo` 的**GL 真机截屏**（应用自己算顶点/投影、用 `fillLine` 画的线框立方体；离屏渲染只有空画布） |
+| [img/texturedemo.png](img/texturedemo.png) | `examples/texturedemo` 的**GL 真机截屏**（`updateImageRaw` 每帧上传的程序化纹理多尺寸采样；离屏渲染拿不到运行时纹理） |
 | [img/python-binding.png](img/python-binding.png) | Python 绑定演示界面（`bindings/python/demo_ui.html`） |
 | [img/go-binding.png](img/go-binding.png) | Go 绑定演示界面（`bindings/go/demo/ui.html`） |
 | [img/rust-binding.png](img/rust-binding.png) | Rust 绑定演示界面（`bindings/rust/ui.html`） |
@@ -36,11 +36,15 @@
 | [font_hinting_modes.png](font_hinting_modes.png) | `BINUI_FONT_HINT=0\|1\|2` 三种 hinting 模式对比 |
 
 > 绑定演示图为什么是离屏渲染：OpenGL 窗口的内容抓不到（`PrintWindow` 对双缓冲 GL
-> 窗口返回全黑，`BitBlt` 只能抓被遮挡后合成到桌面的部分）。所以演示图一律走
+> 窗口返回全黑，`BitBlt` 只能抓被遮挡后合成到桌面的部分）。所以大部分演示图走
 > `tools/offscreen_render` 的 GDI 路径 —— 同一份 HTML、同一套布局引擎，界面一样，
 > 但 `<canvas>` 里由应用自己画的内容不会出现。
+>
+> 因此 **svgdemo / cubedemo / texturedemo 三张改用 GL 真机截屏**：它们的画布内容是应用在
+> `drawFn` 里逐帧画的（立方体、频谱、程序化纹理），离屏渲染只能得到空画布。截屏用
+> `tools/window_capture` 或 `build-mingw/tmp/drive.ps1 -Action shot`，抓窗口矩形即可。
 
-改完示例 UI 后重出这几张图（`make tools` 之后，一张一条命令）：
+改完示例 UI 后重出这些图（`make tools` 之后，一张一条命令）：
 
 ```sh
 B=build-mingw/bin/offscreen_render.exe
@@ -49,11 +53,9 @@ $B examples/buttonshow/main.html docs/img/buttonshow.png
 $B examples/features/main.html docs/img/features.png
 $B examples/animshow/main.html docs/img/animshow.png
 $B examples/fontshow/main.html docs/img/fontshow.png
-$B examples/svgdemo/main.html docs/img/svgdemo.png
-$B examples/cubedemo/main.html docs/img/cubedemo.png
-$B examples/texturedemo/main.html docs/img/texturedemo.png
 $B components/preview.html docs/img/std-components.png
 $B --default docs/img/default-layout.png
+# svgdemo / cubedemo / texturedemo 需要启动示例后真机截屏（见上面说明）
 ```
 
 ## 相关外部文档

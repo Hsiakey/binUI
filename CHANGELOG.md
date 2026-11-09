@@ -12,9 +12,12 @@
   动画截图，而"默认布局"只是引擎兜底布局（不是示例），观感像很久以前的东西。
 - 换成 8 组示例里最有代表性的三张：**flexshow**（自适应布局）、**buttonshow**（按钮与状态样式）、
   **animshow**（动画与过渡），全部用 `tools/offscreen_render` 从**当前源码**重出。
-- 新增 `docs/img/flexshow.png`、`docs/img/buttonshow.png`；顺手重出 animshow / svgdemo / cubedemo /
-  texturedemo / 组件库预览；`docs/README.md` 图片表补上这两行，并加了"改完示例 UI 怎么重出这些图"
-  的命令清单（`make tools` 后一张一条）。
+- 新增 `docs/img/flexshow.png`、`docs/img/buttonshow.png`；顺手重出 animshow / 组件库预览；
+  `docs/README.md` 图片表补上这两行，并加了"改完示例 UI 怎么重出这些图"的命令清单
+  （`make tools` 后一张一条）。
+- **3D / 纹理 / SVG 画布三张改成 GL 真机截屏**：cubedemo 的立方体、texturedemo 的程序化纹理、
+  svgdemo 的 canvas 频谱都是应用在 `drawFn` 里逐帧画的，离屏渲染只能得到空画布 —— 之前
+  `docs/img/cubedemo.png` 就是一张"画布空白"的图，README 顶部也补了第四格 3D 线框（真机截屏并注明）。
 - flexshow 状态栏的占位文案从「窗口 —」改成默认窗口尺寸（运行时仍由 resize 事件覆盖），
   离屏图/截图不再出现"—"。
 - 修默认布局（`GenerateDefaultBinUI()`）按钮文字变左对齐：手写节点漏了 `BINUI_TEXT_CENTER`，

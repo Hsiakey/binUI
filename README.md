@@ -11,12 +11,13 @@
 
 > 前身 `.xec`（含打包器 xecpack、加载器 xecrun 与动态加载层）已评估砍除——那层对多数场景是负资产；**保留并重构了真正有价值的部分：UI 编译、解析与渲染内核**。项目现名为 **binUI**，与二进制布局格式同名。
 
-| 自适应布局（`examples/flexshow`） | 按钮与状态样式（`examples/buttonshow`） | 动画与过渡（`examples/animshow`） |
-|---|---|---|
-| ![自适应布局](docs/img/flexshow.png) | ![按钮样式](docs/img/buttonshow.png) | ![动画](docs/img/animshow.png) |
+| 自适应布局（`examples/flexshow`） | 按钮与状态样式（`examples/buttonshow`） | 动画与过渡（`examples/animshow`） | 3D 渲染（`examples/cubedemo`） |
+|---|---|---|---|
+| ![自适应布局](docs/img/flexshow.png) | ![按钮样式](docs/img/buttonshow.png) | ![动画](docs/img/animshow.png) | ![3D](docs/img/cubedemo.png) |
 
-> 三张图都是 `tools/offscreen_render` 从 `examples/` 当前源码离屏渲染出来的真实布局（GDI 后端），不是设计稿；
-> 其余示例（features / fontshow / svgdemo / cubedemo / texturedemo / 组件库）的截图见
+> 前三张是 `tools/offscreen_render` 从当前源码离屏渲染的真实布局（GDI 后端）；第四张是 GL 真机截屏
+> —— 立方体是应用在 `<canvas>` 回调里用 `fillLine` 画的，离屏渲染跑不到那段代码。
+> 其余示例（features / fontshow / svgdemo / texturedemo / 组件库）的截图见
 > [`docs/README.md`](docs/README.md#图片)，重出命令也在那里。
 
 ## 目录结构
