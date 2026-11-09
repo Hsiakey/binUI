@@ -1858,22 +1858,36 @@ int run() {
         TEST("std: titlebar 三大按钮 id 可定制",
              r.findNodeByName("imin") != 0 && r.findNodeByName("imax") != 0 &&
              r.findNodeByName("iclose") != 0);
-        TEST("std: titlebar 关闭按钮文案是 ✕", byText("\xE2\x9C\x95") != 0xFFFF);
-        TEST("std: titlebar 最大化文案是 ▢", byText("\xE2\x96\xA2") != 0xFFFF);
-        TEST("std: titlebar 最小化文案是 —", byText("\xE2\x80\x94") != 0xFFFF);
         {
             const uint16_t nMin = r.findNodeByName("imin"), nMax = r.findNodeByName("imax");
             const uint16_t nClose = r.findNodeByName("iclose");
             const auto* bMin = nodeOf(nMin); const auto* bMax = nodeOf(nMax);
             const auto* bClose = nodeOf(nClose);
-            // 三颗按钮必须同尺寸；字形墨迹宽度不一样，靠各调字号凑成一样大（横线比 ▢/✕ 小）
+            // 三颗控制按钮：同尺寸，图标是元素画的（按钮自己不再有字形文案）
             TEST("std: titlebar 三颗控制按钮同宽高",
                  bMin && bMax && bClose && bMin->width == bMax->width &&
                  bMax->width == bClose->width && bMin->height == bMax->height &&
                  bMax->height == bClose->height);
-            TEST("std: titlebar 横线字号比 ▢/✕ 小",
-                 bMin && bMax && bClose && bMin->fontSize < bMax->fontSize &&
-                 bMax->fontSize == bClose->fontSize);
+            TEST("std: titlebar 按钮不再拿字形当图标（文案为空）",
+                 bMin && bMax && bClose && bMin->text.empty() && bMax->text.empty() &&
+                 bClose->text.empty());
+            // 图标是按钮的绝对定位子节点：不参与命中测试，点在图标上照样落到按钮
+            TEST("std: titlebar 图标节点存在且不可交互",
+                 bMin && [&] {
+                     int iconNodes = 0;
+                     int interactiveIcons = 0;
+                     for (const auto& n : r.getNodes()) {
+                         if (n.parentId != nMin && n.parentId != nMax && n.parentId != nClose) continue;
+                         iconNodes++;
+                         if (n.flags & BINUI_INTERACTIVE) interactiveIcons++;
+                     }
+                     return iconNodes >= 3 && interactiveIcons == 0;
+                 }());
+            TEST("std: titlebar 点按钮中心命中按钮自己",
+                 bMin && bMax && bClose &&
+                 r.hitTest(bMin->x + bMin->width / 2, bMin->y + bMin->height / 2) == (int)nMin &&
+                 r.hitTest(bMax->x + bMax->width / 2, bMax->y + bMax->height / 2) == (int)nMax &&
+                 r.hitTest(bClose->x + bClose->width / 2, bClose->y + bClose->height / 2) == (int)nClose);
         }
 
         // 2) button：根标签搬过来 → 真的是 BINUI_BUTTON（可点击、居中、粗体）

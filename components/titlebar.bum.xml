@@ -1,7 +1,7 @@
 <!--
   titlebar.bum.xml —— 标准标题栏
       左：  图标  标题  副标题
-      右：  最小化 ─   最大化 □   关闭 ✕
+      右：  最小化 —   最大化 ▢   关闭 ✕（三颗都是元素画的 10×10 图标，不是字形）
   整条用 flex 排版，窗口多宽都不用宿主算按钮坐标。
   根元素是 <titlebar>，所以窗口拖动（isTitlebarDrag）照常生效。
 
@@ -15,10 +15,7 @@
     h          高度          44
     pad        左内边距      16
     padr       右内边距      12
-    bs         按钮边长      28
-    bsym       按钮符号字号  13            最大化 ▢ / 关闭 ✕ 的字号
-    bsymmin    横线字号      11            最小化那条横线单独用：em dash 的墨迹宽度≈1.0 字号，
-                                          13px 的 ▢ 也才 10px 宽，所以横线给 11px 才和它们一样宽
+    bs         按钮边长      28            ⚠ 图标是元素按 28×28 坐标系写死的，改 bs 要同步改图标坐标
     gap        元素间距      6
     idmin      最小化按钮 id win-min
     idmax      最大化按钮 id win-max
@@ -40,16 +37,30 @@
                     transition: background-color .15s ease; }
     .bui-tb-close:hover  { background:#FFD9DE; }
     .bui-tb-close:active { background:#FFC6CE; }
+    /* 最大化图标：10×10 的空心方框（1px 边框画在节点内侧，和最小化的 1px 横线同粗细） */
+    .bui-tb-sq    { border:1px solid #66768C; }
 </style>
 <titlebar class="bui-tb" style="height:{{h=44}}; display:flex; align-items:center; gap:{{gap=6}}">
     <div style="width:{{pad=16}}; height:1; background:transparent"></div>
     <span class="bui-tb-icon" style="width:{{iconw=1}}; height:22">{{icon=}}</span>
     <span class="bui-tb-title" style="width:{{titlew=content}}; height:20">{{title=标题}}</span>
     <span class="bui-tb-sub" style="flex:1; height:16">{{sub=}}</span>
-    <!-- 三颗控制图标：字形墨迹宽度不同（横线 11px≈10px 宽、▢ 13px=10px、✕ 13px=8px），
-         各自调字号凑成"看起来一样大"，见文件头 bsym / bsymmin 说明。 -->
-    <button id="{{idmin=win-min}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; font-size:{{bsymmin=11}}">—</button>
-    <button id="{{idmax=win-max}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; font-size:{{bsym=13}}">▢</button>
-    <button id="{{idclose=win-close}}" class="bui-tb-close" style="width:{{bs=28}}; height:{{bs=28}}; font-size:{{bsym=13}}">✕</button>
+    <!-- 三颗控制图标：不用字形，直接用元素画 —— 字形墨迹宽高受字体度量摆布（横线、方块、
+         ✕ 在同一个字号下差 30%），换字体/换 DPI 还会再变；元素画的图标几何完全由坐标决定，
+         三颗都是 10×10 的框、中心都在按钮正中。
+         按钮本身负责点击/悬停/焦点环，图标是它内部的绝对定位子节点（不参与命中测试，
+         鼠标事件照样落到按钮上）。 -->
+    <button id="{{idmin=win-min}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; padding:0">
+        <div style="position:absolute; left:9; top:13.5; width:10; height:1; background:#66768C"></div>
+    </button>
+    <button id="{{idmax=win-max}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; padding:0">
+        <div class="bui-tb-sq" style="position:absolute; left:9; top:9; width:10; height:10"></div>
+    </button>
+    <button id="{{idclose=win-close}}" class="bui-tb-close" style="width:{{bs=28}}; height:{{bs=28}}; padding:0">
+        <svg style="position:absolute; left:0; top:0; width:28; height:28">
+            <line x1="9"  y1="9"  x2="18" y2="18" stroke="#FF6B6B" stroke-width="1"/>
+            <line x1="18" y1="9"  x2="9"  y2="18" stroke="#FF6B6B" stroke-width="1"/>
+        </svg>
+    </button>
     <div style="width:{{padr=12}}; height:1; background:transparent"></div>
 </titlebar>

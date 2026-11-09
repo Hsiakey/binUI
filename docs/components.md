@@ -16,7 +16,7 @@
 
 | 组件 | 根标签 | 参数 |
 |---|---|---|
-| `titlebar` | `<titlebar>` | `title` `titlew`(默认 `content`=按文字宽度) `sub` `icon` `iconw` `h` `pad` `padr` `bs` `bsym` `gap` `idmin` `idmax` `idclose`（左：图标/标题/副标题；右：− □ ✕） |
+| `titlebar` | `<titlebar>` | `title` `titlew`(默认 `content`=按文字宽度) `sub` `icon` `iconw` `h` `pad` `padr` `bs` `gap` `idmin` `idmax` `idclose`（左：图标/标题/副标题；右：最小化— 最大化▢ 关闭✕，三颗图标都是元素画的 10×10 图形） |
 | `button` | `<button>` | `label` `kind`(primary/secondary/ghost/danger) `w` `h` `fs` `r` |
 | `field` | `<input>` | `ph` `val` `w` `h` `fs` `pad` |
 | `badge` | `<span>` | `text` `kind`(blue/mint/amber/red/gray) `w` |
