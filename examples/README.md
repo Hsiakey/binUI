@@ -36,7 +36,15 @@ CMake 构建同理（`cmake --build build`，产物同样落 `build/bin/examples
 ## 写新示例的约定
 
 1. 目录名 = 可执行文件名 = UI 子目录名（`examples/<name>/main.html`）。
-2. 标题栏用标准组件：`<use src="../../components/titlebar.bum.xml" .../>`。
+2. 标题栏用标准组件（`icon` + `iconw="22"` 给个字形，`title` / `sub` 写标题与一句话说明）：
+
+   ```html
+   <use src="../../components/titlebar.bum.xml" x="0" y="0" w="<窗口宽>" icon="◆" iconw="22"
+        title="…" sub="…"/>
+   ```
+
+   它占顶部 44px（白底 + 1px 分割线 + 右上三颗窗口按钮），窗口高度要把它算进去；
+   内容块从 `y=56` 起（44 + 12 间距），末块距底留 20px 左右。
 3. 颜色照抄上面的令牌，别另发明一套。
 4. 加进 `Makefile` 的 `DEMO_BINS` 与 `CMakeLists.txt` 的 `add_gl_demo(...)`，
    并保证 `check_examples` 跑完 0 问题（CI 会把警告也算成问题）。

@@ -19,8 +19,8 @@
     opacity（LABEL 另有 color）；所以悬停改文字色是不生效的；
   · `background:linear-gradient(...)` 只取首尾两色，渐变底没法做 background-color 过渡。
 -->
-<app_window width="1020" height="712" bg="#F4F7FC" title="binUI · 按钮样式">
-<html width="1020" height="712" bg="#F4F7FC">
+<app_window width="1020" height="684" bg="#F4F7FC" title="binUI · 按钮样式">
+<html width="1020" height="684" bg="#F4F7FC">
 <head>
     <meta charset="UTF-8">
     <title>按钮样式一览</title>
@@ -29,13 +29,9 @@
            主字 #1F2A37 / 次字 #66768C / 弱字 #94A3B8 / 主色 #3E8BFF / 薄荷 #2FBF9A */
         body { font-size: 13px; color: #1F2A37; }
 
-        .title      { font-size: 24px; font-weight: 700; color: #1F2A37; }
-        .sub        { font-size: 12px; color: #66768C; }
         .card       { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 14; }
         .card-title { font-size: 12px; font-weight: 700; color: #1F2A37; }
         .note       { font-size: 11px; color: #94A3B8; }
-        .chip       { background: #EAF1FF; color: #3E8BFF; border: 1px solid #CFE0F8;
-                      border-radius: 12; font-size: 11px; }
 
         /* ============ 按钮基底 ============ */
         /* 过渡写在基底上：状态样式切目标值时走过渡，否则瞬时。
@@ -136,13 +132,12 @@
 </head>
 <body>
 
-    <!-- 头部 -->
-    <span class="title" style="position:absolute;left:28;top:18;width:600;height:32">按钮样式一览</span>
-    <span class="sub"   style="position:absolute;left:28;top:52;width:660;height:18">语义 / 尺寸 / 圆角 / 底色 / 状态 / 形态 —— 全部是 CSS，没有一行绘制代码</span>
-    <span class="chip"  style="position:absolute;left:836;top:22;width:156;height:26">pure CSS · 主色 #3E8BFF</span>
+    <!-- 标题栏（根元素是 <titlebar>，按下可拖动窗口） -->
+    <use src="../../components/titlebar.bum.xml" x="0" y="0" w="1020" icon="▣" iconw="22"
+         title="按钮样式一览" sub="语义 / 尺寸 / 圆角 / 底色 / 状态 / 形态 —— 全部是 CSS，没有一行绘制代码"/>
 
     <!-- ① 语义色 -->
-    <div class="card" style="position:absolute;left:24;top:84;width:972;height:96">
+    <div class="card" style="position:absolute;left:24;top:56;width:972;height:96">
         <span class="card-title" style="position:absolute;left:16;top:12;width:560;height:16">① 语义色：一套颜色管一类动作</span>
         <button class="b pri"   style="position:absolute;left:16;top:40;width:118">主操作</button>
         <button class="b sec"   style="position:absolute;left:146;top:40;width:118">次要操作</button>
@@ -154,7 +149,7 @@
     </div>
 
     <!-- ② 尺寸与图标 -->
-    <div class="card" style="position:absolute;left:24;top:192;width:470;height:96">
+    <div class="card" style="position:absolute;left:24;top:164;width:470;height:96">
         <span class="card-title" style="position:absolute;left:16;top:12;width:420;height:16">② 尺寸（11 / 12 / 14px）与图标按钮</span>
         <button class="b sm pri" style="position:absolute;left:16;top:44;width:70">小号</button>
         <button class="b md pri" style="position:absolute;left:100;top:41;width:88">中等</button>
@@ -165,7 +160,7 @@
     </div>
 
     <!-- ③ 圆角 -->
-    <div class="card" style="position:absolute;left:506;top:192;width:490;height:96">
+    <div class="card" style="position:absolute;left:506;top:164;width:490;height:96">
         <span class="card-title" style="position:absolute;left:16;top:12;width:440;height:16">③ 圆角：2 / 9 / 16 / 胶囊</span>
         <button class="b pri r0"   style="position:absolute;left:16;top:40;width:100">2px</button>
         <button class="b pri r9"   style="position:absolute;left:134;top:40;width:100">9px</button>
@@ -174,7 +169,7 @@
     </div>
 
     <!-- ④ 底色 -->
-    <div class="card" style="position:absolute;left:24;top:300;width:470;height:164">
+    <div class="card" style="position:absolute;left:24;top:272;width:470;height:164">
         <span class="card-title" style="position:absolute;left:16;top:12;width:430;height:16">④ 底色：纯色 / 渐变 / 描边 / 幽灵</span>
         <button class="b solid"   style="position:absolute;left:16;top:40;width:200">纯色底</button>
         <button class="b grad"    style="position:absolute;left:228;top:40;width:200">渐变底</button>
@@ -184,7 +179,7 @@
     </div>
 
     <!-- ⑤ 状态 -->
-    <div class="card" style="position:absolute;left:506;top:300;width:490;height:164">
+    <div class="card" style="position:absolute;left:506;top:272;width:490;height:164">
         <span class="card-title" style="position:absolute;left:16;top:12;width:460;height:16">⑤ 状态：:hover / :active / :checked / disabled</span>
         <button class="b sec"  style="position:absolute;left:16;top:40;width:100">普通</button>
         <button class="b pri"  style="position:absolute;left:130;top:40;width:100">悬停看我</button>
@@ -196,7 +191,7 @@
     </div>
 
     <!-- ⑥ 形态 -->
-    <div class="card" style="position:absolute;left:24;top:476;width:972;height:130">
+    <div class="card" style="position:absolute;left:24;top:448;width:972;height:130">
         <span class="card-title" style="position:absolute;left:16;top:12;width:560;height:16">⑥ 形态：图标按钮 / 纯文本按钮 / 键盘焦点 / 块级整行</span>
         <button class="icon" style="position:absolute;left:16;top:42">✕</button>
         <button class="icon" style="position:absolute;left:58;top:42">→</button>
@@ -207,7 +202,7 @@
     </div>
 
     <!-- 底部状态栏：点任意按钮都会更新这两行 -->
-    <div class="card" style="position:absolute;left:24;top:618;width:972;height:74">
+    <div class="card" style="position:absolute;left:24;top:590;width:972;height:74">
         <span id="status" class="status" style="position:absolute;left:16;top:14;width:520;height:20">最后点击：—</span>
         <span id="count"  class="count"  style="position:absolute;left:16;top:40;width:200;height:16">点击次数 0</span>
         <span class="note" style="position:absolute;left:420;top:16;width:540;height:40">Tab / 方向键移动焦点　·　Enter 或 Space 触发　·　鼠标点击同样更新状态行　·　Esc 退出</span>

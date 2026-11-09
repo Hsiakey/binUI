@@ -6,6 +6,35 @@
 
 ## [Unreleased]
 
+### 示例 — `buttonshow` 补上标准标题栏，7 个示例现在外观统一
+
+之前 6 个示例（features / animshow / fontshow / svgdemo / cubedemo / texturedemo）都用
+`components/titlebar.bum.xml`，只有 `buttonshow` 自己拿两个 `<span>`（24px 大标题 + 副标题 +
+右上角一颗 chip）拼了个"头部"：窗口没有可拖动的标题栏、右上角没有窗口按钮，和其余示例摆在一起
+一眼就看出不是一套东西（`examples/README.md` 里"都用标准标题栏"那句当时是假的）。
+
+改成和别的示例同构：
+
+```html
+<use src="../../components/titlebar.bum.xml" x="0" y="0" w="1020" icon="▣" iconw="22"
+     title="按钮样式一览" sub="语义 / 尺寸 / 圆角 / 底色 / 状态 / 形态 —— 全部是 CSS，没有一行绘制代码"/>
+```
+
+- 原来那个 24px 大标题与副标题被标题栏的 `title` / `sub` 取代，`.title` / `.sub` / `.chip`
+  三条样式随之删掉（不留死样式）；chip 里的"主色 #3E8BFF"由副标题覆盖，信息没丢。
+- 内容整体上移 28px：卡片序列从 `84 / 192 / 300 / 476 / 618` 变成 `56 / 164 / 272 / 448 / 590`，
+  首块距标题栏 12px、末块距底 20px，窗口高度 712 → 684（和其他示例"标题栏 44 + 内容从 56 起"一致）。
+
+验收：
+
+- 离屏渲染：把改前 `y=84..692` 与改后 `y=56..664` 两块裁出来逐像素比对，**完全一致**
+  （说明只是整体位移，没有别的重排）；标题栏条带与其余 6 个示例逐像素同规格
+  （白底、`y=43` 处 `#E6EDF7` 分割线、右端 `#FFE9EC` 关闭钮）。
+- 真机 GL：标题栏可见；从标题栏按下拖动，窗口矩形 `(770,358) → (870,398)`，位移正好等于鼠标
+  位移 `(+100,+40)`；悬停最小化钮，底色 `#EEF3FA → #DCE5F2`（走 `.bui-tb-btn:hover`）；
+  点「主操作」按钮，状态行更新为"最后点击：主操作 / 点击次数 1"。
+- `check_examples` 10 个 UI 0 问题；`build-mingw/bin/examples/` 下 7 份 main.html 与源树哈希一致。
+
 ### 重构 — `examples/features` 的按钮组件去掉多余的根 div
 
 `examples/features/button.bum.xml` 以前写成 `<div class="cmp-wrap"><button …></div>`：这层 div
