@@ -6,6 +6,13 @@
 
 ## [Unreleased]
 
+### 文档 — 尚未实现的下潜/上浮方案改称「层级焦点导航」
+
+- 原来叫 "z 序焦点"，容易和窗口 Z 序（`binui_win32_foreground.h` 里的置顶）混淆；它讲的其实是
+  焦点在元素层级树里的下潜/上浮，和渲染 Z 序无关。
+- 改名范围：`docs/keyboard_focus.md` 末节标题改为「未来开发计划：层级焦点导航（下潜 / 上浮，未实现）」，
+  `docs/README.md` 索引同步；`[0.3.0]` 里那条记录也换成新名字（语义没变，仍未实现）。
+
 ### README 顶部的示例图换成当前示例；补 flexshow / buttonshow 截图
 
 - 顶部三张图原来是「内置默认布局 / features / animshow」：第三张标着"组件化（`<use>`）"却放的
@@ -155,8 +162,8 @@ app.setImeActiveFn([&] { return renderer.isEditing(); });
     组字 “ni'hao” 时按 Esc：只取消候选，编辑态与实线蓝环保留；再按一次 Esc 才回到虚线待编辑态。
     `BINUI_IME_LOG=1` 的日志同步显示 `ime detached` / `ime attached` 跟着编辑态切换。
 
-z 序焦点（非输入框按 Enter 下潜到子元素、多层可下沉，`Delete` 上浮）按 master 的要求先记下
-设计，见 [`docs/keyboard_focus.md`](docs/keyboard_focus.md) 末节，本次未实现。
+层级焦点导航（非输入框按 Enter 下潜到子元素、多层可下沉，`Delete` 上浮）按 master 的要求
+先记下设计，见 [`docs/keyboard_focus.md`](docs/keyboard_focus.md) 末节，本次未实现。
 
 ### 示例 — 标题栏的 − □ ✕ 三颗按钮全部接线，固定布局示例补 `ui_scale="proportional"`
 
