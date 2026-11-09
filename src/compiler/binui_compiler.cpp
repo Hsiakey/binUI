@@ -4104,6 +4104,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                     ln.color = stroke;
                     ln.radius = sw2;
                     nodes.push_back(ln);
+                    // 线段的 width/height 是"终点绝对坐标"，不是尺寸：重排规格里存**相对偏移**，
+                    // 运行期按"起点 + 偏移"还原，父容器一动线段才会跟着走（见 renderer relayout）
+                    BinUISpecNode sp = {};
+                    sp.nodeId = ln.id;
+                    sp.relX = coords[2*a];
+                    sp.relY = coords[2*a+1];
+                    sp.relW = coords[2*b] - coords[2*a];
+                    sp.relH = coords[2*b+1] - coords[2*a+1];
+                    specNodes.push_back(sp);
                 };
                 for (size_t k = 0; k + 1 < m; k++) emitSeg(k, k + 1);
                 if (closed) emitSeg(m - 1, 0);
@@ -4174,7 +4183,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 
         // SVG 图形属性 -> 通用定位：<line> 用 x1/y1/x2/y2 端点，<circle> 用 cx/cy/r
         // 端点在绘制后端按"起点 + 相对偏移"还原（见节点生成处的 BINUI_LINE 覆盖）
-        float svgR = -1, svgLineX2 = -1, svgLineY2 = -1;
+        float svgR = -1, svgLineX1 = 0, svgLineY1 = 0, svgLineX2 = -1, svgLineY2 = -1;
         if (e.tag == "line") {
             float x1 = parseLen(e.attrs.count("x1") ? e.attrs.at("x1") : "", 0);
             float y1 = parseLen(e.attrs.count("y1") ? e.attrs.at("y1") : "", 0);
@@ -4182,6 +4191,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             float y2 = parseLen(e.attrs.count("y2") ? e.attrs.at("y2") : "", 0);
             sx = std::to_string(x1); sy = std::to_string(y1);
             sw = std::to_string(x2); sh = std::to_string(y2);
+            svgLineX1 = x1; svgLineY1 = y1;
             svgLineX2 = x2; svgLineY2 = y2;
         } else if (e.tag == "circle") {
             float cx = parseLen(e.attrs.count("cx") ? e.attrs.at("cx") : "", 0);
@@ -4782,6 +4792,14 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (mxHp) sp.flags |= SPEC_MAXH_PCT;
         sp.relW = (!flexPlaced && hasW && pctW < 0) ? baseW : -1;
         sp.relH = (!flexPlaced && !sh.empty() && pctH < 0) ? baseH : -1;
+        // 线段：width/height 是"终点绝对坐标"，重排规格必须存**起点偏移 + 端点增量**，
+        // 否则 relayout 会把终点当尺寸，父容器一挪线段就被拉成一条横贯窗口的直线
+        if (e.tag == "line") {
+            sp.relX = svgLineX1;
+            sp.relY = svgLineY1;
+            sp.relW = svgLineX2 - svgLineX1;
+            sp.relH = svgLineY2 - svgLineY1;
+        }
         // 高度是编译期按文本估算撑开的：运行期 setText 换文本后需要重算（issue 06 的第 1 步）
         if (heightAuto) { sp.heightAuto = 1; sp.autoBase = autoBase; }
         specNodes.push_back(sp);

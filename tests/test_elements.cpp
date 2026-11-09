@@ -1042,6 +1042,47 @@ int run() {
         TEST("ultra-wide dashed ring covers whole outline", ultraBottom && ultraLeft && ultraRight);
     }
 
+    // 9d. svg <line> 在运行期重排里的坐标（width/height 是"终点绝对坐标"，不是尺寸）
+    //     回归：窗口 resize 后父容器挪位置，终点没跟着走，✕ 被拉成一条横贯窗口的直线
+    {
+        auto ufl = CompileHTML(
+            "<html width=\"300\" height=\"100\" bg=\"#FFFFFF\"><body>"
+            "<div style=\"position:absolute; left:0; top:0; width:100%; height:100%;"
+            " display:flex; justify-content:flex-end\">"
+            "<svg style=\"width:29; height:29\">"
+            "<line x1=\"10.5\" y1=\"10.5\" x2=\"18.5\" y2=\"18.5\" stroke=\"#FF0000\" stroke-width=\"1\"/>"
+            "</svg></div></body></html>");
+        BinUIRenderer r;
+        TEST("line relayout layout loads", r.loadLayout(ufl.data(), ufl.size()));
+        auto lineNode = [&]() -> const BinUIRenderer::NodeInfo* {
+            for (const auto& n : r.getNodes())
+                if (n.type == BINUI_LINE) return &n;
+            return nullptr;
+        };
+        auto svgNode = [&]() -> const BinUIRenderer::NodeInfo* {
+            for (const auto& n : r.getNodes())
+                if (n.type == BINUI_SVG) return &n;
+            return nullptr;
+        };
+        const BinUIRenderer::NodeInfo* ln = lineNode();
+        const BinUIRenderer::NodeInfo* sv = svgNode();
+        TEST("line node exists", ln != nullptr && sv != nullptr);
+        if (ln && sv) {
+            const float dx0 = ln->width - ln->x, dy0 = ln->height - ln->y;
+            const float off0 = ln->x - sv->x;
+            const float svx0 = sv->x;
+            TEST("line initial delta", std::fabs(dx0 - 8.0f) < 0.01f && std::fabs(dy0 - 8.0f) < 0.01f);
+            r.setSize(600, 100);   // flex-end：svg 右移，线段必须整体跟着走
+            ln = lineNode();
+            sv = svgNode();
+            const float dx1 = ln->width - ln->x, dy1 = ln->height - ln->y;
+            TEST("line delta survives relayout",
+                 std::fabs(dx1 - dx0) < 0.01f && std::fabs(dy1 - dy0) < 0.01f);
+            TEST("line follows its parent", sv->x > svx0 + 1.0f &&
+                 std::fabs((ln->x - sv->x) - off0) < 0.01f);
+        }
+    }
+
     // 10. flexbox（编译期布局）与滚动容器
     {
         // flex 等分布局

@@ -1042,6 +1042,19 @@ void BinUIRenderer::relayout(int width, int height) {
         node.width = w;
         node.height = h;
 
+        // 线段（BINUI_LINE）的 width/height 是**终点绝对坐标**，不是尺寸：按"起点 + 编译期
+        // 端点增量"还原，父容器挪位置时起点和终点一起走。不这么写，窗口 resize 后线段的末尾
+        // 留在老地方，会被拉成一条横贯窗口的直线（示例标题栏的 ✕ 就是这么坏掉的）。
+        if (node.type == BINUI_LINE) {
+            if (spec) {
+                node.x = c.ox + spec->relX;
+                node.y = c.oy + spec->relY;
+                node.width = node.x + spec->relW;
+                node.height = node.y + spec->relH;
+            }
+            continue;   // 线段没有子节点，不参与容器压栈/flex
+        }
+
         // ---- flex 容器：重算子项位置/尺寸（与编译器 layoutFlex 一致） ----
         auto fit = flexOf_.find(node.id);
         if (fit != flexOf_.end()) {
