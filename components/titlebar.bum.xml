@@ -12,10 +12,11 @@
     sub        副标题        （空）        11px / #94A3B8，左对齐紧跟标题
     icon       左侧图标      （空）        一个字形，例如 ◆ ♻ ✏；建议配 iconw
     iconw      图标宽度      1             不给就只是 1px 占位（不传图标时不用管）
-    h          高度          44
+    h          高度          45            单数：按钮 29 高时 (45-29)/2 = 8 才能落在整行上
     pad        左内边距      16
     padr       右内边距      12
-    bs         按钮边长      28            ⚠ 图标是元素按 28×28 坐标系写死的，改 bs 要同步改图标坐标
+    bs         按钮边长      29            单数：1px 图标（横线）能正好压在中线那一行上
+                                           ⚠ 图标是元素按 29×29 坐标系写死的，改 bs 要同步改图标坐标
     gap        元素间距      6
     idmin      最小化按钮 id win-min
     idmax      最大化按钮 id win-max
@@ -37,35 +38,32 @@
                     transition: background-color .15s ease; }
     .bui-tb-close:hover  { background:#FFD9DE; }
     .bui-tb-close:active { background:#FFC6CE; }
-    /* 最大化图标：10×10 的空心方框（1px 边框画在节点内侧，和最小化的 1px 横线同粗细） */
+    /* 最大化图标：9×9 空心方框（单数尺寸，1px 边框落在第 10 和第 18 行，正中是第 14 行） */
     .bui-tb-sq    { border:1px solid #66768C; }
-    /* 最小化图标：10×1 实心横条，落在第 21 行（按钮 28 高，第 8..35 行）。
-       为什么是这一行：1px 细线在偶数高按钮里没法正好压在中线（21.5 是行边界），只能选 21 或
-       22。选 21 —— 它正好落在方框图标的内空区（18..25 行）正中；用 21.5 反而不行，GL 会把它
-       渲染成"半覆盖一行"，又灰又像高半像素。写成 2px 能数学居中（T13/B13），但比方框和 ✕
-       的 1px 描边明显粗，不合适。 */
+    /* 最小化图标：9×1 实心横条，落在第 14 行 —— 29 高的按钮中线就是第 14 行，上下各留 14 行。
+       这就是把按钮和图标都改成单数的目的：偶数尺寸时中线落在两行交界，1px 线永远差半像素。 */
     .bui-tb-bar   { background:#66768C; }
 </style>
-<titlebar class="bui-tb" style="height:{{h=44}}; display:flex; align-items:center; gap:{{gap=6}}">
+<titlebar class="bui-tb" style="height:{{h=45}}; display:flex; align-items:center; gap:{{gap=6}}">
     <div style="width:{{pad=16}}; height:1; background:transparent"></div>
     <span class="bui-tb-icon" style="width:{{iconw=1}}; height:22">{{icon=}}</span>
     <span class="bui-tb-title" style="width:{{titlew=content}}; height:20">{{title=标题}}</span>
     <span class="bui-tb-sub" style="flex:1; height:16">{{sub=}}</span>
     <!-- 三颗控制图标：不用字形，直接用元素画 —— 字形墨迹宽高受字体度量摆布（横线、方块、
-         ✕ 在同一个字号下差 30%），换字体/换 DPI 还会再变；元素画的图标几何完全由坐标决定，
-         三颗都是 10×10 的框、中心都在按钮正中。
+         ✕ 在同一个字号下差 30%），换字体/换 DPI 还会再变。元素画的图标几何完全由坐标决定：
+         按钮 29×29（单数），图标 9×9（单数），横线落在正中第 14 行，方框边框落在第 10/18 行。
          按钮本身负责点击/悬停/焦点环，图标是它内部的绝对定位子节点（不参与命中测试，
          鼠标事件照样落到按钮上）。 -->
-    <button id="{{idmin=win-min}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; padding:0">
-        <div class="bui-tb-bar" style="position:absolute; left:9; top:13; width:10; height:1"></div>
+    <button id="{{idmin=win-min}}"   class="bui-tb-btn"   style="width:{{bs=29}}; height:{{bs=29}}; padding:0">
+        <div class="bui-tb-bar" style="position:absolute; left:10; top:14; width:9; height:1"></div>
     </button>
-    <button id="{{idmax=win-max}}"   class="bui-tb-btn"   style="width:{{bs=28}}; height:{{bs=28}}; padding:0">
-        <div class="bui-tb-sq" style="position:absolute; left:9; top:9; width:10; height:10"></div>
+    <button id="{{idmax=win-max}}"   class="bui-tb-btn"   style="width:{{bs=29}}; height:{{bs=29}}; padding:0">
+        <div class="bui-tb-sq" style="position:absolute; left:10; top:10; width:9; height:9"></div>
     </button>
-    <button id="{{idclose=win-close}}" class="bui-tb-close" style="width:{{bs=28}}; height:{{bs=28}}; padding:0">
-        <svg style="position:absolute; left:0; top:0; width:28; height:28">
-            <line x1="9.5" y1="9.5" x2="18.5" y2="18.5" stroke="#FF6B6B" stroke-width="1"/>
-            <line x1="18.5" y1="9.5" x2="9.5" y2="18.5" stroke="#FF6B6B" stroke-width="1"/>
+    <button id="{{idclose=win-close}}" class="bui-tb-close" style="width:{{bs=29}}; height:{{bs=29}}; padding:0">
+        <svg style="position:absolute; left:0; top:0; width:29; height:29">
+            <line x1="10.5" y1="10.5" x2="18.5" y2="18.5" stroke="#FF6B6B" stroke-width="1"/>
+            <line x1="18.5" y1="10.5" x2="10.5" y2="18.5" stroke="#FF6B6B" stroke-width="1"/>
         </svg>
     </button>
     <div style="width:{{padr=12}}; height:1; background:transparent"></div>
