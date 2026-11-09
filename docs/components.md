@@ -215,7 +215,98 @@ renderer.setImageOrder(renderer.imagePaths());
 renderer.loadResources(imgs);
 ```
 
-## 十、已知限制
+## 十、目录结构（推荐）
+
+binUI 对目录**没有硬性要求**：`src` 一律相对"写出这个 `<use>` 的文件"解析，嵌套组件再相对
+组件自己。工程怎么摆都行 —— 但有一条约束会直接决定成败：
+
+> **相对路径最终相对宿主 UI 文件解析。** 编译期宿主是 `main.html`，运行期宿主是 `main.bui`
+> （`ex::MountAll(renderer, DirOf(uiPath), …)`）。两者不在同一目录、而组件又没跟着走时，
+> `external` 外挂组件会**挂不上**：
+
+```
+A  源码树 + 运行目录 bin/，bin/ 下没有 components/
+     [binui] 外挂组件缺失：components/dock.bum.html（锚点 #1）    mounted=0 failed=1
+B  组件按原相对位置拷进 bin/components/
+     mounted=1 failed=0
+C  组件挪到 bin/../assets/components/
+     [binui] 外挂组件缺失：components/dock.bum.html（锚点 #1）    mounted=0 failed=1
+```
+
+（**编译期内联**的组件不受影响：它们已经并进 `.bui`，运行期一个文件都不读。所以只有
+`external` 和组件里的图片/视频路径会在意目录。）
+
+结论：**让"源码树"和"运行树"的相对布局镜像**，最省事。
+
+### 最小可用：单个目录
+
+```
+myapp/
+├── main.html            # 源码，改这个
+├── main.bui             # 构建产物（loadLayout 吃这个）
+├── button.bum.html      # 组件源码
+└── button.bum           # 可选：编好的二进制（存在时优先，可保护源码/加速启动）
+```
+
+```html
+<use src="button.bum.html" x="16" y="44" w="132" label="确定"/>
+```
+
+### 组件多起来：`components/` 子目录
+
+```
+myapp/
+├── main.html
+├── main.bui
+└── components/
+    ├── button.bum.html
+    ├── panel.bum.html
+    └── icon.png          # 组件用到的图片也放这里（编译期会改写成 components/icon.png）
+```
+
+```html
+<use src="components/button.bum.html" x="16" y="44" w="132" label="确定"/>
+```
+
+编译期写 `components/…`，运行期还是 `components/…` —— **同一个相对路径两边都成立**，不用改。
+
+### 分发布局：`ui/` 源码 + `binui/` 自包含运行目录
+
+源码和发行物分开，发给用户（或打包进安装包）的只有 `binui/`：
+
+```
+myapp/
+├── ui/                          # 源码树（不进发行包）
+│   ├── main.html
+│   └── components/
+│       ├── button.bum.html
+│       └── dock.bum.html        # external 外挂的那一个
+└── binui/                       # 运行目录：整个目录能整体拷走、整体搬盘
+    ├── main.bui
+    └── components/              # 与源码树镜像（相对 main.bui 的位置一模一样）
+        ├── button.bum.html      # 源码也行：就地编译（开发期友好）
+        ├── button.bum           # 或二进制（优先，发行版该给这个）
+        └── dock.bum
+```
+
+`ui/main.html` 里照旧写 `src="components/…"`。编成 `binui/main.bui` 后，运行期从
+`binui/components/…` 找 —— 因为两边都是"UI 文件旁边的 `components/`"，路径不用重写：
+
+```cpp
+renderer.loadLayout(bytes.data(), bytes.size());
+binui::ex::MountAll(renderer, binui::ex::DirOf(uiPath), renderer.layoutBytes());
+// uiPath = "…/binui/main.bui" → 组件从 binui/components/ 找
+```
+
+### 三条规则
+
+1. **`.bui` 和它的组件要能一起搬**：相对关系写死在布局里（含 `external` 的组件引用段），
+   拆开就断。别把 `.bui` 放 `bin/` 而组件留 `assets/`。
+2. **`external` 组件必须相对 `.bui` 可达**：编译期相对 `.html`，运行期相对 `.bui`。
+3. **组件的图片/视频跟着组件目录走**：编译期会被改写成宿主相对路径（见上一节），
+   运行期按同一个相对路径找文件。
+
+## 十一、已知限制
 
 | 限制 | 现状 |
 |---|---|

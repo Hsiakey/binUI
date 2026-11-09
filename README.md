@@ -310,7 +310,11 @@ HTML5 编译规则：
   （不会变成标签），`{{名=默认值}}` 在单独编 `.bum` 时取默认值；组件内可再引用组件（深度上限 8）；
   组件内相对资源路径自动改写成宿主相对路径，图片清单随布局写出（v12 资源段）。
   **组件自带的 `<style>` 是全局的**（可被宿主主题化，也需类名前缀约定），参数化样式请写内联。
-  完整契约见 [docs/components.md](docs/components.md)。- **长度单位**：`px`（可省略）与 `%` 之外，还支持 `em`（相对该元素 `font-size`）、`rem`（相对根字号，默认 14）、`vw`/`vh`（相对**编译期**视口；不随运行时 resize 重排，需跟随请用 `%`）。**不支持的单位**（`pt/cm/mm/in/ex/ch/vmin/vmax`）与**函数值**（`calc/min/max/clamp`）会**打编译警告并回退默认值**，不再静默当成 px（警告同时收集在 `CompileResult::warnings`）。
+  **目录结构**：`src` 相对"写出这个 `<use>` 的文件"解析，摆哪都行；但 `external` 组件和组件图片
+  必须能跟着 `.bui` 一起搬 —— 推荐 `.bui` 旁边一个 `components/`，让源码树与运行树相对布局镜像。
+  完整契约（含推荐目录结构）见 [docs/components.md](docs/components.md)。
+
+- **长度单位**：`px`（可省略）与 `%` 之外，还支持 `em`（相对该元素 `font-size`）、`rem`（相对根字号，默认 14）、`vw`/`vh`（相对**编译期**视口；不随运行时 resize 重排，需跟随请用 `%`）。**不支持的单位**（`pt/cm/mm/in/ex/ch/vmin/vmax`）与**函数值**（`calc/min/max/clamp`）会**打编译警告并回退默认值**，不再静默当成 px（警告同时收集在 `CompileResult::warnings`）。
 - 颜色：支持 CSS **命名色**（完整 147 色 + `transparent`）、`#RGB`/`#RRGGBB`、`#ARGB`/`#AARRGGBB`（**8 位按 binUI 约定的 AARRGGBB**，与 CSS 的 `#RRGGBBAA` 相反，首次使用会警告）、`rgb()/rgba()`（逗号或空格分隔、通道可写百分比、支持现代 `rgb(0 0 255 / 50%)`）、`hsl()/hsla()`。`!important` 会被剥离。无法识别的颜色**保留默认色并警告**（以前是静默变白/变透明）。
 - 尺寸约束：`min-width/max-width/min-height/max-height`（值支持 `N` 像素与 `N%` 相对父内容盒；XML 下为同名属性）。min 撑开尺寸（自动宽/声明宽小于最小值时）、max 收缩（百分比/自动宽超过上限时）；flex 子项弹性分配后同样受约束钳制（钳制释放的空间不向兄弟项再分配）。编译期按初始窗口生效，运行时 `setSize` 重排按新视口重新解析。
 - **等比 UI 缩放（`<app_window ui_scale="proportional">`）**：`setSize` 不再做流式/百分比/flex 重排，而是把整棵节点树的坐标/尺寸/字号/圆角按「新窗口 ÷ 设计尺寸」等比写回 `nodes_`——**固定像素布局也能整体跟手缩放**，且命中测试/滚动/绘制读同一份缩放后坐标、天然一致；字形按缩放后的字号重新光栅化（图集缓存，清晰不糊）。与 `window_resize="aspect"` 组合即"窗口仅等比例 + UI 等比缩放"。动态运行时节点（图表 API 的 `addNode`）不参与缩放，图表类应用不要启用此模式。

@@ -6,6 +6,19 @@
 
 ## [Unreleased]
 
+### 新增 — 文档：推荐的组件目录结构（"运行树必须镜像"有实测数据）
+
+- `docs/components.md` 新增第十节「目录结构（推荐）」：三种摆法 —— 单目录 / `components/`
+  子目录 / `ui/` 源码 + `binui/` 自包含发行目录，并给出三条硬规则。
+- 说清那条真正会咬人的约束：**相对路径最终相对宿主 UI 文件解析**。编译期宿主是
+  `main.html`，运行期宿主是 `main.bui`（`ex::MountAll(renderer, DirOf(uiPath), …)`）。
+  两者不镜像、组件又没跟着搬时，`external` 外挂组件会静默挂不上。实测三组：
+  不镜像 `mounted=0 failed=1`；按原相对位置拷进 `bin/components/` → `mounted=1`；
+  挪到 `bin/../assets/components/` → 又 `failed=1`。**编译期内联的组件不受影响**
+  （已并进 `.bui`，运行期一个文件都不读）。
+- `README.md`、`components/README.md`、`docs/README.md` 同步一句指引；
+  原「十、已知限制」顺延为十一。
+
 ### 变更 — 组件源码统一改名为 `.bum.html`（标准组件库 11 个 + examples/features 3 个）
 
 - 事实：**组件源码的扩展名从来不影响任何行为**。编译器按**内容**选解析器
