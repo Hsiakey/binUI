@@ -5094,7 +5094,10 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
 
     // 10: Material button (purple accent)
     memset(&n, 0, sizeof(n));
-    n.id = 10; n.parentId = 0; n.type = BINUI_BUTTON; n.flags = 5;
+    n.id = 10; n.parentId = 0; n.type = BINUI_BUTTON;
+    // 手写布局也得带"按钮文字默认居中"这条 UA 语义（编译期路径见上面 type==BINUI_BUTTON
+    // 补 BINUI_TEXT_CENTER 那段）：后端改成读 flags 后，漏了这条按钮文字会变左对齐。
+    n.flags = 5 | BINUI_TEXT_CENTER;
     n.x = 32; n.y = 276; n.width = 416; n.height = 48;
     n.color = 0xFF3E8BFF; n.textOffset = textOff[7]; n.fontSize = 14; n.radius = 8;
     add(n);

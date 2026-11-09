@@ -18,6 +18,8 @@
 | 文件 | 说明 |
 |---|---|
 | [img/default-layout.png](img/default-layout.png) | 内置默认布局（`GenerateDefaultBinUI()`，480×800）在 GDI 后端下的渲染结果 |
+| [img/flexshow.png](img/flexshow.png) | `examples/flexshow` 的离屏渲染（百分比 / `flex:1` / `min·max-width` / `overflow:auto`；拖窗实时重排是运行时行为，静态图看不出） |
+| [img/buttonshow.png](img/buttonshow.png) | `examples/buttonshow` 的离屏渲染（语义色 / 尺寸 / 圆角 / 底色 / 形态，以及 `:hover`·`:active`·`:checked`·`disabled` 状态） |
 | [img/features.png](img/features.png) | `examples/features` 的离屏渲染（伪类/扩展绘制/HTML 语义/组件化/数据驱动） |
 | [img/std-components.png](img/std-components.png) | `components/preview.html` 的离屏渲染（标准组件库全览） |
 | [img/animshow.png](img/animshow.png) | `examples/animshow` 的离屏渲染（关键帧 / 过渡；静态呈现，动态需真实运行） |
@@ -37,6 +39,22 @@
 > 窗口返回全黑，`BitBlt` 只能抓被遮挡后合成到桌面的部分）。所以演示图一律走
 > `tools/offscreen_render` 的 GDI 路径 —— 同一份 HTML、同一套布局引擎，界面一样，
 > 但 `<canvas>` 里由应用自己画的内容不会出现。
+
+改完示例 UI 后重出这几张图（`make tools` 之后，一张一条命令）：
+
+```sh
+B=build-mingw/bin/offscreen_render.exe
+$B examples/flexshow/main.html docs/img/flexshow.png
+$B examples/buttonshow/main.html docs/img/buttonshow.png
+$B examples/features/main.html docs/img/features.png
+$B examples/animshow/main.html docs/img/animshow.png
+$B examples/fontshow/main.html docs/img/fontshow.png
+$B examples/svgdemo/main.html docs/img/svgdemo.png
+$B examples/cubedemo/main.html docs/img/cubedemo.png
+$B examples/texturedemo/main.html docs/img/texturedemo.png
+$B components/preview.html docs/img/std-components.png
+$B --default docs/img/default-layout.png
+```
 
 ## 相关外部文档
 

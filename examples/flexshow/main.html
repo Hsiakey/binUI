@@ -115,7 +115,8 @@
 
         <!-- ④ 状态栏：宽度由 C++ 写入（setText），验证 resizing 事件已到达 -->
         <div id="statusbar" class="card" style="display:flex; align-items:center; gap:10; height:34; padding:9">
-            <span id="status" style="width:340; height:18; font-size:12px; color:#1F2A37">窗口 —</span>
+            <!-- 占位值 = 默认窗口尺寸：运行时每次 resize 由 C++ 覆盖；离屏渲染/截图也好看 -->
+            <span id="status" style="width:340; height:18; font-size:12px; color:#1F2A37">窗口 1100×720 · 侧栏 200 固定</span>
             <span class="note" style="flex:1; height:16">拖边框改尺寸：布局实时重排，动画不中断</span>
             <span class="pill" style="width:content; height:20; padding:3">纯 CSS 布局</span>
         </div>

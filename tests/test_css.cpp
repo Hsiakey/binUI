@@ -488,6 +488,17 @@ int run() {
                  rr.loadLayout(d.data(), d.size());
                  return !rr.hasResizeSpec();
              }());
+        // 手写默认布局里的按钮也要带"按钮文字默认居中"这条 UA 语义
+        // （后端按 flags 画文字，漏了它就是左对齐）
+        TEST("default layout button text centered",
+             [] {
+                 BinUIRenderer rr;
+                 auto d = GenerateDefaultBinUI();
+                 rr.loadLayout(d.data(), d.size());
+                 for (const auto& n : rr.getNodes())
+                     if (n.type == BINUI_BUTTON) return (n.flags & BINUI_TEXT_CENTER) != 0;
+                 return false;
+             }());
     }
 
     // 4b. min/max 尺寸约束：编译期即生效（初始布局），HTML 与 XML 均支持

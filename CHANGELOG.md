@@ -6,6 +6,20 @@
 
 ## [Unreleased]
 
+### README 顶部的示例图换成当前示例；补 flexshow / buttonshow 截图
+
+- 顶部三张图原来是「内置默认布局 / features / animshow」：第三张标着"组件化（`<use>`）"却放的
+  动画截图，而"默认布局"只是引擎兜底布局（不是示例），观感像很久以前的东西。
+- 换成 8 组示例里最有代表性的三张：**flexshow**（自适应布局）、**buttonshow**（按钮与状态样式）、
+  **animshow**（动画与过渡），全部用 `tools/offscreen_render` 从**当前源码**重出。
+- 新增 `docs/img/flexshow.png`、`docs/img/buttonshow.png`；顺手重出 animshow / svgdemo / cubedemo /
+  texturedemo / 组件库预览；`docs/README.md` 图片表补上这两行，并加了"改完示例 UI 怎么重出这些图"
+  的命令清单（`make tools` 后一张一条）。
+- flexshow 状态栏的占位文案从「窗口 —」改成默认窗口尺寸（运行时仍由 resize 事件覆盖），
+  离屏图/截图不再出现"—"。
+- 修默认布局（`GenerateDefaultBinUI()`）按钮文字变左对齐：手写节点漏了 `BINUI_TEXT_CENTER`，
+  后端改成按 flags 画文字之后就露出来了；`test_css` 加一条守护（手写布局按钮也必须居中）。
+
 ## [0.3.0] - 2026-11-10
 
 首个正式按 `MAJOR.MINOR.PATCH` 发布的版本（此前只有 0.0.1 / 0.0.2 两个归档）。
