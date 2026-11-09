@@ -92,6 +92,29 @@ mingw32-make SHELL=sh test
 2. `Makefile`：加入 `DEMO_BINS` 并写链接规则（记得 `cmd /c copy` 把 HTML 拷到 `bin/<name>/`）；
 3. `CMakeLists.txt`：`add_executable` + `target_link_libraries(... gl_shell)` + `POST_BUILD` 拷 HTML。
 
+## 版本号与发布
+
+版本号是 `MAJOR.MINOR.PATCH`（tag 写成 `v0.3.0`）：
+
+| 位 | 什么时候加 | 例子 |
+|---|---|---|
+| `PATCH`（小版本） | **bug 修复与改进**，可以有多位，最多到 **999** | `0.3.0 → 0.3.1` |
+| `MINOR`（中版本） | 新增能力 / 行为变化，但旧用法还能用；`0.x` 期间 API 仍可能调整 | `0.3.x → 0.4.0` |
+| `MAJOR`（大版本） | 不兼容变更（删接口、改语义） | `0.x → 1.0.0` |
+
+- `PATCH` 到 999 就不再往上加：下一个改动进位成 `MINOR+1`、`PATCH` 归 0。
+- **别把它和下面两个“版本”混了**：
+  - `BINUI_VERSION`（`include/binui_format.h`）是**二进制布局格式号**，只在节点/段结构变化时 +1，
+    旧 `.bui` 必须重编 —— 和发布版本无关；
+  - `BINUI_C_ABI_VERSION`（`include/binui_c.h`）只在 C ABI 的结构体/函数签名不兼容时 +1。
+- **发版清单**（少一处就会出现“库说 0.2.0、Cargo 说 0.3.0”这种不一致）：
+  1. `CMakeLists.txt` 的 `project(... VERSION x.y.z)`；
+  2. `src/binui_c.cpp` 的 `binui_version()` 返回值；
+  3. `bindings/rust/Cargo.toml` 与 `Cargo.lock`（Go/Python 绑定读库，不用改）；
+  4. `README.md` 顶部的 version 徽章；
+  5. `CHANGELOG.md` 把 `[Unreleased]` 的内容整理进 `## [x.y.z] - YYYY-MM-DD`，Unreleased 留空；
+  6. `git tag -a vx.y.z -m "binUI x.y.z"`（tag 打在发版提交上）。
+
 ## 提交与 PR
 
 - 一次提交一件事；信息格式 `<范围>: <做了什么>`，例如

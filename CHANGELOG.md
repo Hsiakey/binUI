@@ -6,6 +6,11 @@
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-10
+
+首个正式按 `MAJOR.MINOR.PATCH` 发布的版本（此前只有 0.0.1 / 0.0.2 两个归档）。
+版本号规则见 [CONTRIBUTING.md](CONTRIBUTING.md) 的「版本号与发布」；二进制布局格式号仍独立递增（当前 v14）。
+
 ### 修宽输入框的虚线焦点环只画了一半；`strokeRounded` 真正支持线宽
 
 - `flex:1` 拉满窗口的输入框（flexshow 的搜索框，800+px 宽）周长超过虚线段数上限，

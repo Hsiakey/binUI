@@ -55,6 +55,14 @@ int main() {
     // ---- 1. 版本 / 错误串 ----
     TEST("abi version", binui_abi_version() == BINUI_C_ABI_VERSION);
     TEST("version string", binui_version() != nullptr && std::strlen(binui_version()) > 0);
+    // 版本号格式 MAJOR.MINOR.PATCH（见 CONTRIBUTING「版本号与发布」）：发版时只改数字，
+    // 别把串改坏（比如漏一个点、写成 v 前缀）
+    {
+        int maj = -1, min = -1, patch = -1;
+        const int n = std::sscanf(binui_version(), "%d.%d.%d", &maj, &min, &patch);
+        TEST("version is MAJOR.MINOR.PATCH", n == 3 && maj >= 0 && min >= 0 && patch >= 0);
+        TEST("version patch <= 999", patch <= 999);
+    }
 
     // ---- 2. 内存编译 ----
     void* layout = nullptr;
