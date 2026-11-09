@@ -361,7 +361,8 @@ BINUI_C_API int32_t BINUI_C_CALL binui_mount_components(void* app, const char* l
  *     （离焦点最近的滚动容器，没有就滚视口内面积最大的那个），PageUp/PageDown 翻页，
  *     Home/End 到顶/到底，Tab/Shift+Tab 循环，回车激活焦点（输入框进入编辑、其余触发点击），
  *     空格有焦点时激活、无焦点时向下翻页。
- *   · 焦点环只在键盘导航时画，2 秒没有操作自动消失（鼠标点击不画）。
+ *   · 焦点环只在键盘导航时画，2 秒没有操作自动消失（鼠标点击不画；鼠标点进输入框
+ *     直接进入编辑，那圈蓝环同样不画）。
  * 清空后 KEY 事件照旧推给宿主，宿主只做库做不了的事（Esc 关窗、Ctrl+C/V 由库内部接
  * 系统剪贴板）。 */
 #define BINUI_KEY_BACK   0x08

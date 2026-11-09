@@ -1667,10 +1667,11 @@ void BinUIRenderer::hideFocusRing() { focusRing_ = false; }
 
 void BinUIRenderer::setFocusRingIdleTime(double seconds) { focusRingIdle_ = seconds; }
 
-// 某个节点现在该画什么环：编辑中是实线蓝（只套正在编辑的输入框）；
+// 某个节点现在该画什么环：编辑中是实线蓝（只套正在编辑的输入框，且只有键盘进的编辑才画）；
 // 待编辑（虚线）只给输入元素；其它可交互元素是普通焦点（实线）。
 BinUIRenderer::FocusRing BinUIRenderer::focusRingOf(uint16_t nodeId) const {
-    if (edit_.active) return edit_.nodeId == nodeId ? FocusRing::Editing : FocusRing::None;
+    if (edit_.active)
+        return (editRing_ && edit_.nodeId == nodeId) ? FocusRing::Editing : FocusRing::None;
     if (!focusRing_ || keyboardId_ != static_cast<int>(nodeId)) return FocusRing::None;
     auto it = nodeIndexById_.find(nodeId);
     if (it == nodeIndexById_.end()) return FocusRing::None;
@@ -1791,7 +1792,7 @@ bool BinUIRenderer::activateKeyboardFocus() {
     const auto& n = nodes_[it->second];
 
     if (n.type == BINUI_INPUT) {
-        focus(n.id);
+        focus(n.id, true);   // 键盘进编辑：画"编辑中"蓝环
         return true;
     }
     if (n.type == BINUI_VIDEO) {
@@ -2229,7 +2230,7 @@ void BinUIRenderer::reserveImageSlots(uint16_t count) {
 
 // ============ 文本框编辑 ============
 
-void BinUIRenderer::focus(uint16_t nodeId) {
+void BinUIRenderer::focus(uint16_t nodeId, bool viaKeyboard) {
     auto it = nodeIndexById_.find(nodeId);
     if (it == nodeIndexById_.end() || nodes_[it->second].type != BINUI_INPUT) {
         blur();
@@ -2247,6 +2248,7 @@ void BinUIRenderer::focus(uint16_t nodeId) {
     edit_.value = isPlaceholder(nodeId) ? std::string() : nodes_[it->second].text;
     edit_.caret = edit_.selStart = edit_.value.size();
     focusRing_ = false;                           // 编辑中画光标，不画焦点环
+    editRing_ = viaKeyboard;                      // 鼠标点进来的不画蓝环（键盘 Enter 进来的才画）
     refreshNodeStyle(static_cast<int>(nodeId));   // :focus 状态样式（正在编辑也算聚焦）
 
     if (eventCallback_) {
@@ -2266,8 +2268,10 @@ void BinUIRenderer::blur() {
     edit_.active = false;
     edit_.value.clear();
     edit_.caret = edit_.selStart = 0;
-    // 退出编辑 = 回到焦点控制：把焦点环点亮（再 2 秒不动才消失）
-    if (keyboardId_ >= 0) bumpFocusRing();
+    // 退出编辑 = 回到焦点控制：键盘进来过的才把焦点环点亮（再 2 秒不动才消失）；
+    // 鼠标点进来的编辑退出后不给环，免得点一下就在屏幕上留个框。
+    if (editRing_ && keyboardId_ >= 0) bumpFocusRing();
+    editRing_ = false;
     refreshNodeStyle(static_cast<int>(nodeId));   // 结束编辑：:focus 状态样式回退
 
     auto it = nodeIndexById_.find(nodeId);

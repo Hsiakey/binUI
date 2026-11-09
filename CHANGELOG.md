@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### 修复 — 鼠标点输入框也画出"编辑中"蓝环
+
+- `focusRingOf()` 原来只看 `edit_.active`：一旦进入编辑态就返回 `Editing`，不管编辑是键盘
+  Enter 进来的还是鼠标点进来的。于是点一下输入框，周围立刻套一圈 2px 蓝框 —— 和"焦点框
+  只代表键盘在操作"的设计矛盾。
+- 现在区分来源：`focus(nodeId, viaKeyboard)`，只有 `activateKeyboardFocus()`（Enter）传
+  `true` 才画编辑环；鼠标点击 / 宿主直接调 `focus(id)` 进入的编辑有光标、能打字、`:focus`
+  样式照旧，但不画环。退出编辑时同源判断：键盘进来的回到虚线待编辑环，鼠标进来的不画环。
+- 实测（fontshow 普通输入框，客户区 900×760）：鼠标点进去 0 个蓝像素（光标在）；
+  Esc 退出后 0 个；同一框再按 Enter 进来 850 个 `RGB(62,139,255)` 像素、边框两像素宽 ——
+  说明只是"鼠标进来的不画"，不是把编辑环关掉了。
+- `test_elements` 9c 补 6 条：鼠标点击进编辑且有 `:focus` 但不画环、Esc 退出后仍不画、
+  键盘重新 Enter 后编辑环保留。文档与 C ABI 注释同步（`docs/keyboard_focus.md` /
+  `docs/bindings.md` / `README.md` / `include/binui_c.h`）。
+
 ### 文档 — 尚未实现的下潜/上浮方案改称「层级焦点导航」
 
 - 原来叫 "z 序焦点"，容易和窗口 Z 序（`binui_win32_foreground.h` 里的置顶）混淆；它讲的其实是

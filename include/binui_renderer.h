@@ -325,7 +325,10 @@ public:
     }
     const EditState& edit() const { return edit_; }
 
-    void focus(uint16_t nodeId);       // 开始编辑会话（仅 INPUT 节点，其他情况失焦）
+    // 开始编辑会话（仅 INPUT 节点，其他情况失焦）。viaKeyboard 表示是键盘（Enter）进来的：
+    // 两种来源都会进编辑态、都会设 :focus，但**鼠标点进来的不画编辑焦点环** ——
+    // 焦点框是键盘专用的提示，鼠标用户看光标就够了（浏览器 :focus-visible 同款取舍）。
+    void focus(uint16_t nodeId, bool viaKeyboard = false);
     void blur();                       // 提交当前值到节点文本并结束会话
     bool insertText(const std::string& utf8);          // 在光标处插入（替换选区）
     bool backspace();                                  // 删除光标前字符（或整个选区）
@@ -468,6 +471,7 @@ private:
     int keyboardId_ = -1;
     bool   focusRing_ = false;         // 焦点环是否点亮（2 秒无操作自动熄灭）
     double focusRingHideAt_ = 0;       // 自动熄灭时刻（AnimNow 时钟）
+    bool   editRing_ = false;          // 编辑中的蓝环要不要画：只有键盘进编辑才画
     std::unordered_map<uint16_t, ScrollState> scroll_;
     int scrollDragNode_ = -1;   // 正在拖动滚动条（thumb 位置偏移）
     float scrollDragGrab_ = 0;

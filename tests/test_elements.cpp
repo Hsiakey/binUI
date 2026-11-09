@@ -973,6 +973,26 @@ int run() {
         TEST("esc exits editing", !rf.isEditing());
         TEST("esc restores dashed ring", rf.focusRingOf(rfIn) == BinUIRenderer::FocusRing::Dashed);
 
+        // 鼠标点进输入框：进编辑态、设 :focus，但**不画焦点框**（焦点框只给键盘）
+        BinUIRenderer rcm;
+        TEST("click-edit layout loads", rcm.loadLayout(ufl.data(), ufl.size()));
+        uint16_t cmIn = rcm.getNodes()[1].id;
+        rcm.dispatchClick(50, 20);   // 输入框 (10,10,120x30)
+        TEST("click input enters editing", rcm.isEditing() && rcm.isFocused(cmIn));
+        TEST("click input sets focus", rcm.keyboardNode() == (int)cmIn);
+        TEST("click input no editing ring", rcm.focusRingOf(cmIn) == BinUIRenderer::FocusRing::None);
+        TEST("click input no ring visible", !rcm.focusRingVisible());
+        rcm.handleKey(0x1B);   // Esc 退出编辑
+        TEST("esc after mouse-edit exits", !rcm.isEditing());
+        TEST("esc after mouse-edit keeps no ring",
+             rcm.focusRingOf(cmIn) == BinUIRenderer::FocusRing::None && !rcm.focusRingVisible());
+        // 键盘再进同一个框：蓝环回来（说明只是"鼠标进来的不画"，不是把编辑环整个关掉）
+        rcm.handleKey('D');
+        rcm.setKeyboardFocus(cmIn);
+        rcm.handleKey(0x0D);
+        TEST("keyboard re-entry draws editing ring",
+             rcm.isEditing() && rcm.focusRingOf(cmIn) == BinUIRenderer::FocusRing::Editing);
+
         // 虚线环几何（binui_paint.h，三端共用）：线段数合理，端点不跑出环矩形
         PaintSegment segs[kMaxFocusDashSegments];
         const int dn = BuildDashedRoundRing(10, 10, 120, 40, 8, 6, 4, segs, kMaxFocusDashSegments);
