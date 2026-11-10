@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+（暂无）
+
+## [0.4.0] - 2026-11-10
+
+本轮主题：**SVG 从"五个图元"升级成"能直接粘现成素材"**（【格式 v15】），
+外加打包清单 `binui.res`、`binui_export` 解包工具，以及一批"写了没效果"的告警清理。
+破坏性：`BINUI_VERSION` 14 → 15，旧 `.bui` / `.bum` 需重编（`binui.res` 里是源码，重编即可）。
+
 ### 新增 — SVG P2-4：`stroke-linecap="round"`
 
 - 开放子路径的两端可以补圆点了（复用 `PaintPathStroke` 已有的 `roundCap` 参数，
