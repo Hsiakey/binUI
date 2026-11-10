@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<app_window width="420" height="260" bg="#151517" title="svg linejoin probe">
+<html width="420" height="260" bg="#151517">
+<head><meta charset="UTF-8"><style> body { font-size: 12px; color: #ADB2B8; } </style></head>
+<body>
+<!-- 第一行：同一个五角星，三种连接方式（圆角 / 斜接 / 斜面） -->
+<svg style="position:absolute; left:16; top:14; width:72; height:72" viewBox="0 0 24 24">
+    <path d="M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z"
+          fill="none" stroke="#7AAAFF" stroke-width="2" stroke-linejoin="round"/>
+</svg>
+<svg style="position:absolute; left:100; top:14; width:72; height:72" viewBox="0 0 24 24">
+    <path d="M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z"
+          fill="none" stroke="#F2B544" stroke-width="2" stroke-linejoin="miter"/>
+</svg>
+<svg style="position:absolute; left:184; top:14; width:72; height:72" viewBox="0 0 24 24">
+    <path d="M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z"
+          fill="none" stroke="#4ED17E" stroke-width="2" stroke-linejoin="bevel"/>
+</svg>
+<!-- 粗线宽的折线：连接方式的差别最明显 -->
+<svg style="position:absolute; left:270; top:14; width:132; height:72" viewBox="0 0 132 72">
+    <path d="M14 58 L34 14 L54 58 L74 14 L94 58 L114 14"
+          fill="none" stroke="#F25A5A" stroke-width="9" stroke-linejoin="miter"/>
+</svg>
+
+<!-- 第二行：miter-limit 的作用（尖刺默认会被削成斜面） -->
+<svg style="position:absolute; left:16; top:100; width:120; height:64" viewBox="0 0 60 32">
+    <path d="M26 30 L30 14 L34 30" fill="none" stroke="#38BDF8" stroke-width="6"
+          stroke-linejoin="miter" stroke-miterlimit="4"/>
+</svg>
+<svg style="position:absolute; left:150; top:100; width:120; height:64" viewBox="0 0 60 32">
+    <path d="M26 30 L30 14 L34 30" fill="none" stroke="#38BDF8" stroke-width="6"
+          stroke-linejoin="miter" stroke-miterlimit="12"/>
+</svg>
+<span style="position:absolute; left:284; top:104; width:126; height:56; font-size:11px; color:#81858C">同一根尖刺：miterlimit=4（削平）vs 12（尖角伸出去）</span>
+
+<!-- 第三行：真实图标（尖角本来会被圆角连接磨圆） -->
+<svg style="position:absolute; left:16; top:180; width:56; height:56" viewBox="0 0 24 24">
+    <path d="M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z"
+          fill="#F2B544"/>
+</svg>
+<svg style="position:absolute; left:84; top:180; width:56; height:56" viewBox="0 0 24 24">
+    <path d="M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z"
+          fill="none" stroke="#F2B544" stroke-width="1.6" stroke-linejoin="miter"/>
+</svg>
+<svg style="position:absolute; left:152; top:180; width:56; height:56" viewBox="0 0 24 24">
+    <path d="M6 3 L18 12 L6 21" fill="none" stroke="#7AAAFF" stroke-width="3.2"
+          stroke-linejoin="miter" stroke-linecap="round"/>
+</svg>
+<svg style="position:absolute; left:220; top:180; width:56; height:56" viewBox="0 0 24 24">
+    <path d="M4 20 L12 3 L20 20 Z" fill="none" stroke="#4ED17E" stroke-width="2.4"
+          stroke-linejoin="miter"/>
+</svg>
+<span style="position:absolute; left:290; top:188; width:114; height:44; font-size:11px; color:#81858C">star / chevron / triangle：miter 让尖角是尖的</span>
+<span style="position:absolute; left:16; top:242; width:400; height:14; font-size:11px; color:#81858C">svg linejoin: round / miter / bevel + stroke-miterlimit（缺口填多边形）</span>
+</body></html>
+</app_window>

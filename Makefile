@@ -324,7 +324,7 @@ tools: $(TOOL_BINS)
 #   mingw32-make SHELL=sh pixels           # 渲染 + 与 docs/pixels 基准图比对
 #   mingw32-make SHELL=sh pixels-update    # 改完绘制/布局后重新生成基准图
 # =============================================
-PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad
+PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad svgjoin
 PIXEL_OUT   := $(BUILD_DIR)/pixels
 PIXEL_GOLD  := docs/pixels
 PIXEL_TOL   ?= 0.5

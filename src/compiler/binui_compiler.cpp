@@ -2362,7 +2362,7 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "x1", "y1", "x2", "y2",
         // v15 SVG 路径：d 是路径数据；其余是描边/填充规则的表现属性
         "d", "ry", "fill-rule", "fill-opacity", "stroke-opacity",
-        "stroke-linecap", "stroke-linejoin", "stroke-dasharray",
+        "stroke-linecap", "stroke-linejoin", "stroke-dasharray", "stroke-miterlimit",
         "viewbox", "preserveaspectratio", "xlink:href",
         // v16 SVG 渐变：端点/圆心/焦点/色标/单位/变换/spread（x1/y1/x2/y2/cx/cy/r 上面已有）
         "fx", "fy", "offset", "stop-color", "stop-opacity",
@@ -4971,6 +4971,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         uint32_t pathFillColor = 0xFF000000u, pathStrokeColor = 0xFF000000u;
         float pathStrokeW = 0.0f;
         uint8_t pathCap = BINUI_CAP_BUTT;   // stroke-linecap
+        uint8_t pathJoin = BINUI_JOIN_ROUND; // stroke-linejoin（圆角是 binUI 的历史默认）
+        uint8_t pathMiterLimit = 0;          // stroke-miterlimit（0 = 运行期按 SVG 默认 4）
         bool pathHasGrad = false;           // v16：填充用渐变
         BinUIPathGradient pathGrad = {};
         // <path>/<ellipse>：永远是路径。
@@ -5063,8 +5065,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                         }
                     }
                 }
-                // stroke-linecap：只有 round 有实现（两端补圆点），square 按 butt 画并告警。
-                // 连接方式目前固定圆角（转角 > 15° 补圆点），miter/bevel 未实现。
+                // stroke-linecap：butt（默认）/ round（两端补圆点）；square 按 butt 画并告警。
+                // stroke-linejoin：round（默认）/ miter / bevel 都实现了（缺口填多边形）；
+                //   miter 超过 stroke-miterlimit（SVG 默认 4）时按 bevel 画，与规范一致。
                 if (pathStroke) {
                     std::string lc = style.count("stroke-linecap") ? style.at("stroke-linecap") : "";
                     if (lc.empty() && e.attrs.count("stroke-linecap"))
@@ -5077,13 +5080,56 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                     if (lj.empty() && e.attrs.count("stroke-linejoin"))
                         lj = e.attrs.at("stroke-linejoin");
                     lj = lowerStr(lj);
-                    if (lj == "miter" || lj == "miter-clip" || lj == "bevel")
-                        Warn("stroke-linejoin=\"" + lj + "\" 未实现，按圆角连接画（尖角图标会更圆）");
+                    if (lj == "miter" || lj == "miter-clip") {
+                        pathJoin = BINUI_JOIN_MITER;
+                    } else if (lj == "bevel") {
+                        pathJoin = BINUI_JOIN_BEVEL;
+                    } else if (lj == "round") {
+                        pathJoin = BINUI_JOIN_ROUND;
+                    } else if (!lj.empty()) {
+                        Warn("stroke-linejoin=\"" + lj + "\" 不认识，按圆角连接画（可选 miter / bevel / round）");
+                    }
+                    // stroke-miterlimit：只对 miter 有用；格式里借 head.reserve 这个空闲字节存
+                    std::string ml = style.count("stroke-miterlimit") ? style.at("stroke-miterlimit") : "";
+                    if (ml.empty() && e.attrs.count("stroke-miterlimit"))
+                        ml = e.attrs.at("stroke-miterlimit");
+                    if (!ml.empty()) {
+                        const float lim = parseLen(ml, 4.0f, "stroke-miterlimit");
+                        if (lim < 1.0f)
+                            Warn("stroke-miterlimit 不能小于 1，已按 1 处理（规范要求 ≥1）");
+                        pathMiterLimit = (uint8_t)std::min(255.0f, std::max(1.0f, lim));
+                    }
                 }
+                // 几何盒（不含描边）：渐变 objectBoundingBox 与"斜接撑盒"都以它为基准
+                const float geomMinX = svgPathShape.minX, geomMinY = svgPathShape.minY;
+                const float geomW = svgPathShape.Width(), geomH = svgPathShape.Height();
                 if (pathStroke) {   // 描边外扩后才是节点盒
                     const float e2 = pathStrokeW * 0.5f;
                     svgPathShape.minX -= e2; svgPathShape.minY -= e2;
                     svgPathShape.maxX += e2; svgPathShape.maxY += e2;
+                }
+                // 斜接尖角能伸出半线宽之外 (ratio-1)·半线宽。三个后端都"把每个节点裁剪到
+                // 自己的矩形"，所以盒子必须盖住尖角，否则尖角会被切平（看起来像斜面）。
+                // 用与运行期同一个 PathJoinAt 算交点，编译期与运行期不会各算一份。
+                if (pathStroke && pathJoin == BINUI_JOIN_MITER) {
+                    const float half = pathStrokeW * 0.5f;
+                    const float lim = pathMiterLimit > 0 ? (float)pathMiterLimit : 4.0f;
+                    for (const PathShape::Contour& ct : svgPathShape.contours) {
+                        if (ct.count < 2) continue;
+                        for (uint32_t k = 0; k < ct.count; k++) {
+                            const PathPointF& a2 = svgPathShape.pts[ct.first + k];
+                            const PathPointF& b2 = svgPathShape.pts[ct.first + (k + 1) % ct.count];
+                            const PathPointF& c2 = svgPathShape.pts[ct.first + (k + 2) % ct.count];
+                            if (!PathNeedJoin(a2.x, a2.y, b2.x, b2.y, c2.x, c2.y)) continue;
+                            const PathJoinGeom jg = PathJoinAt(a2.x, a2.y, b2.x, b2.y,
+                                                               c2.x, c2.y, half);
+                            if (!jg.ok || jg.ratio > lim) continue;   // 超限按斜面画，不会伸出去
+                            if (jg.mx < svgPathShape.minX) svgPathShape.minX = jg.mx;
+                            if (jg.my < svgPathShape.minY) svgPathShape.minY = jg.my;
+                            if (jg.mx > svgPathShape.maxX) svgPathShape.maxX = jg.mx;
+                            if (jg.my > svgPathShape.maxY) svgPathShape.maxY = jg.my;
+                        }
+                    }
                 }
                 // ---- v16 渐变填充：把"渐变空间"折进"节点盒归一化空间" ----
                 // 运行期拿到的是归一化坐标（设备 = 节点盒左上 + 归一化 × 盒尺寸），
@@ -5108,10 +5154,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                             M = PathMul(M, PathMul(svgX, gd.xform));
                         } else {
                             // objectBoundingBox：坐标是"几何包围盒（**不含描边**）的单位正方形"
-                            const float e2 = pathStroke ? pathStrokeW * 0.5f : 0.0f;
-                            const float fw = std::max(1e-6f, boxW - 2.0f * e2);
-                            const float fh = std::max(1e-6f, boxH - 2.0f * e2);
-                            M = PathMul(M, PathMul(PathTranslate(boxX + e2, boxY + e2),
+                            // 注意不能拿节点盒减 2·e2 反推：斜接撑盒可能是不对称的
+                            const float fw = std::max(1e-6f, geomW);
+                            const float fh = std::max(1e-6f, geomH);
+                            M = PathMul(M, PathMul(PathTranslate(geomMinX, geomMinY),
                                                    PathScale(fw, fh)));
                             M = PathMul(M, gd.xform);
                         }
@@ -5782,8 +5828,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             pp.head.designW = svgPathShape.Width();
             pp.head.designH = svgPathShape.Height();
             pp.head.strokeW = (uint8_t)std::min(255.0f, pathStrokeW);
-            pp.head.join = BINUI_JOIN_ROUND;
+            pp.head.join = pathJoin;
             pp.head.cap = pathCap;
+            pp.head.reserve = pathMiterLimit;   // 借空闲字节存 miter-limit（0 = 默认 4）
             PathNormData nd;
             if (NormalizeShape(svgPathShape, nd)) {
                 pp.head.pointCount = (uint16_t)std::min<size_t>(65535, nd.pts.size() / 2);

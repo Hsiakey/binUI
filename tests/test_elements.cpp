@@ -2652,28 +2652,132 @@ static void TestFill() {
     }
 }
 
+// 收集描边回调：线段数 / 圆点数 / 多边形顶点（斜接与斜面靠它验证）
+struct StrokeRec {
+    int lines = 0, dots = 0;
+    std::vector<std::vector<std::pair<float, float>>> polys;
+    void Reset() { lines = dots = 0; polys.clear(); }
+    // 任意点是否落在收集到的某个多边形内（凸多边形，按顶点绕向逐边同号判定）
+    bool Covers(float px, float py) const {
+        for (const auto& p : polys) {
+            const size_t n = p.size();
+            if (n < 3) continue;
+            // 有向面积定绕向：正 = 逆时针（内侧叉积恒正），负 = 顺时针（恒负）
+            float area2 = 0.0f;
+            for (size_t i = 0; i < n; i++) {
+                const auto& a = p[i];
+                const auto& b = p[(i + 1) % n];
+                area2 += a.first * b.second - b.first * a.second;
+            }
+            const float want = area2 >= 0.0f ? 1.0f : -1.0f;
+            bool in = true;
+            for (size_t i = 0; i < n && in; i++) {
+                const auto& a = p[i];
+                const auto& b = p[(i + 1) % n];
+                const float cross = (b.first - a.first) * (py - a.second) -
+                                    (b.second - a.second) * (px - a.first);
+                if (cross * want < 0.0f) in = false;
+            }
+            if (in) return true;
+        }
+        return false;
+    }
+};
+
+static int StrokeWith(const DevicePath& dev, float width, bool roundCap, uint8_t join,
+                      uint8_t miterLimit, StrokeRec& rec) {
+    rec.Reset();
+    return PaintPathStroke(dev.view(), width, roundCap, join, miterLimit,
+        [&](float, float, float, float, float) { rec.lines++; },
+        [&](float, float, float, float, float) { rec.dots++; },
+        [&](const float* xy, int n) {
+            std::vector<std::pair<float, float>> p;
+            for (int i = 0; i < n; i++) p.push_back({ xy[i * 2], xy[i * 2 + 1] });
+            rec.polys.push_back(std::move(p));
+        });
+}
+
 static void TestStroke() {
     PathShape sq;
     std::string err;
     ParsePathData("M0 0 H100 V100 H0 Z", 0.01f, sq, &err);
     DevicePath dev = ToDevice(sq);
-    int lines = 0, dots = 0;
-    const int segs = PaintPathStroke(dev.view(), 2.0f, false,
-        [&](float, float, float, float, float) { lines++; },
-        [&](float, float, float, float, float) { dots++; });
-    CHECK(segs == 4 && lines == 4, "描边：闭合路径段数 = 点数");
-    CHECK(dots == 4, "描边：四个直角各补一个圆点");
+    StrokeRec rec;
+    const int segs = StrokeWith(dev, 2.0f, false, BINUI_JOIN_ROUND, 0, rec);
+    CHECK(segs == 4 && rec.lines == 4, "描边：闭合路径段数 = 点数");
+    CHECK(rec.dots == 4, "描边：圆角连接在四个直角各补一个圆点");
+    CHECK(rec.polys.empty(), "描边：圆角连接不产生多边形");
 
     PathShape open;
     ParsePathData("M0 0 H100 V100", 0.01f, open, &err);
     DevicePath odev = ToDevice(open);
-    lines = dots = 0;
-    const int osegs = PaintPathStroke(odev.view(), 2.0f, false,
-        [&](float, float, float, float, float) { lines++; },
-        [&](float, float, float, float, float) { dots++; });
-    CHECK(osegs == 2 && lines == 2, "描边：开放路径段数 = 点数-1");
-    CHECK(dots == 1, "描边：只在真实转角补点");
+    const int osegs = StrokeWith(odev, 2.0f, false, BINUI_JOIN_ROUND, 0, rec);
+    CHECK(osegs == 2 && rec.lines == 2, "描边：开放路径段数 = 点数-1");
+    CHECK(rec.dots == 1, "描边：只在真实转角补点");
+
+    // ---- 斜接 / 斜面：直角转弯（0,0)→(100,0)→(100,100)，线宽 10（半宽 5）----
+    // 转角缺口是 (100,-5) (100,0) (105,0) 这个 5×5 方块的下三角。
+    const int nBevel = StrokeWith(odev, 10.0f, false, BINUI_JOIN_BEVEL, 0, rec);
+    CHECK(nBevel == 2 && rec.polys.size() == 1, "斜面：只补一个多边形");
+    CHECK(rec.polys.size() == 1 && rec.polys[0].size() == 3, "斜面：补的是三角形");
+    CHECK(rec.dots == 0, "斜面：不再补圆点");
+    if (rec.polys.size() == 1) {
+        const auto& p = rec.polys[0];
+        std::printf("  [svgpath] 斜面三角 = (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)\n",
+                    (double)p[0].first, (double)p[0].second, (double)p[1].first,
+                    (double)p[1].second, (double)p[2].first, (double)p[2].second);
+        CHECK_NEAR(p[0].first, 100.0f, 0.01f, "斜面：p1 在入射段外侧");
+        CHECK_NEAR(p[0].second, -5.0f, 0.01f, "斜面：p1 偏移半线宽");
+        CHECK(rec.Covers(102.0f, -1.0f), "斜面：缺口靠外的三角区被覆盖");
+        CHECK(!rec.Covers(104.0f, -4.0f), "斜面：尖角（斜接）区域不覆盖");
+    }
+
+    const int nMiter = StrokeWith(odev, 10.0f, false, BINUI_JOIN_MITER, 0, rec);
+    CHECK(nMiter == 2 && rec.polys.size() == 1, "斜接：补一个多边形");
+    CHECK(rec.polys.size() == 1 && rec.polys[0].size() == 4, "斜接：补的是四边形");
+    CHECK(rec.Covers(104.0f, -4.0f), "斜接：尖角区域被覆盖（斜面盖不到的那块）");
+    if (rec.polys.size() == 1) {
+        const auto& p = rec.polys[0];
+        std::printf("  [svgpath] 斜接四边形 = (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)\n",
+                    (double)p[0].first, (double)p[0].second, (double)p[1].first,
+                    (double)p[1].second, (double)p[2].first, (double)p[2].second,
+                    (double)p[3].first, (double)p[3].second);
+        CHECK_NEAR(p[1].first, 105.0f, 0.01f, "斜接点 x = 顶点 + 半线宽");
+        CHECK_NEAR(p[1].second, -5.0f, 0.01f, "斜接点 y = 顶点 - 半线宽（直角 1/sin45° = √2）");
+    }
+
+    // miter-limit：直角比值 √2 ≈ 1.414，限制给 1 时必须退回斜面
+    const int nLim = StrokeWith(odev, 10.0f, false, BINUI_JOIN_MITER, 1, rec);
+    CHECK(nLim == 2 && rec.polys.size() == 1 && rec.polys[0].size() == 3,
+          "斜接：超过 miter-limit 退回斜面（规范要求）");
+
+    // 尖角：几乎原路折返 → 斜接长度爆炸（1/sin(θ/2) 远大于 4），默认 limit 必须退回斜面。
+    // 注意"几乎直线"反而是 length≈1 的正常斜接，别拿它当尖角。
+    PathShape sharp;
+    ParsePathData("M0 0 L100 0 L4 4", 0.01f, sharp, &err);
+    DevicePath sharpDev = ToDevice(sharp);
+    const int nSharp = StrokeWith(sharpDev, 10.0f, false, BINUI_JOIN_MITER, 0, rec);
+    CHECK(nSharp == 2 && rec.polys.size() == 1 && rec.polys[0].size() == 3,
+          "斜接：尖角超过默认 miter-limit 4 退回斜面");
+    // 换成 limit 上限（255）就该真的画尖角
+    StrokeWith(sharpDev, 10.0f, false, BINUI_JOIN_MITER, 255, rec);
+    CHECK(rec.polys.size() == 1 && rec.polys[0].size() == 4, "斜接：limit 放大后画真尖角");
+    // 几乎直线的折点（转角 < 15°）：连缺口都不补 —— 折线是从曲线细分出来的，
+    // 这种微折点每个都补会让 draw call 翻倍，而缺口只有零点几像素。
+    PathShape nearly;
+    ParsePathData("M0 0 L100 0 L200 4", 0.01f, nearly, &err);
+    DevicePath nearlyDev = ToDevice(nearly);
+    StrokeWith(nearlyDev, 10.0f, false, BINUI_JOIN_MITER, 0, rec);
+    CHECK(rec.polys.empty() && rec.dots == 0, "斜接：转角 < 15° 的微折点不补缺口");
+
+    // 共线（没有转角）：不该补任何东西
+    PathShape flat;
+    ParsePathData("M0 0 H50 H100", 0.01f, flat, &err);
+    DevicePath flatDev = ToDevice(flat);
+    StrokeWith(flatDev, 10.0f, false, BINUI_JOIN_MITER, 0, rec);
+    CHECK(rec.polys.empty() && rec.dots == 0, "共线：不补缺口");
 }
+
 
 // 编译 → 加载 → 路径段往返：<path>/<ellipse> 必须编成 BINUI_PATH 节点，
 // 节点盒 = 几何包围盒，路径段里的折线能被渲染器取到（这是 B 阶段"端到端通"的证据）。
@@ -3153,6 +3257,73 @@ static void TestGradientBands() {
     }
 }
 
+// 描边连接：join / miter-limit 落库，以及"斜接尖角把节点盒撑开"（不撑开会被后端切平）
+static void TestLineJoin() {
+    const std::string starD =
+        "M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 "
+        "L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z";
+    auto compile = [&](const std::string& attrs, std::vector<std::string>* warns) {
+        const std::string html =
+            "<app_window width=\"96\" height=\"96\"><html width=\"96\" height=\"96\" bg=\"#000000\">"
+            "<body><svg x=\"0\" y=\"0\" width=\"96\" height=\"96\" viewBox=\"0 0 24 24\">"
+            "<path d=\"" + starD + "\" fill=\"none\" stroke=\"#F2B544\" stroke-width=\"2\" " +
+            attrs + "/></svg></body></html></app_window>";
+        auto res = binui::CompileBinUIEx(html);
+        if (warns) *warns = res.warnings;
+        BinUIRenderer r;
+        if (!r.loadLayout(res.layout.data(), res.layout.size())) return BinUIRenderer::PathRecord{};
+        for (const auto& n : r.getNodes()) {
+            if (n.type != BINUI_PATH) continue;
+            const auto* pr = r.pathOf(n.id);
+            if (pr) return *pr;
+        }
+        return BinUIRenderer::PathRecord{};
+    };
+
+    std::vector<std::string> w;
+    const auto roundRec = compile("stroke-linejoin=\"round\"", &w);
+    CHECK(w.empty(), "连接：round 不报警告");
+    CHECK(roundRec.head.join == BINUI_JOIN_ROUND, "连接：round 落库");
+    const auto miterRec = compile("stroke-linejoin=\"miter\" stroke-miterlimit=\"2\"", &w);
+    CHECK(w.empty(), "连接：miter + miterlimit 不报警告");
+    CHECK(miterRec.head.join == BINUI_JOIN_MITER, "连接：miter 落库");
+    CHECK(miterRec.head.reserve == 2, "连接：stroke-miterlimit 落库");
+    const auto bevelRec = compile("stroke-linejoin=\"bevel\"", &w);
+    CHECK(w.empty(), "连接：bevel 不报警告");
+    CHECK(bevelRec.head.join == BINUI_JOIN_BEVEL, "连接：bevel 落库");
+    CHECK(bevelRec.head.reserve == 0, "连接：没写 miterlimit 时留 0（运行期按默认 4）");
+
+    std::printf("  [svgpath] 连接盒：round=%.2fx%.2f  miter=%.2fx%.2f  bevel=%.2fx%.2f\n",
+                (double)roundRec.head.designW, (double)roundRec.head.designH,
+                (double)miterRec.head.designW, (double)miterRec.head.designH,
+                (double)bevelRec.head.designW, (double)bevelRec.head.designH);
+    // 五角星尖角的斜接比 ≈ 1/sin(18°) ≈ 3.24；limit=2 → 按斜面画，盒子不该被撑开
+    CHECK_NEAR(miterRec.head.designW, roundRec.head.designW, 0.02f,
+               "连接：miterlimit=2 时尖角超限按斜面画，盒子与圆角一致");
+    // limit 给足 → 斜接尖角伸出几何盒，节点盒必须跟着变大，否则后端会把它切平
+    const auto miterBig = compile("stroke-linejoin=\"miter\" stroke-miterlimit=\"10\"", &w);
+    CHECK(w.empty(), "连接：miterlimit=10 不报警告");
+    std::printf("  [svgpath] 斜接撑盒：round=%.2fx%.2f  miter(limit=10)=%.2fx%.2f\n",
+                (double)roundRec.head.designW, (double)roundRec.head.designH,
+                (double)miterBig.head.designW, (double)miterBig.head.designH);
+    CHECK(miterBig.head.designW > roundRec.head.designW + 0.5f,
+          "连接：斜接尖角把节点盒撑宽（不会被自己节点的裁剪矩形切平）");
+    CHECK(miterBig.head.designH > roundRec.head.designH + 0.5f,
+          "连接：斜接尖角把节点盒撑高");
+
+    // 认不出的值：明确告警，按圆角画
+    compile("stroke-linejoin=\"diagonal\"", &w);
+    bool warned = false;
+    for (const auto& s : w) { std::printf("  [svgpath][warn] %s\n", s.c_str());
+        if (s.find("stroke-linejoin") != std::string::npos) warned = true; }
+    CHECK(warned, "连接：不认识的值要告警");
+    // square 线帽仍未实现：必须告警（别静默）
+    compile("stroke-linecap=\"square\"", &w);
+    warned = false;
+    for (const auto& s : w) if (s.find("stroke-linecap") != std::string::npos) warned = true;
+    CHECK(warned, "连接：linecap=square 仍要告警（未实现）");
+}
+
 static void TestGradientCompile() {
     // <defs><linearGradient> + fill="url(#…)"：默认 objectBoundingBox 单位 → 归一化端点 0,0→1,0
     {
@@ -3306,6 +3477,7 @@ static int run() {
     TestSvgTextImage();
     TestGradientBands();
     TestGradientCompile();
+    TestLineJoin();
     std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");
     return g_fail;
 }

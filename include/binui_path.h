@@ -891,6 +891,67 @@ inline bool PointInPath(const PathShape& s, float px, float py, bool evenOdd) {
 }
 
 // ============================================================
+// 描边连接几何（stroke-linejoin）：斜接 / 斜面缺口的三角形与四边形
+//
+// 两个地方要用同一份数学，所以放在几何头里而不是 paint 头：
+//   · 运行期描边：`binui_paint.h` 用它在拐角补多边形；
+//   · 编译期算包围盒：斜接尖角能伸出几何包围盒 (ratio-1)·半线宽，
+//     不把盒子撑开就会被"每个节点都裁剪到自己矩形"的后端切平（见 buf 里 append tip）。
+// ============================================================
+inline float PathJoinCosThreshold() { return 0.966f; }   // cos(15°)
+
+// 两段方向夹角是否需要补缺口（补 = 转角超过 15°）
+inline bool PathNeedJoin(float ax, float ay, float bx, float by, float cx, float cy) {
+    const float ux = bx - ax, uy = by - ay;
+    const float vx = cx - bx, vy = cy - by;
+    const float lu = std::sqrt(ux * ux + uy * uy);
+    const float lv = std::sqrt(vx * vx + vy * vy);
+    if (lu <= 1e-6f || lv <= 1e-6f) return false;
+    const float cs = (ux * vx + uy * vy) / (lu * lv);
+    return cs < PathJoinCosThreshold();
+}
+
+// 转角缺口的几何：两条外侧偏移点 + 斜接点（外侧两条偏移线的交点）
+//   p1 = b + half·n(入射段)、p2 = b + half·n(出射段)、m = 两条偏移线的交点
+//   缺口区域 = 三角形 (p1, b, p2)（斜面）；斜接时再补上 (p1, m, p2) 那块尖角，
+//   合成四边形 (p1, m, p2, b)。两个多边形都只和线段"擦边"，不重复覆盖 ——
+//   半透明描边不会因此被叠加两次。
+struct PathJoinGeom {
+    bool ok = false;
+    float p1x = 0, p1y = 0;
+    float p2x = 0, p2y = 0;
+    float mx = 0, my = 0;
+    float ratio = 0;   // |m-b| / half = 1/sin(θ/2)：斜接尖角的长度比
+};
+
+inline PathJoinGeom PathJoinAt(float ax, float ay, float bx, float by, float cx, float cy,
+                               float half) {
+    PathJoinGeom g;
+    float ux = bx - ax, uy = by - ay, vx = cx - bx, vy = cy - by;
+    const float lu = std::sqrt(ux * ux + uy * uy);
+    const float lv = std::sqrt(vx * vx + vy * vy);
+    if (lu <= 1e-6f || lv <= 1e-6f) return g;
+    ux /= lu; uy /= lu; vx /= lv; vy /= lv;
+    const float cross = ux * vy - uy * vx;
+    if (std::fabs(cross) <= 1e-6f) return g;      // 共线 / 原地折返：没有缺口
+    // 外侧法线：方向向量转 -90°（y 向上/向下都成立，靠 cross 符号选边）
+    const float s = cross > 0.0f ? 1.0f : -1.0f;
+    g.p1x = bx + s * uy * half; g.p1y = by - s * ux * half;
+    g.p2x = bx + s * vy * half; g.p2y = by - s * vx * half;
+    // 斜接点 = 过 p1 沿 u 的直线 ∩ 过 p2 沿 v 的直线（二维叉积解）
+    const float dx = g.p2x - g.p1x, dy = g.p2y - g.p1y;
+    const float den = ux * vy - uy * vx;
+    if (std::fabs(den) <= 1e-9f) return g;
+    const float t = (dx * vy - dy * vx) / den;
+    g.mx = g.p1x + ux * t;
+    g.my = g.p1y + uy * t;
+    const float ddx = g.mx - bx, ddy = g.my - by;
+    g.ratio = std::sqrt(ddx * ddx + ddy * ddy) / half;
+    g.ok = true;
+    return g;
+}
+
+// ============================================================
 // 归一化（v15 路径段的存储形态）
 //
 // 每个点量化成 uint16：0..65535 映射包围盒内 0..1。

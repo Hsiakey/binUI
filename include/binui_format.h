@@ -437,9 +437,9 @@ enum BinUIPathFlag : uint16_t {
 
 
 enum BinUIPathJoin : uint8_t {
-    BINUI_JOIN_ROUND = 0, // 本版唯一实现（折线接缝补圆）
-    BINUI_JOIN_MITER = 1, // 预留
-    BINUI_JOIN_BEVEL = 2, // 预留
+    BINUI_JOIN_ROUND = 0, // 转角补圆点（binUI 的历史默认，也是 v15 的唯一实现）
+    BINUI_JOIN_MITER = 1, // 斜接：补三角形 + 尖角四边形；超过 miter-limit 按 bevel 画
+    BINUI_JOIN_BEVEL = 2, // 斜面：只补三角形
 };
 
 enum BinUIPathCap : uint8_t {
@@ -463,7 +463,7 @@ struct BinUIPathEntry {
     uint8_t  strokeW;       // 设计线宽（像素，0 = 不描边）
     uint8_t  join;          // BinUIPathJoin
     uint8_t  cap;           // BinUIPathCap
-    uint8_t  reserve;
+    uint8_t  reserve;       // stroke-miterlimit（0 = 运行期按 SVG 默认 4）
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIPathEntry) == 28, "BinUIPathEntry must be 28 bytes");
