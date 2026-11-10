@@ -3591,6 +3591,24 @@ void BinUIAppGLGdi::handleResize(int w, int h) {
     pendingH_ = h;
 }
 
+// 客户区是否盖满整块显示器（borderless 全屏）。
+// 这种状态下 NVIDIA 的 SwapBuffers 会被 DWM 提升成直翻转，实测在远程桌面/虚拟显示器上
+// 画面会**停住不动**（应用仍在 100fps 绘制，屏幕却是旧帧），切回普通尺寸就恢复。
+// 判定：客户区宽高都 ≥ 所在显示器的尺寸。
+bool BinUIAppGLGdi::clientCoversMonitor() const {
+    const HWND h = static_cast<HWND>(hwnd_);
+    if (!h || childMode_) return false;
+    RECT cr;
+    if (!GetClientRect(h, &cr)) return false;
+    const HMONITOR mon = MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO mi = {};
+    mi.cbSize = sizeof(mi);
+    if (!mon || !GetMonitorInfoW(mon, &mi)) return false;
+    const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+    const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+    return (cr.right - cr.left) >= mw && (cr.bottom - cr.top) >= mh;
+}
+
 void BinUIAppGLGdi::applyPendingResize() {
     if (pendingW_ <= 0 || pendingH_ <= 0) return;
     int w = pendingW_, h = pendingH_;
@@ -3599,6 +3617,7 @@ void BinUIAppGLGdi::applyPendingResize() {
     height_ = h;
     if (resize_) resize_(w, h);
     gfx_.resize(w, h);
+    fullscreenPresent_ = clientCoversMonitor();
     invalidateAll();
 }
 
@@ -3612,7 +3631,10 @@ void BinUIAppGLGdi::renderOnce() {
         gfx_.beginFrame(rc);
         if (draw_) draw_(gfx_, rc);
         const double t2 = perf.on ? NowMs() : 0.0;
-        if (gdiPresent_ && !transparent_) gfx_.presentViaGdi();
+        // 拖拽 resize 期与"客户区铺满显示器"时都走 GDI 贴屏：
+        // 前者绕开 NVIDIA 在 resize+SwapBuffers 组合下的崩溃，
+        // 后者绕开全屏直翻转导致的"画面停住"（见 clientCoversMonitor 注释）。
+        if ((gdiPresent_ || fullscreenPresent_) && !transparent_) gfx_.presentViaGdi();
         else gfx_.present();
         dirty_ = false;
         if (perf.on) {

@@ -73,12 +73,7 @@ int main(int argc, char* argv[]) {
         if (ev.nodeId == idWinClose) { app.requestExit(); return; }
     });
 
-    auto findNode = [&](uint16_t id) -> const binui::BinUIRenderer::NodeInfo* {
-        for (const auto& n : renderer.getNodes())
-            if (n.id == id) return &n;
-        return nullptr;
-    };
-        auto invalidateNode = [&](uint16_t id) {
+    auto invalidateNode = [&](uint16_t id) {
         // 失效矩形必须含动画后的包围盒：hover 放大时只按布局矩形失效，
         // 长出来的那一圈（边框/底色）不会被重绘，看上去就是"边框被削掉一半"
         float bx, by, bw, bh;
@@ -86,11 +81,12 @@ int main(int argc, char* argv[]) {
             app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
     };
 
-    // <canvas id="cvEq"> 绘制面：取得节点矩形（绝对坐标）
+    // <canvas id="cvEq"> 绘制面。**不要缓存它的矩形**：窗口一改大小，layout 会把这
+    // 个盒子挪走/缩放（百分比/flex），缓存的旧矩形失效后，每帧只重绘旧位置那一块，
+    // 画布剩下的部分就永远停在上一帧 —— 表现为"最大化后动画停了 + 画布割裂"。
+    // 失效一律用 renderer.invalidRect(id) 现取（它含动画后的包围盒）。
     uint16_t cvId = renderer.findNodeByName("cvEq");
     if (!cvId) std::fprintf(stderr, "[svgdemo] MISS canvas \"cvEq\"\n");
-    float cvX = 0, cvY = 0, cvW = 0, cvH = 0;
-    if (const auto* n = findNode(cvId)) { cvX = n->x; cvY = n->y; cvW = n->width; cvH = n->height; }
 
     // 频谱条数据（updateFn 每帧推进，drawFn 的 canvas 回调读取绘制）
     const int kN = 20;
@@ -180,8 +176,6 @@ int main(int argc, char* argv[]) {
         if (hot.Tick(renderer, "svgdemo", winW, winH) == binui::ex::HotReload::Result::Reloaded) {
             // 换树后本 demo 缓存的节点几何全部失效：按 id 重新取
             cvId = renderer.findNodeByName("cvEq");
-            cvX = cvY = cvW = cvH = 0;
-            if (const auto* n = findNode(cvId)) { cvX = n->x; cvY = n->y; cvW = n->width; cvH = n->height; }
             app.invalidateAll();
         }
         static const double t0 = NowSec();
@@ -192,10 +186,8 @@ int main(int argc, char* argv[]) {
             float target = 0.18f + 0.82f * (0.5f + 0.5f * sinf(t * 2.1f + k * 0.62f));
             bars[k] += (target - bars[k]) * std::min(1.0f, dt * 4.0f);
         }
-        if (cvId && cvW > 0) {
-            app.invalidateRect((int)cvX, (int)cvY, (int)cvW, (int)cvH);
-            // 频谱条闪烁的"节拍"指示：脉动画布右下小圆（用 canvas 里画）
-        }
+        // 每帧只重绘画布本身：矩形现取（见上面 cvId 处的注释），布局变了也不会失效
+        if (cvId) invalidateNode(cvId);
 
         // CSS 动画推进
         for (uint16_t id : renderer.stepAnimations())

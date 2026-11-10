@@ -1,7 +1,7 @@
 # binUI - 跨平台描述式 UI 核心
 
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.9.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.9.1-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
 [![Format v18](https://img.shields.io/badge/binUI%20format-v19-orange.svg)](include/binui_format.h)
@@ -145,6 +145,10 @@ D3D11 后端要点：
 GPU 后端缩放处理（D3D11 / OpenGL 同构）：
 - 手动拖边缩放时 `WM_SIZE` 只记录尺寸，合并为每帧应用一次（`applyPendingResize`），交换链/FBO 每帧至多重建一次，避免高频重建导致的花屏/卡顿。
 - 拖拽循环（`startResize`）：窗口每帧实时跟随鼠标缩放（`SetWindowPos`），并每帧按新尺寸渲染离屏 + **`presentViaGdi` 呈现**（读回离屏像素 → `StretchDIBits` 到窗口 DC），拖拽中内容实时重绘、清晰跟手。**拖拽期间绝不 `SwapBuffers`**——实测 NVIDIA 驱动（nvoglv64 `DrvPresentBuffers`）在"窗口 resize + SwapBuffers"组合下稳定崩溃（角点圆周拖拽半圈内必崩，呈现路径跳到损坏的堆地址；vsync 开关/上下文 detach/节流呈现均无法规避），GDI 呈现完全绕开驱动 present 路径。松手时仍以 GDI 呈现一次最终清晰帧，surface 稳定后恢复正常 `SwapBuffers`（透明分层窗口本身走 `UpdateLayeredWindow`、不 SwapBuffers，不受影响）。
+- **客户区铺满整块显示器（borderless 全屏 / 最大化）时也走 `presentViaGdi`**：这种尺寸下 DWM 会把
+  `SwapBuffers` 提升成直翻转，实测（NVIDIA + 远程桌面/虚拟显示器）应用仍在 ~100fps 绘制、屏幕却停在
+  旧帧——表现为"最大化后动画停了、画面割裂，切回普通尺寸就恢复"。`clientCoversMonitor()` 判定
+  "客户区宽高 ≥ 所在显示器"，命中就切 GDI 贴屏。判定在 `applyPendingResize()` 里重算，尺寸变回来自动恢复。
 - D3D11 `ResizeBuffers` 失败时记录日志并自动重试一次。
 
 透明窗口（`<app_window transparent="true">` 或画布 bg 带 alpha）：两 GPU 后端走 WS_EX_LAYERED 分层窗口，离屏 premultiplied 缓冲读回 → `UpdateLayeredWindow` 每像素合成到桌面；`resizable="false"` 时命中测试禁用拖边，`aspect` 在缩放循环内做等比约束。

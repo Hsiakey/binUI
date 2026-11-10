@@ -236,6 +236,10 @@ private:
     int width_ = 0, height_ = 0;
     bool vsync_ = true;
     bool gdiPresent_ = false; // resize 拖拽期：present 走 GDI（读回离屏 → StretchDIBits），不 SwapBuffers
+    // 客户区盖满整块显示器时也要走 GDI 贴屏：全屏直翻转会让驱动/远程显示器拿不到新帧
+    // （应用还在 100fps 画，屏幕上却是旧画面）。由 applyPendingResize 重算。
+    bool fullscreenPresent_ = false;
+    bool clientCoversMonitor() const;
     BinUIGLGdi gfx_;
     void* hwnd_ = nullptr;
 
