@@ -6,25 +6,30 @@
 
 ## [Unreleased]
 
-### 新增 — 打包清单 `.bui.srcmap` + `binui_export`：**内嵌的包也能解包回打包前的目录结构**
+### 新增 — 打包清单 `binui.res` + `binui_export`：**内嵌的包也能解包回打包前的目录结构**
 
 - 之前文档里写"从 `.bui` 反推源码树做不到"——那是**没有清单**时的结论。现在补上了：
-  编译时在产物旁边写一份 `.srcmap`，记录主 UI 与每个被内联/外挂组件的**原始文件字节** +
-  相对 appRootDir 的路径；`binui_export` 按它逐字节还原，不是"节点树反推 HTML"那种有损转换。
-- **不动二进制布局**：清单是独立文件，`BINUI_VERSION` 保持 14，`.bui` 一个字节都不变，
-  加载路径与启动性能零影响。想保护源码就不带这个文件（或 `--no-srcmap`）。
+  编译时在产物目录写一份 `binui.res`（清单 + 原路径），记录主 UI 与每个被内联/外挂组件的
+  **完整原始文件内容** + 相对 appRootDir 的路径；`binui_export` 按它逐字节还原，
+  不是"节点树反推 HTML"那种有损转换，也不是偏移量记录（倒出来就是原文件本身）。
+- **可有可无**：`binui.res` 是旁挂文件，布局里没有任何东西引用它。实测删掉后同一份
+  `.bui` 的离屏渲染**逐像素不变**（0 差异），只是不能再解包。
+- **不动二进制布局**：`BINUI_VERSION` 保持 14，`.bui` 一个字节都不变，加载路径与启动性能
+  零影响。想保护源码就不带这个文件（或 `--no-srcmap`）。
+- **一目录一份**：多个 `.bui` 编到同一目录时清单**合并**（同路径以本次为准）。
 - 路径口径：先记绝对路径，最后统一折算成**相对所有文件共同祖先**的相对路径。所以
   `main.bui.html` 在 `examples/features/`、组件用 `../../components/x` 引用的工程，
   解出来的就是 `examples/features/main.html` + `components/x.bum.html`，与原树一致。
 - 新增 `/lib` 侧：`CompileOptions::emitSrcMap`（默认 false）、`CompileResult::srcMap`、
   header-only 的 `include/binui_srcmap.h`（`BuildSrcMap` / `ParseSrcMap`）。
 - 新增工具 **`binui_export`**：`binui_export main.bui -o restore/`，支持 `--list`。
-  `binui_compile` 默认产出 `<out>.srcmap`，`--no-srcmap` 关闭。
+  `binui_compile` 默认产出 `binui.res`，`--no-srcmap` 关闭；旧产物 `<x.bui>.srcmap`
+  仍能读取。
 - 实测闭环（examples/features：源码组件 + 二进制组件 + 外挂组件）：
   编出 `main.bui` → `binui_export` → 6 个文件**逐字节 SHA256 全等** →
   解包出来的树再编一次 → `.bui` **逐字节相同**（同一 SHA256）。
 - 顺带：`binui_compile -o` 指向不存在的目录时自动建父目录（以前直接失败）。
-- 测试：`test_css` 新增 9 条 srcmap 断言（开关产出 / 可解析 / 第 0 条是主 UI /
+- 测试：`test_css` 新增 9 条清单断言（开关产出 / 可解析 / 第 0 条是主 UI /
   与原文件逐字节一致 / 多实例只记一份 / 嵌套组件在清单 / 读不到的组件不进清单 /
   路径都是相对 / 默认不产出）。
 

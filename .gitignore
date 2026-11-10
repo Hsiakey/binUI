@@ -23,7 +23,8 @@ compile_commands.json
 *.so
 *.dylib
 *.binui
-# 打包清单（binui_compile 默认在产物旁边生成，binui_export 靠它解包）
+# 打包清单（binui_compile 默认写在产物目录，binui_export 靠它解包）
+binui.res
 *.srcmap
 
 # ---------- 第三方源码（体积大，用 scripts/fetch-deps.sh 拉取） ----------

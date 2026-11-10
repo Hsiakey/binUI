@@ -17,8 +17,9 @@ build-mingw/bin/binui_compile.exe dist/titlebar.bum -o dist2/titlebar.bum   # �
 `make components` / CMake 的 `components_bums` 目标会在构建期生成示例组件二进制。
 详见 [docs/components.md](../docs/components.md)。
 
-默认会在产物旁边写一份 **打包清单** `<out>.srcmap`（主 UI + 每个组件的原始字节与路径），
-`binui_export` 靠它解包；`--no-srcmap` 不生成，等于这个包不可解包。
+默认会在产物**所在目录**写一份 **打包清单** `binui.res`（清单 + 原路径：主 UI + 每个组件的
+原始字节与相对路径）。`binui_export` 靠它解包；`--no-srcmap` 不生成。它可有可无 ——
+删掉不影响运行，只是这个包不能再解包。多个 `.bui` 编到同一目录时条目会合并。
 
 ## binui_export —— 把 .bui 还原成打包前的目录结构
 
@@ -28,9 +29,9 @@ make tools && build-mingw/bin/binui_export.exe build/main.bui -o restore/
 build-mingw/bin/binui_export.exe build/main.bui --list    # 只看清单，不写文件
 ```
 
-读的是旁边那份 `main.bui.srcmap`。存的是**原始文件字节 + 相对 appRootDir 的路径**，
-所以是逐字节还原，不是"节点树反推 HTML"。没带 `.srcmap` 的包不可解包（这正是"不想泄露源码
-就别带"的开关）。解出来的树能再编一次，产出同一个字节的 `.bui`。
+读的是同目录那份 `binui.res`。存的是**原始文件字节 + 相对 appRootDir 的路径**（不是偏移量，
+倒出来就是原文件），
+所以是逐字节还原，不是"节点树反推 HTML"。没带 `binui.res` 的包不可解包（这正是"不想泄露源码就别带"的开关）。解出来的树能再编一次，产出同一个字节的 `.bui`。
 
 ## check_examples —— 示例 UI 零警告检查
 

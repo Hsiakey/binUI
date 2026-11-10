@@ -3,14 +3,15 @@
 // 用法:
 //   binui_export <x.bui|.bum> [-o <outDir>] [-q] [--list]
 //
-//   <x.bui>  由 binui_compile 产出的布局；旁边要有 <x.bui>.srcmap
+//   <x.bui>  由 binui_compile 产出的布局；同目录要有 binui.res（清单）
 //   -o       输出目录（默认：<布局文件名>.src/）
 //   --list   只列出清单里的路径，不写文件
 //
 // 打包清单里存的是**原始文件字节** + 相对 appRootDir 的路径（见 include/binui_srcmap.h），
 // 所以还原出来的就是打包前的那些文件本身 —— 不是"节点树反推的等价 HTML"那种有损转换。
 //
-// 没带 .srcmap 的包不可解包（这正是"想保护源码就别带"的开关）。
+// 没带 binui.res 的包不可解包（这正是"想保护源码就别带"的开关），但**不影响运行**：
+// 布局里没有任何东西依赖它。
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
@@ -28,7 +29,7 @@ namespace {
 void Usage() {
     std::printf(
         "用法: binui_export <x.bui|.bum> [-o <outDir>] [-q] [--list]\n"
-        "  <x.bui>  由 binui_compile 产出的布局，旁边需要 <x.bui>.srcmap\n"
+        "  <x.bui>  由 binui_compile 产出的布局，同目录需要 binui.res\n"
         "  -o       输出目录（默认 <布局文件名>.src/）\n"
         "  --list   只列路径不写文件\n"
         "  -q       静默（只打错误）\n");
@@ -72,14 +73,25 @@ int main(int argc, char* argv[]) {
     }
     if (in.empty()) { Usage(); return 1; }
 
-    // 输入可以是布局文件，也可以直接指 .srcmap
+    // 输入可以是布局文件，也可以直接指清单（binui.res / *.srcmap）
+    // 查找顺序：<x.bui>.srcmap（旧约定，一 UI 一清单）→ 同目录 binui.res（新约定，一目录一份）
     std::string mapPath = in;
-    if (!binui::AssetEndsWith(binui::AssetLower(in), ".srcmap")) mapPath = in + ".srcmap";
+    const std::string low = binui::AssetLower(in);
+    if (!binui::AssetEndsWith(low, ".srcmap") && !binui::AssetEndsWith(low, ".res")) {
+        const std::filesystem::path inPath(in);
+        const std::filesystem::path dir =
+            inPath.has_parent_path() ? inPath.parent_path() : std::filesystem::path(".");
+        mapPath.clear();
+        std::error_code ec;
+        const std::string resPath = (dir / "binui.res").generic_string();
+        if (std::filesystem::is_regular_file(resPath, ec)) mapPath = resPath;
+        else mapPath = in + ".srcmap";
+    }
 
     std::vector<uint8_t> mapBytes;
     if (!ReadFile(mapPath, mapBytes)) {
         std::fprintf(stderr, "binui_export: 找不到打包清单 %s\n", mapPath.c_str());
-        std::fprintf(stderr, "  （这个包没带 .srcmap，无法解包。编译时别加 --no-srcmap 即可产出。）\n");
+        std::fprintf(stderr, "  （这个包没带 binui.res，无法解包。编译时别加 --no-srcmap 即可产出。）\n");
         return 1;
     }
     std::vector<binui::SrcMapEntry> entries;

@@ -8,9 +8,10 @@
 //   -q     静默（只打错误）
 //   --no-srcmap  不产出 <out>.srcmap
 //
-// 默认会在 <out> 旁边写一份 **打包清单** `<out>.srcmap`：主 UI 与每个被内联/外挂的
+// 默认会在 <out> 所在目录写一份 **打包清单** `binui.res`：主 UI 与每个被内联/外挂的
 // 组件的**原始字节** + 相对 appRootDir 的路径。binui_export 靠它把 .bui 还原成打包前
-// 的目录结构（逐字节一致）。不想泄露源码就不带这个文件，或用 --no-srcmap 不生成。
+// 的目录结构（逐字节一致）。可有可无：不带它就是不可解包，运行完全不受影响。
+// 一个目录一份（多个 .bui 编到同一目录会合并），--no-srcmap 不生成。
 //
 // 约定（docs/components.md）：
 //   .bui  单个 UI（应用入口，可直接 loadLayout）
@@ -21,11 +22,13 @@
 #include <cstdio>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
 #include "binui_compiler.h"
 #include "binui_link.h"
+#include "binui_srcmap.h"
 
 namespace {
 
@@ -34,7 +37,7 @@ void Usage() {
                 "  <src>  .bui.html / .bum.html / .html / .xml / 已编译的 .bui|.bum\n"
                 "  -o     输出路径（默认同目录：x.bum.html -> x.bum，x.bui.html -> x.bui）\n"
                 "  -q     静默（只打错误）\n"
-                "  --no-srcmap  不产出 <out>.srcmap（打包清单，binui_export 靠它解包）\n");
+                "  --no-srcmap  不产出 binui.res（打包清单，binui_export 靠它解包）\n");
 }
 
 bool EndsWith(const std::string& s, const char* tail) {
@@ -137,24 +140,53 @@ int main(int argc, char* argv[]) {
     std::fwrite(res.layout.data(), 1, res.layout.size(), f);
     std::fclose(f);
 
-    // 打包清单：<out>.srcmap（binui_export 靠它还原打包前的目录结构）
-    bool srcmapOk = false;
+    // 打包清单：<out 所在目录>/binui.res（binui_export 靠它还原打包前的目录结构）。
+    // 一个目录一份清单：多个 .bui 编到同一目录时会合并（同路径以本次为准），
+    // 所以"清单 + 原路径"是整包级别的，而不是每个 .bui 一个。
+    bool resOk = false;
     if (!res.srcMap.empty()) {
-        const std::string mapPath = out + ".srcmap";
-        FILE* mf = std::fopen(mapPath.c_str(), "wb");
+        const std::filesystem::path outPath(out);
+        const std::filesystem::path mapPath =
+            (outPath.has_parent_path() ? outPath.parent_path() : std::filesystem::path(".")) / "binui.res";
+
+        std::vector<uint8_t> merged = res.srcMap;
+        // 已有清单 -> 先读进来，按路径合并
+        {
+            std::vector<uint8_t> oldBytes;
+            std::ifstream oldIn(mapPath, std::ios::binary);
+            if (oldIn) {
+                oldBytes.assign(std::istreambuf_iterator<char>(oldIn), std::istreambuf_iterator<char>());
+                std::vector<binui::SrcMapEntry> oldEnts, newEnts;
+                if (binui::ParseSrcMap(oldBytes.data(), oldBytes.size(), oldEnts) &&
+                    binui::ParseSrcMap(res.srcMap.data(), res.srcMap.size(), newEnts)) {
+                    std::vector<binui::SrcMapEntry> all = oldEnts;
+                    for (auto& ne : newEnts) {
+                        bool replaced = false;
+                        for (auto& oe : all) {
+                            if (oe.path == ne.path) { oe = ne; replaced = true; break; }
+                        }
+                        if (!replaced) all.push_back(ne);
+                    }
+                    merged = binui::BuildSrcMap(all);
+                }
+            }
+        }
+
+        FILE* mf = std::fopen(mapPath.generic_string().c_str(), "wb");
         if (mf) {
-            std::fwrite(res.srcMap.data(), 1, res.srcMap.size(), mf);
+            std::fwrite(merged.data(), 1, merged.size(), mf);
             std::fclose(mf);
-            srcmapOk = true;
+            resOk = true;
         } else {
-            std::fprintf(stderr, "binui_compile: 无法写入 %s（布局已正常产出）\n", mapPath.c_str());
+            std::fprintf(stderr, "binui_compile: 无法写入 %s（布局已正常产出）\n",
+                         mapPath.generic_string().c_str());
         }
     }
 
     if (!quiet) {
         std::printf("[binui_compile] %s -> %s（%zu 字节", in.c_str(), out.c_str(), res.layout.size());
         if (!res.images.empty()) std::printf("，资源 %zu 项", res.images.size());
-        if (srcmapOk) std::printf("，打包清单 %zu 字节", res.srcMap.size());
+        if (resOk) std::printf("，打包清单 %zu 字节", res.srcMap.size());
         std::printf("）\n");
     }
     return 0;

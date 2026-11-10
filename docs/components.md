@@ -199,14 +199,14 @@ binui_export build/main.bui --list             # 只看包里有哪些文件
 `build-mingw/assets/components/*.bum`；CMake 里是 `components_bums` 目标
 （`cmake --build . --target components_bums`）。产物不落源码树。
 
-## 八、打包清单与解包（`.bui.srcmap`）
+## 八、打包清单与解包（`binui.res`）
 
-**内嵌的包也能还原打包前的目录结构** —— 靠编译时在旁边写的一份打包清单。
+**内嵌的包也能还原打包前的目录结构** —— 靠编译时在同一目录写的一份打包清单 `binui.res`。
 
 ```bash
 binui_compile src/main.bui.html -o out/binui/main.bui
 #   -> out/binui/main.bui
-#   -> out/binui/main.bui.srcmap     ← 打包清单
+#   -> out/binui/binui.res     ← 打包清单（清单 + 原路径）
 
 binui_export out/binui/main.bui -o restore/
 #   restore/
@@ -217,15 +217,18 @@ binui_export out/binui/main.bui -o restore/
 
 清单里存的是**每个文件的原始字节** + **相对 appRootDir 的路径**（不是编译机的绝对路径，
 所以整包搬到哪都能还原）。记录的是"打包时用到的那些文件"：主 UI、每个被内联的组件源码、
-每个被链接/外挂的 `.bum`。
+每个被链接/外挂的 `.bum`。**存的是完整文件内容，不是偏移量**，所以倒出来就是原文件本身。
 
-三条性质：
+四条性质：
 
-1. **逐字节还原**：存的就是原文件内容，不是"节点树反推 HTML"那种有损转换
+1. **可有可无，不影响运行**：`binui.res` 只是旁挂文件，布局里没有任何东西引用它。
+   删掉它，同一份 `.bui` 的渲染逐像素不变（实测 0 差异），只是这个包不能再解包。
+2. **逐字节还原**：存的就是原文件内容，不是"节点树反推 HTML"那种有损转换
    （那种会把 CSS 级联、flex、`{{参数}}` 全拍平成绝对值）。
-2. **解包出来的树能再编一次，产出同一个字节的 `.bui`**（实测：SHA256 相同）。
-3. **不想给就不给**：`.srcmap` 是独立文件，不随 `.bui` 走。发行时别带它、或者编译时
-   `--no-srcmap` 不生成，就没有任何源码泄露；主 `.bui` 一个字节都不变。
+3. **解包出来的树能再编一次，产出同一个字节的 `.bui`**（实测：SHA256 相同）。
+4. **一目录一份**：多个 `.bui` 编到同一目录时会**合并**条目（同路径以本次为准），
+   所以 `binui.res` 是整包级别的。不同 `.bui` 的 appRootDir 不同时，同一个组件可能在
+   清单里出现两次（内容相同、路径不同），解包会写出两份 —— 无害。
 
 > 为什么不把清单塞进 `.bui`：那会引入新的格式段、升 `BINUI_VERSION`，还会让包里**一定**
 > 带着源码（没得选）。旁挂文件是"要不要暴露"的开关，而布局格式和加载性能完全不动。
@@ -235,12 +238,17 @@ binui_export out/binui/main.bui -o restore/
 binui::CompileOptions opt;
 opt.emitSrcMap = true;                                   // 默认 false
 binui::CompileResult res = binui::CompileBinUIFileEx("main.bui.html", opt);
-if (!res.srcMap.empty()) /* 写 main.bui.srcmap */;
+if (!res.srcMap.empty()) /* 自己写到 binui.res */;
 
 // 读回来（header-only）
 std::vector<binui::SrcMapEntry> entries;
 binui::ParseSrcMap(res.srcMap.data(), res.srcMap.size(), entries);
 ```
+
+> 没有 `binui.res` 就**没法重建目录结构** —— 内联后 `.bui` 里只剩扁平节点树，组件边界和
+> `<use src>` 路径都没留下（只有 `external` 外挂组件的路径在 v12 组件引用段里）。所以
+> "从 `.html` 的引用路径重建"这条路要先有 `.html`，那时也就不需要解包了。
+
 
 ## 九、两个必须知道的坑
 
