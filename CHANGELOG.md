@@ -8,6 +8,62 @@
 
 （暂无）
 
+## [0.5.0] - 2026-11-10
+
+本轮主题：**SVG 渐变**（`<linearGradient>` / `<radialGradient>`，【格式 v16】）。
+破坏性：`BINUI_VERSION` 15 → 16，旧 `.bui` / `.bum` 需重编（`binui.res` 里是源码，重编即可）。
+
+### 新增 — SVG 渐变填充
+
+- `fill="url(#id)"` 引用 `<linearGradient>` / `<radialGradient>`，现在能直接粘现成素材了：
+  - **线性**任意角度（`x1/y1/x2/y2`）、**径向椭圆**（`cx/cy/r`，包围盒非正方时两轴半径不同，
+    符合 SVG 语义；`rx/ry` 分开存就是为了这个）
+  - **2–8 个色标**：`offset`（支持 `"50%"`）、`stop-color`、`stop-opacity`，也认
+    `style="stop-color:#fff;stop-opacity:.5"`；缺 `offset` 按等距插值、整体非递减夹紧；
+    `stop-color="currentColor"` 沿祖先链取 `color`
+  - `spreadMethod="pad|repeat|reflect"`
+  - `gradientTransform`（走既有 `ParseSvgTransform`）、`gradientUnits="objectBoundingBox"`（默认）
+    与 `"userSpaceOnUse"`
+  - `href` / `xlink:href` 继承另一个渐变的色标与未写明的属性（深度 ≤8 + 环检测）
+  - `fill` 的继承链继续生效：`<svg fill="url(#g)">` / `<g fill="url(#g)">` 全子树带渐变
+- **实现方式**：渐变在编译期折成**包围盒归一化坐标**（与折线点同一套映射，缩放节点盒时渐变
+  跟着缩放），运行期把每条扫描线条带的颜色从常量换成 `t` 的函数 —— 不需要着色器、不需要纹理、
+  不需要每端各写一份采样数学，三端仍然只画 `fillRect`。两处关键取舍：
+  - **量化**：`t` 量化到 `levels` 级（每 ~2 设备像素一级，8..96）、级内取级中心色，同色行才能
+    继续合并成高条带 —— 否则每条带颜色都不同，400px 高的形状就是 400 条带；
+  - **按方向切段**：颜色沿 x 变时按"走一级要几个像素"把这一行切细，纯垂直渐变一段都不切。
+    结果横竖两个方向的条带数都只跟级数同量级：100×100 垂直/水平渐变各 **50 条**，
+    24×24 图标尺寸对角渐变 **20 条**，400×400 对角渐变 **2352 条一次画完**（不降级）。
+- `<circle>` / `<rect>` 的**渐变填充**也会自动降级成路径（轻量映射只能表达一个颜色）。
+- 三端一致性实测：同一份 UI 的 11 个渐变区域（横/竖/45°/径向/宽盒径向/repeat/rotate/窄条/
+  盾牌/圆角矩形/`<g>` 继承）**GDI 与 GL 逐像素完全一致（最大通道差 0）**；差异只落在既有的
+  描边边缘（GL `fillLine` 自带 AA）与文字抗锯齿上。
+
+### 新增 — 不支持的渐变写法一律告警（都带替代方案）
+
+`stroke="url(#…)"`（渐变描边，按首个色标纯色画）、`>8` 个色标（截断）、径向焦点 `fx/fy`
+（按同心圆画）、径向 + `gradientTransform` 含旋转/斜切（按轴对齐椭圆近似）、
+`userSpaceOnUse` 下的百分比（按用户单位折算，不是 viewport 比例）、
+`<text>` / `<polyline>` / `<polygon>` 的渐变填充（降级纯色）、`url(#不存在)`（退回纯色）。
+`<linearGradient>` / `<radialGradient>` / `<stop>` 也不再出现在"不支持标签"表里。
+
+### 变更 — 格式 v16
+
+- 路径记录在定长头 `BinUIPathEntry` 之后可选追加 `BinUIPathGradient`（92 字节：
+  类型 / spread / 2 个端点或圆心 + 椭圆两轴半径 / 内联 8 个色标），只有 `PATH_FILL_GRAD`
+  置位时才写 —— 纯色路径的字节布局与 v15 完全一样，多出来的成本只落在渐变节点上。
+- 单条路径的条带上限 `kMaxPathBands` 2048 → 4096（渐变的条带比纯色多，见上）。
+- 渲染器 / 链接器 / 三端 `BINUI_PATH` 分支都带上了渐变；`PathRecord` 新增 `hasGrad` + `grad`。
+
+### 验证
+
+- `make all tools`：0 warning。
+- 四套测试全绿；`suite_svgpath` 新增 `TestGradientBands`（量化/切段/合并/spread/退化/透明度
+  共 9 组数值断言）与 `TestGradientCompile`（默认 oBB 端点、`userSpaceOnUse` 折算、
+  `href` 继承、径向默认 50%、缺定义告警 4 组端到端断言）。
+- `check_examples`：11 个 UI 0 问题；`examples/svgdemo` 图标条新增四个渐变样例并重出截图。
+- `make pixels`：**6/6 零差异**（新增基准 `svggrad`，420×260）。
+
 ## [0.4.0] - 2026-11-10
 
 本轮主题：**SVG 从"五个图元"升级成"能直接粘现成素材"**（【格式 v15】），
