@@ -447,4 +447,215 @@ inline int BuildDashedRoundRing(float x, float y, float w, float h, float radius
     return n;
 }
 
+// ============================================================
+// 路径填充（SVG <path>/<ellipse>）：折线 → 逐行扫描线 → 轴对齐条带
+//
+// 为什么只能这么做：三个后端都没有"填充任意多边形"的原语（GL/D3D 没有
+// stencil 与三角化接口，GDI 只有硬编码的三角形调用）。共用一个扫描线求交
+// 器，各端只负责 fillRect，三端像素才必然一致 —— 与上面的 BuildFillBands
+// 是同一个分工。
+//
+// 两个实现细节：
+//   · 相邻同宽同色的行要合并（pushRun 那套）。一个 24px 图标逐行画是 24 条，
+//     合并后通常只剩"两侧弧边几十条 + 实心区一条"，差一个数量级。
+//   · 撞条带上限时**按行步长降级**（1 → 2 → 4 → …），保证画完而不是画一半；
+//     调用方从返回值/truncated 判断要不要重试。
+// ============================================================
+constexpr int kMaxPathBands = 2048;      // 单条路径的条带上限
+constexpr int kMaxPathCrossings = 1024;  // 单条扫描线的交点上限
+constexpr int kMaxRowSpans = 128;        // 单行条带上限
+constexpr int kMaxOpenRuns = 96;         // 跨行合并的"正在延伸的条带"表
+
+// 设备坐标下的折线路径（点按子路径首尾相接；指向调用方内存，不拷）
+struct PaintPath {
+    const float*    pts = nullptr;      // x,y 交替
+    const uint32_t* first = nullptr;    // 子路径起始点下标
+    const uint32_t* count = nullptr;    // 子路径点数（≥2）
+    const uint8_t*  closed = nullptr;   // 1 = 原始 Z（描边时连接首尾）
+    int contours = 0;
+    bool Valid() const { return pts && first && count && contours > 0; }
+};
+
+// 扫描线填充。clip 为设备像素裁剪盒（通常是节点包围盒）。
+// color 写进每个条带；rowStep>1 是降级模式（行更粗、条带更少）。
+// truncated = true 表示撞上 cap / 交点上限，调用方应放大 rowStep 重试。
+inline int BuildPathFillBands(const PaintPath& path, bool evenOdd,
+                              float clipX0, float clipY0, float clipX1, float clipY1,
+                              uint32_t color, PaintBand* out, int cap,
+                              int rowStep = 1, bool* truncated = nullptr) {
+    if (truncated) *truncated = false;
+    if (!path.Valid() || !out || cap <= 0) return 0;
+    if (rowStep < 1) rowStep = 1;
+    if (clipX1 <= clipX0 || clipY1 <= clipY0) return 0;
+
+    struct Crossing { float x; int dir; };
+    Crossing crossings[kMaxPathCrossings];
+    struct RowSpan { int x0, x1; };
+    RowSpan spans[kMaxRowSpans];
+    // 跨行合并：记下"上一行还在延伸"的条带
+    struct OpenRun { int x0, w, endY, idx; };
+    OpenRun open[kMaxOpenRuns];
+    int openN = 0;
+
+    int n = 0;
+    const int yBegin = (int)std::floor(clipY0);
+    const int yEnd = (int)std::ceil(clipY1);
+    auto flushStale = [&](int y) {
+        int w = 0;
+        for (int i = 0; i < openN; i++)
+            if (open[i].endY > y) open[w++] = open[i];
+        openN = w;
+    };
+
+    for (int y = yBegin; y < yEnd; y += rowStep) {
+        const float yc = (float)y + (float)rowStep * 0.5f;
+        int nc = 0;
+        bool overflow = false;
+        for (int c = 0; c < path.contours && !overflow; c++) {
+            const uint32_t first = path.first[c];
+            const uint32_t cnt = path.count[c];
+            if (cnt < 2) continue;
+            for (uint32_t i = 0; i < cnt; i++) {
+                const uint32_t ia = first + i;
+                const uint32_t ib = first + (i + 1) % cnt;
+                const float ax = path.pts[ia * 2], ay = path.pts[ia * 2 + 1];
+                const float bx = path.pts[ib * 2], by = path.pts[ib * 2 + 1];
+                if (ay == by) continue;                       // 水平边不产生交点
+                if ((ay <= yc) == (by <= yc)) continue;       // 半开区间，顶点不重复计数
+                if (nc >= kMaxPathCrossings) { overflow = true; break; }
+                const float t = (yc - ay) / (by - ay);
+                crossings[nc++] = { ax + t * (bx - ax), ay < by ? 1 : -1 };
+            }
+        }
+        if (overflow) {                                   // 交点太多：降级重来
+            if (truncated) *truncated = true;
+            return n;
+        }
+        if (nc < 2) { flushStale(y); continue; }
+        std::sort(crossings, crossings + nc,
+                  [](const Crossing& a, const Crossing& b) { return a.x < b.x; });
+
+        int ns = 0;
+        if (evenOdd) {
+            for (int i = 0; i + 1 < nc; i += 2) {
+                if (ns >= kMaxRowSpans) { if (truncated) *truncated = true; break; }
+                spans[ns++] = { (int)std::lround(crossings[i].x),
+                                (int)std::lround(crossings[i + 1].x) };
+            }
+        } else {
+            int winding = 0;
+            float startX = 0.0f;
+            for (int i = 0; i < nc; i++) {
+                const int prev = winding;
+                winding += crossings[i].dir;
+                if (prev == 0 && winding != 0) {
+                    startX = crossings[i].x;
+                } else if (prev != 0 && winding == 0) {
+                    if (ns >= kMaxRowSpans) { if (truncated) *truncated = true; break; }
+                    spans[ns++] = { (int)std::lround(startX), (int)std::lround(crossings[i].x) };
+                }
+            }
+        }
+
+        const int xLo = (int)std::floor(clipX0);
+        const int xHi = (int)std::ceil(clipX1);
+        for (int i = 0; i < ns; i++) {
+            int x0 = std::max(spans[i].x0, xLo);
+            int x1 = std::min(spans[i].x1, xHi);
+            const int w = x1 - x0;
+            if (w <= 0) continue;                         // 亚像素条带丢掉（不做抗锯齿）
+            // 与上一行的条带对齐 → 直接加高，省一个 draw call
+            bool merged = false;
+            for (int k = 0; k < openN; k++) {
+                if (open[k].x0 == x0 && open[k].w == w && open[k].endY == y) {
+                    out[open[k].idx].h += (float)rowStep;
+                    open[k].endY = y + rowStep;
+                    merged = true;
+                    break;
+                }
+            }
+            if (merged) continue;
+            if (n >= cap) {
+                if (truncated) *truncated = true;
+                return n;
+            }
+            out[n] = { (float)x0, (float)y, (float)w, (float)rowStep, color, 0.0f, false };
+            if (openN < kMaxOpenRuns) {
+                open[openN++] = { x0, w, y + rowStep, n };
+            } else {
+                // 合并表满了：只丢合并机会，像素仍然正确 —— 找一条最老的顶掉
+                int oldest = 0;
+                for (int k = 1; k < openN; k++)
+                    if (open[k].endY < open[oldest].endY) oldest = k;
+                open[oldest] = { x0, w, y + rowStep, n };
+            }
+            n++;
+        }
+        flushStale(y);
+    }
+    return n;
+}
+
+// 折线描边：逐段画线，转角超过阈值时补一个圆点（圆角连接）。
+// 三个后端的 fillLine / fillRounded 签名一致，所以这里用回调模板，
+// 后端只传"怎么画一根线 / 一个圆"，几何只写一份。
+//
+// 为什么只在转角补点：折线是细分出来的，绝大多数相邻段几乎共线，
+// 每段都补圆会把 draw call 翻倍；15° 以下的缺口在 1–2px 线宽上看不见。
+inline float PathJoinCosThreshold() { return 0.966f; }   // cos(15°)
+
+// 两段方向夹角是否需要补圆点（补 = 转角超过 15°）
+inline bool PathNeedJoin(float ax, float ay, float bx, float by, float cx, float cy) {
+    const float ux = bx - ax, uy = by - ay;
+    const float vx = cx - bx, vy = cy - by;
+    const float lu = std::sqrt(ux * ux + uy * uy);
+    const float lv = std::sqrt(vx * vx + vy * vy);
+    if (lu <= 1e-6f || lv <= 1e-6f) return false;
+    const float cs = (ux * vx + uy * vy) / (lu * lv);
+    return cs < PathJoinCosThreshold();
+}
+
+// line(x0,y0,x1,y1) → 后端画一根 lineWidth 粗的线
+// dot(x,y,w,h,r)    → 后端画一个实心圆（转角补洞）
+// roundCap 为 true 时开放子路径的两端也补圆（P2 的 linecap=round）
+// 返回画出的线段数（供调用方估算开销）
+template <class LineFn, class DotFn>
+inline int PaintPathStroke(const PaintPath& path, float width, bool roundCap,
+                           LineFn&& line, DotFn&& dot) {
+    if (!path.Valid() || width <= 0.0f) return 0;
+    const float half = width * 0.5f;
+    int segs = 0;
+    for (int c = 0; c < path.contours; c++) {
+        const uint32_t first = path.first[c];
+        const uint32_t cnt = path.count[c];
+        if (cnt < 2) continue;
+        const bool closed = path.closed && path.closed[c];
+        const uint32_t segCount = closed ? cnt : cnt - 1;
+        for (uint32_t i = 0; i < segCount; i++) {
+            const uint32_t ia = first + i;
+            const uint32_t ib = first + (i + 1) % cnt;
+            const float ax = path.pts[ia * 2], ay = path.pts[ia * 2 + 1];
+            const float bx = path.pts[ib * 2], by = path.pts[ib * 2 + 1];
+            line(ax, ay, bx, by);
+            segs++;
+            // 顶点 b 上还有没有下一段：闭合子路径的最后一段也有
+            const bool hasNext = (i + 1 < segCount) || closed;
+            if (hasNext) {
+                const uint32_t ic = first + (i + 2) % cnt;
+                const float cx = path.pts[ic * 2], cy = path.pts[ic * 2 + 1];
+                if (PathNeedJoin(ax, ay, bx, by, cx, cy))
+                    dot(bx - half, by - half, width, width, half);
+            }
+        }
+        if (!closed && roundCap) {
+            const float ax = path.pts[first * 2], ay = path.pts[first * 2 + 1];
+            const float bx = path.pts[(first + cnt - 1) * 2], by = path.pts[(first + cnt - 1) * 2 + 1];
+            dot(ax - half, ay - half, width, width, half);
+            dot(bx - half, by - half, width, width, half);
+        }
+    }
+    return segs;
+}
+
 } // namespace binui
+

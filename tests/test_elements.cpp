@@ -21,6 +21,7 @@
 #include <thread>
 #include <string>
 #include "binui_paint.h"
+#include "binui_path.h"
 #include "binui_text_estimate.h"
 #include <filesystem>
 #include <fstream>
@@ -2393,6 +2394,301 @@ static int run() {
 
 }  // namespace suite_clip_chain
 
+// ---------------------------------------------------------------------------
+// suite_svgpath：SVG 路径几何（include/binui_path.h）+ 扫描线填充（binui_paint.h）
+//
+// 这两块都是"编译期与运行期共用的一份数学"，和 suite_paint 同一个思路：
+// 纯 CPU 可验证，不需要窗口/后端。重点：
+//   · `d` 的语法边界（隐式重复、紧贴负数、隐式小数点、弧标志紧贴）
+//   · 细分质量（弧离真圆的最大偏差）与容差的方向性（容差越大点越少）
+//   · 扫描线的正确性用"面积"和"采样点"两个独立口径互相印证
+//   · 条带必须合并（否则一个实心图标就是每行一个 draw call）
+//   · 撞上限时必须 truncated（调用方降级重试），而不是画一半
+// ---------------------------------------------------------------------------
+namespace suite_svgpath {
+
+using namespace binui;
+
+static int g_fail = 0;
+#define CHECK(cond, msg) do { if (!(cond)) { std::printf("FAIL: %s\n", msg); g_fail++; } } while (0)
+#define CHECK_NEAR(a, b, eps, msg) \
+    do { if (std::fabs((a) - (b)) > (eps)) { \
+        std::printf("FAIL: %s (%.4f vs %.4f)\n", msg, (double)(a), (double)(b)); g_fail++; } } while (0)
+
+// PathShape → 设备坐标的 PaintPath（点直接拷贝到本地缓冲，调用方持有）
+struct DevicePath {
+    std::vector<float> pts;
+    std::vector<uint32_t> first, count;
+    std::vector<uint8_t> closed;
+    PaintPath view() const {
+        return PaintPath{ pts.data(), first.data(), count.data(), closed.data(),
+                          static_cast<int>(first.size()) };
+    }
+};
+
+static DevicePath ToDevice(const PathShape& s, float dx = 0.0f, float dy = 0.0f) {
+    DevicePath d;
+    for (const PathShape::Contour& c : s.contours) {
+        d.first.push_back(c.first);
+        d.count.push_back(c.count);
+        d.closed.push_back(c.closed ? 1u : 0u);
+    }
+    for (const PathPointF& p : s.pts) {
+        d.pts.push_back(p.x + dx);
+        d.pts.push_back(p.y + dy);
+    }
+    return d;
+}
+
+static bool BandCovers(const PaintBand* bands, int n, float px, float py) {
+    for (int i = 0; i < n; i++)
+        if (px >= bands[i].x && px < bands[i].x + bands[i].w &&
+            py >= bands[i].y && py < bands[i].y + bands[i].h) return true;
+    return false;
+}
+
+static double BandArea(const PaintBand* bands, int n) {
+    double a = 0;
+    for (int i = 0; i < n; i++) a += static_cast<double>(bands[i].w) * bands[i].h;
+    return a;
+}
+
+static void TestParse() {
+    PathShape s;
+    std::string err;
+
+    // 绝对坐标 + 一条命令后跟多组坐标（隐式 lineto）
+    CHECK(ParsePathData("M0 0 L10 0 10 10 0 10 Z", 0.1f, s, &err), "解析：绝对 + 隐式 lineto");
+    CHECK(s.pts.size() == 4, "解析：矩形 4 个点");
+    CHECK(s.contours.size() == 1 && s.contours[0].closed, "解析：一条闭合子路径");
+    CHECK_NEAR(s.maxX, 10, 1e-3f, "解析：包围盒右边界");
+    CHECK_NEAR(s.maxY, 10, 1e-3f, "解析：包围盒下边界");
+
+    // 相对命令 + 紧贴负数（"l5-3" 合法）
+    CHECK(ParsePathData("m10,10 l5-3", 0.1f, s, &err), "解析：相对命令 + 紧贴负数");
+    CHECK_NEAR(s.pts.back().x, 15, 1e-3f, "解析：相对命令终点 x");
+    CHECK_NEAR(s.pts.back().y, 7, 1e-3f, "解析：相对命令终点 y");
+
+    // 隐式小数点（"1.5.5" = 1.5, 0.5）
+    CHECK(ParsePathData("M1.5.5 L3 3", 0.1f, s, &err), "解析：隐式小数点");
+    CHECK_NEAR(s.pts[0].x, 1.5f, 1e-3f, "解析：1.5.5 → x=1.5");
+    CHECK_NEAR(s.pts[0].y, 0.5f, 1e-3f, "解析：1.5.5 → y=0.5");
+
+    // H/V
+    CHECK(ParsePathData("M0 0 H10 V10 H0 Z", 0.1f, s, &err), "解析：H/V");
+    CHECK_NEAR(s.maxX, 10, 1e-3f, "解析：H 生效");
+    CHECK_NEAR(s.maxY, 10, 1e-3f, "解析：V 生效");
+
+    // 三次 + S（反射控制点）、二次 + T
+    CHECK(ParsePathData("M0 0 C0 10 10 10 10 0 S0 -10 0 0", 0.05f, s, &err), "解析：C + S");
+    CHECK_NEAR(s.pts.back().x, 0, 1e-3f, "解析：S 终点 x");
+    CHECK_NEAR(s.pts.back().y, 0, 1e-3f, "解析：S 终点 y");
+    CHECK(ParsePathData("M0 0 Q5 5 10 0 T20 0", 0.05f, s, &err), "解析：Q + T");
+    CHECK_NEAR(s.pts.back().x, 20, 1e-3f, "解析：T 终点 x");
+    CHECK_NEAR(s.pts.back().y, 0, 1e-3f, "解析：T 终点 y");
+
+    // 弧：四分之一圆，圆心 (0,10) 半径 10 —— 每个细分点都该落在圆上
+    CHECK(ParsePathData("M0 0 A10 10 0 0 1 10 10", 0.05f, s, &err), "解析：弧");
+    CHECK_NEAR(s.pts.back().x, 10, 1e-3f, "解析：弧终点 x");
+    CHECK_NEAR(s.pts.back().y, 10, 1e-3f, "解析：弧终点 y");
+    {
+        float worst = 0;
+        for (const PathPointF& p : s.pts)
+            worst = std::max(worst, std::fabs(std::sqrt(p.x * p.x + (p.y - 10) * (p.y - 10)) - 10.0f));
+        std::printf("  [svgpath] 弧离真圆最大偏差 %.4f px（容差 0.05）\n", worst);
+        CHECK(worst < 0.05f, "解析：弧的细分精度（< 容差）");
+    }
+
+    // 多子路径 + 填充规则
+    CHECK(ParsePathData("M0 0 H100 V100 H0 Z M25 25 H75 V75 H25 Z", 0.01f, s, &err),
+          "解析：两条子路径（带洞）");
+    CHECK(s.contours.size() == 2, "解析：子路径数 2");
+    CHECK(!PointInPath(s, 50, 50, true), "填充规则：evenodd 挖掉内洞");
+    CHECK(PointInPath(s, 50, 50, false), "填充规则：nonzero 同向时内洞仍实心");
+    CHECK(PointInPath(s, 8, 50, true), "填充规则：环上算实心（射线穿过 3 条边）");
+
+    // 椭圆（走同一套细分容差）
+    {
+        PathShape e;
+        AppendEllipse(e, 0, 0, 20, 10, 0.05f);
+        CHECK(e.contours.size() == 1 && e.contours[0].closed, "椭圆：闭合子路径");
+        CHECK_NEAR(e.minX, -20, 0.02f, "椭圆：左边界");
+        CHECK_NEAR(e.maxX, 20, 0.02f, "椭圆：右边界");
+        CHECK_NEAR(e.minY, -10, 0.02f, "椭圆：上边界");
+        CHECK_NEAR(e.maxY, 10, 0.02f, "椭圆：下边界");
+        float worst = 0;
+        for (const PathPointF& p : e.pts)
+            worst = std::max(worst, std::fabs((p.x * p.x) / 400.0f + (p.y * p.y) / 100.0f - 1.0f));
+        CHECK(worst < 0.01f, "椭圆：细分精度");
+    }
+
+    // 变换（viewBox / <g transform> 都走这一条）
+    {
+        PathShape t;
+        ParsePathData("M0 0 L10 0", 0.1f, t, &err);
+        TransformShape(t, PathRotate(90.0f));
+        CHECK_NEAR(t.pts.back().x, 0, 0.01f, "变换：rotate 90 → x");
+        CHECK_NEAR(t.pts.back().y, 10, 0.01f, "变换：rotate 90 → y");
+        TransformShape(t, PathTranslate(5, 5));
+        CHECK_NEAR(t.pts.back().x, 5, 0.01f, "变换：translate 可叠加");
+        CHECK_NEAR(t.pts.back().y, 15, 0.01f, "变换：translate 可叠加（y）");
+        PathShape v;
+        ParsePathData("M0 0 L1 1", 0.1f, v, &err);
+        TransformShape(v, PathMul(PathScale(2, 3), PathTranslate(1, 1)));
+        CHECK_NEAR(v.pts.back().x, 4, 0.01f, "变换：先平移再缩放（x）");
+        CHECK_NEAR(v.pts.back().y, 6, 0.01f, "变换：先平移再缩放（y）");
+    }
+
+    // 归一化往返（v15 路径段的存储形态）
+    {
+        PathShape n;
+        ParsePathData("M0 0 C3 0 7 10 10 10", 0.05f, n, &err);
+        PathNormData nd;
+        CHECK(NormalizeShape(n, nd), "归一化：成功");
+        CHECK(nd.pts.size() == n.pts.size() * 2, "归一化：点数一致");
+        CHECK(nd.pts[0] == 0 && nd.pts[1] == 0, "归一化：首点落在 0,0");
+        std::vector<PathPointF> back(n.pts.size());
+        DenormPoints(nd.pts.data(), static_cast<uint32_t>(n.pts.size()),
+                     n.minX, n.minY, n.Width(), n.Height(), back.data());
+        float worst = 0;
+        for (size_t i = 0; i < back.size(); i++) {
+            worst = std::max(worst, std::fabs(back[i].x - n.pts[i].x));
+            worst = std::max(worst, std::fabs(back[i].y - n.pts[i].y));
+        }
+        std::printf("  [svgpath] 归一化往返误差 %.6f px\n", worst);
+        CHECK(worst < 0.001f, "归一化：往返误差 < 0.001px");
+    }
+
+    // 容差方向：越粗点越少，但仍在可接受区间
+    {
+        PathShape fine, coarse;
+        ParsePathData("M0 0 C0 50 100 50 100 0", 0.01f, fine, &err);
+        ParsePathData("M0 0 C0 50 100 50 100 0", 1.0f, coarse, &err);
+        std::printf("  [svgpath] 容差 0.01 → %d 点，容差 1.0 → %d 点\n",
+                    (int)fine.pts.size(), (int)coarse.pts.size());
+        CHECK(coarse.pts.size() < fine.pts.size(), "容差：越粗点数越少");
+        CHECK(coarse.pts.size() >= 4 && coarse.pts.size() <= 64, "容差：1.0 的点数合理");
+    }
+
+    // 错误输入：报错但不崩
+    {
+        PathShape bad;
+        CHECK(!ParsePathData("M10", 0.1f, bad, &err), "错误：缺坐标要报错");
+        CHECK(!err.empty(), "错误：有可读的原因");
+        CHECK(!ParsePathData("X10 10", 0.1f, bad, &err), "错误：未知命令要报错");
+        CHECK(!ParsePathData("M0 0 A10 10 0 2 1 10 10", 0.1f, bad, &err),
+              "错误：弧标志只能是 0/1");
+        CHECK(ParsePathData("", 0.1f, bad, &err) && bad.Empty(), "错误：空串不是错误，得到空路径");
+        CHECK(ParsePathData("M10 10", 0.1f, bad, &err) && bad.Empty(),
+              "错误：只有 M 没有面积，按空路径处理");
+    }
+
+    // 点数上限：撞上限置 truncated（调用方提高容差重来）
+    {
+        PathShape cap;
+        ParsePathData("M0 0 C0 500 500 500 500 0", 0.001f, cap, &err, 64);
+        CHECK(cap.truncated, "上限：撞上限置 truncated");
+        CHECK(cap.pts.size() <= 64, "上限：绝不超限");
+    }
+}
+
+static void TestFill() {
+    // 直角三角形：面积与采样双向验证
+    {
+        PathShape tri;
+        std::string err;
+        ParsePathData("M0 0 L40 0 L0 40 Z", 0.01f, tri, &err);
+        DevicePath dev = ToDevice(tri);
+        PaintBand bands[kMaxPathBands];
+        bool trunc = false;
+        const int n = BuildPathFillBands(dev.view(), false, 0, 0, 64, 64, 0xFF00FF00u,
+                                         bands, kMaxPathBands, 1, &trunc);
+        std::printf("  [svgpath] 三角形：%d 条带，面积 %.0f（理论 800）\n", n, BandArea(bands, n));
+        CHECK(!trunc, "填充：小图形不截断");
+        CHECK_NEAR(BandArea(bands, n), 800.0, 60.0, "填充：面积与解析解一致");
+        CHECK(n <= 40, "填充：条带数不超过行数");
+        CHECK(BandCovers(bands, n, 10, 10), "填充：重心被覆盖");
+        CHECK(!BandCovers(bands, n, 30, 30), "填充：外部不覆盖");
+    }
+
+    // 带洞的环：evenodd 挖空 + 条带合并（4 条：上边、左右两段、下边）
+    {
+        PathShape donut;
+        std::string err;
+        ParsePathData("M0 0 H100 V100 H0 Z M25 25 H75 V75 H25 Z", 0.01f, donut, &err);
+        DevicePath dev = ToDevice(donut);
+        PaintBand bands[kMaxPathBands];
+        bool t1 = false, t2 = false;
+        const int ne = BuildPathFillBands(dev.view(), true, 0, 0, 120, 120, 0xFF000000u,
+                                          bands, kMaxPathBands, 1, &t1);
+        CHECK(!t1, "填充：环不截断");
+        CHECK(!BandCovers(bands, ne, 50, 50), "填充：evenodd 挖掉内洞");
+        CHECK(BandCovers(bands, ne, 10, 50), "填充：evenodd 环上实心");
+        CHECK(ne <= 8, "填充：环的条带被合并（≤8 条）");
+        const int nz = BuildPathFillBands(dev.view(), false, 0, 0, 120, 120, 0xFF000000u,
+                                          bands, kMaxPathBands, 1, &t2);
+        CHECK(!t2, "填充：nonzero 不截断");
+        CHECK(BandCovers(bands, nz, 50, 50), "填充：nonzero 同向时内洞仍然实心");
+        CHECK(nz <= 4, "填充：nonzero 整块合并成少量条带");
+    }
+
+    // 撞 cap：必须 truncated，且降级（更大的 cap / 更粗步长）能画完
+    {
+        PathShape big;
+        AppendEllipse(big, 200, 200, 200, 200, 0.01f);
+        DevicePath dev = ToDevice(big);
+        PaintBand smallCap[16];
+        bool trunc = false;
+        const int n = BuildPathFillBands(dev.view(), false, 0, 0, 400, 400, 0xFF000000u,
+                                         smallCap, 16, 1, &trunc);
+        CHECK(trunc && n <= 16, "填充：cap 触顶置 truncated 且不越界");
+        PaintBand bigCap[256];
+        bool trunc2 = false;
+        const int n2 = BuildPathFillBands(dev.view(), false, 0, 0, 400, 400, 0xFF000000u,
+                                          bigCap, 256, 8, &trunc2);
+        std::printf("  [svgpath] 400px 圆：cap=16 截断=%d；cap=256 步长8 → %d 条 截断=%d\n",
+                    (int)trunc, n2, (int)trunc2);
+        CHECK(!trunc2 && n2 <= 256, "填充：降级后能完整画完");
+    }
+}
+
+static void TestStroke() {
+    PathShape sq;
+    std::string err;
+    ParsePathData("M0 0 H100 V100 H0 Z", 0.01f, sq, &err);
+    DevicePath dev = ToDevice(sq);
+    int lines = 0, dots = 0;
+    const int segs = PaintPathStroke(dev.view(), 2.0f, false,
+        [&](float, float, float, float) { lines++; },
+        [&](float, float, float, float, float) { dots++; });
+    CHECK(segs == 4 && lines == 4, "描边：闭合路径段数 = 点数");
+    CHECK(dots == 4, "描边：四个直角各补一个圆点");
+
+    PathShape open;
+    ParsePathData("M0 0 H100 V100", 0.01f, open, &err);
+    DevicePath odev = ToDevice(open);
+    lines = dots = 0;
+    const int osegs = PaintPathStroke(odev.view(), 2.0f, false,
+        [&](float, float, float, float) { lines++; },
+        [&](float, float, float, float, float) { dots++; });
+    CHECK(osegs == 2 && lines == 2, "描边：开放路径段数 = 点数-1");
+    CHECK(dots == 1, "描边：只在真实转角补点");
+}
+
+static int run() {
+    std::printf("\n[suite_svgpath] 路径几何（binui_path.h）+ 扫描线填充（binui_paint.h）\n");
+    TestParse();
+    TestFill();
+    TestStroke();
+    std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");
+    return g_fail;
+}
+
+#undef CHECK
+#undef CHECK_NEAR
+
+}  // namespace suite_svgpath
+
 // ===========================================================================
 // 汇总入口：任一子套件有失败则整体失败
 // ===========================================================================
@@ -2406,6 +2702,7 @@ int main() {
     fails += suite_hot_reload::run();
     fails += suite_hover_dirty::run();
     fails += suite_clip_chain::run();
+    fails += suite_svgpath::run();
     std::printf("\n=== test_elements: %s ===\n", fails ? "FAILED" : "全部通过");
     return fails ? 1 : 0;
 }
