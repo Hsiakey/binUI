@@ -1,4 +1,5 @@
 #include "binui_renderer.h"
+#include "binui_path.h"        // v17 精确命中：PointInPathNorm
 #include "binui_text_estimate.h"
 #include <cstring>
 #include <cmath>
@@ -616,6 +617,16 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
                     hasGrad = true;
                     if (grad.stopCount < 2 || grad.stopCount > kPathGradMaxStops) hasGrad = false;
                 }
+                BinUIPathGradient strokeGrad{};
+                bool hasStrokeGrad = false;
+                if (h.flags & PATH_STROKE_GRAD) {
+                    if (q + sizeof(strokeGrad) > qend) break;
+                    memcpy(&strokeGrad, q, sizeof(strokeGrad));
+                    q += sizeof(strokeGrad);
+                    hasStrokeGrad = true;
+                    if (strokeGrad.stopCount < 2 || strokeGrad.stopCount > kPathGradMaxStops)
+                        hasStrokeGrad = false;
+                }
                 const size_t need = static_cast<size_t>(h.contourCount) * (sizeof(uint32_t) + 1) +
                                     static_cast<size_t>(h.pointCount) * 2 * sizeof(uint16_t);
                 if (q + need > qend) break;   // 数据损坏：后面条目的边界也不可信
@@ -624,6 +635,8 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
                 rec.head = h;
                 rec.hasGrad = hasGrad;
                 rec.grad = grad;
+                rec.hasStrokeGrad = hasStrokeGrad;
+                rec.strokeGrad = strokeGrad;
                 rec.first.resize(h.contourCount);
                 if (h.contourCount)
                     memcpy(rec.first.data(), q, static_cast<size_t>(h.contourCount) * sizeof(uint32_t));
@@ -1370,6 +1383,29 @@ int BinUIRenderer::hitTestEx(float x, float y, bool allowStyled, uint8_t state) 
 
         if (x >= node.x - ox && x <= node.x - ox + node.width &&
             y >= node.y - oy && y <= node.y - oy + node.height) {
+            // v17 精确命中：有填充的路径按"点在路径内"再判一次 —— 环的洞、星形的凹口
+            // 不再误命中（以前整个包围盒都算）。描边-only 的路径仍用包围盒：
+            // 1–2px 的线本来就不好点，按壳命中反而更难用。
+            if (node.type == BINUI_PATH) {
+                const PathRecord* pr = pathOf(node.id);
+                if (pr && (pr->head.flags & PATH_FILL) && !pr->first.empty() &&
+                    node.width > 0.0f && node.height > 0.0f) {
+                    const bool eo = (pr->head.flags & PATH_EVENODD) != 0;
+                    const float nx = (x + ox - node.x) / node.width;
+                    const float ny = (y + oy - node.y) / node.height;
+                    // ±1 设备像素的容差：折线是细分出来的，贴着轮廓点时可能落在折线外
+                    const float dx = 1.0f / node.width, dy = 1.0f / node.height;
+                    bool in = PointInPathNorm(pr->pts.data(), pr->first.data(), pr->count.data(),
+                                              static_cast<int>(pr->first.size()), nx, ny, eo);
+                    for (int k = 0; !in && k < 4; k++) {
+                        const float sx = nx + ((k & 1) ? dx : -dx);
+                        const float sy = ny + ((k & 2) ? dy : -dy);
+                        in = PointInPathNorm(pr->pts.data(), pr->first.data(), pr->count.data(),
+                                             static_cast<int>(pr->first.size()), sx, sy, eo);
+                    }
+                    if (!in) continue;
+                }
+            }
             return node.id;
         }
     }

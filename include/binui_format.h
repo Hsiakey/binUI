@@ -14,7 +14,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v14: 扩展绘制段追加 textFlags（斜体/占位符/只读/初始勾选），BinUIPaintNode 40 -> 44 字节
 // v15: 路径段（SVG <path>/<ellipse> 的归一化折线），见 BinUIPathEntry
 // v16: 路径渐变（SVG <linearGradient>/<radialGradient> 填充），见 BinUIPathGradient
-constexpr uint32_t BINUI_VERSION    = 16;
+// v17: 渐变描边（stroke="url(#id)"）+ stroke-linecap="square"，多一条可选渐变记录
+constexpr uint32_t BINUI_VERSION    = 17;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -419,7 +420,8 @@ static_assert(sizeof(BinUIPaintNode) == 44, "BinUIPaintNode must be 44 bytes");
 // 布局：uint32 pathBytes（0 = 无路径）+ uint32 pathCount
 //       + pathCount 条子记录，顺序拼接：
 //           BinUIPathEntry              定长头
-//           BinUIPathGradient           v16：仅 PATH_FILL_GRAD 置位时才写
+//           BinUIPathGradient           填充渐变，仅 PATH_FILL_GRAD 置位时才写（v16）
+//           BinUIPathGradient           描边渐变，仅 PATH_STROKE_GRAD 置位时才写（v17）
 //           uint32 contourFirst[n]      每条子路径的起始**点下标**（升序）
 //           uint8  contourClosed[n]     1 = 原始 Z（描边时连接首尾）
 //           uint16 points[m*2]          归一化坐标（x,y 交替，0..65535 映射包围盒）
@@ -432,7 +434,8 @@ enum BinUIPathFlag : uint16_t {
     PATH_FILL      = 1 << 0, // 填充（fill 有效且不透明）
     PATH_STROKE    = 1 << 1, // 描边（stroke 有效且线宽 > 0）
     PATH_EVENODD   = 1 << 2, // fill-rule="evenodd"；否则非零环绕
-    PATH_FILL_GRAD = 1 << 3, // v16：填充用渐变（BinUIPathGradient 紧随定长头）
+    PATH_FILL_GRAD   = 1 << 3, // v16：填充用渐变（BinUIPathGradient 紧随定长头）
+    PATH_STROKE_GRAD = 1 << 4, // v17：描边用渐变（第二条 BinUIPathGradient，在填充渐变之后）
 };
 
 
@@ -443,9 +446,9 @@ enum BinUIPathJoin : uint8_t {
 };
 
 enum BinUIPathCap : uint8_t {
-    BINUI_CAP_BUTT   = 0, // 默认
-    BINUI_CAP_ROUND  = 1, // 预留
-    BINUI_CAP_SQUARE = 2, // 预留
+    BINUI_CAP_BUTT   = 0, // 默认：端点就是路径端点
+    BINUI_CAP_ROUND  = 1, // 两端补半圆
+    BINUI_CAP_SQUARE = 2, // v17：两端各外延半个线宽（方头）
 };
 
 #pragma pack(push, 1)

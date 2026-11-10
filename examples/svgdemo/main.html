@@ -67,8 +67,9 @@
         <span class="panel-title" style="position:absolute; left:20; top:10; width:420; height:18">SVG 图标：现成素材直接粘（&lt;path d&gt; + viewBox）</span>
         <!-- 32px 显示、viewBox 24：坐标自动等比放大，stroke-width 也跟着放大 -->
         <svg style="position:absolute; left:24; top:34; width:32; height:32" viewBox="0 0 24 24">
+            <!-- v17：描边也能用渐变（stroke="url(#…)"），方头端帽 stroke-linecap="square" 生效 -->
             <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"
-                  fill="none" stroke="#FF8A65" stroke-width="2"/>
+                  fill="none" stroke="url(#hs)" stroke-width="2" stroke-linecap="square"/>
         </svg>
         <svg style="position:absolute; left:88; top:34; width:32; height:32" viewBox="0 0 24 24">
             <path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.623-2.43a2.123 2.123 0 0 0-1.973 0L6.385 20.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.15 8.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"
@@ -109,6 +110,12 @@
                 <stop offset="0" stop-color="#FF8A65"/>
                 <stop offset="1" stop-color="#3E8BFF"/>
             </linearGradient>
+            <!-- v17：描边渐变（心跳图标的描边用这条） -->
+            <linearGradient id="hs" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#FF8A65"/>
+                <stop offset="0.5" stop-color="#F2B544"/>
+                <stop offset="1" stop-color="#FF6B6B"/>
+            </linearGradient>
         </defs>
         <svg style="position:absolute; left:404; top:30; width:112; height:44" viewBox="0 0 100 44">
             <path d="M4 4 H96 V40 H4 Z" fill="url(#d1)"/>
@@ -128,7 +135,7 @@
     <!-- 底部说明 -->
     <div class="panel" style="position:absolute; left:16; top:452; width:928; height:72">
         <span class="desc" style="position:absolute; left:20; top:14; width:470; height:18">SVG 子图形 = 普通节点：path · ellipse · line · polyline · polygon · circle · rect</span>
-        <span class="note" style="position:absolute; left:20; top:36; width:470; height:16; font-size:10">渐变填充在编译期折成归一化坐标（线性/径向/多色标/spread/transform），运行时逐条带取色</span>
+        <span class="note" style="position:absolute; left:20; top:36; width:470; height:16; font-size:10">渐变：填充与描边都能用（fill/stroke=url(#…)），编译期折成归一化坐标，运行时逐条带取色</span>
         <span class="desc" style="position:absolute; left:500; top:14; width:420; height:18">&lt;canvas&gt; 空绘制面：drawNodesGL 回调应用，已裁剪到画布矩形</span>
         <span class="note" style="position:absolute; left:500; top:36; width:400; height:16">应用 updateFn 每帧更新数据 + invalidateRect → 帧内回调重绘（立即式）</span>
     </div>

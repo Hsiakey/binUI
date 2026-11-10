@@ -115,6 +115,9 @@ public:
         // v16：填充渐变（PATH_FILL_GRAD 置位时有效）
         bool hasGrad = false;
         BinUIPathGradient grad{};
+        // v17：描边渐变（PATH_STROKE_GRAD 置位时有效）
+        bool hasStrokeGrad = false;
+        BinUIPathGradient strokeGrad{};
     };
     const PathRecord* pathOf(uint16_t nodeId) const {
         auto it = pathIdx_.find(nodeId);

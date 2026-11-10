@@ -2373,22 +2373,26 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
                     const auto* pr = renderer.pathOf(node.id);
                     if (!pr || pr->first.empty()) break;
                     static thread_local binui::PathRenderBuffers pbuf;
-                    const uint32_t pfc = ScaleAlpha(pr->head.fillColor, opacity);
-                    const uint32_t psc = ScaleAlpha(pr->head.strokeColor, opacity);
+                    binui::PathPaintSpec pspec;
+                    pspec.fillColor = ScaleAlpha(pr->head.fillColor, opacity);
+                    pspec.strokeColor = ScaleAlpha(pr->head.strokeColor, opacity);
+                    pspec.fillGrad = pr->hasGrad ? &pr->grad : nullptr;
+                    pspec.strokeGrad = pr->hasStrokeGrad ? &pr->strokeGrad : nullptr;
+                    pspec.opacity = opacity;
                     binui::PaintPathNode(
                         pr->head, pr->pts.data(), pr->first.data(), pr->count.data(),
                         pr->closed.data(), static_cast<int>(pr->first.size()),
                         static_cast<float>(x), static_cast<float>(y),
-                        static_cast<float>(nw), static_cast<float>(nh), pfc, pr->hasGrad ? &pr->grad : nullptr, opacity, psc, pbuf,
+                        static_cast<float>(nw), static_cast<float>(nh), pspec, pbuf,
                         [&](const binui::PaintBand* b, int n) {
                             for (int k = 0; k < n; k++)
                                 gfx.fillRect(b[k].x, b[k].y, b[k].w, b[k].h, b[k].color);
                         },
-                        [&](float x0, float y0, float x1, float y1, float lw) {
-                            gfx.fillLine(x0, y0, x1, y1, lw, psc);
+                        [&](float x0, float y0, float x1, float y1, float lw, uint32_t lc) {
+                            gfx.fillLine(x0, y0, x1, y1, lw, lc);
                         },
-                        [&](float rx, float ry, float rw, float rh, float rr) {
-                            gfx.fillRounded(rx, ry, rw, rh, rr, psc);
+                        [&](float rx, float ry, float rw, float rh, float rr, uint32_t dc) {
+                            gfx.fillRounded(rx, ry, rw, rh, rr, dc);
                         });
                     break;
                 }

@@ -2655,8 +2655,11 @@ static void TestFill() {
 // 收集描边回调：线段数 / 圆点数 / 多边形顶点（斜接与斜面靠它验证）
 struct StrokeRec {
     int lines = 0, dots = 0;
+    struct Seg { float x0, y0, x1, y1; uint32_t color; };
+    Seg seg[64] = {};
+    int nseg = 0;
     std::vector<std::vector<std::pair<float, float>>> polys;
-    void Reset() { lines = dots = 0; polys.clear(); }
+    void Reset() { lines = dots = 0; nseg = 0; polys.clear(); }
     // 任意点是否落在收集到的某个多边形内（凸多边形，按顶点绕向逐边同号判定）
     bool Covers(float px, float py) const {
         for (const auto& p : polys) {
@@ -2685,12 +2688,18 @@ struct StrokeRec {
 };
 
 static int StrokeWith(const DevicePath& dev, float width, bool roundCap, uint8_t join,
-                      uint8_t miterLimit, StrokeRec& rec) {
+                      uint8_t miterLimit, StrokeRec& rec, uint32_t strokeColor = 0xFF000000u,
+                      uint8_t cap = 0) {
     rec.Reset();
-    return PaintPathStroke(dev.view(), width, roundCap, join, miterLimit,
-        [&](float, float, float, float, float) { rec.lines++; },
-        [&](float, float, float, float, float) { rec.dots++; },
-        [&](const float* xy, int n) {
+    return PaintPathStroke(dev.view(), width, cap ? cap : static_cast<uint8_t>(roundCap ? BINUI_CAP_ROUND : BINUI_CAP_BUTT),
+        join, miterLimit,
+        [&](float, float) { return strokeColor; },
+        [&](float x0, float y0, float x1, float y1, float, uint32_t c) {
+            rec.lines++;
+            if (rec.nseg < 64) rec.seg[rec.nseg++] = { x0, y0, x1, y1, c };
+        },
+        [&](float, float, float, float, float, uint32_t) { rec.dots++; },
+        [&](const float* xy, int n, uint32_t) {
             std::vector<std::pair<float, float>> p;
             for (int i = 0; i < n; i++) p.push_back({ xy[i * 2], xy[i * 2 + 1] });
             rec.polys.push_back(std::move(p));
@@ -2776,6 +2785,25 @@ static void TestStroke() {
     DevicePath flatDev = ToDevice(flat);
     StrokeWith(flatDev, 10.0f, false, BINUI_JOIN_MITER, 0, rec);
     CHECK(rec.polys.empty() && rec.dots == 0, "共线：不补缺口");
+
+    // ---- stroke-linecap="square"：两端各沿切线外延半线宽 ----
+    // 开放路径 (0,0)→(100,0)，线宽 10：butt 是 0..100，square 应该是 -5..105
+    PathShape seg1;
+    ParsePathData("M0 0 H100", 0.01f, seg1, &err);
+    DevicePath seg1Dev = ToDevice(seg1);
+    StrokeWith(seg1Dev, 10.0f, false, BINUI_JOIN_ROUND, 0, rec, 0xFF000000u, BINUI_CAP_BUTT);
+    CHECK(rec.lines == 1 && rec.seg[0].x0 == 0.0f && rec.seg[0].x1 == 100.0f,
+          "线帽 butt：端点就是路径端点");
+    StrokeWith(seg1Dev, 10.0f, false, BINUI_JOIN_ROUND, 0, rec, 0xFF000000u, BINUI_CAP_SQUARE);
+    std::printf("  [svgpath] 方头端点：(%.1f,%.1f) → (%.1f,%.1f)\n",
+                (double)rec.seg[0].x0, (double)rec.seg[0].y0,
+                (double)rec.seg[0].x1, (double)rec.seg[0].y1);
+    CHECK_NEAR(rec.seg[0].x0, -5.0f, 0.01f, "线帽 square：起点外延半线宽");
+    CHECK_NEAR(rec.seg[0].x1, 105.0f, 0.01f, "线帽 square：终点外延半线宽");
+    CHECK(rec.dots == 0, "线帽 square：不补圆点");
+    // 圆头仍然只在两端补圆
+    StrokeWith(seg1Dev, 10.0f, true, BINUI_JOIN_ROUND, 0, rec, 0xFF000000u, BINUI_CAP_ROUND);
+    CHECK(rec.dots == 2, "线帽 round：两端各补一个圆");
 }
 
 
@@ -3247,6 +3275,42 @@ static void TestGradientBands() {
         CHECK(!s1.Active() && s1.At(50, 50) == 0xFF445566u, "渐变单色标：按纯色");
     }
 
+    // 渐变描边：每段线按自己的中点取色（v17）—— 折线是细分出来的，逐段取色就是逐像素
+    {
+        // 用折线（不是单段）：单段只会在中点取一次色，看不出渐变
+        PathShape line2;
+        ParsePathData("M0 0 L10 4 L20 0 L30 4 L40 0 L50 4 L60 0 L70 4 L80 0 L90 4 L100 0",
+                      0.01f, line2, &err);
+        DevicePath ldev = ToDevice(line2);
+        BinUIPathGradient g = linGrad(0, 0, 1, 0);
+        const PathShade sh = MakePathShade(&g, 0xFFFFFFFFu, 1.0f, 0, 0, 100, 100);
+        auto strokeRec = [&](const PathShade& s2, uint32_t solid) {
+            std::vector<uint32_t> cols;
+            PaintPathStroke(ldev.view(), 4.0f, BINUI_CAP_BUTT, BINUI_JOIN_ROUND, 0,
+                            [&](float px, float py) { return s2.At(px, py); },
+                            [&](float, float, float, float, float, uint32_t c) { cols.push_back(c); },
+                            [&](float, float, float, float, float, uint32_t) {},
+                            [&](const float*, int, uint32_t) {});
+            (void)solid;
+            return cols;
+        };
+        PathShade solidShade;
+        solidShade.color = 0xFF00FF00u;
+        const auto solidCols = strokeRec(solidShade, 0xFF00FF00u);
+        const auto gradCols = strokeRec(sh, 0);
+        std::printf("  [svgpath] 渐变描边：%zu 段，纯色首段=%08X，渐变首段=%08X 末段=%08X\n",
+                    gradCols.size(), solidCols.empty() ? 0u : solidCols.front(),
+                    gradCols.empty() ? 0u : gradCols.front(),
+                    gradCols.empty() ? 0u : gradCols.back());
+        CHECK(!solidCols.empty() && solidCols.size() == gradCols.size(), "渐变描边：段数与纯色一致");
+        CHECK(!solidCols.empty() && solidCols[0] == 0xFF00FF00u && solidCols.back() == 0xFF00FF00u,
+              "渐变描边：纯色时段段同色");
+        CHECK(!gradCols.empty(), "渐变描边：有线段颜色");
+        CHECK(!gradCols.empty() && ((gradCols.front() >> 16) & 0xFF) > 200,
+              "渐变描边：起点接近红");
+        CHECK(!gradCols.empty() && (gradCols.back() & 0xFF) > 200, "渐变描边：终点接近蓝");
+    }
+
     // 节点 opacity：渐变每条带的 alpha 都要折进去（纯色是调用方先折好的）
     {
         BinUIPathGradient g = linGrad(0, 0, 1, 0);
@@ -3258,6 +3322,35 @@ static void TestGradientBands() {
 }
 
 // 描边连接：join / miter-limit 落库，以及"斜接尖角把节点盒撑开"（不撑开会被后端切平）
+// 精确命中（v17）：有填充的路径按"点在路径内"判，环的洞 / 星形凹口不再误命中
+static void TestPathHitTest() {
+    // 一个 20x20 的环（evenodd 挖洞），放在 100x100 窗口里
+    const std::string html =
+        "<app_window width=\"100\" height=\"100\"><html width=\"100\" height=\"100\" bg=\"#000000\">"
+        "<head><style> .hit:hover { background: #333333; } </style></head>"
+        "<body><svg x=\"0\" y=\"0\" width=\"100\" height=\"100\" viewBox=\"0 0 24 24\">"
+        "<path class=\"hit\" d=\"M2 2 H22 V22 H2 Z M8 8 H16 V16 H8 Z\" "
+        "fill=\"#7AAAFF\" fill-rule=\"evenodd\"/></svg></body></html></app_window>";
+    auto res = binui::CompileBinUIEx(html);
+    for (const auto& w : res.warnings) std::printf("  [svgpath][warn] %s\n", w.c_str());
+    BinUIRenderer r;
+    CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "命中：布局可解析");
+    uint16_t pathId = 0xFFFF;
+    for (const auto& n : r.getNodes())
+        if (n.type == BINUI_PATH) pathId = n.id;
+    CHECK(pathId != 0xFFFF, "命中：找到路径节点");
+    if (pathId == 0xFFFF) return;
+    // 盒 = (8.3,8.3 83.3x83.3)：环带在 x∈[8.3,33.3]，洞在中间
+    const int inRing = r.hitTestEx(20.0f, 50.0f, true, BINUI_ST_HOVER);
+    const int inHole = r.hitTestEx(50.0f, 50.0f, true, BINUI_ST_HOVER);
+    std::printf("  [svgpath] 命中：环带 = %d，洞心 = %d（节点 %u）\n", inRing, inHole,
+                (unsigned)pathId);
+    CHECK(inRing == pathId, "命中：环带上的点命中路径");
+    CHECK(inHole == -1, "命中：环的洞里不再命中（精确命中生效）");
+    // 盒外仍然是 -1（包围盒粗筛没坏）
+    CHECK(r.hitTestEx(2.0f, 2.0f, true, BINUI_ST_HOVER) == -1, "命中：盒外不命中");
+}
+
 static void TestLineJoin() {
     const std::string starD =
         "M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 "
@@ -3317,11 +3410,10 @@ static void TestLineJoin() {
     for (const auto& s : w) { std::printf("  [svgpath][warn] %s\n", s.c_str());
         if (s.find("stroke-linejoin") != std::string::npos) warned = true; }
     CHECK(warned, "连接：不认识的值要告警");
-    // square 线帽仍未实现：必须告警（别静默）
-    compile("stroke-linecap=\"square\"", &w);
-    warned = false;
-    for (const auto& s : w) if (s.find("stroke-linecap") != std::string::npos) warned = true;
-    CHECK(warned, "连接：linecap=square 仍要告警（未实现）");
+    // v17：square 线帽实现了，落库 + 不报警告
+    const auto capSq = compile("stroke-linecap=\"square\"", &w);
+    CHECK(w.empty(), "连接：linecap=square 不再报警告");
+    CHECK(capSq.head.cap == BINUI_CAP_SQUARE, "连接：linecap=square 落库");
 }
 
 static void TestGradientCompile() {
@@ -3478,6 +3570,7 @@ static int run() {
     TestGradientBands();
     TestGradientCompile();
     TestLineJoin();
+    TestPathHitTest();
     std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");
     return g_fail;
 }

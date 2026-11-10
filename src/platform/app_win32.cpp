@@ -1281,33 +1281,42 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 const uint32_t psc = fadeA(pr->head.strokeColor);
                 const uint32_t pbg = underBg;   // 与边框/文字同一底色口径
                 static thread_local binui::PathRenderBuffers pbuf;
-                // 描边笔按宽度缓存：一条折线几十上百段，每段建/删笔纯属浪费
+                // 描边笔按"宽度 + 颜色"缓存：一条折线几十上百段，每段建/删笔纯属浪费；
+                // 渐变描边每段颜色都不同，缓存键里必须带颜色，否则会拿到上一段的笔。
                 HPEN pen = nullptr;
                 int penW = -1;
-                auto penFor = [&](float lw) -> HPEN {
+                uint32_t penC = 0;
+                auto penFor = [&](float lw, uint32_t color) -> HPEN {
                     const int iw = std::max(1, (int)std::lround(lw));
-                    if (pen && penW == iw) return pen;
+                    const uint32_t c = BlendOver(color, pbg);
+                    if (pen && penW == iw && penC == c) return pen;
                     if (pen) DeleteObject(pen);
-                    const uint32_t c = BlendOver(psc, pbg);
                     pen = CreatePen(PS_SOLID, iw, RGB((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF));
                     penW = iw;
+                    penC = c;
                     return pen;
                 };
+                binui::PathPaintSpec pspec;
+                pspec.fillColor = pfc;
+                pspec.strokeColor = psc;
+                pspec.fillGrad = pr->hasGrad ? &pr->grad : nullptr;
+                pspec.strokeGrad = pr->hasStrokeGrad ? &pr->strokeGrad : nullptr;
+                pspec.opacity = pop;
                 binui::PaintPathNode(
                     pr->head, pr->pts.data(), pr->first.data(), pr->count.data(),
                     pr->closed.data(), static_cast<int>(pr->first.size()),
-                    nfx, nfy, nfw, nfh, pfc, pr->hasGrad ? &pr->grad : nullptr, pop, psc, pbuf,
+                    nfx, nfy, nfw, nfh, pspec, pbuf,
                     [&](const binui::PaintBand* b, int n) { FillPaintBands(hdc, b, n, pbg); },
-                    [&](float x0, float y0, float x1, float y1, float lw) {
-                        HPEN hp = penFor(lw);
+                    [&](float x0, float y0, float x1, float y1, float lw, uint32_t lc) {
+                        HPEN hp = penFor(lw, lc);
                         if (!hp) return;
                         HGDIOBJ old = SelectObject(hdc, hp);
                         MoveToEx(hdc, (int)std::lround(x0), (int)std::lround(y0), nullptr);
                         LineTo(hdc, (int)std::lround(x1), (int)std::lround(y1));
                         SelectObject(hdc, old);
                     },
-                    [&](float rx, float ry, float rw, float rh, float) {
-                        const uint32_t c = BlendOver(psc, pbg);
+                    [&](float rx, float ry, float rw, float rh, float, uint32_t dc) {
+                        const uint32_t c = BlendOver(dc, pbg);
                         HBRUSH br = CreateSolidBrush(RGB((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF));
                         HGDIOBJ ob = SelectObject(hdc, br);
                         Ellipse(hdc, (int)std::lround(rx), (int)std::lround(ry),

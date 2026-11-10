@@ -22,6 +22,8 @@ struct DocPath {
     BinUIPathEntry head{};
     bool hasGrad = false;
     BinUIPathGradient grad{};
+    bool hasStrokeGrad = false;
+    BinUIPathGradient strokeGrad{};
     std::vector<uint32_t> first;
     std::vector<uint8_t>  closed;
     std::vector<uint16_t> pts;
@@ -391,6 +393,12 @@ bool ParseDoc(const void* data, size_t size, Doc& d) {
                                 std::memcpy(&dp.grad, gp, sizeof(BinUIPathGradient));
                                 dp.hasGrad = true;
                             }
+                            if (dp.head.flags & PATH_STROKE_GRAD) {
+                                const uint8_t* gp = nullptr;
+                                if (!p.blob(sizeof(BinUIPathGradient), gp)) { good = false; break; }
+                                std::memcpy(&dp.strokeGrad, gp, sizeof(BinUIPathGradient));
+                                dp.hasStrokeGrad = true;
+                            }
                             const size_t cbytes = (size_t)dp.head.contourCount * sizeof(uint32_t);
                             const uint8_t* cp = nullptr;
                             if (!p.blob(cbytes, cp)) { good = false; break; }
@@ -559,6 +567,7 @@ std::vector<uint8_t> EmitDoc(Doc& d) {
         for (const DocPath& dp : d.paths) {
             PutRaw(p, &dp.head, sizeof(dp.head));
             if (dp.hasGrad)         PutRaw(p, &dp.grad, sizeof(dp.grad));
+            if (dp.hasStrokeGrad)   PutRaw(p, &dp.strokeGrad, sizeof(dp.strokeGrad));
             if (!dp.first.empty())  PutRaw(p, dp.first.data(),  dp.first.size() * sizeof(uint32_t));
             if (!dp.closed.empty()) PutRaw(p, dp.closed.data(), dp.closed.size());
             if (!dp.pts.empty())    PutRaw(p, dp.pts.data(),    dp.pts.size() * sizeof(uint16_t));

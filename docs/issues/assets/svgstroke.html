@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<app_window width="420" height="260" bg="#151517" title="svg stroke probe">
+<html width="420" height="260" bg="#151517">
+<head><meta charset="UTF-8"><style> body { font-size: 12px; color: #ADB2B8; } </style></head>
+<body>
+<defs>
+    <linearGradient id="sH" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#7AAAFF"/><stop offset="1" stop-color="#F25A5A"/>
+    </linearGradient>
+    <linearGradient id="s3" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#4ED17E"/>
+        <stop offset="0.5" stop-color="#F2B544"/>
+        <stop offset="1" stop-color="#7A5AFF"/>
+    </linearGradient>
+    <radialGradient id="sR" cx="0.5" cy="0.5" r="0.55">
+        <stop offset="0" stop-color="#FFF2B0"/><stop offset="1" stop-color="#F25A5A"/>
+    </radialGradient>
+</defs>
+
+<!-- 第一行：渐变描边（线性 / 径向 / 渐变 + 斜接 / 渐变 + 虚线） -->
+<svg style="position:absolute; left:18; top:14; width:64; height:64" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="9" fill="none" stroke="url(#sH)" stroke-width="3"/>
+</svg>
+<svg style="position:absolute; left:98; top:14; width:64; height:64" viewBox="0 0 24 24">
+    <rect x="3" y="3" width="18" height="18" rx="6" fill="none" stroke="url(#sR)" stroke-width="3"/>
+</svg>
+<svg style="position:absolute; left:178; top:14; width:64; height:64" viewBox="0 0 24 24">
+    <path d="M3 20 L8 6 L13 16 L18 4 L21 12" fill="none" stroke="url(#s3)"
+          stroke-width="2.4" stroke-linejoin="miter"/>
+</svg>
+<svg style="position:absolute; left:258; top:14; width:144; height:64" viewBox="0 0 144 24">
+    <path d="M6 12 H138" fill="none" stroke="url(#sH)" stroke-width="8"
+          stroke-dasharray="16 10"/>
+</svg>
+
+<!-- 第二行：线帽三连（butt / round / square）+ 方头虚线 -->
+<svg style="position:absolute; left:18; top:100; width:60; height:16" viewBox="0 0 60 16">
+    <path d="M10 8 H50" fill="none" stroke="#38BDF8" stroke-width="10" stroke-linecap="butt"/>
+</svg>
+<svg style="position:absolute; left:94; top:100; width:60; height:16" viewBox="0 0 60 16">
+    <path d="M10 8 H50" fill="none" stroke="#4ED17E" stroke-width="10" stroke-linecap="round"/>
+</svg>
+<svg style="position:absolute; left:170; top:100; width:60; height:16" viewBox="0 0 60 16">
+    <path d="M10 8 H50" fill="none" stroke="#F2B544" stroke-width="10" stroke-linecap="square"/>
+</svg>
+<svg style="position:absolute; left:246; top:96; width:156; height:24" viewBox="0 0 156 24">
+    <path d="M14 12 H142" fill="none" stroke="#7AAAFF" stroke-width="10"
+          stroke-linecap="square" stroke-dasharray="18 12"/>
+</svg>
+
+<!-- 第三行：真实图标（渐变描边 + 方头 + 斜接） -->
+<svg style="position:absolute; left:18; top:176; width:56; height:56" viewBox="0 0 24 24">
+    <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"
+          fill="none" stroke="url(#sH)" stroke-width="2"/>
+</svg>
+<svg style="position:absolute; left:86; top:176; width:56; height:56" viewBox="0 0 24 24">
+    <path d="M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z"
+          fill="none" stroke="url(#s3)" stroke-width="1.6" stroke-linejoin="miter"/>
+</svg>
+<svg style="position:absolute; left:154; top:176; width:56; height:56" viewBox="0 0 24 24">
+    <path d="M4 20 L20 4 M20 4 H10 M20 4 V14" fill="none" stroke="url(#sR)"
+          stroke-width="2.4" stroke-linecap="square" stroke-linejoin="miter"/>
+</svg>
+<span style="position:absolute; left:222; top:180; width:182; height:52; font-size:11px; color:#81858C">渐变描边（线性/径向/三色标）+ 方头线帽，缺口与线段逐段取色</span>
+<span style="position:absolute; left:18; top:242; width:400; height:14; font-size:11px; color:#81858C">svg stroke: gradient stroke (per-segment color) + stroke-linecap square</span>
+</body></html>
+</app_window>

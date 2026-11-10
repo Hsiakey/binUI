@@ -890,6 +890,37 @@ inline bool PointInPath(const PathShape& s, float px, float py, bool evenOdd) {
     return evenOdd ? (crossings & 1) != 0 : winding != 0;
 }
 
+// 归一化折线上的"点在路径内"（v17）：与 PointInPath 同一套绕数/奇偶逻辑，
+// 直接吃路径段的 uint16 点（0..65535 映射包围盒），省掉每次命中的反归一化拷贝。
+//   nx, ny 是包围盒归一化坐标（0..1，盒外也算数，命中判定由调用方先做包围盒粗筛）
+inline bool PointInPathNorm(const uint16_t* pts, const uint32_t* first, const uint32_t* count,
+                            int contours, float nx, float ny, bool evenOdd) {
+    if (!pts || !first || !count || contours <= 0) return false;
+    const float px = nx * 65535.0f, py = ny * 65535.0f;
+    int winding = 0, crossings = 0;
+    for (int c = 0; c < contours; c++) {
+        const uint32_t f = first[c], n = count[c];
+        if (n < 2) continue;
+        for (uint32_t i = 0; i < n; i++) {
+            const uint32_t ia = f + i, ib = f + (i + 1) % n;
+            const float ax = pts[ia * 2], ay = pts[ia * 2 + 1];
+            const float bx = pts[ib * 2], by = pts[ib * 2 + 1];
+            if (ay == by) continue;                       // 水平边不产生穿越
+            const float side = (bx - ax) * (py - ay) - (px - ax) * (by - ay);
+            if ((ay <= py) != (by <= py)) {
+                const float t = (py - ay) / (by - ay);
+                if (ax + t * (bx - ax) > px) crossings++;
+            }
+            if (ay <= py) {
+                if (by > py && side > 0.0f) winding++;
+            } else {
+                if (by <= py && side < 0.0f) winding--;
+            }
+        }
+    }
+    return evenOdd ? (crossings & 1) != 0 : winding != 0;
+}
+
 // ============================================================
 // 描边连接几何（stroke-linejoin）：斜接 / 斜面缺口的三角形与四边形
 //

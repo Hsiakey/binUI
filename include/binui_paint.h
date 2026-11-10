@@ -761,15 +761,17 @@ inline int BuildPathFillBands(const PaintPath& path, bool evenOdd,
 // 三个后端的 fillLine / fillRounded / fillRect 签名一致，所以这里用回调模板，
 // 后端只传"怎么画一根线 / 一个圆 / 一堆条带"，几何只写一份。
 //
-// line(x0,y0,x1,y1,w) → 后端画一根 w 粗的线
-// dot(x,y,w,h,r)      → 后端画一个实心圆（圆角连接 / 圆头）
-// poly(xy, n)         → 后端填一个多边形（斜接/斜面缺口的条带填充，颜色由调用方定）
-// roundCap 为 true 时开放子路径的两端也补圆（linecap=round）
+// ---- 描边回调契约 ----
+// line(x0,y0,x1,y1,w,c) → 后端画一根 w 粗的线（颜色逐段给：渐变描边靠这个）
+// dot(x,y,w,h,r,c)      → 后端画一个实心圆（圆角连接 / 圆头）
+// poly(xy, n, c)        → 后端填一个多边形（斜接/斜面缺口）
+// colorAt(x,y)          → 该点颜色（纯色时是常量，渐变描边时逐段取色）
+// cap = BinUIPathCap：BUTT（端点即路径端点）/ ROUND（两端半圆）/ SQUARE（两端各外延半线宽）
 // join = BinUIPathJoin；miterLimit 为 0 时按 SVG 默认 4
 // 返回画出的线段数（供调用方估算开销）
-template <class LineFn, class DotFn, class PolyFn>
-inline int PaintPathStroke(const PaintPath& path, float width, bool roundCap,
-                           uint8_t join, uint8_t miterLimit,
+template <class ColorAt, class LineFn, class DotFn, class PolyFn>
+inline int PaintPathStroke(const PaintPath& path, float width, uint8_t cap,
+                           uint8_t join, uint8_t miterLimit, ColorAt&& colorAt,
                            LineFn&& line, DotFn&& dot, PolyFn&& poly) {
     if (!path.Valid() || width <= 0.0f) return 0;
     const float half = width * 0.5f;
@@ -784,37 +786,50 @@ inline int PaintPathStroke(const PaintPath& path, float width, bool roundCap,
         for (uint32_t i = 0; i < segCount; i++) {
             const uint32_t ia = first + i;
             const uint32_t ib = first + (i + 1) % cnt;
-            const float ax = path.pts[ia * 2], ay = path.pts[ia * 2 + 1];
-            const float bx = path.pts[ib * 2], by = path.pts[ib * 2 + 1];
-            line(ax, ay, bx, by, width);
+            // 原始端点（转角几何一律用它 —— 方头外延只影响画出来的那根线）
+            const float oax = path.pts[ia * 2], oay = path.pts[ia * 2 + 1];
+            const float obx = path.pts[ib * 2], oby = path.pts[ib * 2 + 1];
+            float ax = oax, ay = oay, bx = obx, by = oby;
+            if (!closed && cap == BINUI_CAP_SQUARE) {
+                // 方头 = 端点沿切线方向各外延半线宽（这就是 SVG square cap 的定义）
+                const float lx = obx - oax, ly = oby - oay;
+                const float ll = std::sqrt(lx * lx + ly * ly);
+                if (ll > 1e-6f) {
+                    const float ex = lx / ll * half, ey = ly / ll * half;
+                    if (i == 0) { ax -= ex; ay -= ey; }
+                    if (i + 1 == segCount) { bx += ex; by += ey; }
+                }
+            }
+            line(ax, ay, bx, by, width, colorAt((ax + bx) * 0.5f, (ay + by) * 0.5f));
             segs++;
             // 顶点 b 上还有没有下一段：闭合子路径的最后一段也有
             const bool hasNext = (i + 1 < segCount) || closed;
             if (hasNext) {
                 const uint32_t ic = first + (i + 2) % cnt;
                 const float cx = path.pts[ic * 2], cy = path.pts[ic * 2 + 1];
-                if (!PathNeedJoin(ax, ay, bx, by, cx, cy)) continue;
+                if (!PathNeedJoin(oax, oay, obx, oby, cx, cy)) continue;
                 if (join == BINUI_JOIN_MITER || join == BINUI_JOIN_BEVEL) {
-                    const PathJoinGeom g = PathJoinAt(ax, ay, bx, by, cx, cy, half);
+                    const PathJoinGeom g = PathJoinAt(oax, oay, obx, oby, cx, cy, half);
                     if (!g.ok) continue;
+                    const uint32_t col = colorAt(obx, oby);
                     if (join == BINUI_JOIN_MITER && g.ratio <= limit) {
-                        const float q[8] = { g.p1x, g.p1y, g.mx, g.my, g.p2x, g.p2y, bx, by };
-                        poly(q, 4);
+                        const float q[8] = { g.p1x, g.p1y, g.mx, g.my, g.p2x, g.p2y, obx, oby };
+                        poly(q, 4, col);
                     } else {
                         // 斜面，或斜接超过 miter-limit（规范：超限按 bevel 画）
-                        const float q[6] = { g.p1x, g.p1y, bx, by, g.p2x, g.p2y };
-                        poly(q, 3);
+                        const float q[6] = { g.p1x, g.p1y, obx, oby, g.p2x, g.p2y };
+                        poly(q, 3, col);
                     }
                 } else {
-                    dot(bx - half, by - half, width, width, half);
+                    dot(obx - half, oby - half, width, width, half, colorAt(obx, oby));
                 }
             }
         }
-        if (!closed && roundCap) {
+        if (!closed && cap == BINUI_CAP_ROUND) {
             const float ax = path.pts[first * 2], ay = path.pts[first * 2 + 1];
             const float bx = path.pts[(first + cnt - 1) * 2], by = path.pts[(first + cnt - 1) * 2 + 1];
-            dot(ax - half, ay - half, width, width, half);
-            dot(bx - half, by - half, width, width, half);
+            dot(ax - half, ay - half, width, width, half, colorAt(ax, ay));
+            dot(bx - half, by - half, width, width, half, colorAt(bx, by));
         }
     }
     return segs;
@@ -825,9 +840,19 @@ inline int PaintPathStroke(const PaintPath& path, float width, bool roundCap,
 // 三端共用：每端只传三个"怎么画"的回调（条带 / 线 / 圆），几何与颜色顺序只写一份。
 // 缓冲由后端持有（PathRenderBuffers），避免每帧分配。
 //
-// 颜色由调用方先乘好 opacity（GDI 端没有合成，淡出要折进 alpha）。
+// 颜色由调用方先乘好 opacity（GDI 端没有合成，淡出要折进 alpha）；渐变则按色标逐条乘。
 // 描边线宽按"节点盒高 / 设计盒高"缩放：归一化点会自动跟随节点盒，线宽必须显式跟，
 // 否则等比缩放后"形状变大、线条没变粗"。与边框、字号只跟纵向比例是同一处取舍。
+//
+// 颜料集中成 PathPaintSpec：填充/描边各有"纯色 + 可选渐变"两组，v17 起描边也能带渐变。
+struct PathPaintSpec {
+    uint32_t fillColor   = 0xFF000000u;
+    uint32_t strokeColor = 0xFF000000u;
+    const BinUIPathGradient* fillGrad   = nullptr;
+    const BinUIPathGradient* strokeGrad = nullptr;
+    float opacity = 1.0f;
+};
+
 struct PathRenderBuffers {
     std::vector<PathPointF> pts;    // 设备坐标
     std::vector<float> xy;          // PaintPath 需要的 x,y 交错布局
@@ -839,8 +864,7 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
                           const uint32_t* first, const uint32_t* count,
                           const uint8_t* closed, int contours,
                           float x, float y, float w, float h,
-                          uint32_t fillColor, const BinUIPathGradient* fillGrad, float opacity,
-                          uint32_t strokeColor,
+                          const PathPaintSpec& spec,
                           PathRenderBuffers& buf,
                           FillBands&& fillBands, LineFn&& line, DotFn&& dot) {
     if (!normPts || !first || !count || contours <= 0 || head.pointCount == 0) return;
@@ -861,8 +885,8 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
             buf.bands.resize(kMaxPathBands);
         const bool evenOdd = (head.flags & PATH_EVENODD) != 0;
         // v16：渐变填充（无渐变时退化成纯色取样器，与老路径完全一致）
-        const PathShade shade = MakePathShade((head.flags & PATH_FILL_GRAD) ? fillGrad : nullptr,
-                                              fillColor, opacity, x, y, w, h);
+        const PathShade shade = MakePathShade((head.flags & PATH_FILL_GRAD) ? spec.fillGrad : nullptr,
+                                              spec.fillColor, spec.opacity, x, y, w, h);
         int n = 0;
         bool truncated = false;
         // 撞上限：按行步长降级重来（1 → 2 → 4 → 8），保证画完而不是画一半
@@ -878,16 +902,21 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
         const float k = head.designH > 0.0f ? h / head.designH : 1.0f;
         const float sw = static_cast<float>(head.strokeW) * k;
         if (sw > 0.05f) {
+            // v17：渐变描边。色标按设备点取色（量化级与填充同一套），所以每一小段线的
+            // 颜色都对得上 —— 折线本来就是细分的，逐段取色就是逐像素取色。
+            const PathShade strokeShade =
+                MakePathShade((head.flags & PATH_STROKE_GRAD) ? spec.strokeGrad : nullptr,
+                              spec.strokeColor, spec.opacity, x, y, w, h);
+            auto colorAt = [&](float px, float py) { return strokeShade.At(px, py); };
             // 斜接/斜面的缺口是多边形：复用填充那套条带，三端仍然只画 fillRect。
-            // 颜色走 strokeColor（半透明已在调用方折进 alpha）。
             //
             // 裁剪盒要**外扩**：节点盒只按"半线宽"外扩了几何盒（SVG 的 bbox 本来就不含描边），
             // 而斜接尖角可以伸出 (ratio-1)·半线宽 —— 不外扩的话尖角会被自己节点的盒子切平，
-            // 看起来像被削过的斜面（这就是"miterlimit 调大了却没变化"的原因）。
-            // 外扩量取 miter-limit 允许的最大值；父级裁剪仍然照常生效（SVG 的 viewport 语义）。
+            // 看起来像被削过的斜面。外扩量取 miter-limit 允许的最大值；
+            // 父级裁剪仍然照常生效（SVG 的 viewport 语义）。
             const float limit = head.reserve > 0 ? static_cast<float>(head.reserve) : 4.0f;
             const float pad = limit * sw * 0.5f;
-            auto poly = [&](const float* xy, int n) {
+            auto poly = [&](const float* xy, int n, uint32_t color) {
                 if (!xy || n < 3) return;
                 if (buf.bands.size() < static_cast<size_t>(kMaxPathBands))
                     buf.bands.resize(kMaxPathBands);
@@ -896,18 +925,17 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
                 const uint8_t one = 1;
                 const PaintPath pg{ xy, &zero, &cnt, &one, 1 };
                 PathShade ps;
-                ps.color = strokeColor;
+                ps.color = color;
                 bool tr = false;
                 const int bn = BuildPathFillBands(pg, false, x - pad, y - pad, x + w + pad,
                                                   y + h + pad, ps, buf.bands.data(),
                                                   kMaxPathBands, 1, &tr);
                 if (bn > 0) fillBands(buf.bands.data(), bn);
             };
-            PaintPathStroke(view, sw, head.cap == BINUI_CAP_ROUND, head.join, head.reserve,
+            PaintPathStroke(view, sw, head.cap, head.join, head.reserve, colorAt,
                             line, dot, poly);
         }
     }
 }
 
 } // namespace binui
-
