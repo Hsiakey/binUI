@@ -8,6 +8,43 @@
 
 （暂无）
 
+## [0.6.0] - 2026-11-10
+
+本轮主题：**`stroke-linejoin` 的 miter / bevel 补齐**（SVG P2 收尾，格式仍是 v16，
+**不破坏兼容** —— 旧二进制照旧能读，没有 `stroke-linejoin` 的路径仍然是圆角连接）。
+
+### 新增 — `stroke-linejoin`: round / miter / bevel + `stroke-miterlimit`
+
+- 圆角（`round`，binUI 的历史默认）、斜接（`miter`）、斜面（`bevel`）三种连接都实现了：
+  - `miter` 补四边形 `(p1, m, p2, b)`，`bevel` 补三角形 `(p1, b, p2)`；
+  - `ratio = 1/sin(θ/2)` 超过 `stroke-miterlimit`（SVG 默认 4）时按规范退回 bevel；
+  - 转角 < 15° 的微折点仍然不补（折线是曲线细分出来的，缺口只有零点几像素）。
+- **实现方式**：后端没有"填多边形"的原语，缺口复用路径填充那套扫描线条带
+  （`BuildPathFillBands` → `fillRect`），三端只多接一个"填条带"回调，几何只写一份。
+  一个 72px 图标加 10 个斜接尖角，合计只多 **9 条条带**。
+- **斜接尖角会伸出几何包围盒 `(ratio-1)·半线宽`**，而三个后端都把每个节点裁剪到自己的矩形 ——
+  不处理的话 `miterlimit` 调大也看不出变化（尖角画出来又被裁掉）。现在编译期用运行时
+  同一个 `PathJoinAt` 逐顶点算交点、把节点盒撑开（五角星 72px 盒 / 2px 描边 /
+  `miterlimit=10`：盒子 **88.00×84.08 → 97.19×92.43**），尖角不再被切平。
+- `stroke-miterlimit` 只认数字（<1 告警并按 1 处理）；藏在路径记录的空闲字节
+  `BinUIPathEntry.reserve` 里（0 = 运行期按默认 4），**所以格式版本不需要升**。
+- 认不出的 `stroke-linejoin` 值明确告警（可选 round / miter / bevel），不再静默。
+- `stroke-linecap="square"` 仍未实现（按 butt 画并告警，要方头把两端各延长半个线宽）。
+
+### 验证
+
+- `make all tools`：0 warning；四套测试全绿。`suite_svgpath` 新增：
+  - 运行期几何 9 组断言（斜面三角形顶点、斜接四边形顶点、`miterlimit` 超限退回斜面、
+    尖刺真斜接、共线不补、圆角不产生多边形）；
+  - 编译端到端 7 组断言（三种 join 落库、`stroke-miterlimit` 落库、尖角超限时盒子不撑开、
+    尖角未超限时盒子被撑开、未知值告警、`linecap=square` 告警）。
+- 像素基准新增 `svgjoin`（420×260）：五角星 round / miter / bevel 三连 + 粗折线尖角 +
+  `miterlimit=4` vs `12` 的尖刺对照 + star / chevron / triangle 真图标。
+  `make pixels` **7/7 零差异**。
+- 三端一致性（GDI 离屏 vs GL 窗口）：离描边边缘 ≥4px 的内部像素 702 个中 5 个不同（0.7%），
+  差异全在线段的端点/AA 边缘（GDI `LineTo` 与 GL `fillLine` 的取整差异，与连接方式无关）。
+- `check_examples`：11 个 UI 0 问题。
+
 ## [0.5.0] - 2026-11-10
 
 本轮主题：**SVG 渐变**（`<linearGradient>` / `<radialGradient>`，【格式 v16】）。

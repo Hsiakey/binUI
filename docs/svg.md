@@ -96,7 +96,7 @@ struct BinUIPathEntry {      // 32 字节
     uint16_t pointCount;
     uint16_t contourCount;
     uint8_t  strokeW;        // 设计值（像素），运行期乘缩放系数
-    uint8_t  join;           // 0=round（P1 唯一实现）1=miter 2=bevel
+    uint8_t  join;           // 0=round（默认）1=miter 2=bevel —— 三者都已实现
     uint8_t  cap;            // 0=butt 1=round 2=square
     uint8_t  reserve;
 };
@@ -155,9 +155,9 @@ struct BinUIPathEntry {      // 32 字节
   合并之后，一个实心图标通常是"边缘几十条 + 中间一条"，不是"每行一条"。
 - **上限与降级**：`kMaxPathSpans`（初值 2048）。撞上限时行步长翻倍重算，
   保证画完而不是画一半（`BuildDashedRoundRing` 的 `binui_paint.h:435-447` 是同一套思路）。
-- **描边**：折线逐段 `fillLine`，段与段接缝补一个直径 `strokeW` 的 `fillRounded` 圆点
-  （圆角连接）。细分够密时圆点看不出来，折角图标（五角星）会是圆角——P2 再加 miter。
-  这段用模板函数写在 `binui_paint.h` 里，三端传进去的只有 `fillLine`/`fillRounded`，签名三端一致。
+- **描边**：折线逐段画线，转角按 `stroke-linejoin` 补缺口：圆角补一个直径 `strokeW` 的圆点，
+  斜接/斜面填一个多边形（见第 9 节）。细分够密时这些补片看不出来。
+  这段用模板函数写在 `binui_paint.h` 里，三端传进去的只有"画线 / 画圆 / 填多边形"，签名三端一致。
 - **缩放**：`k = node.height / entry.designH`（整形钳制到 [0.05, 64]），`strokeW*k` 四舍五入。
   与边框/线宽的既有做法一致（`binui_renderer.cpp:966-972` 的 `designBorderW_`）。
   非等比拉伸时用 `height` 方向的比例——和 `fontSize` 只跟 `scaleY` 是同一处取舍，
@@ -257,7 +257,9 @@ P1 里这个降级不做，但文档要写清"圆/矩形没有独立描边"。
   `stroke-linecap`（butt/round）。
 - **P2 已完成**：`linearGradient` / `radialGradient`（格式 v16，路径记录带渐变；
   量化条带逐带取色，不需要着色器与纹理 —— 设计与实测见第 8 节）。
-- **P2 待做**：`stroke-linejoin`（miter/bevel）。渐变描边、径向焦点 `fx/fy`、
+- **P2 已完成**：`stroke-linejoin`（round / miter / bevel + `stroke-miterlimit`，
+  缺口填多边形走同一套条带填充 —— 设计与实测见第 9 节）。
+- **P2 待做**：`stroke-linecap="square"`、渐变描边、径向焦点 `fx/fy`、
   `userSpaceOnUse` 下的百分比（目前按用户单位折算并告警）。
 - **P3**：精确命中（点在路径内，可选）、span 缓存、命令级存储 + 运行时再细分、可选灰度抗锯齿
   （只对 path 边缘，全库仍走硬边）。
@@ -296,15 +298,16 @@ P1 里这个降级不做，但文档要写清"圆/矩形没有独立描边"。
 
 ### 7.4 已知取舍
 
-- **描边连接**：只有圆角连接（转角 > 15° 补圆点），没有 miter/bevel —— 尖角图标（五角星）
-  会比标准 SVG 略圆。
+- **描边连接**：round / miter / bevel 都有了（miter 超 `stroke-miterlimit` 按规范退回 bevel）；
+  转角 < 15° 的微折点不补缺口（折线是曲线细分出来的，这种缺口只有零点几像素，补了只会让
+  draw call 翻倍）。
 - **两条线之间**没有抗锯齿：硬边与整个库一致；GL 端 `fillLine` 的边缘是它自己的 AA，
   所以"填充逐像素一致、描边边缘略有差异"。
 - **`<circle>` / `<rect>` 默认仍走轻量映射**（九宫格填充比扫描线干净）：只有写了 `stroke`
   才自动编成路径（`AppendRoundedRect` 把 `rx` 变成真圆弧），所以"圆没有独立描边"这条限制已经没了。
 - **`stroke-linecap` 支持 butt/round**（round 在两端补圆点，square 按 butt 画并告警）；
-  **`stroke-linejoin` 只有圆角连接**（转角 > 15° 补圆点），miter/bevel 会告警 —— 尖角图标
-  （五角星）会比标准 SVG 略圆。
+  **`stroke-linejoin` 三种都支持**（round 补圆点、miter/bevel 填多边形，miter 受
+  `stroke-miterlimit` 限制），尖角图标（五角星）终于是尖的。
 - **嵌套 `<svg>`**：内层 svg 自己的 `transform` 与 viewBox 会重新起算，祖先的变换不叠加
   （嵌套 svg 在图标素材里极少见，暂不处理）。
 
@@ -408,3 +411,67 @@ v16 把单条路径的条带上限从 2048 提到 4096，就是为了让 400px �
 - **`userSpaceOnUse` + 百分比**：按"用户单位"折算（不是 viewport 比例），命中即告警并给出改法。
 - **`fx/fy` 焦点**忽略（告警）；`<text>` / `<polyline>` / `<polygon>` 的渐变填充降级成纯色并告警
   （前者的颜料走文字色通道，后者编成线段节点，都没有填充通路）。
+
+---
+
+## 9. 描边连接（linejoin，0.6.0）
+
+### 9.1 难在哪：后端没有"填多边形"
+
+转角缺口是个三角形/四边形，而三端只有 `fillRect`/`fillLine`/`fillRounded`。
+这一版没给后端加任何原语，而是**复用路径填充那套扫描线条带**：把缺口多边形喂给
+`BuildPathFillBands`，出来的还是 `fillRect`。于是三端的改动只有一句 ——
+把描边色和"填条带"的回调接进 `PaintPathStroke`。
+
+### 9.2 几何（`PathJoinAt` 放在 `binui_path.h`）
+
+- 归一化两段方向 `u`、`v`，叉积定"转角外侧"，两侧各偏移半线宽得 `p1`、`p2`；
+- 斜接点 `m` = 过 `p1` 沿 `u` 的直线 ∩ 过 `p2` 沿 `v` 的直线；
+- `ratio = |m-b| / half = 1/sin(θ/2)`，`θ` 是顶点的内角；
+- **bevel** 填三角形 `(p1, b, p2)`；**miter** 填四边形 `(p1, m, p2, b)`。
+  两个多边形都只和线段"擦边"，不重复覆盖 —— 半透明描边不会被叠加两次。
+- `ratio > stroke-miterlimit`（默认 4）时按 bevel 画，这就是规范的"削角"行为；
+- 转角 < 15° 的微折点不补（折线是从曲线细分出来的，这种缺口只有零点几像素，
+  每个都补会让 draw call 翻倍）。
+
+### 9.3 踩到的坑：斜接尖角会被自己的节点盒切平
+
+节点盒按"半线宽"外扩几何包围盒（SVG 的 bbox 本来就不含描边），但**斜接尖角可以伸出
+`(ratio-1)·半线宽`**，而三个后端都把每个节点裁剪到自己的矩形（GDI 是
+`IntersectClipRect(node rect)`）。结果：`miterlimit` 调到 12 也看不出变化 ——
+尖角画出来了，又被盒子的裁剪矩形削掉。
+
+解法是让**编译期把包围盒按实际尖角撑开**：用与运行期同一个 `PathJoinAt` 逐顶点算交点，
+超限（按 bevel 画）的不算，把 `minX/maxX/minY/maxY` 撑到交点。运行期条带裁剪盒再多给
+`limit·半线宽` 的余量吸收取整误差。实测：五角星（72px 盒、2px 描边、`miterlimit=10`）
+节点盒从 **88.00×84.08 涨到 97.19×92.43**，尖角不再被切。
+`objectBoundingBox` 渐变的"几何盒"因此不能再拿"节点盒减 2·半线宽"反推（撑盒是不对称的），
+改成先用局部变量记下外扩前的几何盒。
+
+### 9.4 实测
+
+| 场景 | 线段 | 补片 | 条带（合成后） |
+|---|---|---|---|
+| 五角星 round，w=2 | 10 | 10 个圆点 | — |
+| 五角星 miter，w=2 | 10 | 10 个四边形 | **9 条** |
+| 五角星 bevel，w=2 | 10 | 10 个三角形 | **4 条** |
+| 五角星 miter，w=6 | 10 | 10 个四边形 | 33 条 |
+| 五角星 bevel，w=6 | 10 | 10 个三角形 | 20 条 |
+
+一个 72px 图标加 10 个斜接尖角，合计只多 9 条条带（每个尖角一条），开销可以忽略。
+
+视觉与像素：
+
+- 像素基准新增 `svgjoin`（420×260）：同一颗五角星的 round / miter / bevel 三连、粗折线
+  尖角、`miterlimit=4` vs `12` 的尖刺对照、以及 star / chevron / triangle 三个真图标。
+  `make pixels` **7/7 零差异**。
+- 尖刺对照的量化：`miterlimit=4`（兜底斜面）最高点 y=123；`12`（真斜接）最高点 **y=103**，
+  也就是尖角多伸出 20px（1/sin 换算的理论值 24.7px，差的是取整与 15° 阈值）。
+- 三端一致性（GDI 离屏 vs GL 窗口）：离描边边缘 ≥4px 的内部像素 702 个中 5 个不同
+  （0.7%），差异全在线段的端点/AA 边缘（GDI `LineTo` 与 GL `fillLine` 的端点取整本来
+  就差 1px，与连接方式无关）；连接多边形本身逐像素一致。
+
+### 9.5 仍然没做的
+
+- `stroke-linecap="square"`：仍按 butt 画并告警（要方头把路径两端各延长半个线宽）。
+- `miter-clip`：按普通 miter 处理（SVG2 的这个变体只在超限时把尖角改成"平头"，没人用）。
