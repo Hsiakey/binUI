@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<app_window width="420" height="260" bg="#151517" title="svg antialias probe">
+<html width="420" height="260" bg="#151517">
+<head><meta charset="UTF-8"><style> body { font-size: 12px; color: #ADB2B8; } </style></head>
+<body>
+<defs>
+    <linearGradient id="gA" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="#7AAAFF"/><stop offset="1" stop-color="#F25A5A"/>
+    </linearGradient>
+</defs>
+
+<!-- 第一行：同一个五角星 crispEdges vs auto（默认硬边 vs 边缘抗锯齿） -->
+<svg style="position:absolute; left:16; top:10; width:72; height:72" viewBox="0 0 24 24"
+     shape-rendering="crispEdges">
+    <path d="M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z"
+          fill="#F2B544"/>
+</svg>
+<svg style="position:absolute; left:96; top:10; width:72; height:72" viewBox="0 0 24 24"
+     shape-rendering="auto">
+    <path d="M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z"
+          fill="#F2B544"/>
+</svg>
+<!-- 细斜线 + 圆：AA 最明显的地方 -->
+<svg style="position:absolute; left:176; top:10; width:72; height:72" viewBox="0 0 24 24"
+     shape-rendering="crispEdges">
+    <path d="M3 21 L21 3 L21 8 L8 21 Z" fill="#4ED17E"/>
+    <circle cx="17" cy="17" r="4.5" fill="#7AAAFF"/>
+</svg>
+<svg style="position:absolute; left:256; top:10; width:72; height:72" viewBox="0 0 24 24"
+     shape-rendering="auto">
+    <path d="M3 21 L21 3 L21 8 L8 21 Z" fill="#4ED17E"/>
+    <circle cx="17" cy="17" r="4.5" fill="#7AAAFF"/>
+</svg>
+<!-- 渐变 + AA：颜色随覆盖率折 alpha，渐变本身不变 -->
+<svg style="position:absolute; left:340; top:10; width:64; height:72" viewBox="0 0 24 27"
+     shape-rendering="auto">
+    <path d="M2 25 L12 2 L22 25 Z" fill="url(#gA)"/>
+</svg>
+
+<!-- 第二行：真正的图标尺寸（24px 盒里的小图形，AA 的收益最直观） -->
+<svg style="position:absolute; left:16; top:104; width:24; height:24" viewBox="0 0 24 24"
+     shape-rendering="crispEdges">
+    <path d="M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z"
+          fill="#F2B544"/>
+</svg>
+<svg style="position:absolute; left:52; top:104; width:24; height:24" viewBox="0 0 24 24"
+     shape-rendering="auto">
+    <path d="M12 2 L15.09 8.26 L22 9.27 L17 14.14 L18.18 21.02 L12 17.77 L5.82 21.02 L7 14.14 L2 9.27 L8.91 8.26 Z"
+          fill="#F2B544"/>
+</svg>
+<svg style="position:absolute; left:96; top:104; width:64; height:24" viewBox="0 0 64 24">
+    <path d="M4 20 L32 4 L60 20 Z" fill="#F25A5A" shape-rendering="crispEdges"/>
+</svg>
+<svg style="position:absolute; left:172; top:104; width:64; height:24" viewBox="0 0 64 24">
+    <path d="M4 20 L32 4 L60 20 Z" fill="#F25A5A" shape-rendering="auto"/>
+</svg>
+<span style="position:absolute; left:248; top:104; width:160; height:52; font-size:11px; color:#81858C">左 crispEdges（默认硬边）/ 右 auto（覆盖率抗锯齿）</span>
+
+<!-- 第三行：带洞的环（evenodd）+ 描边图形：AA 只作用于填充 -->
+<svg style="position:absolute; left:16; top:150; width:96; height:96" viewBox="0 0 24 24"
+     shape-rendering="auto">
+    <path d="M2 2 H22 V22 H2 Z M7 7 H17 V17 H7 Z" fill="#7AAAFF" fill-rule="evenodd"/>
+</svg>
+<svg style="position:absolute; left:120; top:150; width:96; height:96" viewBox="0 0 24 24">
+    <path d="M3 21 L12 3 L21 21 Z" fill="#4ED17E" shape-rendering="auto"
+          stroke="#F25A5A" stroke-width="1.2"/>
+</svg>
+<span style="position:absolute; left:228; top:160; width:180; height:64; font-size:11px; color:#81858C">evenodd 洞边缘同样平滑；描边仍是线段的 AA（GL 自带、GDI 硬边）</span>
+<span style="position:absolute; left:16; top:250; width:400; height:12; font-size:10px; color:#81858C">svg antialias: shape-rendering auto/optimizeQuality = edge coverage (4x vertical supersampling)</span>
+</body></html>
+</app_window>

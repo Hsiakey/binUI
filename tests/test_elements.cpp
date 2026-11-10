@@ -3640,6 +3640,96 @@ static void TestPathBandCache() {
     }
 }
 
+// v19 shape-rendering：auto/optimizeQuality 开 AA，crispEdges/optimizeSpeed 关，可继承
+static void TestShapeRendering() {
+    auto flagsOf = [](const std::string& svgAttrs, const std::string& pathAttrs,
+                      std::vector<std::string>* warns) {
+        const std::string html =
+            "<app_window width=\"100\" height=\"100\"><html width=\"100\" height=\"100\" bg=\"#000000\">"
+            "<body><svg x=\"0\" y=\"0\" width=\"100\" height=\"100\" viewBox=\"0 0 100 100\" " +
+            svgAttrs + ">"
+            "<g " + pathAttrs + "><path d=\"M0 0 H100 V100 H0 Z\" fill=\"#FF0000\"/></g>"
+            "</svg></body></html></app_window>";
+        auto res = binui::CompileBinUIEx(html);
+        if (warns) *warns = res.warnings;
+        binui::BinUIRenderer r;
+        r.loadLayout(res.layout.data(), res.layout.size());
+        for (const auto& n : r.getNodes())
+            if (n.type == BINUI_PATH) {
+                const auto* pr = r.pathOf(n.id);
+                if (pr) return static_cast<int>(pr->head.flags);
+            }
+        return -1;
+    };
+    std::vector<std::string> w;
+    int f = flagsOf("shape-rendering=\"auto\"", "", &w);
+    CHECK(w.empty(), "shape-rendering：auto 不报警告");
+    CHECK(f > 0 && (f & PATH_AA), "shape-rendering=auto：<svg> 上的值被子元素继承 → PATH_AA");
+    f = flagsOf("", "shape-rendering=\"optimizeQuality\"", &w);
+    CHECK(f > 0 && (f & PATH_AA), "shape-rendering=optimizeQuality：<g> 上同样生效");
+    f = flagsOf("shape-rendering=\"crispEdges\"", "", &w);
+    CHECK(f > 0 && !(f & PATH_AA), "shape-rendering=crispEdges：不开 AA");
+    f = flagsOf("", "", &w);
+    CHECK(f > 0 && !(f & PATH_AA), "shape-rendering：没写就是硬边（默认不变）");
+    f = flagsOf("shape-rendering=\"optimizeSpeed\"", "", &w);
+    CHECK(f > 0 && !(f & PATH_AA), "shape-rendering=optimizeSpeed：不开 AA");
+    flagsOf("shape-rendering=\"blurry\"", "", &w);
+    bool warned = false;
+    for (const auto& x : w) {
+        std::printf("  [svgpath][warn] %s\n", x.c_str());
+        if (x.find("shape-rendering") != std::string::npos) warned = true;
+    }
+    CHECK(warned, "shape-rendering：不认识的值要告警");
+}
+
+// v19 边缘抗锯齿：覆盖率条带（部分 alpha）+ 面积守恒 + 太宽时退回硬边
+static void TestPathAA() {
+    PathShape tri;
+    std::string err;
+    ParsePathData("M0 0 L100 0 L0 100 Z", 0.01f, tri, &err);
+    DevicePath dev = ToDevice(tri);
+    // 设备盒 100x100：解析面积 5000
+    PathShade shade;
+    shade.color = 0xFFFF0000u;
+    PaintBand bands[kMaxPathBands];
+    std::vector<uint16_t> covAcc;
+    bool trunc = false;
+
+    auto areaOf = [&](int n) {
+        double a = 0.0;
+        for (int i = 0; i < n; i++)
+            a += (double)bands[i].w * (double)bands[i].h *
+                 (double)((bands[i].color >> 24) & 0xFF) / 255.0;
+        return a;
+    };
+    int partial = 0;
+
+    const int n = BuildPathFillBandsAA(dev.view(), false, 0, 0, 100, 100, shade, bands,
+                                       kMaxPathBands, covAcc, &trunc);
+    CHECK(n > 0 && !trunc, "AA：三角形能画完");
+    for (int i = 0; i < n; i++)
+        if (((bands[i].color >> 24) & 0xFF) < 255) partial++;
+    std::printf("  [svgpath] AA：条带 %d，其中半透明边缘 %d 条，覆盖面积 %.1f（理论 5000）\n",
+                n, partial, areaOf(n));
+    CHECK(partial > 0, "AA：边缘出现了部分覆盖的像素（alpha < 255）");
+    CHECK_NEAR(areaOf(n), 5000.0, 60.0, "AA：alpha 加权面积与解析解一致");
+
+    // 硬边：不应有半透明像素，面积误差在行取整范围内
+    const int nh = BuildPathFillBands(dev.view(), false, 0, 0, 100, 100, 0xFFFF0000u, bands,
+                                      kMaxPathBands, 1, &trunc);
+    partial = 0;
+    for (int i = 0; i < nh; i++)
+        if (((bands[i].color >> 24) & 0xFF) < 255) partial++;
+    std::printf("  [svgpath] 硬边：条带 %d，半透明 %d 条，面积 %.1f\n", nh, partial, areaOf(nh));
+    CHECK(partial == 0, "硬边：没有半透明像素");
+    CHECK_NEAR(areaOf(nh), 5000.0, 200.0, "硬边：面积误差在行取整范围内");
+
+    // 太宽（> kMaxPathAAWidth）时必须报 -1，让调用方退回硬边
+    const int tooWide = BuildPathFillBandsAA(dev.view(), false, 0, 0, 5000, 100, shade, bands,
+                                             kMaxPathBands, covAcc, &trunc);
+    CHECK(tooWide == -1, "AA：超出宽度上限时返回 -1（调用方退回硬边）");
+}
+
 static void TestPathHitTest() {
     // 一个 20x20 的环（evenodd 挖洞），放在 100x100 窗口里
     const std::string html =
@@ -3888,6 +3978,8 @@ static int run() {
     TestGradientCompile();
     TestLineJoin();
     TestPathHitTest();
+    TestPathAA();
+    TestShapeRendering();
     TestPathBandCache();
     TestSvgFinish();
     std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");

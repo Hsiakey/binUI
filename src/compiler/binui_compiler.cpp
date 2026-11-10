@@ -2367,6 +2367,7 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         // v15 SVG 路径：d 是路径数据；其余是描边/填充规则的表现属性
         "d", "ry", "fill-rule", "fill-opacity", "stroke-opacity",
         "stroke-linecap", "stroke-linejoin", "stroke-dasharray", "stroke-dashoffset", "stroke-miterlimit",
+        "shape-rendering",
         "viewbox", "preserveaspectratio", "xlink:href",
         // v16 SVG 渐变：端点/圆心/焦点/色标/单位/变换/spread（x1/y1/x2/y2/cx/cy/r 上面已有）
         "fx", "fy", "offset", "stop-color", "stop-opacity",
@@ -4273,6 +4274,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // 当前 <svg> 视口在**用户单位**下的尺寸：userSpaceOnUse 里写百分比时要按它折算，
         // 例如 x1="50%" 等于 viewport 宽度的一半（SVG 规范）。没有 viewBox 时取 width/height。
         float    vpW = 0.0f, vpH = 0.0f;
+        // v19：shape-rendering（可继承）。true = auto/optimizeQuality（边缘抗锯齿），
+        // false = crispEdges/optimizeSpeed（硬边，也是 binUI 的默认）。
+        bool     aa = false;
         // v16：fill 用的渐变 id（空 = 纯色）。渐变是继承属性，<svg>/<g> 上写一次全子树生效；
         // fillColor 同时存"中间色标的代表色"，供运行期兜底与不支持渐变的通路使用。
         std::string fillGradId{};
@@ -4845,6 +4849,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         bool eHasStroke = pc.hasStroke;
         uint8_t eStrokeW = pc.strokeW;
         bool eEvenOdd = pc.evenOdd;
+        bool eAA = pc.aa;          // v19：shape-rendering 的继承值
         std::string fillGradId = pc.fillGradId;   // v16：继承下来的渐变填充（空 = 纯色）
         std::string strokeGradId = pc.strokeGradId;  // v17：继承下来的渐变描边（空 = 纯色）
         bool eFillStated = pc.fillStated;         // v18：颜料是否被显式给过（含祖先）
@@ -4935,6 +4940,16 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             }
             const std::string fr = pickSvgPaint("fill-rule");
             if (!fr.empty()) eEvenOdd = (lowerStr(fr) == "evenodd");
+            // v19：shape-rendering 决定填充边缘要不要抗锯齿。
+            // 默认（没写/auto 以外的未知值）保持 binUI 的硬边；显式 auto/optimizeQuality 才开 AA。
+            const std::string sr = pickSvgPaint("shape-rendering");
+            if (!sr.empty()) {
+                const std::string lv = lowerStr(sr);
+                if (lv == "auto" || lv == "optimizequality") eAA = true;
+                else if (lv == "crispedges" || lv == "optimizespeed") eAA = false;
+                else Warn("shape-rendering=\"" + sr + "\" 不认识，可选 auto | optimizeQuality | "
+                          "crispEdges | optimizeSpeed（前两个开边缘抗锯齿）");
+            }
         }
 
         // <polyline points="x,y x,y ..."> / <polygon>：展开成若干 BINUI_LINE 子节点
@@ -5959,7 +5974,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                             (pathStroke ? PATH_STROKE : 0) |
                             (pathEvenOdd ? PATH_EVENODD : 0) |
                             (pathHasGrad ? PATH_FILL_GRAD : 0) |
-                            (pathHasStrokeGrad ? PATH_STROKE_GRAD : 0);
+                            (pathHasStrokeGrad ? PATH_STROKE_GRAD : 0) |
+                            ((pathFill && eAA) ? PATH_AA : 0);   // v19：边缘抗锯齿
             pp.hasGrad = pathHasGrad;
             if (pathHasGrad) pp.grad = pathGrad;
             pp.hasStrokeGrad = pathHasStrokeGrad;
@@ -6210,6 +6226,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             child.hasStroke = eHasStroke;
             child.strokeW = eStrokeW;
             child.evenOdd = eEvenOdd;
+            child.aa = eAA;
             child.fillMentioned = eFillMentioned;   // fill（含 none）的"提到过"也沿树继承
             child.fillGradId = fillGradId;   // 渐变填充是继承属性（<svg>/<g> 写一次全子树生效）
             child.strokeGradId = strokeGradId;   // 渐变描边同理（v17）

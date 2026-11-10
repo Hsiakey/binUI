@@ -16,7 +16,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v16: 路径渐变（SVG <linearGradient>/<radialGradient> 填充），见 BinUIPathGradient
 // v17: 渐变描边（stroke="url(#id)"）+ stroke-linecap="square"，多一条可选渐变记录
 // v18: 径向渐变的焦点 fx/fy（BinUIPathGradient 92 -> 100 字节）
-constexpr uint32_t BINUI_VERSION    = 18;
+// v19: 路径边缘抗锯齿开关（shape-rendering=auto/optimizeQuality → PATH_AA）
+constexpr uint32_t BINUI_VERSION    = 19;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -437,6 +438,7 @@ enum BinUIPathFlag : uint16_t {
     PATH_EVENODD   = 1 << 2, // fill-rule="evenodd"；否则非零环绕
     PATH_FILL_GRAD   = 1 << 3, // v16：填充用渐变（BinUIPathGradient 紧随定长头）
     PATH_STROKE_GRAD = 1 << 4, // v17：描边用渐变（第二条 BinUIPathGradient，在填充渐变之后）
+    PATH_AA          = 1 << 5, // v19：填充边缘抗锯齿（shape-rendering=auto/optimizeQuality）
 };
 
 

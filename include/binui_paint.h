@@ -782,6 +782,180 @@ inline int BuildPathFillBands(const PaintPath& path, bool evenOdd,
                               rowStep, truncated);
 }
 
+// ============================================================
+// 边缘抗锯齿（v19，shape-rendering=auto/optimizeQuality）
+//
+// 仍然只画 fillRect，所以不做 MSAA/stencil：改用**逐像素覆盖率**。
+//   1. 每个像素行纵向做 kPathAASubRows 次子采样，把每条子扫描线覆盖到的像素
+//      按重叠比例累加进覆盖率缓冲（0..255）；
+//   2. 把覆盖率相同的**连续像素**合并成一条带，颜色 alpha 乘覆盖率/255。
+// 于是斜边上的像素被"部分覆盖"，台阶就淡了 —— 三端各自合成本端自己的 alpha
+// （GL/D3D 是真合成；GDI 走 BlendOver 近似，见下）。
+//
+// 已知代价（写进 docs/svg.md）：
+//   · 条带数变多（每条行多出左右两条边缘带，整行内区仍会合并成一条）；
+//   · **三端不再逐像素一致**：GDI 没有真 alpha 合成，半透明的边缘带是按"底色"
+//     近似混合的，同一张图在 GDI 与 GL 的边缘像素会差几十级通道；
+//   · 因此像素基准只在"没开 AA"时保证零差异。
+// ============================================================
+constexpr int kPathAASubRows  = 4;      // 每个像素行的纵向子采样数
+constexpr int kMaxPathAAWidth = 4096;   // 覆盖率缓冲宽度上限（更宽就退回硬边）
+
+// 返回条带数；返回 -1 表示"这形状太宽，AA 做不了"（调用方退回硬边填充）。
+inline int BuildPathFillBandsAA(const PaintPath& path, bool evenOdd,
+                                float clipX0, float clipY0, float clipX1, float clipY1,
+                                const PathShade& shade, PaintBand* out, int cap,
+                                std::vector<uint16_t>& covAcc, bool* truncated) {
+    if (truncated) *truncated = false;
+    if (!path.Valid() || !out || cap <= 0) return 0;
+    if (clipX1 <= clipX0 || clipY1 <= clipY0) return 0;
+    const int xLo = (int)std::floor(clipX0);
+    const int xHi = (int)std::ceil(clipX1);
+    const int width = xHi - xLo;
+    if (width <= 0) return 0;
+    if (width > kMaxPathAAWidth) return -1;
+    covAcc.assign(static_cast<size_t>(width), 0);
+
+    struct Crossing { float x; int dir; };
+    Crossing crossings[kMaxPathCrossings];
+    struct SpanF { float a, b; };
+    SpanF spans[kMaxRowSpans];
+    struct OpenRun { int x0, w, endY, idx; };
+    OpenRun open[kMaxOpenRuns];
+    int openN = 0;
+    const int yBegin = (int)std::floor(clipY0);
+    const int yEnd = (int)std::ceil(clipY1);
+    auto flushStale = [&](int y) {
+        int w = 0;
+        for (int i = 0; i < openN; i++)
+            if (open[i].endY > y) open[w++] = open[i];
+        openN = w;
+    };
+
+    int n = 0;
+    for (int y = yBegin; y < yEnd; y++) {
+        std::fill(covAcc.begin(), covAcc.end(), static_cast<uint16_t>(0));
+        // ---- 1. 纵向子采样，累加覆盖率 ----
+        for (int sr = 0; sr < kPathAASubRows; sr++) {
+            const float yc = (float)y + ((float)sr + 0.5f) / (float)kPathAASubRows;
+            int nc = 0;
+            bool overflow = false;
+            for (int c = 0; c < path.contours && !overflow; c++) {
+                const uint32_t first = path.first[c];
+                const uint32_t cnt = path.count[c];
+                if (cnt < 2) continue;
+                for (uint32_t i = 0; i < cnt; i++) {
+                    const uint32_t ia = first + i;
+                    const uint32_t ib = first + (i + 1) % cnt;
+                    const float ax = path.pts[ia * 2], ay = path.pts[ia * 2 + 1];
+                    const float bx = path.pts[ib * 2], by = path.pts[ib * 2 + 1];
+                    if (ay == by) continue;
+                    if ((ay <= yc) == (by <= yc)) continue;
+                    if (nc >= kMaxPathCrossings) { overflow = true; break; }
+                    const float t = (yc - ay) / (by - ay);
+                    crossings[nc++] = { ax + t * (bx - ax), ay < by ? 1 : -1 };
+                }
+            }
+            if (overflow) {
+                if (truncated) *truncated = true;
+                return n;
+            }
+            if (nc < 2) continue;
+            std::sort(crossings, crossings + nc,
+                      [](const Crossing& a, const Crossing& b) { return a.x < b.x; });
+            int ns = 0;
+            if (evenOdd) {
+                for (int i = 0; i + 1 < nc; i += 2) {
+                    if (ns >= kMaxRowSpans) break;
+                    spans[ns++] = { crossings[i].x, crossings[i + 1].x };
+                }
+            } else {
+                int winding = 0;
+                float startX = 0.0f;
+                for (int i = 0; i < nc; i++) {
+                    const int prev = winding;
+                    winding += crossings[i].dir;
+                    if (prev == 0 && winding != 0) {
+                        startX = crossings[i].x;
+                    } else if (prev != 0 && winding == 0) {
+                        if (ns >= kMaxRowSpans) break;
+                        spans[ns++] = { startX, crossings[i].x };
+                    }
+                }
+            }
+            // 把浮点区间按"每个像素重叠多少"累加。
+            // 累加器用 1024 定点（不是 255/子采样数）：整数除法 255/4=63，
+            // 满覆盖也只剩 252/255，会把整块面积系统性低估 1.2%（实测到的偏差）。
+            constexpr int kCovScale = 1024;
+            const int unit = kCovScale / kPathAASubRows;
+            for (int i = 0; i < ns; i++) {
+                int p0 = (int)std::floor(spans[i].a);
+                int p1 = (int)std::floor(spans[i].b);
+                if (p0 < xLo) p0 = xLo;
+                if (p1 >= xHi) p1 = xHi - 1;
+                if (p1 < p0) continue;
+                if (p0 == p1) {
+                    const float ov = spans[i].b - spans[i].a;
+                    covAcc[p0 - xLo] =
+                        static_cast<uint16_t>(covAcc[p0 - xLo] + ov * unit);
+                    continue;
+                }
+                const float ovFirst = std::min(spans[i].b, (float)p0 + 1.0f) - spans[i].a;
+                const float ovLast = spans[i].b - std::max(spans[i].a, (float)p1);
+                covAcc[p0 - xLo] = static_cast<uint16_t>(covAcc[p0 - xLo] + ovFirst * unit);
+                for (int q = p0 + 1; q < p1; q++)
+                    covAcc[q - xLo] = static_cast<uint16_t>(covAcc[q - xLo] + unit);
+                covAcc[p1 - xLo] = static_cast<uint16_t>(covAcc[p1 - xLo] + ovLast * unit);
+            }
+        }
+        // ---- 2. 覆盖率量化成 0..255，相同覆盖率的连续像素合并成一条带 ----
+        const float ycRow = (float)y + 0.5f;
+        int p = 0;
+        while (p < width) {
+            auto alphaOf = [](uint16_t cov) -> int {
+                int a = (static_cast<int>(cov) * 255 + 512) / 1024;
+                return a > 255 ? 255 : a;
+            };
+            int a = alphaOf(covAcc[p]);
+            if (a <= 0) { p++; continue; }
+            int q = p + 1;
+            while (q < width && alphaOf(covAcc[q]) == a) q++;
+            const int runX = xLo + p, runW = q - p;
+            const uint32_t col =
+                PathScaleArgb(shade.At((float)runX + (float)runW * 0.5f, ycRow),
+                              (float)a / 255.0f);
+            bool merged = false;
+            for (int k = 0; k < openN; k++) {
+                if (open[k].x0 == runX && open[k].w == runW && open[k].endY == y &&
+                    out[open[k].idx].color == col) {
+                    out[open[k].idx].h += 1.0f;
+                    open[k].endY = y + 1;
+                    merged = true;
+                    break;
+                }
+            }
+            if (merged) { p = q; continue; }
+            if (n >= cap) {
+                if (truncated) *truncated = true;
+                return n;
+            }
+            out[n] = { (float)runX, (float)y, (float)runW, 1.0f, col, 0.0f, false };
+            if (openN < kMaxOpenRuns) {
+                open[openN++] = { runX, runW, y + 1, n };
+            } else {
+                int oldest = 0;
+                for (int k = 1; k < openN; k++)
+                    if (open[k].endY < open[oldest].endY) oldest = k;
+                open[oldest] = { runX, runW, y + 1, n };
+            }
+            n++;
+            p = q;
+        }
+        flushStale(y);
+    }
+    return n;
+}
+
 // 折线描边：逐段画线，转角按 stroke-linejoin 补缺口（圆角补圆点 / 斜接与斜面填多边形）。
 // 三个后端的 fillLine / fillRounded / fillRect 签名一致，所以这里用回调模板，
 // 后端只传"怎么画一根线 / 一个圆 / 一堆条带"，几何只写一份。
@@ -893,6 +1067,7 @@ struct PathRenderBuffers {
     std::vector<PathPointF> pts;    // 设备坐标
     std::vector<float> xy;          // PaintPath 需要的 x,y 交错布局
     std::vector<PaintBand> bands;   // 填充条带（含降级重试时的容量）
+    std::vector<uint16_t> covAcc;   // v19：AA 的逐像素覆盖率累加缓冲
 };
 
 // 条带缓存的 key：形状盒尺寸 + 填充颜料 + 透明度 + 相关 flags（渐变指针也进去，
@@ -955,11 +1130,26 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
                               spec.fillColor, spec.opacity, x, y, w, h);
             int n = 0;
             bool truncated = false;
-            // 撞上限：按行步长降级重来（1 → 2 → 4 → 8），保证画完而不是画一半
-            for (int step = 1; step <= 8; step *= 2) {
-                n = BuildPathFillBands(view, evenOdd, x, y, x + w, y + h, shade,
-                                       buf.bands.data(), kMaxPathBands, step, &truncated);
-                if (!truncated) break;
+            bool aaDone = false;
+            // v19：shape-rendering=auto/optimizeQuality 时走覆盖率 AA；
+            // 形状太宽（>kMaxPathAAWidth）或撞上限时退回硬边，保证"画得完"优先。
+            if (head.flags & PATH_AA) {
+                const int na = BuildPathFillBandsAA(view, evenOdd, x, y, x + w, y + h, shade,
+                                                    buf.bands.data(), kMaxPathBands,
+                                                    buf.covAcc, &truncated);
+                if (na >= 0 && !truncated) {
+                    n = na;
+                    aaDone = true;
+                }
+            }
+            if (!aaDone) {
+                truncated = false;
+                // 撞上限：按行步长降级重来（1 → 2 → 4 → 8），保证画完而不是画一半
+                for (int step = 1; step <= 8; step *= 2) {
+                    n = BuildPathFillBands(view, evenOdd, x, y, x + w, y + h, shade,
+                                           buf.bands.data(), kMaxPathBands, step, &truncated);
+                    if (!truncated) break;
+                }
             }
             if (n > 0) fillBands(buf.bands.data(), n);
             if (cache) {
