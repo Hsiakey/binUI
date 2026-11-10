@@ -112,6 +112,9 @@ public:
         std::vector<uint32_t> first;    // 每条子路径起始点下标
         std::vector<uint32_t> count;    // 每条子路径点数
         std::vector<uint8_t>  closed;   // 1 = 原始 Z
+        // v16：填充渐变（PATH_FILL_GRAD 置位时有效）
+        bool hasGrad = false;
+        BinUIPathGradient grad{};
     };
     const PathRecord* pathOf(uint16_t nodeId) const {
         auto it = pathIdx_.find(nodeId);

@@ -1296,7 +1296,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 binui::PaintPathNode(
                     pr->head, pr->pts.data(), pr->first.data(), pr->count.data(),
                     pr->closed.data(), static_cast<int>(pr->first.size()),
-                    nfx, nfy, nfw, nfh, pfc, pbuf,
+                    nfx, nfy, nfw, nfh, pfc, pr->hasGrad ? &pr->grad : nullptr, pop, pbuf,
                     [&](const binui::PaintBand* b, int n) { FillPaintBands(hdc, b, n, pbg); },
                     [&](float x0, float y0, float x1, float y1, float lw) {
                         HPEN hp = penFor(lw);

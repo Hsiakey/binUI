@@ -87,15 +87,48 @@
         <svg style="position:absolute; left:344; top:34; width:32; height:32" viewBox="0 0 24 24">
             <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" fill="#38BDF8" stroke="#1F2A37" stroke-width="1"/>
         </svg>
-        <span class="desc" style="position:absolute; left:404; top:16; width:500; height:18">path / ellipse / fill+stroke 并存 / fill-rule=evenodd / transform 与 viewBox</span>
-        <span class="note" style="position:absolute; left:404; top:38; width:500; height:16">每个图标一行 &lt;path&gt;：坐标是 viewBox 用户单位，缩放/描边线宽自动跟随</span>
-        <span class="note" style="position:absolute; left:404; top:58; width:500; height:16">心跳动画仍是普通 CSS：fill 色走 transition，svg 只提供几何</span>
+        <!-- 渐变样例：线性 45° 三色标 / 径向 / spreadMethod=repeat / gradientTransform 旋转 -->
+        <defs>
+            <linearGradient id="d1" x1="0" y1="0" x2="1" y2="1">
+                <stop offset="0" stop-color="#3E8BFF"/>
+                <stop offset="0.5" stop-color="#2FBF9A"/>
+                <stop offset="1" stop-color="#F2B544"/>
+            </linearGradient>
+            <radialGradient id="d2">
+                <stop offset="0" stop-color="#FFFFFF"/>
+                <stop offset="0.55" stop-color="#38BDF8"/>
+                <stop offset="1" stop-color="#1F2A37"/>
+            </radialGradient>
+            <linearGradient id="d3" spreadMethod="repeat" x1="0" y1="0" x2="0.14" y2="0">
+                <stop offset="0" stop-color="#38BDF8"/>
+                <stop offset="0.5" stop-color="#1F2A37"/>
+                <stop offset="1" stop-color="#38BDF8"/>
+            </linearGradient>
+            <linearGradient id="d4" gradientUnits="userSpaceOnUse"
+                            x1="0" y1="22" x2="100" y2="22" gradientTransform="rotate(18 50 22)">
+                <stop offset="0" stop-color="#FF8A65"/>
+                <stop offset="1" stop-color="#3E8BFF"/>
+            </linearGradient>
+        </defs>
+        <svg style="position:absolute; left:404; top:30; width:112; height:44" viewBox="0 0 100 44">
+            <path d="M4 4 H96 V40 H4 Z" fill="url(#d1)"/>
+        </svg>
+        <svg style="position:absolute; left:524; top:30; width:112; height:44" viewBox="0 0 100 44">
+            <path d="M4 4 H96 V40 H4 Z" fill="url(#d2)"/>
+        </svg>
+        <svg style="position:absolute; left:644; top:30; width:112; height:44" viewBox="0 0 100 44">
+            <path d="M4 4 H96 V40 H4 Z" fill="url(#d3)"/>
+        </svg>
+        <svg style="position:absolute; left:764; top:30; width:120; height:44" viewBox="0 0 100 44">
+            <path d="M4 4 H96 V40 H4 Z" fill="url(#d4)"/>
+        </svg>
+        <span class="note" style="position:absolute; left:404; top:80; width:490; height:14">三色标 45° · 径向 · repeat 条纹 · 旋转渐变（oBB / userSpaceOnUse）</span>
     </div>
 
     <!-- 底部说明 -->
     <div class="panel" style="position:absolute; left:16; top:452; width:928; height:72">
         <span class="desc" style="position:absolute; left:20; top:14; width:470; height:18">SVG 子图形 = 普通节点：path · ellipse · line · polyline · polygon · circle · rect</span>
-        <span class="note" style="position:absolute; left:20; top:36; width:470; height:16; font-size:10">全部支持 CSS transition/animation（translate/opacity/颜色），坐标相对 &lt;svg&gt; 容器</span>
+        <span class="note" style="position:absolute; left:20; top:36; width:470; height:16; font-size:10">渐变填充在编译期折成归一化坐标（线性/径向/多色标/spread/transform），运行时逐条带取色</span>
         <span class="desc" style="position:absolute; left:500; top:14; width:420; height:18">&lt;canvas&gt; 空绘制面：drawNodesGL 回调应用，已裁剪到画布矩形</span>
         <span class="note" style="position:absolute; left:500; top:36; width:400; height:16">应用 updateFn 每帧更新数据 + invalidateRect → 帧内回调重绘（立即式）</span>
     </div>

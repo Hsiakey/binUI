@@ -17,9 +17,11 @@ namespace {
 // ============================================================
 // 布局文档：把二进制拆成可合并的结构，再按 v12 段序重新写出
 // ============================================================
-// 路径段（v15）的一条子记录：定长头 + 三条变长表
+// 路径段（v15）的一条子记录：定长头 +（v16）渐变 + 三条变长表
 struct DocPath {
     BinUIPathEntry head{};
+    bool hasGrad = false;
+    BinUIPathGradient grad{};
     std::vector<uint32_t> first;
     std::vector<uint8_t>  closed;
     std::vector<uint16_t> pts;
@@ -383,6 +385,12 @@ bool ParseDoc(const void* data, size_t size, Doc& d) {
                             (void)hpEnd;
                             DocPath dp;
                             std::memcpy(&dp.head, hp, sizeof(BinUIPathEntry));
+                            if (dp.head.flags & PATH_FILL_GRAD) {
+                                const uint8_t* gp = nullptr;
+                                if (!p.blob(sizeof(BinUIPathGradient), gp)) { good = false; break; }
+                                std::memcpy(&dp.grad, gp, sizeof(BinUIPathGradient));
+                                dp.hasGrad = true;
+                            }
                             const size_t cbytes = (size_t)dp.head.contourCount * sizeof(uint32_t);
                             const uint8_t* cp = nullptr;
                             if (!p.blob(cbytes, cp)) { good = false; break; }
@@ -550,6 +558,7 @@ std::vector<uint8_t> EmitDoc(Doc& d) {
         PutU32(p, static_cast<uint32_t>(d.paths.size()));
         for (const DocPath& dp : d.paths) {
             PutRaw(p, &dp.head, sizeof(dp.head));
+            if (dp.hasGrad)         PutRaw(p, &dp.grad, sizeof(dp.grad));
             if (!dp.first.empty())  PutRaw(p, dp.first.data(),  dp.first.size() * sizeof(uint32_t));
             if (!dp.closed.empty()) PutRaw(p, dp.closed.data(), dp.closed.size());
             if (!dp.pts.empty())    PutRaw(p, dp.pts.data(),    dp.pts.size() * sizeof(uint16_t));

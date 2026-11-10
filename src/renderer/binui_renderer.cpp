@@ -606,12 +606,24 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
                 BinUIPathEntry h;
                 memcpy(&h, q, sizeof(h));
                 q += sizeof(h);
+                // v16：渐变紧跟在定长头之后（只有置位时才写）
+                BinUIPathGradient grad{};
+                bool hasGrad = false;
+                if (h.flags & PATH_FILL_GRAD) {
+                    if (q + sizeof(grad) > qend) break;
+                    memcpy(&grad, q, sizeof(grad));
+                    q += sizeof(grad);
+                    hasGrad = true;
+                    if (grad.stopCount < 2 || grad.stopCount > kPathGradMaxStops) hasGrad = false;
+                }
                 const size_t need = static_cast<size_t>(h.contourCount) * (sizeof(uint32_t) + 1) +
                                     static_cast<size_t>(h.pointCount) * 2 * sizeof(uint16_t);
                 if (q + need > qend) break;   // 数据损坏：后面条目的边界也不可信
                 if (!nodeIndexById_.count(h.nodeId)) { q += need; continue; }  // 悬空条目防御
                 PathRecord rec;
                 rec.head = h;
+                rec.hasGrad = hasGrad;
+                rec.grad = grad;
                 rec.first.resize(h.contourCount);
                 if (h.contourCount)
                     memcpy(rec.first.data(), q, static_cast<size_t>(h.contourCount) * sizeof(uint32_t));

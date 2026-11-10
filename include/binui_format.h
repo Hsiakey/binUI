@@ -13,7 +13,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v13: 扩展绘制段（文字色/四边边框/渐变底色/字重/行高/下划线），见 BinUIPaintNode
 // v14: 扩展绘制段追加 textFlags（斜体/占位符/只读/初始勾选），BinUIPaintNode 40 -> 44 字节
 // v15: 路径段（SVG <path>/<ellipse> 的归一化折线），见 BinUIPathEntry
-constexpr uint32_t BINUI_VERSION    = 15;
+// v16: 路径渐变（SVG <linearGradient>/<radialGradient> 填充），见 BinUIPathGradient
+constexpr uint32_t BINUI_VERSION    = 16;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -418,6 +419,7 @@ static_assert(sizeof(BinUIPaintNode) == 44, "BinUIPaintNode must be 44 bytes");
 // 布局：uint32 pathBytes（0 = 无路径）+ uint32 pathCount
 //       + pathCount 条子记录，顺序拼接：
 //           BinUIPathEntry              定长头
+//           BinUIPathGradient           v16：仅 PATH_FILL_GRAD 置位时才写
 //           uint32 contourFirst[n]      每条子路径的起始**点下标**（升序）
 //           uint8  contourClosed[n]     1 = 原始 Z（描边时连接首尾）
 //           uint16 points[m*2]          归一化坐标（x,y 交替，0..65535 映射包围盒）
@@ -427,10 +429,12 @@ static_assert(sizeof(BinUIPaintNode) == 44, "BinUIPaintNode must be 44 bytes");
 // 代价是极限放大能看到折线 —— 这里留了 flags 位给将来的"命令 + 运行时再细分"。
 // ============================================================
 enum BinUIPathFlag : uint16_t {
-    PATH_FILL    = 1 << 0, // 填充（fill 有效且不透明）
-    PATH_STROKE  = 1 << 1, // 描边（stroke 有效且线宽 > 0）
-    PATH_EVENODD = 1 << 2, // fill-rule="evenodd"；否则非零环绕
+    PATH_FILL      = 1 << 0, // 填充（fill 有效且不透明）
+    PATH_STROKE    = 1 << 1, // 描边（stroke 有效且线宽 > 0）
+    PATH_EVENODD   = 1 << 2, // fill-rule="evenodd"；否则非零环绕
+    PATH_FILL_GRAD = 1 << 3, // v16：填充用渐变（BinUIPathGradient 紧随定长头）
 };
+
 
 enum BinUIPathJoin : uint8_t {
     BINUI_JOIN_ROUND = 0, // 本版唯一实现（折线接缝补圆）
@@ -463,6 +467,53 @@ struct BinUIPathEntry {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIPathEntry) == 28, "BinUIPathEntry must be 28 bytes");
+
+// ============================================================
+// 路径渐变（v16）
+//
+// 为什么不复用扩展绘制段的 gradFrom/gradTo：那两个只描述"矩形底色、两色、上下/左右/
+// 对角"，而 SVG 渐变是任意角度的线性渐变 + 椭圆径向渐变 + 多色标 + 三种 spread。
+// 也不做"逐点取色的位图"：路径填充本身是扫描线条带（各端只画 fillRect），
+// 渐变只要给每条带算出颜色就能三端一致，不需要额外纹理与采样器。
+//
+// 坐标是**包围盒归一化坐标**：设备坐标 = 节点盒左上 + 归一化值 × 节点盒尺寸，
+// 与折线点同一套映射。所以缩放节点盒时渐变自然跟着缩放 —— 这正是 SVG 的
+// objectBoundingBox 语义（默认值）。userSpaceOnUse 在编译期就被折算进这套坐标。
+// ============================================================
+enum BinUIPathGradType : uint8_t {
+    PATH_GRAD_LINEAR = 1,
+    PATH_GRAD_RADIAL = 2,
+};
+
+enum BinUIPathGradSpread : uint8_t {
+    PATH_GRAD_PAD     = 0, // 默认：端点色延伸到无穷（SVG 默认）
+    PATH_GRAD_REPEAT  = 1,
+    PATH_GRAD_REFLECT = 2,
+};
+
+#pragma pack(push, 1)
+struct BinUIPathGradStop {
+    float    offset;   // 0..1（已排序、已夹紧）
+    uint32_t color;    // AARRGGBB（已折入 stop-opacity / fill-opacity / opacity）
+};
+
+constexpr int kPathGradMaxStops = 8;
+
+struct BinUIPathGradient {
+    uint8_t  type;         // BinUIPathGradType
+    uint8_t  spread;       // BinUIPathGradSpread
+    uint8_t  stopCount;    // 2..kPathGradMaxStops
+    uint8_t  reserve;
+    // 线性：(x1,y1) → (x2,y2)；径向：圆心 (x1,y1)，椭圆半径 rx/ry。
+    // 径向用两个半径而不是一个：包围盒非正方时 SVG 的径向渐变本来就是椭圆，
+    // 一个半径表达不了（userSpaceOnUse 下两轴缩放不同也会走到这条路）。
+    float    x1, y1, x2, y2;
+    float    rx, ry;
+    BinUIPathGradStop stops[kPathGradMaxStops];   // 前 stopCount 个有效
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUIPathGradient) == 92, "BinUIPathGradient must be 92 bytes");
+
 
 
 // 文字装饰线（下划线/删除线/上划线）在节点文字盒中的位置：

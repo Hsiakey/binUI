@@ -463,10 +463,141 @@ inline int BuildDashedRoundRing(float x, float y, float w, float h, float radius
 //   · 撞条带上限时**按行步长降级**（1 → 2 → 4 → …），保证画完而不是画一半；
 //     调用方从返回值/truncated 判断要不要重试。
 // ============================================================
-constexpr int kMaxPathBands = 2048;      // 单条路径的条带上限
+constexpr int kMaxPathBands = 4096;      // 单条路径的条带上限（v16 渐变要比纯色多）
 constexpr int kMaxPathCrossings = 1024;  // 单条扫描线的交点上限
 constexpr int kMaxRowSpans = 128;        // 单行条带上限
 constexpr int kMaxOpenRuns = 96;         // 跨行合并的"正在延伸的条带"表
+
+// ---- v16 路径渐变（SVG <linearGradient>/<radialGradient>）------------------
+//
+// 渐变怎么落到"只有 fillRect"的后端上：路径填充本来就是"扫描线 → 轴对齐条带"，
+// 渐变只是把每条带的颜色从常量换成"该带中心点的颜色"。两个关键取舍：
+//
+//   · **量化**。t 先量化到 levels 级、级内取级中心色。这样同一级里的相邻行颜色
+//     完全相等，才能继续走"上下合并成高条带"那条老路；否则每条带颜色都不同，
+//     一个 400px 高的形状就是 400 条带，直接撞上限。
+//   · **按方向切**。颜色沿 x 变时（水平/斜向/径向）按"沿 x 走一级要几个像素"把
+//     这一行的条带切细；沿 x 不变的（纯垂直渐变）一段都不切，全靠纵向合并收敛。
+//     于是横、竖两个方向的条带数都只跟 levels 同量级，不随面积增长。
+//
+// 代价是**色阶可见**：levels 每级约 2 设备像素，放大到 400px 的高饱和度渐变能看出
+// 台阶。这与"不做抗锯齿、只用 fillRect"是同一条底线，不是这里偷懒。
+constexpr int kMaxGradSplits = 96;       // 单行条带内最多再切几段
+constexpr int kPathGradLevelsMin = 8;
+constexpr int kPathGradLevelsMax = 96;
+
+// spreadMethod：把 t 折进 0..1（pad 夹紧 / repeat 取小数 / reflect 折返）
+inline float PathGradSpreadT(float t, uint8_t spread) {
+    if (spread == PATH_GRAD_REPEAT) return t - std::floor(t);
+    if (spread == PATH_GRAD_REFLECT) {
+        const float u = t * 0.5f - std::floor(t * 0.5f);   // 三角波，0..1
+        return u <= 0.5f ? u * 2.0f : (1.0f - u) * 2.0f;
+    }
+    return t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+}
+
+// 归一化点 → 渐变轴位置 t
+//   线性：投影到 (x1,y1)→(x2,y2)；径向：到椭圆的归一化距离（rx/ry 各自缩放）。
+//   两轴都用**包围盒归一化坐标**算，所以包围盒非正方时径向天然是椭圆（SVG 语义）。
+inline float PathGradT(const BinUIPathGradient& g, float nx, float ny) {
+    if (g.type == PATH_GRAD_RADIAL) {
+        const float rx = std::fabs(g.rx) > 1e-6f ? std::fabs(g.rx) : 1e-6f;
+        const float ry = std::fabs(g.ry) > 1e-6f ? std::fabs(g.ry) : 1e-6f;
+        const float u = (nx - g.x1) / rx;
+        const float v = (ny - g.y1) / ry;
+        return PathGradSpreadT(std::sqrt(u * u + v * v), g.spread);
+    }
+    const float ax = g.x2 - g.x1, ay = g.y2 - g.y1;
+    const float len2 = ax * ax + ay * ay;
+    if (len2 <= 1e-12f) return 0.0f;                     // 起止点重合：退化纯色
+    return PathGradSpreadT(((nx - g.x1) * ax + (ny - g.y1) * ay) / len2, g.spread);
+}
+
+// t（已折叠到 0..1）→ 颜色：色标间线性插值，两端用端色标
+inline uint32_t PathGradColorAt(const BinUIPathGradient& g, float t) {
+    const int n = (int)g.stopCount;
+    if (n <= 0) return 0xFF000000u;
+    if (n == 1 || t <= g.stops[0].offset) return g.stops[0].color;
+    for (int i = 1; i < n; i++) {
+        const float o1 = g.stops[i].offset;
+        if (t <= o1) {
+            const float o0 = g.stops[i - 1].offset;
+            const float span = o1 - o0;
+            const float k = span > 1e-6f ? (t - o0) / span : 1.0f;
+            return PaintLerpArgb(g.stops[i - 1].color, g.stops[i].color, k);
+        }
+    }
+    return g.stops[n - 1].color;
+}
+
+// 节点整体不透明度：纯色由调用方先乘好，渐变有多个色标只能在这里逐条乘
+inline uint32_t PathScaleArgb(uint32_t c, float op) {
+    if (op >= 1.0f) return c;
+    if (op <= 0.0f) return c & 0x00FFFFFFu;
+    uint32_t a = (uint32_t)(((c >> 24) & 0xFFu) * op);
+    if (a > 255u) a = 255u;
+    return (c & 0x00FFFFFFu) | (a << 24);
+}
+
+// 一条路径的填充取样器：纯色与渐变共用同一个接口，后端与扫描线那边不用分支
+struct PathShade {
+    const BinUIPathGradient* grad = nullptr;   // nullptr = 纯色
+    uint32_t color = 0xFF000000u;              // 纯色 / 渐变不可用时的兜底色
+    int      levels = 0;                       // 量化级数（0 = 不量化）
+    float    alpha = 1.0f;                     // v16：渐变色的 alpha 缩放（节点 opacity）
+    float    bx = 0.0f, by = 0.0f;             // 节点盒（归一化基准）
+    float    bw = 1.0f, bh = 1.0f;
+    float    dtdx = 0.0f;                      // 每设备像素 t 的变化量（横向切段密度）
+
+    bool Active() const { return grad && grad->stopCount >= 2 && levels > 0; }
+
+    // 设备点 → 带颜色（渐变按量化级取级中心色，级内恒定 → 可纵向合并）
+    uint32_t At(float x, float y) const {
+        if (!Active()) return color;
+        const float t = PathGradT(*grad, (x - bx) / bw, (y - by) / bh);
+        uint32_t c = 0;
+        if (levels <= 1) {
+            c = PathGradColorAt(*grad, t);
+        } else {
+            float q = (std::floor(t * (float)levels) + 0.5f) / (float)levels;
+            if (q > 1.0f) q = 1.0f;
+            c = PathGradColorAt(*grad, q);
+        }
+        return PathScaleArgb(c, alpha);
+    }
+};
+
+// 按节点盒与渐变几何一次性备好取样器（级数按渐变轴在设备上的长度取）
+inline PathShade MakePathShade(const BinUIPathGradient* g, uint32_t fallback, float opacity,
+                               float x, float y, float w, float h) {
+    PathShade s;
+    s.color = fallback;
+    s.alpha = opacity;
+    s.bx = x; s.by = y;
+    s.bw = w > 0.0f ? w : 1.0f;
+    s.bh = h > 0.0f ? h : 1.0f;
+    if (!g || g->stopCount < 2) return s;                 // 1 个色标 = 纯色
+    float len = 0.0f, dtdx = 0.0f;
+    if (g->type == PATH_GRAD_RADIAL) {
+        const float rx = std::fabs(g->rx) > 1e-6f ? std::fabs(g->rx) : 1e-6f;
+        const float ry = std::fabs(g->ry) > 1e-6f ? std::fabs(g->ry) : 1e-6f;
+        len = (rx * s.bw + ry * s.bh) * 0.5f;             // t: 0→1 的平均设备距离
+        dtdx = 1.0f / (rx * s.bw);                        // 最陡处（过圆心那一行）
+    } else {
+        const float ax = g->x2 - g->x1, ay = g->y2 - g->y1;
+        const float len2 = ax * ax + ay * ay;
+        if (len2 <= 1e-12f) return s;                     // 退化：纯色
+        len = std::sqrt((ax * s.bw) * (ax * s.bw) + (ay * s.bh) * (ay * s.bh)) / len2;
+        dtdx = std::fabs(ax) / (s.bw * len2);
+    }
+    int n = (int)std::lround(len * 0.5f);                 // 每 ~2 设备像素一级
+    if (n < kPathGradLevelsMin) n = kPathGradLevelsMin;
+    if (n > kPathGradLevelsMax) n = kPathGradLevelsMax;
+    s.levels = n;
+    s.dtdx = dtdx;
+    s.grad = g;
+    return s;
+}
 
 // 设备坐标下的折线路径（点按子路径首尾相接；指向调用方内存，不拷）
 struct PaintPath {
@@ -479,11 +610,11 @@ struct PaintPath {
 };
 
 // 扫描线填充。clip 为设备像素裁剪盒（通常是节点包围盒）。
-// color 写进每个条带；rowStep>1 是降级模式（行更粗、条带更少）。
+// shade 决定每条带的颜色（纯色或 v16 渐变）；rowStep>1 是降级模式（行更粗、条带更少）。
 // truncated = true 表示撞上 cap / 交点上限，调用方应放大 rowStep 重试。
 inline int BuildPathFillBands(const PaintPath& path, bool evenOdd,
                               float clipX0, float clipY0, float clipX1, float clipY1,
-                              uint32_t color, PaintBand* out, int cap,
+                              const PathShade& shade, PaintBand* out, int cap,
                               int rowStep = 1, bool* truncated = nullptr) {
     if (truncated) *truncated = false;
     if (!path.Valid() || !out || cap <= 0) return 0;
@@ -564,38 +695,66 @@ inline int BuildPathFillBands(const PaintPath& path, bool evenOdd,
         for (int i = 0; i < ns; i++) {
             int x0 = std::max(spans[i].x0, xLo);
             int x1 = std::min(spans[i].x1, xHi);
-            const int w = x1 - x0;
-            if (w <= 0) continue;                         // 亚像素条带丢掉（不做抗锯齿）
-            // 与上一行的条带对齐 → 直接加高，省一个 draw call
-            bool merged = false;
-            for (int k = 0; k < openN; k++) {
-                if (open[k].x0 == x0 && open[k].w == w && open[k].endY == y) {
-                    out[open[k].idx].h += (float)rowStep;
-                    open[k].endY = y + rowStep;
-                    merged = true;
-                    break;
+            if (x1 - x0 <= 0) continue;
+            // 渐变：按"沿 x 走一级需要几个像素"把这一行切成几段（纯色永远 1 段）。
+            // 沿 x 不变的渐变（纯垂直）dtdx≈0，一段都不切，全靠纵向合并收敛。
+            int segs = 1;
+            if (shade.Active() && shade.dtdx > 1e-9f) {
+                const float stepPx = 1.0f / ((float)shade.levels * shade.dtdx);
+                const int k = (int)std::ceil((float)(x1 - x0) / std::max(stepPx, 1.0f));
+                if (k > segs) segs = std::min(k, kMaxGradSplits);
+            }
+            const int spanW = x1 - x0;
+            for (int sg = 0; sg < segs; sg++) {
+                const int sx0 = x0 + spanW * sg / segs;
+                const int sx1 = x0 + spanW * (sg + 1) / segs;
+                const int w2 = sx1 - sx0;
+                if (w2 <= 0) continue;
+                // 颜色取这一小段中心点：级内恒定，相邻行同色才能合并成高条带
+                const uint32_t col = shade.At((float)sx0 + (float)w2 * 0.5f, yc);
+                // 与上一行的条带对齐（位置与颜色都相同）→ 直接加高，省一个 draw call
+                bool merged = false;
+                for (int k = 0; k < openN; k++) {
+                    if (open[k].x0 == sx0 && open[k].w == w2 && open[k].endY == y &&
+                        out[open[k].idx].color == col) {
+                        out[open[k].idx].h += (float)rowStep;
+                        open[k].endY = y + rowStep;
+                        merged = true;
+                        break;
+                    }
                 }
+                if (merged) continue;
+                if (n >= cap) {
+                    if (truncated) *truncated = true;
+                    return n;
+                }
+                out[n] = { (float)sx0, (float)y, (float)w2, (float)rowStep, col, 0.0f, false };
+                if (openN < kMaxOpenRuns) {
+                    open[openN++] = { sx0, w2, y + rowStep, n };
+                } else {
+                    // 合并表满了：只丢合并机会，像素仍然正确 —— 找一条最老的顶掉
+                    int oldest = 0;
+                    for (int k = 1; k < openN; k++)
+                        if (open[k].endY < open[oldest].endY) oldest = k;
+                    open[oldest] = { sx0, w2, y + rowStep, n };
+                }
+                n++;
             }
-            if (merged) continue;
-            if (n >= cap) {
-                if (truncated) *truncated = true;
-                return n;
-            }
-            out[n] = { (float)x0, (float)y, (float)w, (float)rowStep, color, 0.0f, false };
-            if (openN < kMaxOpenRuns) {
-                open[openN++] = { x0, w, y + rowStep, n };
-            } else {
-                // 合并表满了：只丢合并机会，像素仍然正确 —— 找一条最老的顶掉
-                int oldest = 0;
-                for (int k = 1; k < openN; k++)
-                    if (open[k].endY < open[oldest].endY) oldest = k;
-                open[oldest] = { x0, w, y + rowStep, n };
-            }
-            n++;
         }
         flushStale(y);
     }
     return n;
+}
+
+// 纯色短路：老调用点（测试、内部工具）不必包一层 PathShade
+inline int BuildPathFillBands(const PaintPath& path, bool evenOdd,
+                              float clipX0, float clipY0, float clipX1, float clipY1,
+                              uint32_t color, PaintBand* out, int cap,
+                              int rowStep = 1, bool* truncated = nullptr) {
+    PathShade s;
+    s.color = color;
+    return BuildPathFillBands(path, evenOdd, clipX0, clipY0, clipX1, clipY1, s, out, cap,
+                              rowStep, truncated);
 }
 
 // 折线描边：逐段画线，转角超过阈值时补一个圆点（圆角连接）。
@@ -678,7 +837,7 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
                           const uint32_t* first, const uint32_t* count,
                           const uint8_t* closed, int contours,
                           float x, float y, float w, float h,
-                          uint32_t fillColor,
+                          uint32_t fillColor, const BinUIPathGradient* fillGrad, float opacity,
                           PathRenderBuffers& buf,
                           FillBands&& fillBands, LineFn&& line, DotFn&& dot) {
     if (!normPts || !first || !count || contours <= 0 || head.pointCount == 0) return;
@@ -698,11 +857,14 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
         if (buf.bands.size() < static_cast<size_t>(kMaxPathBands))
             buf.bands.resize(kMaxPathBands);
         const bool evenOdd = (head.flags & PATH_EVENODD) != 0;
+        // v16：渐变填充（无渐变时退化成纯色取样器，与老路径完全一致）
+        const PathShade shade = MakePathShade((head.flags & PATH_FILL_GRAD) ? fillGrad : nullptr,
+                                              fillColor, opacity, x, y, w, h);
         int n = 0;
         bool truncated = false;
         // 撞上限：按行步长降级重来（1 → 2 → 4 → 8），保证画完而不是画一半
         for (int step = 1; step <= 8; step *= 2) {
-            n = BuildPathFillBands(view, evenOdd, x, y, x + w, y + h, fillColor,
+            n = BuildPathFillBands(view, evenOdd, x, y, x + w, y + h, shade,
                                    buf.bands.data(), kMaxPathBands, step, &truncated);
             if (!truncated) break;
         }

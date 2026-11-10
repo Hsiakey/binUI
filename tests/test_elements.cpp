@@ -3004,6 +3004,296 @@ static void TestSvgTextImage() {
     }
 }
 
+// v16 渐变条带：量化 + 横向切段 + 纵向合并 + spread 折叠（纯几何，不经过编译器）
+static void TestGradientBands() {
+    auto linGrad = [](float x1, float y1, float x2, float y2) {
+        BinUIPathGradient g{};
+        g.type = PATH_GRAD_LINEAR;
+        g.spread = PATH_GRAD_PAD;
+        g.stopCount = 2;
+        g.x1 = x1; g.y1 = y1; g.x2 = x2; g.y2 = y2;
+        g.stops[0] = { 0.0f, 0xFFFF0000u };
+        g.stops[1] = { 1.0f, 0xFF0000FFu };
+        return g;
+    };
+    auto run = [](const DevicePath& dev, const PathShade& s, float w, float h,
+                  PaintBand* bands, bool* trunc) {
+        return BuildPathFillBands(dev.view(), false, 0, 0, w, h, s, bands, kMaxPathBands, 1, trunc);
+    };
+
+    PathShape sq;
+    std::string err;
+    ParsePathData("M0 0 H100 V100 H0 Z", 0.01f, sq, &err);
+    DevicePath dev = ToDevice(sq);
+    PaintBand bands[kMaxPathBands];
+
+    // 纯色：取样器引入后必须还是 1 条整块（老行为不能变）
+    {
+        PathShade solid;
+        solid.color = 0xFF123456u;
+        bool trunc = false;
+        const int n = run(dev, solid, 100, 100, bands, &trunc);
+        CHECK(!trunc && n == 1, "渐变：纯色仍合并成 1 条");
+        CHECK(n == 1 && bands[0].color == 0xFF123456u, "渐变：纯色颜色不变");
+        CHECK(n == 1 && bands[0].w == 100.0f && bands[0].h == 100.0f, "渐变：纯色覆盖整盒");
+    }
+
+    // 垂直渐变（上红下蓝）：级内同色 → 纵向合并，条数与级数同量级
+    {
+        BinUIPathGradient g = linGrad(0, 0, 0, 1);
+        const PathShade s = MakePathShade(&g, 0xFFFFFFFFu, 1.0f, 0, 0, 100, 100);
+        bool trunc = false;
+        const int n = run(dev, s, 100, 100, bands, &trunc);
+        std::printf("  [svgpath] 渐变垂直：levels=%d 条带=%d 首条高=%.0f 首色=%08X 末色=%08X\n",
+                    s.levels, n, n > 0 ? (double)bands[0].h : 0.0, bands[0].color, bands[n - 1].color);
+        CHECK(!trunc, "渐变垂直：不截断");
+        CHECK(n <= s.levels * 2 + 4, "渐变垂直：条数与量化级同量级（纵向合并生效）");
+        CHECK(bands[0].h > 1.5f, "渐变垂直：同色行合并成高条带");
+        CHECK(((bands[0].color >> 16) & 0xFF) > 200 && (bands[0].color & 0xFF) < 60,
+              "渐变垂直：顶部接近红");
+        CHECK((bands[n - 1].color & 0xFF) > 200 && ((bands[n - 1].color >> 16) & 0xFF) < 60,
+              "渐变垂直：底部接近蓝");
+        CHECK_NEAR(BandArea(bands, n), 10000.0, 1.0, "渐变垂直：覆盖面积与纯色一致");
+        // 单调性：越往下越蓝（红通道不回升）
+        bool mono = true;
+        for (int i = 1; i < n; i++)
+            if (((bands[i].color >> 16) & 0xFF) > ((bands[i - 1].color >> 16) & 0xFF)) mono = false;
+        CHECK(mono, "渐变垂直：红通道单调下降（没有乱序条带）");
+    }
+
+    // 水平渐变（左红右蓝）：横向切段 + 每一列合并成整列高
+    {
+        BinUIPathGradient g = linGrad(0, 0, 1, 0);
+        const PathShade s = MakePathShade(&g, 0xFFFFFFFFu, 1.0f, 0, 0, 100, 100);
+        bool trunc = false;
+        const int n = run(dev, s, 100, 100, bands, &trunc);
+        std::printf("  [svgpath] 渐变水平：levels=%d 条带=%d 首列=(%.0fx%.0f)\n",
+                    s.levels, n, (double)bands[0].w, (double)bands[0].h);
+        CHECK(!trunc, "渐变水平：不截断");
+        CHECK(n <= s.levels * 2 + 4, "渐变水平：条数与量化级同量级");
+        CHECK(bands[0].h == 100.0f, "渐变水平：每列合成整列高");
+        CHECK(bands[0].w <= 3.0f, "渐变水平：列宽 ≈ 2px（一级一列）");
+        CHECK_NEAR(BandArea(bands, n), 10000.0, 1.0, "渐变水平：覆盖面积与纯色一致");
+    }
+
+    // 对角渐变 + 大图：撞上限时靠 rowStep 降级画完（不是画一半）
+    {
+        PathShape bigSq;
+        ParsePathData("M0 0 H400 V400 H0 Z", 0.01f, bigSq, &err);
+        DevicePath big = ToDevice(bigSq);
+        BinUIPathGradient g = linGrad(0, 0, 1, 1);
+        const PathShade s = MakePathShade(&g, 0xFFFFFFFFu, 1.0f, 0, 0, 400, 400);
+        bool trunc = false;
+        int usedStep = 0, n = 0;
+        for (int step = 1; step <= 8; step *= 2) {
+            n = BuildPathFillBands(big.view(), false, 0, 0, 400, 400, s, bands, kMaxPathBands,
+                                   step, &trunc);
+            usedStep = step;
+            if (!trunc) break;
+        }
+        std::printf("  [svgpath] 渐变 400px 对角：levels=%d 条带=%d rowStep=%d\n",
+                    s.levels, n, usedStep);
+        CHECK(!trunc, "渐变大图：降级后画完");
+        CHECK_NEAR(BandArea(bands, n), 160000.0, 400.0, "渐变大图：降级后面积仍然完整");
+    }
+
+    // 径向渐变：中心红、边缘蓝；非正方盒仍按椭圆（归一化坐标）
+    {
+        BinUIPathGradient g{};
+        g.type = PATH_GRAD_RADIAL;
+        g.stopCount = 2;
+        g.x1 = 0.5f; g.y1 = 0.5f; g.rx = 0.5f; g.ry = 0.5f;
+        g.stops[0] = { 0.0f, 0xFFFF0000u };
+        g.stops[1] = { 1.0f, 0xFF0000FFu };
+        const PathShade s = MakePathShade(&g, 0xFFFFFFFFu, 1.0f, 0, 0, 100, 100);
+        const PathShade wide = MakePathShade(&g, 0xFFFFFFFFu, 1.0f, 0, 0, 200, 100);
+        std::printf("  [svgpath] 渐变径向：中心=%08X 右缘=%08X 宽盒右缘=%08X\n",
+                    s.At(50, 50), s.At(99, 50), wide.At(199, 50));
+        CHECK(((s.At(50, 50) >> 16) & 0xFF) > 200 && (s.At(50, 50) & 0xFF) < 60,
+              "渐变径向：中心接近红");
+        CHECK((s.At(99, 50) & 0xFF) > 200, "渐变径向：右缘接近蓝");
+        CHECK((wide.At(199, 50) & 0xFF) > 200, "渐变径向：非正方盒按椭圆归一化");
+        bool trunc = false;
+        const int n = run(dev, s, 100, 100, bands, &trunc);
+        CHECK(!trunc && n > 0, "渐变径向：小图一次画完");
+        CHECK_NEAR(BandArea(bands, n), 10000.0, 1.0, "渐变径向：覆盖面积与纯色一致");
+    }
+
+    // spreadMethod 的 t 折叠
+    CHECK(PathGradSpreadT(-0.5f, PATH_GRAD_PAD) == 0.0f, "渐变 spread：pad 负向夹紧");
+    CHECK(PathGradSpreadT(1.5f, PATH_GRAD_PAD) == 1.0f, "渐变 spread：pad 正向夹紧");
+    CHECK_NEAR(PathGradSpreadT(1.25f, PATH_GRAD_REPEAT), 0.25, 1e-5, "渐变 spread：repeat 取小数");
+    CHECK_NEAR(PathGradSpreadT(1.5f, PATH_GRAD_REFLECT), 0.5, 1e-5, "渐变 spread：reflect 折返");
+    CHECK_NEAR(PathGradSpreadT(0.25f, PATH_GRAD_REFLECT), 0.25, 1e-5,
+               "渐变 spread：reflect 在 0..1 内不折返（只处理越界）");
+
+    // 退化与兜底：起止点重合 / 无渐变 / 只有一个色标 → 纯色一条
+    {
+        BinUIPathGradient g = linGrad(0.5f, 0.5f, 0.5f, 0.5f);
+        const PathShade s = MakePathShade(&g, 0xFF00FF00u, 1.0f, 0, 0, 100, 100);
+        CHECK(!s.Active(), "渐变退化：起止点重合不启用");
+        bool trunc = false;
+        const int n = run(dev, s, 100, 100, bands, &trunc);
+        CHECK(n == 1 && bands[0].color == 0xFF00FF00u, "渐变退化：退回兜底纯色");
+        const PathShade none = MakePathShade(nullptr, 0xFF112233u, 1.0f, 0, 0, 100, 100);
+        CHECK(!none.Active() && none.At(5, 5) == 0xFF112233u, "渐变缺失：纯色直通");
+        BinUIPathGradient one = linGrad(0, 0, 1, 0);
+        one.stopCount = 1;
+        const PathShade s1 = MakePathShade(&one, 0xFF445566u, 1.0f, 0, 0, 100, 100);
+        CHECK(!s1.Active() && s1.At(50, 50) == 0xFF445566u, "渐变单色标：按纯色");
+    }
+
+    // 节点 opacity：渐变每条带的 alpha 都要折进去（纯色是调用方先折好的）
+    {
+        BinUIPathGradient g = linGrad(0, 0, 1, 0);
+        const PathShade s = MakePathShade(&g, 0xFFFFFFFFu, 0.5f, 0, 0, 100, 100);
+        const uint32_t a = (s.At(50, 50) >> 24) & 0xFFu;
+        std::printf("  [svgpath] 渐变 + opacity=0.5：alpha=%02X\n", a);
+        CHECK(a >= 0x7Eu && a <= 0x81u, "渐变透明度：alpha 折半");
+    }
+}
+
+static void TestGradientCompile() {
+    // <defs><linearGradient> + fill="url(#…)"：默认 objectBoundingBox 单位 → 归一化端点 0,0→1,0
+    {
+        std::string html =
+            "<app_window width=\"100\" height=\"100\"><html width=\"100\" height=\"100\" bg=\"#000000\">"
+            "<body><svg x=\"0\" y=\"0\" width=\"100\" height=\"100\" viewBox=\"0 0 24 24\">"
+            "<defs><linearGradient id=\"g\">"
+            "<stop offset=\"0\" stop-color=\"#ff0000\"/><stop offset=\"1\" stop-color=\"#0000ff\"/>"
+            "</linearGradient></defs>"
+            "<path d=\"M2 2 H22 V22 H2 Z\" fill=\"url(#g)\"/>"
+            "</svg></body></html></app_window>";
+        auto res = binui::CompileBinUIEx(html);
+        for (const auto& w : res.warnings) std::printf("  [svgpath][warn] %s\n", w.c_str());
+        CHECK(res.warnings.empty(), "渐变编译：默认渐变不报警告");
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "渐变编译：布局可解析");
+        const BinUIRenderer::PathRecord* pr = nullptr;
+        for (const auto& n : r.getNodes())
+            if (n.type == BINUI_PATH) { pr = r.pathOf(n.id); break; }
+        CHECK(pr != nullptr, "渐变编译：编成 PATH 节点");
+        if (pr) {
+            std::printf("  [svgpath] 渐变编译：flags=%u hasGrad=%d type=%u stops=%u "
+                        "p1=(%.3f,%.3f) p2=(%.3f,%.3f) 首色=%08X 末色=%08X\n",
+                        (unsigned)pr->head.flags, (int)pr->hasGrad, (unsigned)pr->grad.type,
+                        (unsigned)pr->grad.stopCount, (double)pr->grad.x1, (double)pr->grad.y1,
+                        (double)pr->grad.x2, (double)pr->grad.y2, pr->grad.stops[0].color,
+                        pr->grad.stops[1].color);
+            CHECK((pr->head.flags & PATH_FILL) && (pr->head.flags & PATH_FILL_GRAD),
+                  "渐变编译：PATH_FILL + PATH_FILL_GRAD 都置位");
+            CHECK(pr->hasGrad, "渐变编译：渐变记录随路径段写出");
+            CHECK(pr->grad.type == PATH_GRAD_LINEAR, "渐变编译：类型 = 线性");
+            CHECK(pr->grad.stopCount == 2, "渐变编译：两个色标");
+            CHECK_NEAR(pr->grad.x1, 0.0f, 0.01f, "渐变编译：x1 默认 0");
+            CHECK_NEAR(pr->grad.y1, 0.0f, 0.01f, "渐变编译：y1 默认 0");
+            CHECK_NEAR(pr->grad.x2, 1.0f, 0.01f, "渐变编译：x2 默认 100%");
+            CHECK_NEAR(pr->grad.y2, 0.0f, 0.01f, "渐变编译：y2 默认 0");
+            CHECK(pr->grad.stops[0].color == 0xFFFF0000u, "渐变编译：首标红");
+            CHECK(pr->grad.stops[1].color == 0xFF0000FFu, "渐变编译：末标蓝");
+            CHECK_NEAR(pr->grad.stops[0].offset, 0.0f, 1e-4, "渐变编译：首标 offset=0");
+            CHECK_NEAR(pr->grad.stops[1].offset, 1.0f, 1e-4, "渐变编译：末标 offset=1");
+        }
+    }
+
+    // gradientUnits="userSpaceOnUse" + gradientTransform：端点按用户空间 → 节点归一化折算
+    {
+        std::string html =
+            "<app_window width=\"100\" height=\"100\"><html width=\"100\" height=\"100\" bg=\"#000000\">"
+            "<body><svg x=\"0\" y=\"0\" width=\"100\" height=\"100\" viewBox=\"0 0 24 24\">"
+            "<defs><linearGradient id=\"g\" gradientUnits=\"userSpaceOnUse\" "
+            "x1=\"0\" y1=\"0\" x2=\"24\" y2=\"0\">"
+            "<stop offset=\"0\" stop-color=\"#00ff00\"/><stop offset=\"1\" stop-color=\"#ff00ff\"/>"
+            "</linearGradient></defs>"
+            "<path d=\"M2 2 H22 V22 H2 Z\" fill=\"url(#g)\"/>"
+            "</svg></body></html></app_window>";
+        auto res = binui::CompileBinUIEx(html);
+        CHECK(res.warnings.empty(), "渐变编译：userSpaceOnUse 不报警告");
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "渐变编译：user 布局可解析");
+        const BinUIRenderer::PathRecord* pr = nullptr;
+        for (const auto& n : r.getNodes())
+            if (n.type == BINUI_PATH) { pr = r.pathOf(n.id); break; }
+        if (pr) {
+            std::printf("  [svgpath] userSpaceOnUse：p1=(%.3f,%.3f) p2=(%.3f,%.3f)\n",
+                        (double)pr->grad.x1, (double)pr->grad.y1, (double)pr->grad.x2,
+                        (double)pr->grad.y2);
+            CHECK(pr->hasGrad, "渐变编译：user 记录写出");
+            // 用户空间 0..24 映射到设备 0..100，节点盒是 (8.33,8.33,83.33,83.33)
+            CHECK_NEAR(pr->grad.x1, -0.1f, 0.02f, "渐变编译：user 起点折到盒外 -0.1");
+            CHECK_NEAR(pr->grad.x2, 1.1f, 0.02f, "渐变编译：user 终点折到盒外 1.1");
+        }
+    }
+
+    // href 继承色标 + 径向默认 50%
+    {
+        std::string html =
+            "<app_window width=\"100\" height=\"100\"><html width=\"100\" height=\"100\" bg=\"#000000\">"
+            "<body><svg x=\"0\" y=\"0\" width=\"100\" height=\"100\" viewBox=\"0 0 24 24\">"
+            "<defs><linearGradient id=\"a\">"
+            "<stop offset=\"0\" stop-color=\"#ffffff\"/><stop offset=\"1\" stop-color=\"#000000\"/>"
+            "</linearGradient>"
+            "<linearGradient id=\"b\" href=\"#a\" x1=\"0\" y1=\"0\" x2=\"0\" y2=\"1\"/></defs>"
+            "<path d=\"M2 2 H22 V22 H2 Z\" fill=\"url(#b)\"/>"
+            "<radialGradient id=\"c\"><stop offset=\"0\" stop-color=\"#ff0000\" stop-opacity=\"0.5\"/>"
+            "<stop offset=\"1\" stop-color=\"#0000ff\"/></radialGradient>"
+            "<path d=\"M2 12 H10 V20 H2 Z\" fill=\"url(#c)\"/>"
+            "</svg></body></html></app_window>";
+        auto res = binui::CompileBinUIEx(html);
+        for (const auto& w : res.warnings) std::printf("  [svgpath][warn] %s\n", w.c_str());
+        CHECK(res.warnings.empty(), "渐变编译：href 继承不报警告");
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "渐变编译：继承布局可解析");
+        int linearN = 0, radialN = 0;
+        for (const auto& n : r.getNodes()) {
+            if (n.type != BINUI_PATH) continue;
+            const auto* pr = r.pathOf(n.id);
+            if (!pr || !pr->hasGrad) continue;
+            if (pr->grad.type == PATH_GRAD_LINEAR) {
+                linearN++;
+                CHECK(pr->grad.stopCount == 2, "渐变编译：href 继承到两个色标");
+                CHECK_NEAR(pr->grad.x2, 0.0f, 0.01f, "渐变编译：href 子元素自己的 x2 生效");
+                CHECK_NEAR(pr->grad.y2, 1.0f, 0.01f, "渐变编译：href 子元素自己的 y2 生效");
+            } else if (pr->grad.type == PATH_GRAD_RADIAL) {
+                radialN++;
+                std::printf("  [svgpath] 径向：c=(%.3f,%.3f) r=(%.3f,%.3f) 首色=%08X\n",
+                            (double)pr->grad.x1, (double)pr->grad.y1, (double)pr->grad.rx,
+                            (double)pr->grad.ry, pr->grad.stops[0].color);
+                CHECK_NEAR(pr->grad.x1, 0.5f, 0.02f, "渐变编译：径向圆心默认 50%");
+                CHECK_NEAR(pr->grad.rx, 0.5f, 0.02f, "渐变编译：径向 r 默认 50%");
+                CHECK_NEAR(pr->grad.ry, 0.5f, 0.02f, "渐变编译：径向 ry 默认 50%");
+                CHECK(((pr->grad.stops[0].color >> 24) & 0xFF) < 0xC0,
+                      "渐变编译：stop-opacity 折进色标 alpha");
+            }
+        }
+        CHECK(linearN == 1, "渐变编译：线性渐变的引用被解析");
+        CHECK(radialN == 1, "渐变编译：径向渐变的引用被解析");
+    }
+
+    // 引用了不存在的渐变：必须告警，并按纯色画（不许静默）
+    {
+        std::string html =
+            "<app_window width=\"100\" height=\"100\"><html width=\"100\" height=\"100\" bg=\"#000000\">"
+            "<body><svg x=\"0\" y=\"0\" width=\"100\" height=\"100\" viewBox=\"0 0 24 24\">"
+            "<path d=\"M2 2 H22 V22 H2 Z\" fill=\"url(#nope)\"/>"
+            "</svg></body></html></app_window>";
+        auto res = binui::CompileBinUIEx(html);
+        bool warned = false;
+        for (const auto& w : res.warnings) {
+            std::printf("  [svgpath][warn] %s\n", w.c_str());
+            if (w.find("nope") != std::string::npos) warned = true;
+        }
+        CHECK(warned, "渐变编译：找不到渐变定义要告警");
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "渐变编译：兜底布局可解析");
+        for (const auto& n : r.getNodes()) {
+            if (n.type != BINUI_PATH) continue;
+            const auto* pr = r.pathOf(n.id);
+            if (pr) CHECK(!pr->hasGrad, "渐变编译：找不到定义时不写渐变记录");
+        }
+    }
+}
+
 static int run() {
     std::printf("\n[suite_svgpath] 路径几何（binui_path.h）+ 扫描线填充（binui_paint.h）\n");
     TestParse();
@@ -3014,6 +3304,8 @@ static int run() {
     TestShapesAndDash();
     TestUseDefs();
     TestSvgTextImage();
+    TestGradientBands();
+    TestGradientCompile();
     std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");
     return g_fail;
 }

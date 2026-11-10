@@ -1057,17 +1057,20 @@ static void AppendPaintSection(std::vector<uint8_t>& buf,
     memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
 
-// 路径段的编译期暂存：定长头 + 三条变长表（子路径起点 / 闭合标记 / 归一化点）
+// 路径段的编译期暂存：定长头 +（v16 可选渐变）+ 三条变长表（子路径起点 / 闭合标记 / 归一化点）
 // 点用 uint16 归一化存（0..65535 映射包围盒），比 float 省一半且精度远超显示能力。
 struct PendingPath {
     BinUIPathEntry head = {};
+    bool hasGrad = false;       // v16：head.flags & PATH_FILL_GRAD 时紧跟一个 BinUIPathGradient
+    BinUIPathGradient grad = {};
     std::vector<uint32_t> first;
     std::vector<uint8_t>  closed;
     std::vector<uint16_t> pts;
 };
 
-// 追加路径段（v15）：uint32 pathBytes + uint32 pathCount + 每条子记录
+// 追加路径段（v15 起，v16 加渐变）：uint32 pathBytes + uint32 pathCount + 每条子记录
 // 恒定写出（无路径时 pathBytes=4），位于扩展绘制段之后、名称段之前。
+// 子记录顺序（读完定长头才能知道后面有没有渐变）：头 → 渐变(可选) → 子路径表 → 点表。
 static void AppendPathSection(std::vector<uint8_t>& buf,
                               const std::vector<PendingPath>& paths) {
     size_t start = buf.size();
@@ -1080,6 +1083,7 @@ static void AppendPathSection(std::vector<uint8_t>& buf,
     wbytes(&count, sizeof(count));
     for (const PendingPath& pp : paths) {
         wbytes(&pp.head, sizeof(pp.head));
+        if (pp.hasGrad) wbytes(&pp.grad, sizeof(pp.grad));
         if (!pp.first.empty())  wbytes(pp.first.data(),  pp.first.size()  * sizeof(uint32_t));
         if (!pp.closed.empty()) wbytes(pp.closed.data(), pp.closed.size());
         if (!pp.pts.empty())    wbytes(pp.pts.data(),    pp.pts.size()    * sizeof(uint16_t));
@@ -2360,6 +2364,9 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "d", "ry", "fill-rule", "fill-opacity", "stroke-opacity",
         "stroke-linecap", "stroke-linejoin", "stroke-dasharray",
         "viewbox", "preserveaspectratio", "xlink:href",
+        // v16 SVG 渐变：端点/圆心/焦点/色标/单位/变换/spread（x1/y1/x2/y2/cx/cy/r 上面已有）
+        "fx", "fy", "offset", "stop-color", "stop-opacity",
+        "gradientunits", "gradienttransform", "spreadmethod",
     };
     return kSet;
 }
@@ -3026,7 +3033,12 @@ static void MarkSvgDefinitions(std::vector<HNode>& elems) {
         size_t guard = elems.size() + 1;
         while (k != SIZE_MAX && k < elems.size() && guard-- > 0) {
             const std::string& t = elems[k].tag;
-            if (t == "defs" || t == "symbol") { elems[i].attrs["_def"] = "1"; break; }
+            // 渐变定义（含 <stop>）也是模板：即使写在 <defs> 外面，也不该画出一个空盒子
+            if (t == "defs" || t == "symbol" || t == "lineargradient" ||
+                t == "radialgradient" || t == "stop") {
+                elems[i].attrs["_def"] = "1";
+                break;
+            }
             k = elems[k].parentIdx;
         }
     }
@@ -3412,6 +3424,280 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (si != s.end()) return si->second;
         return def;
     };
+
+    // ============================================================
+    // SVG 渐变定义（v16）：<linearGradient>/<radialGradient> + <stop>
+    //
+    // 为什么要在这里先建一份"注册表"，而不是在节点循环里现查：
+    //   · 渐变定义通常在 <defs> 里（甚至写在用它的图形之后），节点循环是单趟向前的，
+    //     回头再找元素很别扭；先扫一遍建索引，后面按 id O(1) 取。
+    //   · href 继承（<linearGradient id="b" href="#a">）要把属性与色标沿链合并，
+    //     合并只做一次、带环检测，比每次用的时候递归安全。
+    //   · 色标颜色要乘 stop-opacity，而 fill-opacity/opacity 是**元素级**的，
+    //     所以注册表里只折 stop-opacity，元素级的留到发射时折（见路径段那段）。
+    //
+    // 坐标语义（与运行期约定一致）：发射时再映射成"节点盒归一化坐标"，
+    // 这里存的是 SVG 原始数值（objectBoundingBox 就是 0..1 的分数）。
+    // ============================================================
+    struct SvgGradStopDef {
+        float    off = -1.0f;      // < 0 = 没写 offset（后面按 SVG 规则在相邻色标间插值）
+        uint32_t color = 0xFF000000u;  // 已折 stop-opacity
+    };
+    struct SvgGradDef {
+        bool     found = false;
+        uint8_t  type = PATH_GRAD_LINEAR;
+        uint8_t  spread = PATH_GRAD_PAD;
+        bool     userSpace = false;     // gradientUnits="userSpaceOnUse"（默认是 objectBoundingBox）
+        PathMatrix xform{};             // gradientTransform
+        bool     xformRotated = false;  // 含旋转/斜切（径向渐变会因此变形，要告警）
+        float    x1 = 0.0f, y1 = 0.0f, x2 = 1.0f, y2 = 0.0f;  // 线性端点（默认 0%/0% → 100%/0%）
+        float    cx = 0.5f, cy = 0.5f, r = 0.5f;              // 径向（默认 50%/50%/50%）
+        std::vector<SvgGradStopDef> stops;
+        std::unordered_map<std::string, std::string> attrs;   // 沿 href 链合并后的属性
+    };
+
+    // 渐变里的数字：支持 "50%"、"0.5"、"1"（百分比一律 /100，两套 units 语义都是一样的除法）
+    auto GradNum = [](const std::string& s, float dflt) -> float {
+        std::string t;
+        for (char c : s) if (c != ' ' && c != '\t' && c != '\n' && c != '\r') t += c;
+        if (t.empty()) return dflt;
+        bool pct = false;
+        if (t.back() == '%') { pct = true; t.pop_back(); }
+        char* end = nullptr;
+        const float v = static_cast<float>(std::strtod(t.c_str(), &end));
+        if (end == t.c_str()) return dflt;
+        return pct ? v / 100.0f : v;
+    };
+
+    // fill="url(#id)" / url("#id") / url( #id ) → id（后面的兜底色一律忽略，用渐变）
+    auto ParseUrlId = [](const std::string& v, std::string& id) -> bool {
+        size_t i = 0;
+        auto skipWs = [&]() { while (i < v.size() && (v[i] == ' ' || v[i] == '\t' || v[i] == '\n' || v[i] == '\r')) i++; };
+        skipWs();
+        std::string head;
+        while (i < v.size() && v[i] != '(' && v[i] != ' ' && v[i] != '\t') head += v[i++];
+        for (char& c : head) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (head != "url") return false;
+        skipWs();
+        if (i >= v.size() || v[i] != '(') return false;
+        i++;
+        skipWs();
+        char quote = 0;
+        if (i < v.size() && (v[i] == '"' || v[i] == '\'')) quote = v[i++];
+        std::string inner;
+        while (i < v.size() && v[i] != ')' && v[i] != quote) inner += v[i++];
+        while (!inner.empty() && (inner.back() == ' ' || inner.back() == '\t')) inner.pop_back();
+        if (inner.empty() || inner[0] != '#') return false;
+        id = inner.substr(1);
+        while (!id.empty() && (id.back() == ' ' || id.back() == '\t')) id.pop_back();
+        return !id.empty();
+    };
+
+    // 渐变元素上写 currentColor 时取谁的色：沿祖先链找第一个显式 color（近似）
+    auto gradInheritedColor = [&](size_t idx) -> uint32_t {
+        size_t k = idx;
+        size_t guard = elems.size() + 1;
+        while (k != SIZE_MAX && k < elems.size() && guard-- > 0) {
+            auto st = styleOf(elems[k], k);
+            auto cit = st.find("color");
+            if (cit != st.end() && !cit->second.empty())
+                return parseColorWith(cit->second, 0xFFFFFFFFu, "文字颜色");
+            k = elems[k].parentIdx;
+        }
+        // 祖先链上没有显式 color：与 defaultTextCol 的默认一致（浅底深字那条只影响文字）
+        return 0xFFFFFFFFu;
+    };
+
+    std::unordered_map<std::string, SvgGradDef> svgGrads;
+    {
+        std::unordered_map<std::string, size_t> gradIdx;   // id -> 元素下标（同名取第一个）
+        for (size_t i = 0; i < elems.size(); i++) {
+            const std::string t = lowerStr(elems[i].tag);
+            if (t != "lineargradient" && t != "radialgradient") continue;
+            auto idit = elems[i].attrs.find("id");
+            if (idit == elems[i].attrs.end() || idit->second.empty()) continue;
+            if (!gradIdx.count(idit->second)) gradIdx.emplace(idit->second, i);
+        }
+        std::unordered_set<std::string> resolving;
+        std::function<SvgGradDef(const std::string&, int)> resolveGrad =
+            [&](const std::string& gid, int depth) -> SvgGradDef {
+            SvgGradDef out;
+            auto it = gradIdx.find(gid);
+            if (it == gradIdx.end()) return out;                    // found = false
+            auto cacheIt = svgGrads.find(gid);
+            if (cacheIt != svgGrads.end()) return cacheIt->second;
+            if (depth > 8 || resolving.count(gid)) {
+                Warn("SVG 渐变 #" + gid + " 的 href 链出现循环或超过 8 层，已按空渐变处理");
+                return out;
+            }
+            resolving.insert(gid);
+            const size_t gi = it->second;
+            const HNode& ge = elems[gi];
+            // 1) href 继承：目标先解析一遍，自己的属性覆盖它，自己的色标优先
+            std::string href;
+            if (ge.attrs.count("href")) href = ge.attrs.at("href");
+            else if (ge.attrs.count("xlink:href")) href = ge.attrs.at("xlink:href");
+            if (!href.empty()) {
+                if (href[0] != '#') {
+                    Warn("渐变 #" + gid + " 的 href 只支持 #本地引用（外链渐变不支持）");
+                } else {
+                    SvgGradDef base = resolveGrad(href.substr(1), depth + 1);
+                    if (base.found) out = base;
+                    else Warn("渐变 #" + gid + " 的 href=\"" + href + "\" 找不到定义（按本元素属性处理）");
+                }
+            }
+            out.found = true;
+            out.type = (lowerStr(ge.tag) == "radialgradient") ? PATH_GRAD_RADIAL : PATH_GRAD_LINEAR;
+            for (const auto& kv : ge.attrs) {
+                if (kv.first == "href" || kv.first == "xlink:href" || kv.first == "id") continue;
+                out.attrs[kv.first] = kv.second;
+            }
+            // 2) 自己的色标（没有就沿用继承来的）
+            const uint32_t curCol = gradInheritedColor(gi);
+            std::vector<SvgGradStopDef> own;
+            for (size_t k = 0; k < elems.size(); k++) {
+                if (elems[k].parentIdx != gi) continue;
+                if (lowerStr(elems[k].tag) != "stop") continue;
+                const auto st = styleOf(elems[k], k);
+                auto stopField = [&](const char* key) -> std::string {
+                    auto sit = st.find(key);
+                    if (sit != st.end() && !sit->second.empty()) return sit->second;
+                    auto ait = elems[k].attrs.find(key);
+                    return ait != elems[k].attrs.end() ? ait->second : std::string();
+                };
+                SvgGradStopDef sd;
+                const std::string off = stopField("offset");
+                if (!off.empty()) sd.off = GradNum(off, -1.0f);
+                const std::string col = stopField("stop-color");
+                uint32_t c = 0xFF000000u;
+                if (lowerStr(col) == "currentcolor") c = curCol;      // 规范：用渐变元素自身的 color
+                else if (!col.empty()) c = parseColorWith(col, 0xFF000000u, "stop-color");
+                const std::string sop = stopField("stop-opacity");
+                if (!sop.empty()) {
+                    float op = GradNum(sop, 1.0f);
+                    op = op < 0.0f ? 0.0f : (op > 1.0f ? 1.0f : op);
+                    const uint32_t a = (uint32_t)(((c >> 24) & 0xFFu) * op + 0.5f);
+                    c = (a << 24) | (c & 0x00FFFFFFu);
+                }
+                sd.color = c;
+                own.push_back(sd);
+            }
+            if (!own.empty()) out.stops = std::move(own);
+            resolving.erase(gid);
+            svgGrads[gid] = out;
+            return out;
+        };
+        for (const auto& kv : gradIdx) resolveGrad(kv.first, 0);
+
+        // 3) 收尾：属性解析（units / transform / spread / 端点）+ 色标 offset 规则
+        for (auto& kv : svgGrads) {
+            SvgGradDef& g = kv.second;
+            if (!g.found) continue;
+            auto A = [&](const char* key) -> std::string {
+                auto it = g.attrs.find(key);
+                return it == g.attrs.end() ? std::string() : it->second;
+            };
+            g.userSpace = (lowerStr(A("gradientunits")) == "userspaceonuse");
+            // userSpaceOnUse 下的百分比：规范是按**视口**比例算，本库按"数值 /100"当用户单位
+            // （x1="50%" → 0.5 用户单位）。两者差一个数量级，画出来是一条几乎看不见的渐变，
+            // 而作者完全看不出原因 —— 这种"写了不生效"必须明确告警并给替代写法。
+            // 每条渐变只报一次（把命中的属性列出来），别按属性刷屏。
+            // objectBoundingBox（默认）下的百分比是对的（包围盒的百分比），不报。
+            if (g.userSpace) {
+                static const char* kPctKeys[] = { "x1", "y1", "x2", "y2", "cx", "cy", "r" };
+                std::string badKeys;
+                for (const char* key : kPctKeys) {
+                    std::string v = A(key);
+                    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+                    if (v.empty() || v.back() != '%') continue;
+                    if (!badKeys.empty()) badKeys += "/";
+                    badKeys += key;
+                }
+                if (!badKeys.empty()) {
+                    Warn("渐变 #" + kv.first + " 在 userSpaceOnUse 下用了百分比（" + badKeys +
+                         "）：百分比在这里按\"用户单位\"折半折算（不是 viewport 比例），"
+                         "建议改成具体用户单位，如 x1=\"12\" x2=\"36\"");
+                }
+            }
+            const std::string gt = A("gradienttransform");
+            g.xform = PathMatrix{};
+            if (!gt.empty()) {
+                std::string gerr;
+                if (!ParseSvgTransform(gt, g.xform, &gerr)) {
+                    Warn("渐变 #" + kv.first + " 的 gradientTransform 解析失败（" + gerr +
+                         "），按无变换处理");
+                    g.xform = PathMatrix{};
+                }
+            }
+            g.xformRotated = std::fabs(g.xform.b) > 1e-6f || std::fabs(g.xform.c) > 1e-6f;
+            const std::string sp = lowerStr(A("spreadmethod"));
+            g.spread = (sp == "repeat") ? PATH_GRAD_REPEAT
+                     : (sp == "reflect") ? PATH_GRAD_REFLECT : PATH_GRAD_PAD;
+            g.x1 = GradNum(A("x1"), 0.0f);
+            g.y1 = GradNum(A("y1"), 0.0f);
+            g.x2 = GradNum(A("x2"), 1.0f);
+            g.y2 = GradNum(A("y2"), 0.0f);
+            g.cx = GradNum(A("cx"), 0.5f);
+            g.cy = GradNum(A("cy"), 0.5f);
+            g.r  = GradNum(A("r"), 0.5f);
+            // fx/fy：规范里焦点与圆心不同时是"偏心径向渐变"，本版按同心圆画
+            const std::string fx = A("fx"), fy = A("fy");
+            if ((!fx.empty() && std::fabs(GradNum(fx, g.cx) - g.cx) > 1e-4f) ||
+                (!fy.empty() && std::fabs(GradNum(fy, g.cy) - g.cy) > 1e-4f)) {
+                Warn("渐变 #" + kv.first + "：径向渐变的焦点（fx/fy）未实现，按同心圆绘制"
+                     "（改 cx/cy 或去掉 fx/fy）");
+            }
+            // 色标上限
+            if (g.stops.size() > (size_t)kPathGradMaxStops) {
+                Warn("渐变 #" + kv.first + " 有 " + std::to_string(g.stops.size()) +
+                     " 个色标，超过 " + std::to_string(kPathGradMaxStops) +
+                     " 个上限，已截断（取前 8 个）");
+                g.stops.resize(kPathGradMaxStops);
+            }
+            // offset 补齐：没写的在相邻已知色标之间等距插值（首尾分别贴 0 / 1）
+            const size_t n = g.stops.size();
+            if (n == 1) {
+                // 只有一个色标 = 纯色；格式要求至少 2 个（运行期按两端插值），复制一份
+                g.stops.push_back(g.stops[0]);
+            } else if (n >= 2) {
+                size_t k = 0;
+                while (k < n && g.stops[k].off < 0.0f) k++;      // 开头连续缺失
+                if (k == n) {
+                    // 全部没写 offset：按 SVG 规则在首个 0 与末个 1 之间均分
+                    // （踩过：这里曾按"首个已知值 = 0"处理，2 个色标全缺时两个 offset 都成 0，
+                    //  运行期插值退化成纯色）
+                    for (size_t i = 0; i < n; i++)
+                        g.stops[i].off = static_cast<float>(i) / static_cast<float>(n - 1);
+                } else {
+                    const float firstKnown = g.stops[k].off;
+                    for (size_t i = 0; i < k; i++)
+                        g.stops[i].off = firstKnown * static_cast<float>(i) / static_cast<float>(k);
+                    for (size_t i = k + 1; i < n; i++) {
+                        if (g.stops[i].off >= 0.0f) continue;
+                        // 找这段缺失的右端点（没有就贴 1）
+                        size_t j = i;
+                        while (j < n && g.stops[j].off < 0.0f) j++;
+                        const float leftOff = g.stops[i - 1].off;
+                        const float rightOff = (j < n) ? g.stops[j].off : 1.0f;
+                        const size_t cnt = j - i;
+                        for (size_t m = 0; m < cnt; m++)
+                            g.stops[i + m].off = leftOff + (rightOff - leftOff) *
+                                static_cast<float>(m + 1) / static_cast<float>(cnt + 1);
+                        i = j;
+                    }
+                }
+                // 非递减夹紧 + 夹到 [0,1]（SVG 要求色标单调，后一个小于前一个就抬平）
+                float prev = 0.0f;
+                for (size_t i = 0; i < n; i++) {
+                    float o = g.stops[i].off;
+                    o = o < 0.0f ? 0.0f : (o > 1.0f ? 1.0f : o);
+                    if (o < prev) o = prev;
+                    g.stops[i].off = o;
+                    prev = o;
+                }
+            }
+        }
+    }
 
     // 解析 CSS box 简写（margin/padding）为 {top,right,bottom,left}，支持 1~4 值 + 单边覆盖
     auto parseBox = [&](const std::unordered_map<std::string, std::string>& style,
@@ -3981,6 +4267,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         bool     hasStroke = false;
         uint8_t  strokeW = 1;
         bool     evenOdd = false;                     // fill-rule="evenodd"
+        // v16：fill 用的渐变 id（空 = 纯色）。渐变是继承属性，<svg>/<g> 上写一次全子树生效；
+        // fillColor 同时存"中间色标的代表色"，供运行期兜底与不支持渐变的通路使用。
+        std::string fillGradId{};
     };
 
     // 根节点固定 id 0，位于坐标原点。画布默认白色；<app_window bg>/<html bg> 覆盖
@@ -4270,6 +4559,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             // 向量/画布
             "svg", "canvas", "line", "circle", "rect", "polyline", "polygon",
             "path", "ellipse", "g", "defs", "symbol", "text", "image",
+            "lineargradient", "radialgradient", "stop",
         };
         // 认得但只能糊弄过去的标签：明确说清楚会变成什么，别让人以为生效了
         static const std::unordered_map<std::string, const char*> kShimTags = {
@@ -4298,8 +4588,6 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             // v15 起 path/ellipse 已实现，从这张表里移出（kKnownTags 里有了）。
             
             { "tspan", "SVG <tspan> 不支持富文本：把文字写进 <text> 本体，或拆成多个 <text>" },
-            { "lineargradient", "SVG <linearGradient> 不支持：用 CSS linear-gradient(...) 画矩形渐变" },
-            { "radialgradient", "SVG <radialGradient> 不支持：改画多层同心圆" },
             { "mask", "SVG <mask> 不支持" },
             { "clippath", "SVG <clipPath> 不支持" },
             { "pattern", "SVG <pattern> 不支持" },
@@ -4541,6 +4829,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         bool eHasStroke = pc.hasStroke;
         uint8_t eStrokeW = pc.strokeW;
         bool eEvenOdd = pc.evenOdd;
+        std::string fillGradId = pc.fillGradId;   // v16：继承下来的渐变填充（空 = 纯色）
         if (inSvg) {
             // CSS（含内联 style / 类规则）> 表现属性 > 继承 > SVG 默认
             auto pickSvgPaint = [&](const char* key) -> std::string {
@@ -4553,15 +4842,52 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             auto parsePaint = [&](const std::string& v, uint32_t dflt) -> uint32_t {
                 return lowerStr(v) == "currentcolor" ? curCol : parseColorWith(v, dflt, "SVG 颜色");
             };
+            // 渐变填充的代表色：取中间色标（运行期兜底/不支持渐变的通路用这个颜色）
+            auto gradMidColor = [](const SvgGradDef& g) -> uint32_t {
+                if (g.stops.empty()) return 0xFF000000u;
+                return g.stops[g.stops.size() / 2].color;
+            };
             const std::string f = pickSvgPaint("fill");
             if (!f.empty()) {
-                if (lowerStr(f) == "none") eHasFill = false;
-                else { eFill = parsePaint(f, eFill); eHasFill = true; }
+                std::string gid;
+                if (lowerStr(f) == "none") {
+                    eHasFill = false;
+                    fillGradId.clear();
+                } else if (ParseUrlId(f, gid)) {
+                    auto git = svgGrads.find(gid);
+                    if (git == svgGrads.end() || !git->second.found || git->second.stops.empty()) {
+                        Warn("fill=\"url(#" + gid + ")\" 找不到渐变定义（按纯色填充，"
+                             "请检查 id 拼写或色标是否写在 <linearGradient> 里）");
+                        fillGradId.clear();
+                        eHasFill = true;              // 退回纯色（保持原来的 eFill）
+                    } else {
+                        fillGradId = gid;             // 色标等细节在路径段发射时再展开
+                        eHasFill = true;
+                        eFill = gradMidColor(git->second);
+                    }
+                } else {
+                    eFill = parsePaint(f, eFill);
+                    eHasFill = true;
+                    fillGradId.clear();
+                }
             }
             const std::string s = pickSvgPaint("stroke");
             if (!s.empty()) {
-                if (lowerStr(s) == "none") eHasStroke = false;
-                else { eStroke = parsePaint(s, eStroke); eHasStroke = true; }
+                std::string sgid;
+                if (lowerStr(s) == "none") {
+                    eHasStroke = false;
+                } else if (ParseUrlId(s, sgid)) {
+                    // 描边是逐段画线，没有"沿段取色"的通路：按首个色标纯色画，说清楚
+                    auto git = svgGrads.find(sgid);
+                    if (git != svgGrads.end() && !git->second.stops.empty())
+                        eStroke = git->second.stops[0].color;
+                    Warn("stroke=\"url(#" + sgid + ")\" 不支持渐变描边，已按首个色标纯色绘制"
+                         "（要渐变效果请把描边改成填充区域）");
+                    eHasStroke = true;
+                } else {
+                    eStroke = parsePaint(s, eStroke);
+                    eHasStroke = true;
+                }
             }
             const std::string swv = pickSvgPaint("stroke-width");
             if (!swv.empty()) {
@@ -4589,6 +4915,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             if (!cur.empty()) coords.push_back(parseLen(cur, 0));
             size_t m = coords.size() / 2;
             bool closed = (e.tag == "polygon") && m >= 2;
+            if (!fillGradId.empty()) {
+                Warn("<" + e.tag + "> 不支持渐变填充，按首个色标纯色绘制"
+                     "（要渐变请改用 <path>）");
+            }
             if (m >= 2) {
                 // viewBox / <g transform>：逐点映射到内容盒坐标
                 for (size_t k = 0; k < m; k++) {
@@ -4641,13 +4971,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         uint32_t pathFillColor = 0xFF000000u, pathStrokeColor = 0xFF000000u;
         float pathStrokeW = 0.0f;
         uint8_t pathCap = BINUI_CAP_BUTT;   // stroke-linecap
+        bool pathHasGrad = false;           // v16：填充用渐变
+        BinUIPathGradient pathGrad = {};
         // <path>/<ellipse>：永远是路径。
-        // <circle>/<rect>：只有在**带描边**时才编成路径 —— 轻量映射（LIST + radius）
-        // 只能表达一个颜色，fill 与 stroke 并存走不通；没有描边时继续走轻量映射，
-        // 因为圆角矩形的九宫格填充比扫描线条带更干净（边缘更准、也没有取整毛边）。
+        // <circle>/<rect>：带描边、或填充是渐变时必须编成路径 —— 轻量映射（LIST + radius）
+        // 只能表达一个颜色，fill 与 stroke 并存、多条色标都走不通；没有描边也不是渐变时
+        // 继续走轻量映射，因为圆角矩形的九宫格填充比扫描线条带更干净（边缘更准、也没有取整毛边）。
         const bool shapeAsPath = (e.tag == "path" || e.tag == "ellipse") ||
                                  ((e.tag == "circle" || e.tag == "rect") &&
-                                  eHasStroke && eStrokeW > 0);
+                                  ((eHasStroke && eStrokeW > 0) || !fillGradId.empty()));
         if (shapeAsPath) {
             if (e.tag == "path") {
                 const std::string d = e.attrs.count("d") ? e.attrs.at("d") : "";
@@ -4752,6 +5084,72 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                     const float e2 = pathStrokeW * 0.5f;
                     svgPathShape.minX -= e2; svgPathShape.minY -= e2;
                     svgPathShape.maxX += e2; svgPathShape.maxY += e2;
+                }
+                // ---- v16 渐变填充：把"渐变空间"折进"节点盒归一化空间" ----
+                // 运行期拿到的是归一化坐标（设备 = 节点盒左上 + 归一化 × 盒尺寸），
+                // 所以这里把端点/圆心/半径用同一个仿射 M 折算过去，运行期只做插值。
+                //   userSpaceOnUse : M = N ∘ svgX ∘ gradientTransform
+                //   objectBBox     : M = N ∘ B ∘ gradientTransform（B 把单位正方形铺到几何盒）
+                if (pathFill && !fillGradId.empty()) {
+                    auto git = svgGrads.find(fillGradId);
+                    if (git != svgGrads.end() && git->second.found && !git->second.stops.empty()) {
+                        const SvgGradDef& gd = git->second;
+                        const float boxX = svgPathShape.minX, boxY = svgPathShape.minY;
+                        const float boxW = svgPathShape.Width(), boxH = svgPathShape.Height();
+                        // N：设备坐标 → 节点盒归一化（先把盒原点挪到 0，再除以盒尺寸）。
+                        // 注意 PathMul 的语义是 "先右后左"：这里要先平移再缩放，
+                        // 所以写成 PathMul(S, T) 而不是 PathMul(T, S)。
+                        const PathMatrix N = PathMul(
+                            PathScale(boxW > 1e-6f ? 1.0f / boxW : 0.0f,
+                                      boxH > 1e-6f ? 1.0f / boxH : 0.0f),
+                            PathTranslate(-boxX, -boxY));
+                        PathMatrix M = N;
+                        if (gd.userSpace) {
+                            M = PathMul(M, PathMul(svgX, gd.xform));
+                        } else {
+                            // objectBoundingBox：坐标是"几何包围盒（**不含描边**）的单位正方形"
+                            const float e2 = pathStroke ? pathStrokeW * 0.5f : 0.0f;
+                            const float fw = std::max(1e-6f, boxW - 2.0f * e2);
+                            const float fh = std::max(1e-6f, boxH - 2.0f * e2);
+                            M = PathMul(M, PathMul(PathTranslate(boxX + e2, boxY + e2),
+                                                   PathScale(fw, fh)));
+                            M = PathMul(M, gd.xform);
+                        }
+                        BinUIPathGradient pg = {};
+                        pg.type = gd.type;
+                        pg.spread = gd.spread;
+                        // 色标：元素级的 fill-opacity / opacity 在这里折进 alpha
+                        const int ns = static_cast<int>(
+                            std::min<size_t>(kPathGradMaxStops, gd.stops.size()));
+                        pg.stopCount = static_cast<uint8_t>(std::max(2, ns));
+                        for (int si = 0; si < ns; si++) {
+                            float off = gd.stops[si].off;
+                            off = off < 0.0f ? 0.0f : (off > 1.0f ? 1.0f : off);
+                            pg.stops[si].offset = off;
+                            pg.stops[si].color = fade(gd.stops[si].color, "fill-opacity");
+                            pg.stops[si].color = fade(pg.stops[si].color, "opacity");
+                        }
+                        if (ns < 2) pg.stops[1] = pg.stops[0];   // 兜底（注册表已保证 ≥ 2）
+                        if (gd.type == PATH_GRAD_RADIAL) {
+                            if (gd.xformRotated) {
+                                Warn("渐变 #" + fillGradId + "：径向渐变的 gradientTransform 含旋转/斜切，"
+                                     "已近似为轴对齐椭圆（去掉旋转，或改用线性渐变）");
+                            }
+                            const PathPointF gc = PathApply(M, gd.cx, gd.cy);
+                            pg.x1 = gc.x;
+                            pg.y1 = gc.y;
+                            // 半径按 M 两列的范数放大：仿射变换下圆的轴长正好是这个
+                            pg.rx = std::fabs(gd.r) * std::sqrt(M.a * M.a + M.b * M.b);
+                            pg.ry = std::fabs(gd.r) * std::sqrt(M.c * M.c + M.d * M.d);
+                        } else {
+                            const PathPointF gp1 = PathApply(M, gd.x1, gd.y1);
+                            const PathPointF gp2 = PathApply(M, gd.x2, gd.y2);
+                            pg.x1 = gp1.x; pg.y1 = gp1.y;
+                            pg.x2 = gp2.x; pg.y2 = gp2.y;
+                        }
+                        pathGrad = pg;
+                        pathHasGrad = true;
+                    }
                 }
                 if (svgPathShape.Width() <= 0.0f || svgPathShape.Height() <= 0.0f) {
                     Warn("<path> 的包围盒为零（跳过：只有水平/垂直直线时请改用 <line>）");
@@ -5284,8 +5682,17 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             std::string rx = e.attrs.count("rx") ? e.attrs.at("rx") : "";
             if (!rx.empty()) n.radius = (uint16_t)(parseLen(rx, 0) * PathScaleFactor(svgX));
         } else if (e.tag == "text" && inSvg) {
-            // 文字色走标签自己的填充色（LABEL 的旧约定：color 就是文字色）
-            if (eHasFill) n.color = eFill;
+            // 文字色走标签自己的填充色（LABEL 的旧约定：color 就是文字色）。
+            // 渐变文字做不到（文字是字形图集里逐个 BLEND 画出来的，没有沿字形取色的通路）。
+            if (!fillGradId.empty()) {
+                Warn("<text> 的渐变填充未实现，按首个色标纯色绘制"
+                     "（要渐变文字请把文字转成路径）");
+                auto git = svgGrads.find(fillGradId);
+                if (git != svgGrads.end() && !git->second.stops.empty())
+                    n.color = git->second.stops[0].color;
+            } else if (eHasFill) {
+                n.color = eFill;
+            }
         }
 
         // 文本来源：元素自身文本 > 输入框/按钮的值 > 图片的 alt 兜底
@@ -5366,7 +5773,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             pp.head.nodeId = n.id;
             pp.head.flags = (pathFill ? PATH_FILL : 0) |
                             (pathStroke ? PATH_STROKE : 0) |
-                            (pathEvenOdd ? PATH_EVENODD : 0);
+                            (pathEvenOdd ? PATH_EVENODD : 0) |
+                            (pathHasGrad ? PATH_FILL_GRAD : 0);
+            pp.hasGrad = pathHasGrad;
+            if (pathHasGrad) pp.grad = pathGrad;
             pp.head.fillColor = pathFillColor;
             pp.head.strokeColor = pathStrokeColor;
             pp.head.designW = svgPathShape.Width();
@@ -5611,6 +6021,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             child.hasStroke = eHasStroke;
             child.strokeW = eStrokeW;
             child.evenOdd = eEvenOdd;
+            child.fillGradId = fillGradId;   // 渐变填充是继承属性（<svg>/<g> 写一次全子树生效）
             if (e.tag == "svg") {
                 // 子元素坐标 = viewBox 用户单位 → 本容器内容盒局部坐标。
                 // 注意**不乘位移**：Ctx.ox 已经是内容盒原点，再加一次就是双重偏移
