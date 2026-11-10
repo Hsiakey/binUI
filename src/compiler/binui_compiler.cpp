@@ -3324,6 +3324,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (tag == "canvas") return BINUI_CANVAS;
         if (tag == "line") return BINUI_LINE;
         if (tag == "path" || tag == "ellipse") return BINUI_PATH;
+        if (tag == "text") return BINUI_LABEL;      // SVG 文字 → 普通标签（定位见几何段）
+        if (tag == "image") return BINUI_IMAGE;     // SVG 图片 → 普通图片节点
         if (tag == "video") return BINUI_VIDEO;
         if (tag == "rect" || tag == "circle") return BINUI_LIST;
         return BINUI_LIST;
@@ -4267,7 +4269,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             "input", "button", "video", "img", "source", "track", "titlebar", "use", "component",
             // 向量/画布
             "svg", "canvas", "line", "circle", "rect", "polyline", "polygon",
-            "path", "ellipse", "g", "defs", "symbol",
+            "path", "ellipse", "g", "defs", "symbol", "text", "image",
         };
         // 认得但只能糊弄过去的标签：明确说清楚会变成什么，别让人以为生效了
         static const std::unordered_map<std::string, const char*> kShimTags = {
@@ -4295,15 +4297,13 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             // 否则作者只会看到自己那一段什么都不显示，以为是自己写错了。
             // v15 起 path/ellipse 已实现，从这张表里移出（kKnownTags 里有了）。
             
-            { "text", "SVG <text> 不支持：用普通 <span> 绝对定位到同一坐标" },
-            { "tspan", "SVG <tspan> 不支持：用普通 <span>" },
+            { "tspan", "SVG <tspan> 不支持富文本：把文字写进 <text> 本体，或拆成多个 <text>" },
             { "lineargradient", "SVG <linearGradient> 不支持：用 CSS linear-gradient(...) 画矩形渐变" },
             { "radialgradient", "SVG <radialGradient> 不支持：改画多层同心圆" },
             { "mask", "SVG <mask> 不支持" },
             { "clippath", "SVG <clipPath> 不支持" },
             { "pattern", "SVG <pattern> 不支持" },
             { "marker", "SVG <marker> 不支持" },
-            { "image", "SVG <image> 不支持：用 HTML <img>" },
         };
         // 真正被编译器消费的属性（其余一律视为"写了没效果"）
         const auto& kUsedAttrs = UsedHtmlAttrs();
@@ -4859,6 +4859,36 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             // <g> 在 SVG 里不建立坐标系、也不是布局盒子：给它一个零尺寸的绝对定位节点，
             // 子元素直接挂在父容器原点（见下面 push 处对 <g> 的 ox/oy 处理）
             sx = "0"; sy = "0"; sw = "0"; sh = "0";
+        } else if (e.tag == "text" && inSvg) {
+            // <text x y font-size fill>：编成普通 LABEL（绝对定位）。
+            // SVG 的 y 是**基线**，binUI 按盒顶排版，所以上移 0.8 个字号近似；
+            // 没有富文本能力，<tspan> 仍然不支持（会单独告警）。
+            const float tx = SvgLenPlain(e.attrs.count("x") ? e.attrs.at("x") : "", 0.0f);
+            const float ty = SvgLenPlain(e.attrs.count("y") ? e.attrs.at("y") : "", 0.0f);
+            const float fs = SvgLenPlain((e.attrs.count("font-size") ? e.attrs.at("font-size")
+                                          : (style.count("font-size") ? style.at("font-size") : "")),
+                                         14.0f);
+            const PathPointF tp = PathApply(svgX, tx, ty);
+            nodeFontSize = fs;   // font-size 是 SVG 属性名，走 pick("size") 取不到，这里补上
+            sx = std::to_string(tp.x);
+            sy = std::to_string(tp.y - fs * 0.8f * PathScaleFactor(svgX));
+            if (sw.empty()) {
+                const float avail = pc.contentW - tp.x;
+                sw = std::to_string(avail > 4.0f ? avail : 4.0f);
+            }
+            sh = std::to_string(fs * 1.35f * PathScaleFactor(svgX) + 2.0f);
+        } else if (e.tag == "image" && inSvg) {
+            // <image x y width height href>：编成普通 IMAGE（资源路径相对 UI 文件）
+            const float ix = SvgLenPlain(e.attrs.count("x") ? e.attrs.at("x") : "", 0.0f);
+            const float iy = SvgLenPlain(e.attrs.count("y") ? e.attrs.at("y") : "", 0.0f);
+            const float iw = SvgLenPlain(e.attrs.count("width") ? e.attrs.at("width") : "", 0.0f);
+            const float ih = SvgLenPlain(e.attrs.count("height") ? e.attrs.at("height") : "", 0.0f);
+            const float k = PathScaleFactor(svgX);
+            const PathPointF ip = PathApply(svgX, ix, iy);
+            sx = std::to_string(ip.x);
+            sy = std::to_string(ip.y);
+            if (sw.empty()) sw = std::to_string(iw * k);
+            if (sh.empty()) sh = std::to_string(ih * k);
         }
 
         // <br>：换行占位——块式布局下每个元素已独占一行，br 只占零高度
@@ -5235,6 +5265,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             n.color = eHasFill ? eFill : 0;
             std::string rx = e.attrs.count("rx") ? e.attrs.at("rx") : "";
             if (!rx.empty()) n.radius = (uint16_t)(parseLen(rx, 0) * PathScaleFactor(svgX));
+        } else if (e.tag == "text" && inSvg) {
+            // 文字色走标签自己的填充色（LABEL 的旧约定：color 就是文字色）
+            if (eHasFill) n.color = eFill;
         }
 
         // 文本来源：元素自身文本 > 输入框/按钮的值 > 图片的 alt 兜底
@@ -5267,9 +5300,14 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // 图片节点：src 属性 -> imageIndex（引用编译结果中的资源路径表）
         if (type == BINUI_IMAGE && outImages) {
             std::string src = e.attrs.count("src") ? e.attrs.at("src") : "";
-            if (!src.empty()) {
+            // SVG <image href="x.png">：资源路径同样相对 UI 文件（<img src> 的老路径）
+            if (src.empty() && e.attrs.count("href")) src = e.attrs.at("href");
+            if (src.empty() && e.attrs.count("xlink:href")) src = e.attrs.at("xlink:href");
+            if (!src.empty() && src.rfind("data:", 0) != 0) {
                 n.imageIndex = (uint16_t)outImages->size();
                 outImages->push_back(src);
+            } else if (src.rfind("data:", 0) == 0) {
+                Warn("SVG <image> 的 data: 内联图片不支持（用独立图片文件）");
             }
         }
 

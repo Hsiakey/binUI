@@ -2962,6 +2962,48 @@ static void TestUseDefs() {
     if (bigSq) CHECK_NEAR(bigSq->x, 80, 2.0f, "use/symbol：x 平移生效");
 }
 
+// <text> → LABEL（绝对定位、fill 当文字色）、<image href> → IMAGE（资源路径）
+static void TestSvgTextImage() {
+    std::string html =
+        "<app_window width=\"200\" height=\"100\"><html width=\"200\" height=\"100\" bg=\"#000000\">"
+        "<body><svg x=\"0\" y=\"0\" width=\"200\" height=\"100\" viewBox=\"0 0 200 100\">"
+        "<text x=\"10\" y=\"40\" font-size=\"20\" fill=\"#7AAAFF\">SVG 文本</text>"
+        "<image x=\"120\" y=\"20\" width=\"40\" height=\"40\" href=\"pic.png\"/>"
+        "</svg></body></html></app_window>";
+    auto res = binui::CompileBinUIEx(html);
+    for (const auto& w : res.warnings) std::printf("  [svgpath][warn] %s\n", w.c_str());
+    CHECK(res.warnings.empty(), "text/image：不报警告");
+    BinUIRenderer r;
+    CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "text/image：布局可解析");
+
+    const BinUIRenderer::NodeInfo* label = nullptr;
+    const BinUIRenderer::NodeInfo* img = nullptr;
+    for (const auto& n : r.getNodes()) {
+        if (n.type == BINUI_LABEL && !n.text.empty()) label = &n;
+        if (n.type == BINUI_IMAGE) img = &n;
+    }
+    CHECK(label != nullptr, "text：编成 LABEL 且带文本");
+    if (label) {
+        std::printf("  [svgpath] svg text：盒 = (%.1f,%.1f %.1fx%.1f) 色 = %08X 文本 = %s\n",
+                    (double)label->x, (double)label->y, (double)label->width,
+                    (double)label->height, label->color, label->text.c_str());
+        CHECK_NEAR(label->x, 10, 1.0f, "text：x 生效");
+        // y=40 是基线，盒顶 ≈ 40 - 0.8*20 = 24
+        CHECK(std::fabs(label->y - 24.0f) < 3.0f, "text：基线 → 盒顶的近似");
+        CHECK(label->color == 0xFF7AAAFFu, "text：fill 当文字色");
+        std::printf("  [svgpath] svg text fontSize = %u\n", (unsigned)label->fontSize);
+        CHECK(label->fontSize == 20, "text：font-size 生效");
+    }
+    CHECK(img != nullptr, "image：编成 IMAGE 节点");
+    if (img) {
+        CHECK_NEAR(img->x, 120, 1.0f, "image：x 生效");
+        CHECK_NEAR(img->width, 40, 1.0f, "image：width 生效");
+        const auto& paths = r.imagePaths();
+        CHECK(img->imageIndex < paths.size() && paths[img->imageIndex] == "pic.png",
+              "image：href 进了资源表");
+    }
+}
+
 static int run() {
     std::printf("\n[suite_svgpath] 路径几何（binui_path.h）+ 扫描线填充（binui_paint.h）\n");
     TestParse();
@@ -2971,6 +3013,7 @@ static int run() {
     TestSvgSemantics();
     TestShapesAndDash();
     TestUseDefs();
+    TestSvgTextImage();
     std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");
     return g_fail;
 }

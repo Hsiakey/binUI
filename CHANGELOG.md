@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### 新增 — SVG P2-3：`<text>` 与 `<image>`
+
+- `<text x y font-size fill>` 编成普通 `LABEL`：坐标走 viewBox/transform，`fill` 当文字色，
+  `font-size` 直接生效；SVG 的 `y` 是**基线**，按"盒顶上移 0.8 个字号"近似
+  （没有富文本能力，`<tspan>` 仍告警）。
+- `<image x y width height href>` 编成普通 `IMAGE`：`href` / `xlink:href` 进资源表
+  （路径同样相对 UI 文件），尺寸跟着 viewBox 缩放；`data:` 内联图片明确告警（不支持）。
+- 修一个"属性名走错通道"的坑：SVG 用 `font-size` 属性，而编译器取字号读的是 `size`
+  属性 + `font-size` CSS —— 只写 SVG 属性时字号被忽略（实测落库 14 而不是 20）。
+- 验证：`suite_svgpath` 新增 text/image 端到端断言（文本、颜色、基线近似、字号、
+  imageIndex 与资源表路径）；四套测试全绿、`check_examples` 0 问题。
+
 ### 新增 — SVG P2-2：`<defs>` / `<symbol>` 模板 + `<use href="#id">` 引用
 
 - 图标素材里常见的"一份模板多处引用"现在能用：`<defs>`/`<symbol>` 里的元素是**模板**

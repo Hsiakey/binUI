@@ -251,9 +251,9 @@ P1 里这个降级不做，但文档要写清"圆/矩形没有独立描边"。
   圆/矩形带描边时自动编成路径（`AppendRoundedRect`）、
   `<defs>`/`<symbol>` 模板 + `<use href="#id">` 克隆引用（`ExpandSvgUse`；
   支持 `xlink:href`、按 x/y 平移、symbol 的 viewBox 按 width/height 缩放）。
+- **P2 已完成**：`<text>` → `BINUI_LABEL`（y 当基线近似）、`<image href>` → `BINUI_IMAGE`。
 - **P2 待做**：`stroke-linecap` / `stroke-linejoin`（miter/bevel）、
-  `linearGradient`/`radialGradient`（逐 span 取色，机制与现有渐变一致）、
-  `<text>` → `BINUI_LABEL`、`<image>` → `BINUI_IMAGE`。
+  `linearGradient`/`radialGradient`（逐 span 取色，需要格式 v16：路径段要带渐变引用）。
 - **P3**：精确命中（点在路径内，可选）、span 缓存、命令级存储 + 运行时再细分、可选灰度抗锯齿
   （只对 path 边缘，全库仍走硬边）。
 
