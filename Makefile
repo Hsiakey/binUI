@@ -286,7 +286,8 @@ TOOL_BINS := \
     $(BIN_DIR)/pixel_diff$(EXT) \
     $(BIN_DIR)/check_examples$(EXT) \
     $(BIN_DIR)/vk_shot$(EXT) \
-    $(BIN_DIR)/vk_window$(EXT)
+    $(BIN_DIR)/vk_window$(EXT) \
+    $(BIN_DIR)/vk_stress$(EXT)
 
 # 把 .bui 还原成打包前的目录结构（读同目录的 binui.res，header-only，不用链接库）
 $(BIN_DIR)/binui_export$(EXT): tools/binui_export.cpp
@@ -330,6 +331,15 @@ $(BIN_DIR)/vk_window$(EXT): tools/vk_window.cpp $(BUILD_DIR)/binui_vk.o $(LIB_A)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c tools/vk_window.cpp -o $(BUILD_DIR)/vk_window.o
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_window.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
 		-luser32 -lgdi32 -lgdiplus -lole32 \
+		-Lthird_party/freetype/build -lfreetype \
+		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
+
+# 鲁棒性压测工具（P4）：resize 抖动 / 最小化 / 透明切换 / GDI 切换 / init-shutdown 循环 / 双实例
+$(BIN_DIR)/vk_stress$(EXT): tools/vk_stress.cpp $(BUILD_DIR)/binui_vk.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c tools/vk_stress.cpp -o $(BUILD_DIR)/vk_stress.o
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_stress.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
+		-luser32 -lgdi32 -lgdiplus -lole32 -lpsapi \
 		-Lthird_party/freetype/build -lfreetype \
 		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
@@ -430,6 +440,23 @@ vk-window: tools
 	done; \
 	echo "--- fullscreen guard (window covers monitor -> expect GDI readback) ---"; \
 	$(BIN_DIR)/vk_window$(EXT) docs/issues/assets/probe.html --frames 10 --fullscreen 2>&1 | grep -E "present=|saved|fullscreen" || fail=1; \
+	exit $$fail
+
+.PHONY: vk-stress
+
+# 鲁棒性压测（P4）：resize 抖动 / 同尺寸早退 / 最小化恢复 / 透明切换 / GDI 切换 /
+# init-shutdown 循环 / 双实例共存 / 泄漏复跑。末尾把画面读回与 GL 比（阈值 0）。
+# 判据看工具自己的 [ok]/[FAIL] 与 "后端显存记账归零"。
+vk-stress: tools
+	@mkdir -p $(PIXEL_VK_OUT)
+	@fail=0; \
+	for c in probe vkcolor; do \
+	    echo "--- stress/$$c ---"; \
+	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_VK_OUT)/$$c.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$c"; fail=1; continue; }; \
+	    $(BIN_DIR)/vk_stress$(EXT) docs/issues/assets/$$c.html --rounds 2 \
+	        --out $(PIXEL_VK_OUT)/stress-$$c.png 2>/dev/null || fail=1; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/$$c.gl.png $(PIXEL_VK_OUT)/stress-$$c.png 0 || fail=1; \
+	done; \
 	exit $$fail
 
 else

@@ -1,4 +1,4 @@
-// binui_vk.cpp - Vulkan 绘制后端（v19，P2b：离屏 + 窗口）
+// binui_vk.cpp - Vulkan 绘制后端（v19，P4：离屏 + 窗口 + 鲁棒性）
 //
 // 设计（docs/vulkan_design.md §4、§5.9、§5.10）：
 //   · 运行期只 LoadLibrary("vulkan-1.dll") + vkGetInstanceProcAddr，不链 vulkan-1.lib；
@@ -138,6 +138,7 @@ struct VkApi {
     PFN_vkCmdBlitImage vkCmdBlitImage = nullptr;
     PFN_vkCreateSemaphore vkCreateSemaphore = nullptr;
     PFN_vkDestroySemaphore vkDestroySemaphore = nullptr;
+    PFN_vkEnumerateInstanceLayerProperties vkEnumerateInstanceLayerProperties = nullptr;
 #undef BINUI_VK_FN
 
     bool load() {
@@ -154,24 +155,18 @@ struct VkApi {
             std::fprintf(stderr, "[vk] vulkan-1.dll 里没有 vkGetInstanceProcAddr\n");
             return false;
         }
-        // 设备级函数：vkGetInstanceProcAddr 对设备函数同样可用（loader 会给 trampoline）
-#define BINUI_VK_LOAD(name)                                                   \
-    name = reinterpret_cast<PFN_##name>(                                       \
-        getInstanceProcAddr(instance_, #name));                                \
-    if (!name) {                                                               \
-        std::fprintf(stderr, "[vk] 取不到 %s\n", #name);                        \
-        return false;                                                          \
-    }
-        // instance_ 在 load 之后才创建，这里分两段：先取实例函数，再调 loadDeviceFns()
-        (void)0;
-#undef BINUI_VK_LOAD
+        // 设备级函数：vkGetInstanceProcAddr 对设备函数同样可用（loader 会给 trampoline）。
+        // 注意：这些函数表由**实例持有**（loadInstanceFns 起各自分配），全局只留 vkGetInstanceProcAddr
+        // —— 同一个进程里两个 BinUIVK 实例并存时不会互相覆盖（多实例鲁棒性）。
+        // 实例层枚举是全局的（实例创建之前就要用），只能在 VK_NULL_HANDLE 上取。
+        vkEnumerateInstanceLayerProperties =
+            reinterpret_cast<PFN_vkEnumerateInstanceLayerProperties>(
+                getInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceLayerProperties"));
         return true;
     }
 
-    VkInstance instance_ = VK_NULL_HANDLE;
-
-    bool loadInstanceFns() {
-        auto get = [&](const char* n) { return getInstanceProcAddr(instance_, n); };
+    bool loadInstanceFns(VkInstance inst) {
+        auto get = [&](const char* n) { return getInstanceProcAddr(inst, n); };
         vkDestroyInstance = reinterpret_cast<PFN_vkDestroyInstance>(get("vkDestroyInstance"));
         vkEnumeratePhysicalDevices =
             reinterpret_cast<PFN_vkEnumeratePhysicalDevices>(get("vkEnumeratePhysicalDevices"));
@@ -188,10 +183,8 @@ struct VkApi {
         return vkEnumeratePhysicalDevices && vkCreateDevice && vkGetDeviceQueue;
     }
 
-    bool loadDeviceFns() {
-        auto get = [&](const char* n) { return getInstanceProcAddr(instance_, n); };
-        VkDevice d = device_;
-        (void)d;
+    bool loadDeviceFns(VkInstance inst) {
+        auto get = [&](const char* n) { return getInstanceProcAddr(inst, n); };
         // 设备级函数用 vkGetDeviceProcAddr 更规范，但 loader 的 instance trampoline 也行；
         // 这里统一走 vkGetInstanceProcAddr（Vulkan 1.0 起即保证可用）。
 #define BINUI_VK_LOAD(name)                                                    \
@@ -266,8 +259,8 @@ struct VkApi {
     }
 
     // ---- WSI 函数：只在窗口模式取，取不到就退回离屏（不把整条后端判死）----
-    bool loadSurfaceFns() {
-        auto get = [&](const char* n) { return getInstanceProcAddr(instance_, n); };
+    bool loadSurfaceFns(VkInstance inst) {
+        auto get = [&](const char* n) { return getInstanceProcAddr(inst, n); };
 #define BINUI_VK_TRY(name) name = reinterpret_cast<PFN_##name>(get(#name))
         BINUI_VK_TRY(vkDestroySurfaceKHR);
         BINUI_VK_TRY(vkCreateWin32SurfaceKHR);
@@ -285,8 +278,8 @@ struct VkApi {
         return ok;
     }
 
-    bool loadSwapchainFns() {
-        auto get = [&](const char* n) { return getInstanceProcAddr(instance_, n); };
+    bool loadSwapchainFns(VkInstance inst) {
+        auto get = [&](const char* n) { return getInstanceProcAddr(inst, n); };
 #define BINUI_VK_TRY(name) name = reinterpret_cast<PFN_##name>(get(#name))
         BINUI_VK_TRY(vkCreateSwapchainKHR);
         BINUI_VK_TRY(vkDestroySwapchainKHR);
@@ -304,7 +297,6 @@ struct VkApi {
         return ok;
     }
 
-    VkDevice device_ = VK_NULL_HANDLE;
 };
 
 VkApi g_vk;   // 进程内单例（loader 只加载一次）
@@ -393,6 +385,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
 
     // ---- 目标 ----
     int w = 0, h = 0;
+    // 最近一次读回的实际尺寸（GDI 路径 = w×h；交换链捕获 = swapExtent）
+    int capW = 0, capH = 0;
     VkImage msaaImage = VK_NULL_HANDLE;
     VkDeviceMemory msaaMem = VK_NULL_HANDLE;
     VkImageView msaaView = VK_NULL_HANDLE;
@@ -404,7 +398,6 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     VkBuffer readback = VK_NULL_HANDLE;
     VkDeviceMemory readbackMem = VK_NULL_HANDLE;
     void* readbackMapped = nullptr;
-    std::vector<uint8_t> pixels;              // 读回后的 BGRA（自上而下）
 
     // ---- 窗口 / 交换链（hwnd != nullptr 时才有）----
     // 设计选择：渲染目标始终是 MSAA + resolve 这套离屏图（与离屏模式完全同一条路径），
@@ -505,6 +498,28 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     bool vsync = true;
     bool ready = false;
 
+    // ---- 显存记账（P4：区分"我们漏了"和"驱动池化"）----
+    // 只统计 vkAllocateMemory/vkFreeMemory 这一对，swapchain 图像由驱动持有，不在账上。
+    std::unordered_map<VkDeviceMemory, VkDeviceSize> memSizes;
+    size_t memBytes = 0;
+
+    void trackMem(VkDeviceMemory m, VkDeviceSize bytes) {
+        if (!m) return;
+        memSizes[m] = bytes;
+        memBytes += static_cast<size_t>(bytes);
+    }
+
+    void freeMem(VkDeviceMemory& m) {
+        if (!m) return;
+        auto it = memSizes.find(m);
+        if (it != memSizes.end()) {
+            memBytes -= static_cast<size_t>(it->second);
+            memSizes.erase(it);
+        }
+        g_vk.vkFreeMemory(device, m, nullptr);
+        m = VK_NULL_HANDLE;
+    }
+
     // ============================================================
     // 小工具
     // ============================================================
@@ -534,6 +549,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         ai.allocationSize = req.size;
         ai.memoryTypeIndex = type;
         if (g_vk.vkAllocateMemory(device, &ai, nullptr, &mem) != VK_SUCCESS) return false;
+        trackMem(mem, req.size);
         return g_vk.vkBindBufferMemory(device, buf, mem, 0) == VK_SUCCESS;
     }
 
@@ -573,6 +589,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             std::fprintf(stderr, "[vk] createImage2D: vkAllocateMemory 失败 %s\n", VkResultText(ar));
             return false;
         }
+        trackMem(mem, req.size);
         ar = g_vk.vkBindImageMemory(device, img, mem, 0);
         if (ar != VK_SUCCESS) {
             std::fprintf(stderr, "[vk] createImage2D: vkBindImageMemory 失败 %s\n", VkResultText(ar));
@@ -693,9 +710,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             dci.ppEnabledExtensionNames = devExt;
         }
         VK_CHECK(g_vk.vkCreateDevice(physical, &dci, nullptr, &device), "vkCreateDevice");
-        g_vk.device_ = device;
         g_vk.vkGetDeviceQueue(device, queueFamily, 0, &queue);
-        if (!g_vk.loadDeviceFns()) return false;
+        if (!g_vk.loadDeviceFns(instance)) return false;
         return true;
     }
 
@@ -706,10 +722,11 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         if (resolveView) { g_vk.vkDestroyImageView(device, resolveView, nullptr); resolveView = VK_NULL_HANDLE; }
         if (msaaImage) { g_vk.vkDestroyImage(device, msaaImage, nullptr); msaaImage = VK_NULL_HANDLE; }
         if (resolveImage) { g_vk.vkDestroyImage(device, resolveImage, nullptr); resolveImage = VK_NULL_HANDLE; }
-        if (msaaMem) { g_vk.vkFreeMemory(device, msaaMem, nullptr); msaaMem = VK_NULL_HANDLE; }
-        if (resolveMem) { g_vk.vkFreeMemory(device, resolveMem, nullptr); resolveMem = VK_NULL_HANDLE; }
+        freeMem(msaaMem);
+        freeMem(resolveMem);
         if (readback) { g_vk.vkDestroyBuffer(device, readback, nullptr); readback = VK_NULL_HANDLE; }
-        if (readbackMem) { g_vk.vkFreeMemory(device, readbackMem, nullptr); readbackMem = VK_NULL_HANDLE; readbackMapped = nullptr; }
+        freeMem(readbackMem);
+    readbackMapped = nullptr;
     }
 
     bool createTargets() {
@@ -801,7 +818,13 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         VK_CHECK(g_vk.vkCreateFramebuffer(device, &fbi, nullptr, &framebuffer), "vkCreateFramebuffer");
 
         // 读回 buffer（host visible）
-        if (!createBuffer(static_cast<VkDeviceSize>(w) * h * 4,
+        // 尺寸取"渲染目标"与"交换链"两者的较大者：DPI 缩放/跨显示器移动时 swapchain 的
+        // currentExtent 可能比客户区尺寸大，捕获路径按 swapExtent 拷，缓冲区必须装得下
+        //（否则就是一次越界写 —— P4 复查这块时发现的隐患）。
+        const size_t capArea = std::max(static_cast<size_t>(w) * h,
+                                        static_cast<size_t>(swapExtent.width) *
+                                            swapExtent.height);
+        if (!createBuffer(static_cast<VkDeviceSize>(capArea) * 4,
                           VK_BUFFER_USAGE_TRANSFER_DST_BIT,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
                           readback, readbackMem))
@@ -959,8 +982,10 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         }
         swapFormat = sf.format;
         swapExtent = ext;
-        std::fprintf(stderr, "[vk] 交换链 %ux%u，%u 张，%s，presentMode=%d\n", ext.width,
-                     ext.height, imgN, VkFormatName(sf.format), (int)ci.presentMode);
+        // 拖边框时尺寸每帧变一次、交换链每帧重建一次：默认不打印，排查用 BINUI_VK_TRACE=1
+        if (std::getenv("BINUI_VK_TRACE"))
+            std::fprintf(stderr, "[vk] 交换链 %ux%u，%u 张，%s，presentMode=%d\n", ext.width,
+                         ext.height, imgN, VkFormatName(sf.format), (int)ci.presentMode);
         return true;
     }
 
@@ -980,6 +1005,25 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         }
     }
 
+    // 丢帧（最小化 / 交换链过期 / acquire 失败）时也必须把命令缓冲**提交**掉：
+    // beginFrame 每帧开头等 fence，而 fence 只在 vkQueueSubmit 时才会置位 ——
+    // 漏提交就是"下一帧永远等不到"的死锁。压力测试第一轮最小化就抓到了这个（挂死）。
+    void submitNoPresent() {
+        g_vk.vkEndCommandBuffer(cmd);
+        recording = false;
+        cmdOpen = false;
+        VkSubmitInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+        if (g_vk.vkQueueSubmit(queue, 1, &si, fence) != VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] submitNoPresent: vkQueueSubmit 失败，后端转为未就绪\n");
+            ready = false;
+            return;
+        }
+        g_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
+        freeStaging();
+    }
     // 客户区是否铺满整块显示器（borderless 全屏）。
     // 与 GL 后端 0.9.1 的 clientCoversMonitor() 同一判定与同一理由：这种状态下 DWM 会把
     // 呈现提升成直翻转，实测在远程桌面/虚拟显示器上画面会停住（应用仍在满帧绘制）。
@@ -1144,7 +1188,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         if (t.ds) g_vk.vkFreeDescriptorSets(device, dsPool, 1, &t.ds);
         if (t.view) g_vk.vkDestroyImageView(device, t.view, nullptr);
         if (t.image) g_vk.vkDestroyImage(device, t.image, nullptr);
-        if (t.mem) g_vk.vkFreeMemory(device, t.mem, nullptr);
+        freeMem(t.mem);
         t = Tex{};
     }
 
@@ -1230,7 +1274,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         if (g_vk.vkMapMemory(device, stageMem, 0, bytes, 0, &mapped) != VK_SUCCESS) {
             std::fprintf(stderr, "[vk] stageCopy: 映射 staging 失败\n");
             g_vk.vkDestroyBuffer(device, stage, nullptr);
-            g_vk.vkFreeMemory(device, stageMem, nullptr);
+            freeMem(stageMem);
             return false;
         }
         std::memcpy(mapped, src, static_cast<size_t>(bytes));
@@ -1299,7 +1343,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     void freeStaging() {
         for (auto& kv : stagingToFree) {
             g_vk.vkDestroyBuffer(device, kv.first, nullptr);
-            g_vk.vkFreeMemory(device, kv.second, nullptr);
+            freeMem(kv.second);
         }
         stagingToFree.clear();
     }
@@ -1682,6 +1726,34 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
         ici.enabledExtensionCount = 2;
         ici.ppEnabledExtensionNames = instExt;
     }
+
+    // ---- 校验层（可选）----
+    // BINUI_VK_LAYERS=1      → 打印本机可用的实例层
+    // BINUI_VK_VALIDATION=1  → 若装了 VK_LAYER_KHRONOS_validation 就启用
+    // 这台机器没有 Vulkan SDK（没有层 json 注册），所以默认这条路径是空操作；
+    // P4 的"0 validation error"因此只能靠压力测试 + 静态复查兜底，见 docs §6。
+    const char* layerName = nullptr;
+    if (g_vk.vkEnumerateInstanceLayerProperties) {
+        uint32_t ln = 0;
+        g_vk.vkEnumerateInstanceLayerProperties(&ln, nullptr);
+        std::vector<VkLayerProperties> ls(ln);
+        if (ln) g_vk.vkEnumerateInstanceLayerProperties(&ln, ls.data());
+        const bool listLayers = std::getenv("BINUI_VK_LAYERS") != nullptr;
+        if (listLayers) std::fprintf(stderr, "[vk] 可用实例层 %u 个\n", ln);
+        for (uint32_t i = 0; i < ln; i++) {
+            if (listLayers) std::fprintf(stderr, "[vk]   层: %s\n", ls[i].layerName);
+            if (std::strcmp(ls[i].layerName, "VK_LAYER_KHRONOS_validation") == 0 &&
+                std::getenv("BINUI_VK_VALIDATION"))
+                layerName = "VK_LAYER_KHRONOS_validation";
+        }
+        if (std::getenv("BINUI_VK_VALIDATION") && !layerName)
+            std::fprintf(stderr, "[vk] 要求校验层但本机没装（无 Vulkan SDK）\n");
+    }
+    if (layerName) {
+        ici.enabledLayerCount = 1;
+        ici.ppEnabledLayerNames = &layerName;
+        std::fprintf(stderr, "[vk] 校验层已启用: %s\n", layerName);
+    }
     auto createInstance = reinterpret_cast<PFN_vkCreateInstance>(
         g_vk.getInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
     if (!createInstance) {
@@ -1689,12 +1761,11 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
         return false;
     }
     VK_CHECK(createInstance(&ici, nullptr, &d.instance), "vkCreateInstance");
-    g_vk.instance_ = d.instance;
-    if (!g_vk.loadInstanceFns()) return false;
+    if (!g_vk.loadInstanceFns(d.instance)) return false;
 
     // ---- surface（窗口模式）----
     if (d.windowMode) {
-        if (!g_vk.loadSurfaceFns()) return false;
+        if (!g_vk.loadSurfaceFns(d.instance)) return false;
         VkWin32SurfaceCreateInfoKHR sci{};
         sci.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
         sci.hinstance = GetModuleHandleW(nullptr);
@@ -1712,7 +1783,7 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     if (!d.createDevice()) return false;
 
     // 交换链函数（窗口模式）：取不到就不起窗口失败，而是降级为"读回 + GDI 贴屏"
-    if (d.windowMode && g_vk.loadSwapchainFns()) {
+    if (d.windowMode && g_vk.loadSwapchainFns(d.instance)) {
         if (d.createSwapchain()) {
             VkSemaphoreCreateInfo smi{};
             smi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
@@ -1810,15 +1881,15 @@ void BinUIVK::shutdown() {
     if (d.pipeLayout) g_vk.vkDestroyPipelineLayout(d.device, d.pipeLayout, nullptr);
     if (d.dsLayout) g_vk.vkDestroyDescriptorSetLayout(d.device, d.dsLayout, nullptr);
     if (d.vbuf) g_vk.vkDestroyBuffer(d.device, d.vbuf, nullptr);
-    if (d.vmem) g_vk.vkFreeMemory(d.device, d.vmem, nullptr);
-    g_vk.vkUnmapMemory(d.device, d.vmem);
+    // 先解映射再释放：freeMem 会把句柄置空，之后 vkUnmapMemory 拿到空句柄就直接崩
+    //（P4 压力测试第一次跑就抓到 —— 以前只是"顺序不对但侥幸没崩"）
+    if (d.vmem) g_vk.vkUnmapMemory(d.device, d.vmem);
+    d.freeMem(d.vmem);
     d.destroyTargets();
     if (d.fence) g_vk.vkDestroyFence(d.device, d.fence, nullptr);
     if (d.cmdPool) g_vk.vkDestroyCommandPool(d.device, d.cmdPool, nullptr);
     g_vk.vkDestroyDevice(d.device, nullptr);
     if (d.instance) g_vk.vkDestroyInstance(d.instance, nullptr);
-    g_vk.device_ = VK_NULL_HANDLE;
-    g_vk.instance_ = VK_NULL_HANDLE;
     d.device = VK_NULL_HANDLE;
     d.instance = VK_NULL_HANDLE;
     d.ready = false;
@@ -1834,14 +1905,15 @@ void BinUIVK::resize(int width, int height) {
     g_vk.vkDeviceWaitIdle(d.device);
     d.w = width;
     d.h = height;
+    // 先重建交换链：readback buffer 要按"渲染目标与交换链的较大者"分配，
+    // 反过来（先建目标后建交换链）会让 DPI 缩放时缓冲区偏小（P4 修的隐患）。
+    if (d.windowMode && d.useSwapchain) {
+        if (!d.createSwapchain()) std::fprintf(stderr, "[vk] resize: 交换链重建失败\n");
+    }
     if (!d.createTargets()) {
         d.ready = false;
         std::fprintf(stderr, "[vk] resize 后重建目标失败\n");
         return;
-    }
-    if (d.windowMode && d.useSwapchain) {
-        // 交换链尺寸由 surface 决定；0 尺寸（最小化）时不重建，等下一次 resize
-        if (!d.createSwapchain()) std::fprintf(stderr, "[vk] resize: 交换链重建失败\n");
     }
     d.coversMonitor = d.windowMode ? d.clientCoversMonitor() : false;
 }
@@ -1865,6 +1937,8 @@ void BinUIVK::setCaptureReadback(bool on) { impl_->capture = on; }
 bool BinUIVK::swapchainActive() const { return impl_->useSwapchain && !impl_->lastPresentWasGdi; }
 
 bool BinUIVK::presentUsedGdi() const { return impl_->lastPresentWasGdi; }
+
+size_t BinUIVK::deviceMemoryBytes() const { return impl_->memBytes; }
 
 void BinUIVK::setFontName(const char* name) { impl_->atlas.setFontName(name); }
 
@@ -1942,6 +2016,27 @@ void BinUIVK::present() {
     d.flush();
     g_vk.vkCmdEndRenderPass(d.cmd);
 
+    // ---- 呈现前的 surface 复查（P4：DPI 变化 / 跨显示器移动 / 最小化）----
+    // caps.currentExtent 由 surface 决定，客户区尺寸只是我们的"期望"；两者不一致说明
+    // 窗口刚换过显示器/DPI 或用户改过尺寸，交换链必须先重建才能继续。每帧查一次
+    // （vkGetPhysicalDeviceSurfaceCapabilitiesKHR 是纯 CPU 侧查询，代价可忽略）。
+    if (d.windowMode && d.useSwapchain) {
+        VkSurfaceCapabilitiesKHR caps{};
+        if (g_vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(d.physical, d.surface, &caps) ==
+            VK_SUCCESS) {
+            const VkExtent2D ce = caps.currentExtent;
+            if (ce.width == 0 || ce.height == 0) {
+                // 最小化：没有可呈现的像素，本帧丢掉但不报错（恢复时会重建）
+                d.submitNoPresent();
+                return;
+            }
+            if (ce.width != 0xFFFFFFFFu &&
+                (ce.width != d.swapExtent.width || ce.height != d.swapExtent.height)) {
+                if (!d.recreateSwapchain()) d.useSwapchain = false;
+            }
+        }
+    }
+
     // 呈现路线（设计 §5.5）：
     //   A. 交换链可用且不需要绕开直翻转 → resolve → blit 到交换链图像 → vkQueuePresentKHR
     //   B. 其余情况（透明窗口 / 客户区铺满显示器 / 上层要求拖拽期走 GDI / 无交换链）
@@ -1958,19 +2053,15 @@ void BinUIVK::present() {
                                                        d.semAvail, VK_NULL_HANDLE, &imageIndex);
         if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
             d.recreateSwapchain();
-            g_vk.vkEndCommandBuffer(d.cmd);   // 本帧仍然提交掉，下帧用新交换链
-            d.recording = false;
-            d.cmdOpen = false;
-            g_vk.vkQueueWaitIdle(d.queue);
+            d.submitNoPresent();   // 本帧仍然提交掉，下帧用新交换链
             return;
         }
         if (ar != VK_SUCCESS) {
             std::fprintf(stderr, "[vk] vkAcquireNextImageKHR 失败: %s (%d)\n", VkResultText(ar),
                          (int)ar);
+            if (ar == VK_ERROR_DEVICE_LOST) d.ready = false;   // 设备丢了就别再画
             d.useSwapchain = false;
-            g_vk.vkEndCommandBuffer(d.cmd);
-            d.recording = false;
-            d.cmdOpen = false;
+            d.submitNoPresent();
             return;
         }
         swapImg = d.swapImages[imageIndex];
@@ -1982,6 +2073,8 @@ void BinUIVK::present() {
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         region.imageSubresource.layerCount = 1;
         region.imageExtent = {static_cast<uint32_t>(d.w), static_cast<uint32_t>(d.h), 1};
+        d.capW = d.w;
+        d.capH = d.h;
         g_vk.vkCmdCopyImageToBuffer(d.cmd, d.resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                     d.readback, 1, &region);
     } else {
@@ -2014,6 +2107,8 @@ void BinUIVK::present() {
             region.imageSubresource.layerCount = 1;
             region.imageExtent = {static_cast<uint32_t>(d.swapExtent.width),
                                   static_cast<uint32_t>(d.swapExtent.height), 1};
+            d.capW = static_cast<int>(d.swapExtent.width);
+            d.capH = static_cast<int>(d.swapExtent.height);
             g_vk.vkCmdCopyImageToBuffer(d.cmd, swapImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                         d.readback, 1, &region);
             d.barrier(swapImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, after,
@@ -2049,7 +2144,8 @@ void BinUIVK::present() {
         sig = d.semDone;
     }
     if (g_vk.vkQueueSubmit(d.queue, 1, &si, d.fence) != VK_SUCCESS) {
-        std::fprintf(stderr, "[vk] present: vkQueueSubmit 失败\n");
+        std::fprintf(stderr, "[vk] present: vkQueueSubmit 失败，后端转为未就绪\n");
+        d.ready = false;
         return;
     }
     g_vk.vkWaitForFences(d.device, 1, &d.fence, VK_TRUE, UINT64_MAX);
@@ -2071,6 +2167,7 @@ void BinUIVK::present() {
         d.recreateSwapchain();
     } else if (pr != VK_SUCCESS) {
         std::fprintf(stderr, "[vk] vkQueuePresentKHR 失败: %s (%d)\n", VkResultText(pr), (int)pr);
+        if (pr == VK_ERROR_DEVICE_LOST) d.ready = false;
         d.useSwapchain = false;
     }
 }
@@ -2088,8 +2185,8 @@ void BinUIVK::presentViaGdi() {
 const uint8_t* BinUIVK::readbackPixels(int& outW, int& outH) {
     Impl& d = *impl_;
     if (!d.ready || !d.readbackMapped) return nullptr;
-    outW = d.w;
-    outH = d.h;
+    outW = d.capW > 0 ? d.capW : d.w;
+    outH = d.capH > 0 ? d.capH : d.h;
     // GPU 侧已是自上而下写入（region 的 offset=0 对应图像第 0 行 = 顶部）
     return static_cast<const uint8_t*>(d.readbackMapped);
 }

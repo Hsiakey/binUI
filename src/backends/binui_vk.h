@@ -1,4 +1,4 @@
-// binui_vk.h - Vulkan 绘制后端（v19，P3：全原语离屏）
+// binui_vk.h - Vulkan 绘制后端（v19，P4：离屏 + 窗口 + 鲁棒性）
 //
 // 定位与 GL/D3D11 后端同构：实现 IBinUIGfx，节点树遍历是共享的
 //（src/backends/binui_draw_nodes.h），本文件只管"把四边形画到 Vulkan 上"。
@@ -81,6 +81,9 @@ public:
     // 最近一次 present 走的是不是交换链（false = 读回 + GDI 贴屏）
     bool swapchainActive() const;
     bool presentUsedGdi() const;
+    // 我们自己 vkAllocateMemory 出来的字节数（不含驱动持有的交换链图像）。
+    // 测试用它区分「后端漏了显存」和「驱动把释放的显存留在池里」。
+    size_t deviceMemoryBytes() const;
 
 private:
     struct Impl;

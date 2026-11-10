@@ -6,6 +6,42 @@
 
 ## [Unreleased]
 
+### 新增 — Vulkan 后端 P4：鲁棒性加固 + 压力测试工具
+
+`tools/vk_stress.cpp`（+ `make vk-stress`）：一轮 8 个阶段 —— resize 抖动（120 次，尺寸含 1px/奇数/
+极大值）、同尺寸反复 resize（100 次）、最小化→恢复、透明窗来回切、GDI/交换链交替、init/shutdown
+循环 ×20、双实例并存、泄漏复跑。每阶段都要"不崩、不死锁、最终像素正确"。
+
+#### 修掉的三个真 bug（都由压力测试暴露）
+
+1. **丢帧后不提交命令缓冲 → 下一帧死锁**。最小化（surface extent = 0）、交换链过期、
+   `acquire` 失败三条早退路径以前直接 `vkEndCommandBuffer` 就返回；而 `beginFrame` 每帧开头
+   都在等 fence，fence 只在提交时置位 → 挂死。改走 `submitNoPresent()`。
+   这是本机第一次最小化就复现的（挂死、CPU 0%）。
+2. **`vkUnmapMemory` 用了已释放的句柄**。显存记账把 `freeMem()` 的句柄置空后，原来紧跟其后的
+   `vkUnmapMemory(device, vmem)` 拿到空句柄 → 访问违例 `0xC0000005`。改为先解映射再释放。
+3. **读回缓冲在 DPI 缩放下可能偏小**。捕获路径按 `swapExtent` 拷，原来按 `w*h` 分配；
+   DPI 缩放时 swapchain 可能比客户区大 → 越界写。现在按两者较大者分配。
+
+#### 其他加固
+
+- 每帧复查 `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`：`currentExtent` 变了就重建交换链
+  （跨显示器/DPI），为 0×0 则丢弃本帧（最小化）。
+- 多实例安全：去掉全局 `instance_`/`device_`（会被最后创建的实例覆盖），加载函数改为显式传实例。
+- `VK_ERROR_DEVICE_LOST` → 后端置未就绪，不再继续提交。
+- 新增 `deviceMemoryBytes()`：区分"后端漏显存"和"驱动池化"。
+- 校验层开关：`BINUI_VK_LAYERS=1` 列出实例层、`BINUI_VK_VALIDATION=1` 装了就启用。
+- 交换链创建不再默认刷日志（拖边框时每帧重建），改由 `BINUI_VK_TRACE=1` 打开。
+
+#### 实测（`make vk-stress`，probe / vkcolor）
+
+- 8 个阶段全部 `[ok]`；结束画面与 GL 同尺寸输出 **0 差异（阈值 0）**；
+- `shutdown` 后后端显存记账 **0.0 MB**，两轮之间提交内存 −7.0 MB（无线性增长）；
+- init/shutdown ×20 后提交内存 105.5 → 105.5 MB。
+
+**本机测不了的**（已在 `docs/vulkan_design.md` §6.1.3 写清）：跨显示器 DPI 切换
+（只有 1 台显示器）、RDP/虚拟显示器、验证层 0 error（没装 Vulkan SDK，只枚举到 5 个第三方层）。
+
 ### 新增 — Vulkan 后端 P2b：窗口 + 交换链 + 三路 present
 
 `BinUIVK` 现在能开真窗口了：`init(hwnd, w, h)` 建 surface + 交换链，`present()` 按条件选路。

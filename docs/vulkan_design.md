@@ -518,6 +518,68 @@ mingw32-make pixels GPU=vk               # 10 个用例，输出三方 diff 表�
 | 7 | 热重载（`--watch` + 改 HTML） | 不崩、图集/图片正确换代 |
 | 8 | 验证层（`VK_LAYER_KHRONOS_validation`） | 8 个 demo 各跑 60 秒，**0 error 0 warning**（不含 perf warning） |
 
+### 6.1 P4 落地记录（2026-11-11，已完成可测部分）
+
+代码：`binui_vk.cpp` 的鲁棒性加固（see below）、`tools/vk_stress.cpp`（新，压力测试）、
+`Makefile` 新增 `vk-stress` 目标；`pixel_diff`/工具链无改动。
+
+#### 6.1.1 加固了什么
+
+1. **丢帧也要提交命令缓冲**（`submitNoPresent()`）。最小化（surface extent = 0）、
+   交换链过期、`acquire` 失败这三条早退路径以前直接 `vkEndCommandBuffer` 就返回，
+   而 `beginFrame` 每帧开头都在等 fence —— **漏提交就是死锁**。压力测试第一轮最小化就挂死了，
+   这是本轮抓到的最严重的 bug。
+2. **解映射必须在释放之前**。`freeMem()` 会把句柄置空，原来 `vkFreeMemory` 之后紧跟
+   `vkUnmapMemory(device, vmem)` —— 以前只是"顺序不对但侥幸没崩"，改完记账后立刻变成
+   访问违例（`0xC0000005`）。
+3. **帧前 surface 复查**：每帧查 `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`，
+   `currentExtent` 与交换链不一致（跨显示器 / DPI 变化 / 用户改尺寸）就重建；
+   `currentExtent` 为 0×0（最小化）则丢弃本帧。
+4. **读回缓冲按"渲染目标与交换链的较大者"分配**。DPI 缩放时 swapchain 可能比客户区大，
+   捕获路径按 `swapExtent` 拷 —— 原来按 `w*h` 分配会越界写。
+5. **多实例安全**：去掉全局 `instance_`/`device_`（原先被最后一个实例覆盖，
+   先销毁的实例会把还活着的实例的函数加载路径弄脏），加载函数改为显式传 `VkInstance`。
+6. **设备丢失**：`VK_ERROR_DEVICE_LOST` 时把后端置为未就绪，不再继续提交。
+7. **显存记账** `deviceMemoryBytes()`：区分"我们自己漏了"和"驱动把释放的显存留在池里"
+   （P4 判泄漏时唯一可靠的账）。
+8. **校验层开关**：`BINUI_VK_LAYERS=1` 列出实例层，`BINUI_VK_VALIDATION=1` 在装了就启用
+   Khronos 校验层（本机没装，见 6.1.3）。
+9. 去掉 `[vk] 交换链 …` 的默认打印（拖边框时每帧重建会刷屏），改由 `BINUI_VK_TRACE=1` 打开。
+
+#### 6.1.2 压力测试结果（`make vk-stress`）
+
+`tools/vk_stress.cpp` 一轮 8 个阶段，全部 `[ok]`：
+
+| 阶段 | 判据 | 结果 |
+|---|---|---|
+| 1. resize 抖动（120 次，尺寸含 1/7/33/1200px、奇数、极小值） | 后端仍就绪、记录尺寸与请求一致 | ok |
+| 2. 同尺寸反复 resize（100 次） | 走早退路径不破坏后端 | ok |
+| 3. 最小化 → 恢复 | 0×0 被忽略、恢复后继续绘制、不死锁 | ok |
+| 4. 透明窗来回切（40 次） | 读回路径与交换链路径互切不崩 | ok |
+| 5. 强制 GDI 呈现 / 交换链交替（40 次） | 同上 | ok |
+| 6. init/shutdown ×20（同一 HWND） | 不崩、提交内存不涨（105.5 → 105.5 MB） | ok |
+| 7. 双实例并存 | 两个实例各自出图；销毁第二个后第一个仍可用 | ok |
+| 8. 泄漏复跑 | `shutdown` 后**后端显存记账 = 0.0 MB**；两轮之间提交内存 −7.0 MB（无线性增长） | ok |
+
+关于那 160MB 的提交内存：阶段 1 之后 ~105MB、结束 ~165MB，但**后端自己的 `vkAllocateMemory`
+账在 shutdown 后是 0**，两轮同流程之间不涨 —— 那是驱动对交换链图像/显存块的池化
+（NVIDIA 常见行为），不是后端泄漏。判据因此写成"记账归零 + 不随轮数线性上涨"，
+而不是"进程提交内存回到基线"。
+
+像素侧：压力测试结束时的画面与 GL 同尺寸输出 **0 差异（阈值 0）**（probe / vkcolor 两个用例）。
+
+#### 6.1.3 本机测不了的部分（明确写清楚，不冒充已验证）
+
+| 项 | 状态 | 原因 |
+|---|---|---|
+| 跨显示器拖动（DPI 100%↔150%） | 未实测 | 本机只有 **1 台显示器**（2560×1440，`Screen.AllScreens.Count = 1`）；代码里的 `currentExtent` 复查与读回缓冲尺寸修正是对应防护，但缺现场证据 |
+| 远程桌面 / 向日葵 IDD | 未实测 | 本机没有 RDP 会话与虚拟显示器；IF 停帧守卫（`clientCoversMonitor`）已在 2560×1440 全屏下验证（自动切读回、无停帧） |
+| 验证层 0 error | 不可用 | 没装 Vulkan SDK。实测 `BINUI_VK_LAYERS=1` 只枚举到 **5 个第三方/驱动层**
+（`VK_LAYER_NV_optimus` / `NV_present` / `VALVE_steam_overlay` / `VALVE_steam_fossilize` / `OBS_HOOK`），
+没有 `VK_LAYER_KHRONOS_validation`；`BINUI_VK_VALIDATION=1` 会明确打印"本机没装" |
+| 热重载（`--watch` + 改 HTML） | 未实测 | 热重载在 app 层（`binui_hot_reload`），Vulkan 侧只涉及"重新 `setSize` + 图集换代"，
+那两条路径已被 resize 抖动与 atlas 换代覆盖；完整跑起来要等 P5 的 `GPU=vk` app |
+
 ---
 
 ## 7. P5：工具与发版
