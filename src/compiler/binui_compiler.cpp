@@ -4283,6 +4283,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // 凭空多一个黑色色块比什么都不画更难查 —— 只画显式给了颜料的（polygon/polyline 用）。
         bool fillStated = false;
         bool strokeStated = false;
+        // "fill 被提到过"（写成 none 也算）：用来区分"作者明确说不要填充"和"压根没写"。
+        // 两者在 SVG 里含义不同 —— 没写 = 默认黑填充，写了 none = 不填。
+        bool fillMentioned = false;
     };
 
     // 根节点固定 id 0，位于坐标原点。画布默认白色；<app_window bg>/<html bg> 覆盖
@@ -4845,6 +4848,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         std::string fillGradId = pc.fillGradId;   // v16：继承下来的渐变填充（空 = 纯色）
         std::string strokeGradId = pc.strokeGradId;  // v17：继承下来的渐变描边（空 = 纯色）
         bool eFillStated = pc.fillStated;         // v18：颜料是否被显式给过（含祖先）
+        bool eFillMentioned = pc.fillMentioned;   // fill 被提到过（含 fill="none"）
         bool eStrokeStated = pc.strokeStated;
         if (inSvg) {
             // CSS（含内联 style / 类规则）> 表现属性 > 继承 > SVG 默认
@@ -4864,6 +4868,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 return g.stops[g.stops.size() / 2].color;
             };
             const std::string f = pickSvgPaint("fill");
+            if (!f.empty()) eFillMentioned = true;
             if (!f.empty()) {
                 std::string gid;
                 if (lowerStr(f) == "none") {
@@ -4943,6 +4948,12 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                                    ((eHasFill && eFillStated) || (eHasStroke && eStrokeStated));
         if (e.tag == "polyline" || e.tag == "polygon") {
             if (!polyPaintable) continue;   // 不生成节点、不推容器上下文
+            // 有描边、却没写 fill：按 SVG 规范这是"黑色填充"（浏览器同样如此，是经典坑）。
+            // 折线/轮廓被填成一块黑比不画更难查，所以明确告警并点出替代写法。
+            if (eHasStroke && eStrokeStated && !eFillMentioned) {
+                Warn("<" + e.tag + "> 没写 fill：SVG 默认是黑色填充（浏览器同理），"
+                     "只要描边请写 fill=\"none\"");
+            }
         }
 
         // <path d="…"> / <ellipse cx cy rx ry>：编译期细分成折线
@@ -6199,6 +6210,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             child.hasStroke = eHasStroke;
             child.strokeW = eStrokeW;
             child.evenOdd = eEvenOdd;
+            child.fillMentioned = eFillMentioned;   // fill（含 none）的"提到过"也沿树继承
             child.fillGradId = fillGradId;   // 渐变填充是继承属性（<svg>/<g> 写一次全子树生效）
             child.strokeGradId = strokeGradId;   // 渐变描边同理（v17）
             if (e.tag == "svg") {

@@ -1,6 +1,6 @@
 [package]
 name = "binui"
-version = "0.8.1"
+version = "0.8.2"
 edition = "2021"
 description = "binUI 的 Rust 绑定（C ABI 封装）"
 license = "MIT"
