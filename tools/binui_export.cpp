@@ -10,7 +10,7 @@
 // 打包清单里存的是**原始文件字节** + 相对 appRootDir 的路径（见 include/binui_srcmap.h），
 // 所以还原出来的就是打包前的那些文件本身 —— 不是"节点树反推的等价 HTML"那种有损转换。
 //
-// 没带 binui.res 的包不可解包（这正是"想保护源码就别带"的开关），但**不影响运行**：
+// 没带 binui.res 的包不可解包（清单要显式 `--res` 才生成，默认不带），但**不影响运行**：
 // 布局里没有任何东西依赖它。
 #include <cstdio>
 #include <cstring>
@@ -91,7 +91,7 @@ int main(int argc, char* argv[]) {
     std::vector<uint8_t> mapBytes;
     if (!ReadFile(mapPath, mapBytes)) {
         std::fprintf(stderr, "binui_export: 找不到打包清单 %s\n", mapPath.c_str());
-        std::fprintf(stderr, "  （这个包没带 binui.res，无法解包。编译时别加 --no-srcmap 即可产出。）\n");
+        std::fprintf(stderr, "  （这个包没带 binui.res，无法解包。编译时加 --res 即可产出。）\n");
         return 1;
     }
     std::vector<binui::SrcMapEntry> entries;

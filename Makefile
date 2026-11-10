@@ -82,7 +82,7 @@ $(BIN_DIR)/binui_compile$(EXT): tools/binui_compile.cpp $(LIB_A)
 
 $(BUILD_DIR)/assets/components/%.bum: $(EXA_DIR)/features/%.bum.html $(BIN_DIR)/binui_compile$(EXT)
 	@mkdir -p $(dir $@)
-	$(BIN_DIR)/binui_compile$(EXT) $< -o $@ --no-srcmap
+	$(BIN_DIR)/binui_compile$(EXT) $< -o $@
 
 .PHONY: components
 components: $(COMPONENT_BUMS)
@@ -279,7 +279,7 @@ TOOL_BINS := \
     $(BIN_DIR)/pixel_diff$(EXT) \
     $(BIN_DIR)/check_examples$(EXT)
 
-# 把 .bui 还原成打包前的目录结构（读旁边的 .bui.srcmap，header-only，不用链接库）
+# 把 .bui 还原成打包前的目录结构（读同目录的 binui.res，header-only，不用链接库）
 $(BIN_DIR)/binui_export$(EXT): tools/binui_export.cpp
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $<

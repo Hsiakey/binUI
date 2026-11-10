@@ -1,17 +1,17 @@
 // binui_compile.cpp - UI / 组件源码 -> 二进制布局（.bui / .bum）
 //
 // 用法:
-//   binui_compile <src> [-o <out>] [-q] [--no-srcmap]
+//   binui_compile <src> [-o <out>] [-q] [--res]
 //
 //   <src>  .bui.html / .bum.html / .html / .xml / 已编译的 .bui|.bum
 //   -o     输出路径（默认：x.bum.html -> x.bum，x.bui.html -> x.bui）
 //   -q     静默（只打错误）
-//   --no-srcmap  不产出 <out>.srcmap
+//   --res   同时产出打包清单 binui.res（默认不产出）
 //
-// 默认会在 <out> 所在目录写一份 **打包清单** `binui.res`：主 UI 与每个被内联/外挂的
+// 加 `--res` 才在 <out> 所在目录写一份 **打包清单** `binui.res`：主 UI 与每个被内联/外挂的
 // 组件的**原始字节** + 相对 appRootDir 的路径。binui_export 靠它把 .bui 还原成打包前
-// 的目录结构（逐字节一致）。可有可无：不带它就是不可解包，运行完全不受影响。
-// 一个目录一份（多个 .bui 编到同一目录会合并），--no-srcmap 不生成。
+// 的目录结构（逐字节一致）。**默认不产出** —— 清单里带着源码，不该是默认行为；
+// 它可有可无，不带就是不可解包，运行完全不受影响。一个目录一份（多个 .bui 会合并）。
 //
 // 约定（docs/components.md）：
 //   .bui  单个 UI（应用入口，可直接 loadLayout）
@@ -33,11 +33,11 @@
 namespace {
 
 void Usage() {
-    std::printf("用法: binui_compile <src> [-o <out>] [-q] [--no-srcmap]\n"
+    std::printf("用法: binui_compile <src> [-o <out>] [-q] [--res]\n"
                 "  <src>  .bui.html / .bum.html / .html / .xml / 已编译的 .bui|.bum\n"
                 "  -o     输出路径（默认同目录：x.bum.html -> x.bum，x.bui.html -> x.bui）\n"
                 "  -q     静默（只打错误）\n"
-                "  --no-srcmap  不产出 binui.res（打包清单，binui_export 靠它解包）\n");
+                "  --res   同时产出打包清单 binui.res（默认不产出；binui_export 靠它解包）\n");
 }
 
 bool EndsWith(const std::string& s, const char* tail) {
@@ -71,13 +71,13 @@ std::string DefaultOut(const std::string& in) {
 int main(int argc, char* argv[]) {
     std::string in, out;
     bool quiet = false;
-    bool srcmap = true;   // 默认产出 .bui.srcmap（想"不泄露源码"就 --no-srcmap）
+    bool srcmap = false;  // 默认不产出：清单里带着源码，必须显式 --res 才生成
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i] ? argv[i] : "";
         if (a == "-h" || a == "--help") { Usage(); return 0; }
         else if (a == "-q" || a == "--quiet") quiet = true;
-        else if (a == "--no-srcmap") srcmap = false;
-        else if (a == "--srcmap") srcmap = true;
+        else if (a == "--res" || a == "--srcmap") srcmap = true;
+        else if (a == "--no-res" || a == "--no-srcmap") srcmap = false;
         else if (a == "-o" && i + 1 < argc) { ++i; out = argv[i] ? argv[i] : ""; }
         else if (a.size() && a[0] != '-' && in.empty()) in = a;
         else {

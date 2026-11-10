@@ -190,7 +190,7 @@ binui_compile main.html -o build/main.bui      # 单文件界面
 # 已经是二进制就原样拷贝，方便两条流水线共用一条命令
 binui_compile titlebar.bum -o dist/titlebar.bum
 
-# 解包：把 .bui 还原成打包前的目录结构（依赖编译时生成的 .bui.srcmap）
+# 解包：把 .bui 还原成打包前的目录结构（依赖编译时 --res 生成的 binui.res）
 binui_export build/main.bui -o src_restored/   # 逐字节还原，不是节点反推
 binui_export build/main.bui --list             # 只看包里有哪些文件
 ```
@@ -204,7 +204,7 @@ binui_export build/main.bui --list             # 只看包里有哪些文件
 **内嵌的包也能还原打包前的目录结构** —— 靠编译时在同一目录写的一份打包清单 `binui.res`。
 
 ```bash
-binui_compile src/main.bui.html -o out/binui/main.bui
+binui_compile src/main.bui.html -o out/binui/main.bui --res
 #   -> out/binui/main.bui
 #   -> out/binui/binui.res     ← 打包清单（清单 + 原路径）
 
@@ -221,8 +221,9 @@ binui_export out/binui/main.bui -o restore/
 
 四条性质：
 
-1. **可有可无，不影响运行**：`binui.res` 只是旁挂文件，布局里没有任何东西引用它。
-   删掉它，同一份 `.bui` 的渲染逐像素不变（实测 0 差异），只是这个包不能再解包。
+1. **默认不产出，要显式开**：清单里带着源码，不该是默认行为 —— 编译时加 `--res` 才生成。
+   它是旁挂文件，布局里没有任何东西引用它；删掉后同一份 `.bui` 的渲染逐像素不变
+   （实测 0 差异），只是这个包不能再解包。
 2. **逐字节还原**：存的就是原文件内容，不是"节点树反推 HTML"那种有损转换
    （那种会把 CSS 级联、flex、`{{参数}}` 全拍平成绝对值）。
 3. **解包出来的树能再编一次，产出同一个字节的 `.bui`**（实测：SHA256 相同）。
@@ -392,4 +393,4 @@ B  组件按原相对位置放进 bin/components/          mounted=1 failed=0
 | 组件作用域 CSS 隔离 | 未实现（CSS 全局，靠类名前缀约定） |
 | 组件内 `<script>` | 忽略（没有脚本引擎） |
 | 运行期卸载组件 | 未实现（挂载后只增不减，`loadLayout` 重来即可） |
-| 从**没有** `.srcmap` 的 `.bui` 反推源码 | 做不到：内联把组件边界抹平了，`.bui` 里只剩一棵扁平节点树。想要能解包就编译时保留打包清单（`binui_compile` 默认产出 `.bui.srcmap`），`binui_export` 靠它逐字节还原；没有清单就只能靠外面保存的源码树。 |
+| 从**没有**清单（`binui.res`）的 `.bui` 反推源码 | 做不到：内联把组件边界抹平了，`.bui` 里只剩一棵扁平节点树。想要能解包就编译时加 `--res` 生成打包清单 `binui.res`，`binui_export` 靠它逐字节还原；没有清单就只能靠外面保存的源码树。 |

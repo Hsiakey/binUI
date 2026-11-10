@@ -62,7 +62,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `include/binui_link.h` | **布局链接器**：把组件布局合并进宿主（节点 id 重编号/坐标平移/各段迁移），编译期内联与运行期挂载共用 |
 | `include/binui_asset.h` | 组件文件探测：二进制优先、源码更新则优先源码（同一份规则供编译器与加载器使用） |
 | `include/binui_component.h` | 外挂组件加载（header-only）：`ex::MountAll()` 按布局里的组件引用段挂载 `.bum` |
-| `include/binui_srcmap.h` | 打包清单（`.bui.srcmap`）的读写（header-only）：让 `binui_export` 能把 `.bui` 逐字节还原成打包前的目录结构 |
+| `include/binui_srcmap.h` | 打包清单（`binui.res`）的读写（header-only）：让 `binui_export` 能把 `.bui` 逐字节还原成打包前的目录结构 |
 | `include/binui_video.h` | 可选视频编解码模块接口：FFmpeg 解码 + WASAPI 音频（`BINUI_ENABLE_VIDEO`，默认 OFF 桩实现零依赖） |
 | `src/platform/app_win32.*` | 演示用 Win32 窗口外壳 + GDI 绘制后端（可替换为其他平台后端） |
 | `include/binui_paths.h` | 跨平台路径解析：exe 真实路径（`GetModuleFileName`/`/proc/self/exe`）+ UI 查找顺序 + 图片资源加载（`--ui` / `$BINUI_UI`） |

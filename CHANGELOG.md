@@ -12,10 +12,11 @@
   编译时在产物目录写一份 `binui.res`（清单 + 原路径），记录主 UI 与每个被内联/外挂组件的
   **完整原始文件内容** + 相对 appRootDir 的路径；`binui_export` 按它逐字节还原，
   不是"节点树反推 HTML"那种有损转换，也不是偏移量记录（倒出来就是原文件本身）。
-- **可有可无**：`binui.res` 是旁挂文件，布局里没有任何东西引用它。实测删掉后同一份
-  `.bui` 的离屏渲染**逐像素不变**（0 差异），只是不能再解包。
+- **默认不产出，要显式开**：清单里带着源码，不该是默认行为 —— `binui_compile --res` 才生成。
+  它是旁挂文件，布局里没有任何东西引用它。实测删掉后同一份 `.bui` 的离屏渲染
+  **逐像素不变**（0 差异），只是不能再解包。
 - **不动二进制布局**：`BINUI_VERSION` 保持 14，`.bui` 一个字节都不变，加载路径与启动性能
-  零影响。想保护源码就不带这个文件（或 `--no-srcmap`）。
+  零影响。想保护源码就别带这个文件（默认也不产出，要 `--res` 才有）。
 - **一目录一份**：多个 `.bui` 编到同一目录时清单**合并**（同路径以本次为准）。
 - 路径口径：先记绝对路径，最后统一折算成**相对所有文件共同祖先**的相对路径。所以
   `main.bui.html` 在 `examples/features/`、组件用 `../../components/x` 引用的工程，
@@ -23,7 +24,7 @@
 - 新增 `/lib` 侧：`CompileOptions::emitSrcMap`（默认 false）、`CompileResult::srcMap`、
   header-only 的 `include/binui_srcmap.h`（`BuildSrcMap` / `ParseSrcMap`）。
 - 新增工具 **`binui_export`**：`binui_export main.bui -o restore/`，支持 `--list`。
-  `binui_compile` 默认产出 `binui.res`，`--no-srcmap` 关闭；旧产物 `<x.bui>.srcmap`
+  `binui_compile` 加 `--res` 才产出 `binui.res`（默认不产出）；旧产物 `<x.bui>.srcmap`
   仍能读取。
 - 实测闭环（examples/features：源码组件 + 二进制组件 + 外挂组件）：
   编出 `main.bui` → `binui_export` → 6 个文件**逐字节 SHA256 全等** →

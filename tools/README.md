@@ -17,9 +17,10 @@ build-mingw/bin/binui_compile.exe dist/titlebar.bum -o dist2/titlebar.bum   # �
 `make components` / CMake 的 `components_bums` 目标会在构建期生成示例组件二进制。
 详见 [docs/components.md](../docs/components.md)。
 
-默认会在产物**所在目录**写一份 **打包清单** `binui.res`（清单 + 原路径：主 UI + 每个组件的
-原始字节与相对路径）。`binui_export` 靠它解包；`--no-srcmap` 不生成。它可有可无 ——
-删掉不影响运行，只是这个包不能再解包。多个 `.bui` 编到同一目录时条目会合并。
+加 `--res` 才在产物**所在目录**写一份 **打包清单** `binui.res`（清单 + 原路径：主 UI + 每个
+组件的原始字节与相对路径）。**默认不产出** —— 清单里带着源码，不该是默认行为。
+`binui_export` 靠它解包；它可有可无，删掉不影响运行，只是这个包不能再解包。
+多个 `.bui` 编到同一目录时条目会合并。
 
 ## binui_export —— 把 .bui 还原成打包前的目录结构
 
