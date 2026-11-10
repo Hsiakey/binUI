@@ -1,15 +1,16 @@
-// binui_vk.cpp - Vulkan 绘制后端（v19，P3：全原语离屏）
+// binui_vk.cpp - Vulkan 绘制后端（v19，P2b：离屏 + 窗口）
 //
-// 设计（docs/vulkan_design.md §4、§5.9）：
+// 设计（docs/vulkan_design.md §4、§5.9、§5.10）：
 //   · 运行期只 LoadLibrary("vulkan-1.dll") + vkGetInstanceProcAddr，不链 vulkan-1.lib；
 //   · 每帧画进一张**持久 MSAA 累积图**（loadOp = LOAD），脏矩形靠 scissor + vkCmdClearAttachments；
-//   · present = resolve(MSAA → 单采样) → vkCmdCopyImageToBuffer → 等 fence → 交给读回方；
+//   · present：resolve(MSAA → 单采样) 之后二选一 ——
+//       (A) blit 进交换链图像 + vkQueuePresentKHR（窗口常规路径）
+//       (B) 读回 buffer + SetDIBitsToDevice / UpdateLayeredWindow（透明窗 / 全屏守卫 / 降级）
+//     交换链图像**不是**渲染目标，只是显示用副本，所以窗口与离屏像素必然一致；
 //   · 顶点 20 字节，与 GL 的 GLVertex 逐位相同；颜色走 B8G8R8A8_UNORM，
 //     让 AARRGGBB 的 R/G/B 落到正确的通道（见 MakeVertexFormat 注释）；
 //   · 文本/图片与 GL 共用一份实现（binui_glyph_atlas.h / binui_win_image.h），
 //     所以像素回归里两个 GPU 后端对轴对齐几何是**逐位相同**的。
-//
-// 窗口交换链在 P2b。
 #include "backends/binui_vk.h"
 
 #ifndef _WIN32
@@ -36,6 +37,7 @@
 // 不链接 vulkan-1.lib：全部函数指针自己取（与 binui_gl_ext_min.h 同思路，但这里用官方头，
 // 只靠 VK_NO_PROTOTYPES 关掉原型声明）。
 #define VK_NO_PROTOTYPES
+#define VK_USE_PLATFORM_WIN32_KHR   // vulkan_win32.h：VkWin32SurfaceCreateInfoKHR / PFN_vkCreateWin32SurfaceKHR
 #include "vulkan/vulkan.h"
 
 namespace binui {
@@ -118,6 +120,24 @@ struct VkApi {
     BINUI_VK_FN(vkCmdCopyImageToBuffer)
     BINUI_VK_FN(vkCmdCopyBufferToImage)
     BINUI_VK_FN(vkCmdClearColorImage)
+
+    // ---- WSI（只在窗口模式加载；离屏模式下这些指针必须允许为空）----
+    PFN_vkDestroySurfaceKHR vkDestroySurfaceKHR = nullptr;
+    PFN_vkCreateWin32SurfaceKHR vkCreateWin32SurfaceKHR = nullptr;
+    PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR = nullptr;
+    PFN_vkGetPhysicalDeviceSurfaceCapabilitiesKHR vkGetPhysicalDeviceSurfaceCapabilitiesKHR =
+        nullptr;
+    PFN_vkGetPhysicalDeviceSurfaceFormatsKHR vkGetPhysicalDeviceSurfaceFormatsKHR = nullptr;
+    PFN_vkGetPhysicalDeviceSurfacePresentModesKHR vkGetPhysicalDeviceSurfacePresentModesKHR =
+        nullptr;
+    PFN_vkCreateSwapchainKHR vkCreateSwapchainKHR = nullptr;
+    PFN_vkDestroySwapchainKHR vkDestroySwapchainKHR = nullptr;
+    PFN_vkGetSwapchainImagesKHR vkGetSwapchainImagesKHR = nullptr;
+    PFN_vkAcquireNextImageKHR vkAcquireNextImageKHR = nullptr;
+    PFN_vkQueuePresentKHR vkQueuePresentKHR = nullptr;
+    PFN_vkCmdBlitImage vkCmdBlitImage = nullptr;
+    PFN_vkCreateSemaphore vkCreateSemaphore = nullptr;
+    PFN_vkDestroySemaphore vkDestroySemaphore = nullptr;
 #undef BINUI_VK_FN
 
     bool load() {
@@ -245,6 +265,45 @@ struct VkApi {
         return true;
     }
 
+    // ---- WSI 函数：只在窗口模式取，取不到就退回离屏（不把整条后端判死）----
+    bool loadSurfaceFns() {
+        auto get = [&](const char* n) { return getInstanceProcAddr(instance_, n); };
+#define BINUI_VK_TRY(name) name = reinterpret_cast<PFN_##name>(get(#name))
+        BINUI_VK_TRY(vkDestroySurfaceKHR);
+        BINUI_VK_TRY(vkCreateWin32SurfaceKHR);
+        BINUI_VK_TRY(vkGetPhysicalDeviceSurfaceSupportKHR);
+        BINUI_VK_TRY(vkGetPhysicalDeviceSurfaceCapabilitiesKHR);
+        BINUI_VK_TRY(vkGetPhysicalDeviceSurfaceFormatsKHR);
+        BINUI_VK_TRY(vkGetPhysicalDeviceSurfacePresentModesKHR);
+#undef BINUI_VK_TRY
+        const bool ok = vkDestroySurfaceKHR && vkCreateWin32SurfaceKHR &&
+                        vkGetPhysicalDeviceSurfaceSupportKHR &&
+                        vkGetPhysicalDeviceSurfaceCapabilitiesKHR &&
+                        vkGetPhysicalDeviceSurfaceFormatsKHR &&
+                        vkGetPhysicalDeviceSurfacePresentModesKHR;
+        if (!ok) std::fprintf(stderr, "[vk] WSI 函数不完整（驱动没暴露 surface 扩展）\n");
+        return ok;
+    }
+
+    bool loadSwapchainFns() {
+        auto get = [&](const char* n) { return getInstanceProcAddr(instance_, n); };
+#define BINUI_VK_TRY(name) name = reinterpret_cast<PFN_##name>(get(#name))
+        BINUI_VK_TRY(vkCreateSwapchainKHR);
+        BINUI_VK_TRY(vkDestroySwapchainKHR);
+        BINUI_VK_TRY(vkGetSwapchainImagesKHR);
+        BINUI_VK_TRY(vkAcquireNextImageKHR);
+        BINUI_VK_TRY(vkQueuePresentKHR);
+        BINUI_VK_TRY(vkCmdBlitImage);
+        BINUI_VK_TRY(vkCreateSemaphore);
+        BINUI_VK_TRY(vkDestroySemaphore);
+#undef BINUI_VK_TRY
+        const bool ok = vkCreateSwapchainKHR && vkDestroySwapchainKHR &&
+                        vkGetSwapchainImagesKHR && vkAcquireNextImageKHR && vkQueuePresentKHR &&
+                        vkCmdBlitImage && vkCreateSemaphore && vkDestroySemaphore;
+        if (!ok) std::fprintf(stderr, "[vk] 交换链函数不完整（驱动不支持 VK_KHR_swapchain）\n");
+        return ok;
+    }
+
     VkDevice device_ = VK_NULL_HANDLE;
 };
 
@@ -346,6 +405,33 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     VkDeviceMemory readbackMem = VK_NULL_HANDLE;
     void* readbackMapped = nullptr;
     std::vector<uint8_t> pixels;              // 读回后的 BGRA（自上而下）
+
+    // ---- 窗口 / 交换链（hwnd != nullptr 时才有）----
+    // 设计选择：渲染目标始终是 MSAA + resolve 这套离屏图（与离屏模式完全同一条路径），
+    // present 时才把 resolve 图 blit 到交换链图像。这样窗口模式与离屏模式的像素必然一致，
+    // 也省掉"每个交换链图像一套 framebuffer + render pass"的复杂度。
+    HWND hwnd = nullptr;
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    VkSwapchainKHR swapchain = VK_NULL_HANDLE;
+    VkFormat swapFormat = kColorFormat;
+    VkExtent2D swapExtent{};
+    std::vector<VkImage> swapImages;
+    std::vector<VkImageView> swapViews;
+    VkSemaphore semAvail = VK_NULL_HANDLE;   // 图像可用
+    VkSemaphore semDone = VK_NULL_HANDLE;    // 渲染完成
+    bool windowMode = false;
+    bool useSwapchain = false;               // false = 只能读回 + GDI 贴屏
+    bool transparent = false;                // 分层窗口（UpdateLayeredWindow）
+    bool forceGdi = false;                   // 拖拽 resize 期由上层置位
+    bool coversMonitor = false;              // 客户区铺满整块显示器 → 绕开直翻转
+    bool capture = false;                    // 每帧把交换链图像读回（工具/诊断用）
+    bool lastPresentWasGdi = false;
+
+    // GDI 贴屏/分层窗口用：32bit BGRA，自上而下
+    HBITMAP dib = nullptr;
+    HDC dibDC = nullptr;
+    void* dibBits = nullptr;
+    int dibW = 0, dibH = 0;
 
     // ---- 管线 ----
     VkDescriptorSetLayout dsLayout = VK_NULL_HANDLE;
@@ -551,8 +637,17 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             std::vector<VkQueueFamilyProperties> q(qn);
             g_vk.vkGetPhysicalDeviceQueueFamilyProperties(d, &qn, q.data());
             int gfx = -1;
-            for (uint32_t i = 0; i < qn; i++)
-                if (q[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) { gfx = static_cast<int>(i); break; }
+            for (uint32_t i = 0; i < qn; i++) {
+                if (!(q[i].queueFlags & VK_QUEUE_GRAPHICS_BIT)) continue;
+                // 窗口模式：队列还要能往这块 surface 上呈现（Win32 上通常是同一个队列）
+                if (surface) {
+                    VkBool32 sup = VK_FALSE;
+                    g_vk.vkGetPhysicalDeviceSurfaceSupportKHR(d, i, surface, &sup);
+                    if (!sup) continue;
+                }
+                gfx = static_cast<int>(i);
+                break;
+            }
             if (gfx < 0) continue;
             int score = (p.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) ? 100 : 10;
             if (score > bestScore) {
@@ -588,10 +683,15 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         qci.queueFamilyIndex = queueFamily;
         qci.queueCount = 1;
         qci.pQueuePriorities = &prio;
+        const char* devExt[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
         VkDeviceCreateInfo dci{};
         dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         dci.queueCreateInfoCount = 1;
         dci.pQueueCreateInfos = &qci;
+        if (windowMode) {
+            dci.enabledExtensionCount = 1;
+            dci.ppEnabledExtensionNames = devExt;
+        }
         VK_CHECK(g_vk.vkCreateDevice(physical, &dci, nullptr, &device), "vkCreateDevice");
         g_vk.device_ = device;
         g_vk.vkGetDeviceQueue(device, queueFamily, 0, &queue);
@@ -726,6 +826,224 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         si.pCommandBuffers = &cmd;
         VK_CHECK(g_vk.vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE), "vkQueueSubmit(layout)");
         g_vk.vkQueueWaitIdle(queue);
+        return true;
+    }
+
+    // ============================================================
+    // 交换链（窗口模式）
+    // ============================================================
+    void destroySwapchain() {
+        for (VkImageView v : swapViews)
+            if (v) g_vk.vkDestroyImageView(device, v, nullptr);
+        swapViews.clear();
+        swapImages.clear();
+        if (swapchain) {
+            g_vk.vkDestroySwapchainKHR(device, swapchain, nullptr);
+            swapchain = VK_NULL_HANDLE;
+        }
+    }
+
+    // 首选 B8G8R8A8_UNORM（与渲染目标同格式，blit 是纯拷贝）；没有就退回驱动给的第一种
+    VkSurfaceFormatKHR pickSurfaceFormat() {
+        uint32_t n = 0;
+        g_vk.vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &n, nullptr);
+        VkSurfaceFormatKHR out{};
+        out.format = kColorFormat;
+        out.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+        if (n == 0) return out;
+        std::vector<VkSurfaceFormatKHR> fs(n);
+        g_vk.vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &n, fs.data());
+        for (const auto& f : fs) {
+            if (f.format == kColorFormat && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
+                return f;
+        }
+        if (n == 1 && fs[0].format == VK_FORMAT_UNDEFINED) return out;   // 任意格式
+        return fs[0];
+    }
+
+    // vsync=false 时优先 MAILBOX（不撕裂、不阻塞），否则 IMMEDIATE；都没有就 FIFO
+    VkPresentModeKHR pickPresentMode(bool vsync) {
+        uint32_t n = 0;
+        g_vk.vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &n, nullptr);
+        if (n == 0) return VK_PRESENT_MODE_FIFO_KHR;
+        std::vector<VkPresentModeKHR> ms(n);
+        g_vk.vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &n, ms.data());
+        auto has = [&](VkPresentModeKHR m) {
+            for (VkPresentModeKHR x : ms) if (x == m) return true;
+            return false;
+        };
+        if (vsync) return has(VK_PRESENT_MODE_FIFO_KHR) ? VK_PRESENT_MODE_FIFO_KHR : ms[0];
+        if (has(VK_PRESENT_MODE_MAILBOX_KHR)) return VK_PRESENT_MODE_MAILBOX_KHR;
+        if (has(VK_PRESENT_MODE_IMMEDIATE_KHR)) return VK_PRESENT_MODE_IMMEDIATE_KHR;
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+
+    bool createSwapchain() {
+        if (!windowMode || !surface) return false;
+        destroySwapchain();
+
+        VkSurfaceCapabilitiesKHR caps{};
+        if (g_vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &caps) !=
+            VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] 取不到 surface capabilities\n");
+            return false;
+        }
+        const VkSurfaceFormatKHR sf = pickSurfaceFormat();
+        // currentExtent 是 0xFFFFFFFF 时由应用决定（Win32 上通常直接给出客户区尺寸）
+        VkExtent2D ext = caps.currentExtent;
+        if (ext.width == 0xFFFFFFFFu || ext.height == 0xFFFFFFFFu) {
+            ext.width = static_cast<uint32_t>(std::max(1, w));
+            ext.height = static_cast<uint32_t>(std::max(1, h));
+        }
+        ext.width = std::max(caps.minImageExtent.width, std::min(caps.maxImageExtent.width, ext.width));
+        ext.height =
+            std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, ext.height));
+        if (ext.width == 0 || ext.height == 0) return false;
+
+        uint32_t imageCount = caps.minImageCount + 1;   // 多要一张，避免等待
+        if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
+            imageCount = caps.maxImageCount;
+
+        VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+        if (!(caps.supportedCompositeAlpha & alpha)) {
+            // 透明窗口不走交换链（Windows 上 PRE_MULTIPLIED 只有 ~1/3 设备支持，见设计 §5.6），
+            // 但驱动连 OPAQUE 都不给时要挑一个能用的
+            const VkCompositeAlphaFlagBitsKHR all[] = {
+                VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+                VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
+                VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR,
+                VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR};
+            for (auto a : all)
+                if (caps.supportedCompositeAlpha & a) { alpha = a; break; }
+        }
+
+        VkSwapchainCreateInfoKHR ci{};
+        ci.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+        ci.surface = surface;
+        ci.minImageCount = imageCount;
+        ci.imageFormat = sf.format;
+        ci.imageColorSpace = sf.colorSpace;
+        ci.imageExtent = ext;
+        ci.imageArrayLayers = 1;
+        // TRANSFER_DST：把 resolve 图 blit 上去；TRANSFER_SRC：工具/诊断时读回交换链内容
+        ci.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                        VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+        ci.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ci.preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR)
+                              ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+                              : caps.currentTransform;
+        ci.compositeAlpha = alpha;
+        ci.presentMode = pickPresentMode(vsync);
+        ci.clipped = VK_TRUE;
+        ci.oldSwapchain = VK_NULL_HANDLE;
+
+        const VkResult cr = g_vk.vkCreateSwapchainKHR(device, &ci, nullptr, &swapchain);
+        if (cr != VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] vkCreateSwapchainKHR 失败: %s (%d)\n", VkResultText(cr),
+                         (int)cr);
+            swapchain = VK_NULL_HANDLE;
+            return false;
+        }
+        uint32_t imgN = 0;
+        g_vk.vkGetSwapchainImagesKHR(device, swapchain, &imgN, nullptr);
+        swapImages.resize(imgN);
+        g_vk.vkGetSwapchainImagesKHR(device, swapchain, &imgN, swapImages.data());
+        swapViews.resize(imgN, VK_NULL_HANDLE);
+        for (uint32_t i = 0; i < imgN; i++) {
+            swapViews[i] = makeView(swapImages[i], sf.format, VK_IMAGE_ASPECT_COLOR_BIT);
+            if (!swapViews[i]) {
+                std::fprintf(stderr, "[vk] 交换链图像 %u 建 view 失败\n", i);
+                destroySwapchain();
+                return false;
+            }
+        }
+        swapFormat = sf.format;
+        swapExtent = ext;
+        std::fprintf(stderr, "[vk] 交换链 %ux%u，%u 张，%s，presentMode=%d\n", ext.width,
+                     ext.height, imgN, VkFormatName(sf.format), (int)ci.presentMode);
+        return true;
+    }
+
+    // resize 后交换链可能失效（0 尺寸 / 超出 caps），重建一次即可
+    bool recreateSwapchain() {
+        g_vk.vkDeviceWaitIdle(device);
+        return createSwapchain();
+    }
+
+    static const char* VkFormatName(VkFormat f) {
+        switch (f) {
+            case VK_FORMAT_B8G8R8A8_UNORM: return "B8G8R8A8_UNORM";
+            case VK_FORMAT_B8G8R8A8_SRGB: return "B8G8R8A8_SRGB";
+            case VK_FORMAT_R8G8B8A8_UNORM: return "R8G8B8A8_UNORM";
+            case VK_FORMAT_R8G8B8A8_SRGB: return "R8G8B8A8_SRGB";
+            default: return "其他格式";
+        }
+    }
+
+    // 客户区是否铺满整块显示器（borderless 全屏）。
+    // 与 GL 后端 0.9.1 的 clientCoversMonitor() 同一判定与同一理由：这种状态下 DWM 会把
+    // 呈现提升成直翻转，实测在远程桌面/虚拟显示器上画面会停住（应用仍在满帧绘制）。
+    bool clientCoversMonitor() const {
+        if (!hwnd) return false;
+        RECT cr;
+        if (!GetClientRect(hwnd, &cr)) return false;
+        const HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (!mon || !GetMonitorInfoW(mon, &mi)) return false;
+        const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+        const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        return (cr.right - cr.left) >= mw && (cr.bottom - cr.top) >= mh;
+    }
+
+    bool ensureDib(int dw, int dh) {
+        if (dib && dibW == dw && dibH == dh) return true;
+        if (dib) DeleteObject(dib);
+        if (dibDC) DeleteDC(dibDC);
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = dw;
+        bi.bmiHeader.biHeight = -dh;   // 自上而下
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        dib = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &dibBits, nullptr, 0);
+        dibDC = CreateCompatibleDC(nullptr);
+        dibW = dw;
+        dibH = dh;
+        return dib && dibBits && dibDC;
+    }
+
+    // 把读回缓冲贴到窗口（非透明）/ 合成到桌面（透明）
+    bool blitToWindow(const uint8_t* px, int pw, int ph) {
+        if (!hwnd || !px) return false;
+        if (transparent) {
+            if (!ensureDib(pw, ph)) return false;
+            std::memcpy(dibBits, px, static_cast<size_t>(pw) * ph * 4);
+            HDC screen = GetDC(nullptr);
+            HGDIOBJ old = SelectObject(dibDC, dib);
+            RECT wr;
+            GetWindowRect(hwnd, &wr);
+            POINT dst = {wr.left, wr.top};
+            SIZE sz = {pw, ph};
+            POINT src = {0, 0};
+            BLENDFUNCTION bf = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+            UpdateLayeredWindow(hwnd, screen, &dst, &sz, dibDC, &src, 0, &bf, ULW_ALPHA);
+            SelectObject(dibDC, old);
+            ReleaseDC(nullptr, screen);
+            return true;
+        }
+        // 读回缓冲本身是自上而下的 BGRA，直接当 DIB 位用（SetDIBitsToDevice 不缩放）
+        BITMAPINFO bi{};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = pw;
+        bi.bmiHeader.biHeight = -ph;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        HDC dc = GetDC(hwnd);
+        SetDIBitsToDevice(dc, 0, 0, pw, ph, 0, 0, 0, ph, px, &bi, DIB_RGB_COLORS);
+        ReleaseDC(hwnd, dc);
         return true;
     }
 
@@ -1338,28 +1656,32 @@ BinUIVK::~BinUIVK() {
 
 bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     Impl& d = *impl_;
-    if (hwnd) {
-        std::fprintf(stderr, "[vk] 窗口 + 交换链在 P2b 实现（当前只支持离屏）；返回未就绪\n");
-        return false;
-    }
     if (width <= 0 || height <= 0) return false;
     d.w = width;
     d.h = height;
     d.vsync = vsync;
+    d.hwnd = static_cast<HWND>(hwnd);
+    d.windowMode = (d.hwnd != nullptr);
 
     if (!g_vk.load()) return false;
 
-    // ---- 实例（Vulkan 1.0，无层、无扩展：离屏不需要 WSI）----
+    // ---- 实例 ----
+    // 离屏不需要任何扩展；窗口模式要 surface + win32 surface 这两条实例扩展。
     VkApplicationInfo app{};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app.pApplicationName = "binUI";
-    app.applicationVersion = VK_MAKE_VERSION(0, 9, 2);
+    app.applicationVersion = VK_MAKE_VERSION(0, 10, 0);
     app.pEngineName = "binUI";
-    app.engineVersion = VK_MAKE_VERSION(0, 9, 2);
+    app.engineVersion = VK_MAKE_VERSION(0, 10, 0);
     app.apiVersion = VK_API_VERSION_1_0;
+    const char* instExt[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     VkInstanceCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
     ici.pApplicationInfo = &app;
+    if (d.windowMode) {
+        ici.enabledExtensionCount = 2;
+        ici.ppEnabledExtensionNames = instExt;
+    }
     auto createInstance = reinterpret_cast<PFN_vkCreateInstance>(
         g_vk.getInstanceProcAddr(VK_NULL_HANDLE, "vkCreateInstance"));
     if (!createInstance) {
@@ -1370,8 +1692,42 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     g_vk.instance_ = d.instance;
     if (!g_vk.loadInstanceFns()) return false;
 
+    // ---- surface（窗口模式）----
+    if (d.windowMode) {
+        if (!g_vk.loadSurfaceFns()) return false;
+        VkWin32SurfaceCreateInfoKHR sci{};
+        sci.sType = VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+        sci.hinstance = GetModuleHandleW(nullptr);
+        sci.hwnd = d.hwnd;
+        const VkResult sr = g_vk.vkCreateWin32SurfaceKHR(d.instance, &sci, nullptr, &d.surface);
+        if (sr != VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] vkCreateWin32SurfaceKHR 失败: %s (%d)\n",
+                         VkResultText(sr), (int)sr);
+            d.surface = VK_NULL_HANDLE;
+            return false;
+        }
+    }
+
     if (!d.pickPhysical()) return false;
     if (!d.createDevice()) return false;
+
+    // 交换链函数（窗口模式）：取不到就不起窗口失败，而是降级为"读回 + GDI 贴屏"
+    if (d.windowMode && g_vk.loadSwapchainFns()) {
+        if (d.createSwapchain()) {
+            VkSemaphoreCreateInfo smi{};
+            smi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+            if (g_vk.vkCreateSemaphore(d.device, &smi, nullptr, &d.semAvail) == VK_SUCCESS &&
+                g_vk.vkCreateSemaphore(d.device, &smi, nullptr, &d.semDone) == VK_SUCCESS) {
+                d.useSwapchain = true;
+            } else {
+                std::fprintf(stderr, "[vk] 信号量创建失败，退回读回呈现\n");
+            }
+        } else {
+            std::fprintf(stderr, "[vk] 交换链创建失败，退回读回呈现（性能会差很多）\n");
+        }
+    }
+    if (d.windowMode && !d.useSwapchain)
+        std::fprintf(stderr, "[vk] 窗口模式：present 走读回 + GDI 贴屏\n");
 
     // 命令池 / 命令缓冲 / fence
     VkCommandPoolCreateInfo cpi{};
@@ -1405,8 +1761,10 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     d.atlas.initFonts();
 
     d.ready = true;
-    std::fprintf(stderr, "[vk] 离屏就绪 %dx%d（MSAA %dx）\n", width, height,
-                 static_cast<int>(d.samples));
+    d.coversMonitor = d.windowMode ? d.clientCoversMonitor() : false;
+    std::fprintf(stderr, "[vk] %s就绪 %dx%d（MSAA %dx%s）\n", d.windowMode ? "窗口" : "离屏",
+                 width, height, static_cast<int>(d.samples),
+                 d.windowMode ? (d.useSwapchain ? "，交换链呈现" : "，读回呈现") : "");
     return true;
 }
 
@@ -1414,6 +1772,19 @@ void BinUIVK::shutdown() {
     Impl& d = *impl_;
     if (!d.device) return;
     g_vk.vkDeviceWaitIdle(d.device);
+    if (d.dib) { DeleteObject(d.dib); d.dib = nullptr; }
+    if (d.dibDC) { DeleteDC(d.dibDC); d.dibDC = nullptr; }
+    d.dibBits = nullptr;
+    d.dibW = d.dibH = 0;
+    d.destroySwapchain();
+    if (d.semAvail) g_vk.vkDestroySemaphore(d.device, d.semAvail, nullptr);
+    if (d.semDone) g_vk.vkDestroySemaphore(d.device, d.semDone, nullptr);
+    d.semAvail = d.semDone = VK_NULL_HANDLE;
+    if (d.surface) g_vk.vkDestroySurfaceKHR(d.instance, d.surface, nullptr);
+    d.surface = VK_NULL_HANDLE;
+    d.useSwapchain = false;
+    d.windowMode = false;
+    d.hwnd = nullptr;
     // 图集纹理要先释放（自己 new 出来的 Tex）
     d.atlas.clear();
     d.atlas.setHost(nullptr);
@@ -1466,11 +1837,35 @@ void BinUIVK::resize(int width, int height) {
     if (!d.createTargets()) {
         d.ready = false;
         std::fprintf(stderr, "[vk] resize 后重建目标失败\n");
+        return;
     }
+    if (d.windowMode && d.useSwapchain) {
+        // 交换链尺寸由 surface 决定；0 尺寸（最小化）时不重建，等下一次 resize
+        if (!d.createSwapchain()) std::fprintf(stderr, "[vk] resize: 交换链重建失败\n");
+    }
+    d.coversMonitor = d.windowMode ? d.clientCoversMonitor() : false;
 }
 
-void BinUIVK::setVsync(bool on) { impl_->vsync = on; }
-void BinUIVK::setTransparent(bool) { /* 离屏模式无意义；窗口模式在 P2b */ }
+void BinUIVK::setVsync(bool on) {
+    Impl& d = *impl_;
+    if (d.vsync == on) return;
+    d.vsync = on;
+    // present mode 在交换链里定死：改 vsync 要重建
+    if (d.windowMode && d.useSwapchain) d.recreateSwapchain();
+}
+
+void BinUIVK::setTransparent(bool t) {
+    // 透明窗口**不走交换链**（Windows 上只有约 1/3 设备支持 PRE_MULTIPLIED），
+    // 走读回 + UpdateLayeredWindow，与 GL 后端同一套做法（设计 §5.6）
+    impl_->transparent = t;
+}
+
+void BinUIVK::setCaptureReadback(bool on) { impl_->capture = on; }
+
+bool BinUIVK::swapchainActive() const { return impl_->useSwapchain && !impl_->lastPresentWasGdi; }
+
+bool BinUIVK::presentUsedGdi() const { return impl_->lastPresentWasGdi; }
+
 void BinUIVK::setFontName(const char* name) { impl_->atlas.setFontName(name); }
 
 void BinUIVK::beginFrame(const void* clipRect) {
@@ -1547,13 +1942,89 @@ void BinUIVK::present() {
     d.flush();
     g_vk.vkCmdEndRenderPass(d.cmd);
 
-    // resolve 目标已经是 TRANSFER_SRC_OPTIMAL（render pass finalLayout），直接拷到 buffer
-    VkBufferImageCopy region{};
-    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    region.imageSubresource.layerCount = 1;
-    region.imageExtent = {static_cast<uint32_t>(d.w), static_cast<uint32_t>(d.h), 1};
-    g_vk.vkCmdCopyImageToBuffer(d.cmd, d.resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                                d.readback, 1, &region);
+    // 呈现路线（设计 §5.5）：
+    //   A. 交换链可用且不需要绕开直翻转 → resolve → blit 到交换链图像 → vkQueuePresentKHR
+    //   B. 其余情况（透明窗口 / 客户区铺满显示器 / 上层要求拖拽期走 GDI / 无交换链）
+    //      → resolve → 读回 buffer → SetDIBitsToDevice 或 UpdateLayeredWindow
+    // 两条路线用的是**同一张 resolve 图**，所以窗口模式与离屏模式的像素完全一致。
+    const bool gdiPath = !d.useSwapchain || d.transparent || d.forceGdi ||
+                         (d.windowMode && d.coversMonitor);
+    d.lastPresentWasGdi = gdiPath;
+
+    uint32_t imageIndex = 0;
+    VkImage swapImg = VK_NULL_HANDLE;
+    if (!gdiPath) {
+        const VkResult ar = g_vk.vkAcquireNextImageKHR(d.device, d.swapchain, UINT64_MAX,
+                                                       d.semAvail, VK_NULL_HANDLE, &imageIndex);
+        if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
+            d.recreateSwapchain();
+            g_vk.vkEndCommandBuffer(d.cmd);   // 本帧仍然提交掉，下帧用新交换链
+            d.recording = false;
+            d.cmdOpen = false;
+            g_vk.vkQueueWaitIdle(d.queue);
+            return;
+        }
+        if (ar != VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] vkAcquireNextImageKHR 失败: %s (%d)\n", VkResultText(ar),
+                         (int)ar);
+            d.useSwapchain = false;
+            g_vk.vkEndCommandBuffer(d.cmd);
+            d.recording = false;
+            d.cmdOpen = false;
+            return;
+        }
+        swapImg = d.swapImages[imageIndex];
+    }
+
+    if (gdiPath) {
+        // resolve 目标此刻是 TRANSFER_SRC_OPTIMAL（render pass finalLayout），直接拷到 buffer
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageExtent = {static_cast<uint32_t>(d.w), static_cast<uint32_t>(d.h), 1};
+        g_vk.vkCmdCopyImageToBuffer(d.cmd, d.resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                    d.readback, 1, &region);
+    } else {
+        // 交换链图像：UNDEFINED → TRANSFER_DST，blit 上去，再转 PRESENT_SRC
+        d.barrier(swapImg, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                  VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                  VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImageBlit blit{};
+        blit.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.srcSubresource.layerCount = 1;
+        blit.srcOffsets[0] = {0, 0, 0};
+        blit.srcOffsets[1] = {d.w, d.h, 1};
+        blit.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        blit.dstSubresource.layerCount = 1;
+        blit.dstOffsets[0] = {0, 0, 0};
+        blit.dstOffsets[1] = {static_cast<int32_t>(d.swapExtent.width),
+                              static_cast<int32_t>(d.swapExtent.height), 1};
+        g_vk.vkCmdBlitImage(d.cmd, d.resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                            swapImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                            VK_FILTER_NEAREST);
+        VkImageLayout after = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+        if (d.capture) {
+            // 诊断/验收：把**交换链图像**读回（证明真的画进了交换链，而不只是 resolve 图）
+            d.barrier(swapImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT);
+            VkBufferImageCopy region{};
+            region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            region.imageSubresource.layerCount = 1;
+            region.imageExtent = {static_cast<uint32_t>(d.swapExtent.width),
+                                  static_cast<uint32_t>(d.swapExtent.height), 1};
+            g_vk.vkCmdCopyImageToBuffer(d.cmd, swapImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                        d.readback, 1, &region);
+            d.barrier(swapImg, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, after,
+                      VK_ACCESS_TRANSFER_READ_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        } else {
+            d.barrier(swapImg, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, after,
+                      VK_ACCESS_TRANSFER_WRITE_BIT, 0, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
+        }
+    }
     // 拷完把 resolve 图转回 render pass 的写入布局（下一帧 subpass 会再 resolve 进去）
     d.barrier(d.resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
@@ -1567,13 +2038,52 @@ void BinUIVK::present() {
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
     si.pCommandBuffers = &d.cmd;
+    const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+    VkSemaphore sig = VK_NULL_HANDLE;
+    if (!gdiPath) {
+        si.waitSemaphoreCount = 1;
+        si.pWaitSemaphores = &d.semAvail;
+        si.pWaitDstStageMask = &waitStage;
+        si.signalSemaphoreCount = 1;
+        si.pSignalSemaphores = &d.semDone;
+        sig = d.semDone;
+    }
     if (g_vk.vkQueueSubmit(d.queue, 1, &si, d.fence) != VK_SUCCESS) {
         std::fprintf(stderr, "[vk] present: vkQueueSubmit 失败\n");
         return;
     }
     g_vk.vkWaitForFences(d.device, 1, &d.fence, VK_TRUE, UINT64_MAX);
     d.freeStaging();   // 本帧的 staging 到这里才算用完（拷贝已经执行完）
+
+    if (gdiPath) {
+        d.blitToWindow(static_cast<const uint8_t*>(d.readbackMapped), d.w, d.h);
+        return;
+    }
+    VkPresentInfoKHR pi{};
+    pi.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    pi.waitSemaphoreCount = sig ? 1 : 0;
+    pi.pWaitSemaphores = &sig;
+    pi.swapchainCount = 1;
+    pi.pSwapchains = &d.swapchain;
+    pi.pImageIndices = &imageIndex;
+    const VkResult pr = g_vk.vkQueuePresentKHR(d.queue, &pi);
+    if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
+        d.recreateSwapchain();
+    } else if (pr != VK_SUCCESS) {
+        std::fprintf(stderr, "[vk] vkQueuePresentKHR 失败: %s (%d)\n", VkResultText(pr), (int)pr);
+        d.useSwapchain = false;
+    }
 }
+
+// 强制读回 + GDI 贴屏（拖拽 resize 期由上层调用；全屏直翻转守卫由 present() 内部处理）
+void BinUIVK::presentViaGdi() {
+    Impl& d = *impl_;
+    if (!d.ready) return;
+    d.forceGdi = true;
+    present();
+    d.forceGdi = false;
+}
+
 
 const uint8_t* BinUIVK::readbackPixels(int& outW, int& outH) {
     Impl& d = *impl_;

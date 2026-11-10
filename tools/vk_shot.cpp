@@ -18,52 +18,8 @@
 #include "binui_paths.h"   // ex::LoadImages / DirOf（与 gl_shot 同一份图片加载）
 #include "backends/binui_draw_nodes.h"
 #include "backends/binui_vk.h"
+#include "save_png.h"
 
-namespace {
-
-int GetEncoderClsid(const wchar_t* format, CLSID* pClsid) {
-    UINT num = 0, size = 0;
-    Gdiplus::GetImageEncodersSize(&num, &size);
-    if (size == 0) return 0;
-    std::vector<uint8_t> buf(size);
-    auto* codecs = reinterpret_cast<Gdiplus::ImageCodecInfo*>(buf.data());
-    Gdiplus::GetImageEncoders(num, size, codecs);
-    for (UINT i = 0; i < num; i++) {
-        if (std::wcscmp(codecs[i].MimeType, format) == 0) {
-            *pClsid = codecs[i].Clsid;
-            return 1;
-        }
-    }
-    return 0;
-}
-
-// BGRA（预乘）→ PNG。像素 alpha 不透明时与普通 BGRA 相同；
-// 半透明像素（AA 边缘）按 GDI+ 的要求反预乘回直通 alpha。
-bool SaveBgraPng(const char* path, const uint8_t* bgra, int w, int h) {
-    Gdiplus::Bitmap bmp(w, h, PixelFormat32bppARGB);
-    Gdiplus::Rect rect(0, 0, w, h);
-    Gdiplus::BitmapData bd{};
-    if (bmp.LockBits(&rect, Gdiplus::ImageLockModeWrite, PixelFormat32bppARGB, &bd) != Gdiplus::Ok)
-        return false;
-    for (int y = 0; y < h; y++) {
-        const uint8_t* src = bgra + static_cast<size_t>(y) * w * 4;
-        auto* dst = reinterpret_cast<uint8_t*>(static_cast<uint8_t*>(bd.Scan0) + y * bd.Stride);
-        for (int x = 0; x < w; x++) {
-            const uint8_t a = src[x * 4 + 3];
-            dst[x * 4 + 0] = src[x * 4 + 0];   // B
-            dst[x * 4 + 1] = src[x * 4 + 1];   // G
-            dst[x * 4 + 2] = src[x * 4 + 2];   // R
-            dst[x * 4 + 3] = a;
-        }
-    }
-    bmp.UnlockBits(&bd);
-    CLSID png;
-    if (GetEncoderClsid(L"image/png", &png) == 0) return false;
-    const std::wstring wp(path, path + std::strlen(path));
-    return bmp.Save(wp.c_str(), &png, nullptr) == Gdiplus::Ok;
-}
-
-} // namespace
 
 int main(int argc, char** argv) {
     if (argc < 3) {
@@ -135,7 +91,7 @@ int main(int argc, char** argv) {
         Gdiplus::GdiplusShutdown(token);
         return 1;
     }
-    if (!SaveBgraPng(outPath, px, rw, rh)) {
+    if (!binuishot::SaveBgraPng(outPath, px, rw, rh)) {
         std::fprintf(stderr, "[vk_shot] 保存 PNG 失败: %s\n", outPath);
         Gdiplus::GdiplusShutdown(token);
         return 1;

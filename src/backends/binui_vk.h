@@ -6,10 +6,10 @@
 // 运行期依赖：**只** LoadLibrary("vulkan-1.dll") + vkGetInstanceProcAddr，
 // 不链接 vulkan-1.lib、不需要 Vulkan SDK（头文件在 third_party/vulkan）。
 //
-// 当前范围（见 docs/vulkan_design.md §4、§5.9）：离屏渲染 + 全部 7 个原语
-//（矩形/圆角/线段/描边/图片/文本/换行文本）+ 裁剪栈 + 4x MSAA 累积帧 + 读回。
+// 当前范围（见 docs/vulkan_design.md §4、§5.9、§5.10）：全部 7 个原语（矩形/圆角/线段/
+// 描边/图片/文本/换行文本）+ 裁剪栈 + 4x MSAA 累积帧 + 读回 + 窗口交换链呈现。
 // 文本与图片走与 GL 共用的一份实现（src/backends/binui_glyph_atlas.h、
-// binui_win_image.h），所以在像素回归里两端逐位相同。窗口 + 交换链在 P2b。
+// binui_win_image.h），所以在像素回归里两端逐位相同。
 #ifndef BINUI_VK_H
 #define BINUI_VK_H
 
@@ -25,7 +25,8 @@ public:
     BinUIVK();
     ~BinUIVK() override;
 
-    // hwnd == nullptr → 离屏模式（vk_shot 用）；窗口 + 交换链在 P2b 实现。
+    // hwnd == nullptr → 离屏模式（vk_shot 用）；hwnd != nullptr → 窗口 + 交换链。
+    // 交换链创建失败时自动降级为"读回 + GDI 贴屏"，不会整个初始化失败。
     bool init(void* hwnd, int width, int height, bool vsync = true);
     void shutdown();
 
@@ -70,6 +71,16 @@ public:
 
     // ---- 离屏读回（vk_shot 用）：BGRA8 prepremultiplied，行序自上而下 ----
     const uint8_t* readbackPixels(int& outW, int& outH);
+
+    // ---- 窗口呈现（P2b）----
+    // 强制一次"读回 + GDI 贴屏"（拖拽 resize 期由上层调用；全屏直翻转守卫由
+    // present() 内部按 clientCoversMonitor 自动处理，不用上层管）。
+    void presentViaGdi();
+    // 每帧把**交换链图像**读回缓冲（验收/截图用；默认关，开了会多一次全屏拷贝）
+    void setCaptureReadback(bool on);
+    // 最近一次 present 走的是不是交换链（false = 读回 + GDI 贴屏）
+    bool swapchainActive() const;
+    bool presentUsedGdi() const;
 
 private:
     struct Impl;

@@ -40,7 +40,8 @@
 | 阶段 | 内容 | 人日 | 验收门槛（可执行） | 回滚点 |
 |---|---|---|---|---|
 | **P1** | `IBinUIGfx` + 共享节点遍历（GL+D3D11 先并入） | 2~3 | `make pixels` 10/10 零差异；`gl_shot` 与改前逐像素一致（记录 diff 数值）；四套测试全绿 | 纯重构，`git revert` 即可 |
-| **P2** | Vulkan 骨架：实例/设备/交换链/管线/批次/`fillRect`+`fillRounded`+`present` | 3~4 | `vk_shot` 渲染出"色卡 + 圆角块"，与 GDI 基准 diff ≤ 阈值；跑 10 分钟不崩 | 不接进 demo，仅工具 |
+| **P2** | Vulkan 骨架：实例/设备/离屏目标/管线/批次/`fillRect`+`fillRounded`+`present`（读回） | 3~4 | `vk_shot` 渲染出"色卡 + 圆角块"，与 GDI 基准 diff ≤ 阈值；跑 10 分钟不崩 | 不接进 demo，仅工具 |
+| **P2b** | 窗口 + 交换链 + 三路 present + 全屏直翻转守卫 + 透明窗读回（`vk_window` 验收工具） | 1~2 | 交换链图像读回与 GL 同尺寸输出 0 差异；resize/全屏/透明三条路径各自可跑 | 删除 swapchain 代码即回到 P2 |
 | **P3** | 全原语：线段/文本图集/图片/裁剪栈/MSAA 累积帧（三路 present 归到 P2b） | 4~5 | 10 个像素用例全部出图并给三方 diff 表；`svgdemo`/`features`/`fontshow` 跑通 | demo 仍用 GL，`GPU=vk` 才切 |
 | **P4** | 鲁棒性：resize/最大化/最小化/DPI/多显示器/RDP/多实例/热重载/验证层 | 2~3 | 8 个 demo × 3 圈操作无停帧、无 validation error、无泄漏 | 保留 P3 版本 |
 | **P5** | 工具与发版：`vk_shot`、`GPU=gl\|vk`、文档、CHANGELOG | 1~2 | `make pixels GPU=vk`、`make check_examples` 全绿 | — |
@@ -436,6 +437,71 @@ mingw32-make pixels GPU=vk               # 10 个用例，输出三方 diff 表�
 **更有说服力的一列**：4 个 SVG 用例里 VK↔GDI 与 GL↔GDI 的差异像素数相差 ≤ 34（例如 svgjoin
 7494 vs 7505，共 109200 像素）—— 两个 GPU 后端与 GDI 基准**等距**，谁都不比谁更"错"。
 轴对齐几何（圆、圆角、矩形、渐变、文本、图片）则是**逐位相同**。
+
+### 5.10 P2b 落地记录：窗口 + 交换链 + 三路 present（2026-11-11，已完成）
+
+代码：`binui_vk.cpp` 的 `surface/swapchain` 两块、`tools/vk_window.cpp`（新）、
+`tools/save_png.h`（新，抓图工具共用的 PNG 写出）、`Makefile` 新增 `vk-window` 目标。
+
+#### 5.10.1 关键决定：渲染目标不变，present 时才 blit 到交换链
+
+设计里 §5.5 列了三种 present 走法，落地时选了一个更省事、也更容易保证一致性的结构：
+
+```
+[每帧] MSAA 累积图 --resolve--> 单采样 resolve 图
+                                   ├─(A) vkCmdBlitImage → 交换链图像 → vkQueuePresentKHR
+                                   └─(B) vkCmdCopyImageToBuffer → SetDIBitsToDevice / UpdateLayeredWindow
+```
+
+也就是说**交换链图像从来不是渲染目标**，只是一个"显示用的最终副本"。好处：
+
+- 窗口模式与离屏模式跑的是**同一条渲染路径**，像素必然一致 —— `vk-shot`（离屏）与
+  `vk-window`（窗口，读回交换链图像）在 probe / circle 上都是 **0 差异**；
+- 不需要"每个交换链图像一套 framebuffer + render pass"，也不用考虑交换链格式与
+  `kColorFormat` 不同时 render pass 要重建；
+- 交换链图像只需要 `TRANSFER_DST`（blit 目标）+ `TRANSFER_SRC`（验收读回）两种用途。
+
+代价是每帧多一次全屏 blit（1440p 上 < 0.1ms，实测满帧 1435fps 无压力），P4 若要极限优化
+再改成"直接 resolve 进交换链"。
+
+#### 5.10.2 三路 present 的实际分工
+
+| 条件 | 走法 | 理由 |
+|---|---|---|
+| 交换链可用、非透明、非全屏 | (A) blit + `vkQueuePresentKHR` | 正常路径，最快 |
+| 透明窗口（`setTransparent(true)`） | (B) 读回 + `UpdateLayeredWindow` | 交换链 alpha 在 Windows 上只有约 1/3 设备可信（调研 §4），与 GL 同构 |
+| 客户区铺满显示器（borderless 全屏） | (B) 读回 + `SetDIBitsToDevice` | 与 GL 0.9.1 的直翻转守卫同一判定、同一理由 |
+| 上层强制（拖拽 resize 期调 `presentViaGdi()`） | (B) | 绕开驱动在 resize+present 组合下的不确定性 |
+| 交换链创建失败 / 驱动不给 WSI | (B) 自动降级 | 后端不能因为 WSI 缺失就整体不可用 |
+
+`coversMonitor` 在 `init` 与 `resize` 时重算（与 GL 的 `applyPendingResize` 同节奏）；
+`acquire/present` 返回 `VK_ERROR_OUT_OF_DATE_KHR` / `VK_SUBOPTIMAL_KHR` 时重建交换链。
+
+#### 5.10.3 踩到的坑
+
+1. **`VK_USE_PLATFORM_WIN32_KHR` 必须在 `#include "vulkan/vulkan.h"` 之前定义**，否则
+   `VkWin32SurfaceCreateInfoKHR` / `PFN_vkCreateWin32SurfaceKHR` 根本不存在（vendored 头按
+   平台宏裁剪）。报错看起来像"头文件不全"，其实是少了这个宏。
+2. **WSI 与交换链函数必须单独加载、且允许为空**：离屏模式下 `vkCreateWin32SurfaceKHR`
+   之类的入口本来就不存在（没开 surface 扩展），用统一 `BINUI_VK_LOAD` 会让离屏初始化直接失败。
+   所以拆成 `loadSurfaceFns()` / `loadSwapchainFns()`，失败只降级不致命。
+3. **`--fullscreen` 的真实代价**：2560×1440 走读回 + GDI 贴屏只有 **11.4 fps**（全屏读回
+   138MB/帧）。这与 GL 的守卫路径同量级，但说明"全屏 + 读回"只能当兜底，不能当常规路径。
+
+#### 5.10.4 P2b 验收实测（`make vk-window`）
+
+| 场景 | 结果 |
+|---|---|
+| probe / circle（窗口 + 交换链，读回**交换链图像**） | 与 GL 同尺寸输出 **0 像素差异（阈值 0）** |
+| svgpath（斜边 AA） | 611px（0.560%），最大通道差 116 —— 与离屏模式的 4 个 SVG 残差同源 |
+| 强制 GDI 路径（`--gdi`） | 0 差异（probe/circle），11fps→223fps 量级正常 |
+| 透明窗口（`--transparent`，分层窗口） | 0 差异，无崩溃 |
+| resize（600×260 → 760×340，交换链重建） | 重建后捕获帧与 GL 在 760×340 下的输出 **0 差异** |
+| 全屏守卫（2560×1440 铺满显示器） | 自动切 `present=GDI 读回`，11.4 fps，无停帧/撕裂现象 |
+| 帧率晴雨表（交换链，vsync=false，MAILBOX） | 1435 fps（600×260）→ 说明 present 没有额外阻塞 |
+
+**未做（留到后面）**：交换链 alpha（透明仍走读回）、frames-in-flight 并行（仍是单命令缓冲 +
+每帧等 fence）、输入/IME 事件循环（P5 的 app 类）、`GPU=vk` 构建开关（P5）。
 
 ---
 

@@ -6,6 +6,40 @@
 
 ## [Unreleased]
 
+### 新增 — Vulkan 后端 P2b：窗口 + 交换链 + 三路 present
+
+`BinUIVK` 现在能开真窗口了：`init(hwnd, w, h)` 建 surface + 交换链，`present()` 按条件选路。
+渲染目标仍是那张 MSAA + resolve 离屏图（与离屏模式完全同一条路径），present 时才把 resolve 图
+blit 进交换链 —— 所以**窗口模式与离屏模式的像素必然一致**。
+
+- 交换链：首选 `B8G8R8A8_UNORM`（与渲染目标同格式，blit 是纯拷贝）；`vsync=true` → FIFO，
+  `false` → MAILBOX/IMMEDIATE 优先；`setVsync` 改呈现模式时重建交换链。
+- 三路 present：交换链常规路径；透明窗口 → 读回 + `UpdateLayeredWindow`；客户区铺满显示器
+  （borderless 全屏，直翻转风险）→ 读回 + `SetDIBitsToDevice`；`acquire/present` 返回
+  `OUT_OF_DATE`/`SUBOPTIMAL` 时重建。
+- 降级链：交换链创建失败、或驱动没暴露 WSI 时，自动退回"读回 + GDI 贴屏"，不会整体不可用。
+- 新工具 `tools/vk_window.cpp`（+ `make vk-window`）：开真窗口跑 N 帧，把**交换链图像本身**
+  读回写 PNG，与 `gl_shot` 同尺寸输出逐像素比。
+- 新文件 `tools/save_png.h`：BGRA → PNG，抓图工具共用（vk_shot 的本地副本已删）。
+
+#### 实测（`make vk-window`）
+
+| 场景 | 结果 |
+|---|---|
+| probe / circle（窗口 + 交换链） | 与 GL **0 像素差异（阈值 0）** |
+| svgpath（斜边 AA） | 611px（0.560%），最大通道差 116（与离屏同源） |
+| 强制 GDI 路径 / 透明窗口 | 均 0 差异 |
+| resize 600×260 → 760×340（交换链重建） | 与 GL 在 760×340 下 **0 差异** |
+| 全屏守卫 2560×1440 | 自动切 `GDI 读回`，11.4 fps，无停帧 |
+| 交换链帧率（vsync=false, MAILBOX, 600×260） | 1435 fps |
+
+#### 踩到的坑
+
+- **`VK_USE_PLATFORM_WIN32_KHR` 必须在 `#include "vulkan/vulkan.h"` 之前定义**（vendored 头
+  按平台宏裁剪），否则 `VkWin32SurfaceCreateInfoKHR` 之类直接不存在。
+- WSI / 交换链函数必须**单独加载且允许为空**：离屏模式没有 surface 扩展，用统一加载会让离屏
+  初始化直接失败。
+
 ### 新增 — Vulkan 后端 P3：全原语（文本 / 图片 / 线段），离屏
 
 `BinUIVK` 现在 7 个原语全通，并且**文本与图片的实现与 GL 共用一份代码**，

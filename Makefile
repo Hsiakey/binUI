@@ -285,7 +285,8 @@ TOOL_BINS := \
     $(BIN_DIR)/enum_windows$(EXT) \
     $(BIN_DIR)/pixel_diff$(EXT) \
     $(BIN_DIR)/check_examples$(EXT) \
-    $(BIN_DIR)/vk_shot$(EXT)
+    $(BIN_DIR)/vk_shot$(EXT) \
+    $(BIN_DIR)/vk_window$(EXT)
 
 # 把 .bui 还原成打包前的目录结构（读同目录的 binui.res，header-only，不用链接库）
 $(BIN_DIR)/binui_export$(EXT): tools/binui_export.cpp
@@ -319,6 +320,15 @@ $(BIN_DIR)/vk_shot$(EXT): tools/vk_shot.cpp $(BUILD_DIR)/binui_vk.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c tools/vk_shot.cpp -o $(BUILD_DIR)/vk_shot.o
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
+		-luser32 -lgdi32 -lgdiplus -lole32 \
+		-Lthird_party/freetype/build -lfreetype \
+		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
+
+# 真实窗口 + 交换链的验收工具（P2b）：跑 N 帧，把**交换链图像**读回写 PNG
+$(BIN_DIR)/vk_window$(EXT): tools/vk_window.cpp $(BUILD_DIR)/binui_vk.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c tools/vk_window.cpp -o $(BUILD_DIR)/vk_window.o
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_window.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
 		-luser32 -lgdi32 -lgdiplus -lole32 \
 		-Lthird_party/freetype/build -lfreetype \
 		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
@@ -378,6 +388,8 @@ PIXEL_VK_TOL   ?= 1.5
 PIXEL_VK_CHTOL ?= 128
 # 真实示例（整页 UI，不是单点卡片）：文本、图片、组件、SVG 混排
 VK_DEMO_CASES  := features fontshow svgdemo texturedemo
+# 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
+VK_WINDOW_CASES := probe svgpath circle
 
 .PHONY: pixels-vk
 
@@ -396,6 +408,28 @@ pixels-vk: tools
 	    $(BIN_DIR)/gl_shot$(EXT) examples/$$d/main.html $(PIXEL_VK_OUT)/demo-$$d.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$d"; fail=1; continue; }; \
 	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/demo-$$d.gl.png $(PIXEL_VK_OUT)/demo-$$d.png $(PIXEL_VK_TOL) $(PIXEL_VK_OUT)/demo-$$d.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
 	done; \
+	exit $$fail
+
+.PHONY: vk-window
+
+# 窗口模式验收：拿真实窗口跑 N 帧，读回**交换链图像**与 GL 同尺寸输出比（阈值 0）。
+# 覆盖：交换链呈现 / 强制 GDI 读回 / resize 后交换链重建 / 全屏直翻转守卫 / 透明窗。
+vk-window: tools
+	@mkdir -p $(PIXEL_VK_OUT)
+	@fail=0; \
+	for c in $(VK_WINDOW_CASES); do \
+	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_VK_OUT)/$$c.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$c"; fail=1; continue; }; \
+	    for mode in "" "--gdi" "--transparent" "--resize"; do \
+	        tag=$$(echo "win$$mode" | tr -d '-'); \
+	        echo "--- $$c $$mode ---"; \
+	        $(BIN_DIR)/vk_window$(EXT) docs/issues/assets/$$c.html --frames 20 $$mode \
+	            --out $(PIXEL_VK_OUT)/$$c.$$tag.png >/dev/null 2>&1 || { echo "window failed: $$c $$mode"; fail=1; continue; }; \
+	        if [ "$$mode" = "--resize" ]; then continue; fi; \
+	        $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/$$c.gl.png $(PIXEL_VK_OUT)/$$c.$$tag.png $(PIXEL_VK_TOL) $(PIXEL_VK_OUT)/$$c.$$tag.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	    done; \
+	done; \
+	echo "--- fullscreen guard (window covers monitor -> expect GDI readback) ---"; \
+	$(BIN_DIR)/vk_window$(EXT) docs/issues/assets/probe.html --frames 10 --fullscreen 2>&1 | grep -E "present=|saved|fullscreen" || fail=1; \
 	exit $$fail
 
 else
