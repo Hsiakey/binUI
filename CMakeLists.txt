@@ -3,7 +3,7 @@
 # 字体渲染：FreeType + HarfBuzz（third_party 源码，静态链接）
 cmake_minimum_required(VERSION 3.16)
 project(binui
-    VERSION 0.7.0
+    VERSION 0.8.0
     DESCRIPTION "Cross-platform declarative UI core (binUI compiler + renderer)"
     LANGUAGES C CXX
 )

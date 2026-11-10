@@ -8,6 +8,64 @@
 
 （暂无）
 
+## [0.8.0] - 2026-11-10
+
+本轮主题：**SVG 收尾**（【格式 v18】）—— 元素类型齐了、坐标系闭合了、文字锚点对了、
+渐变的偏心焦点真算了。破坏性：`BINUI_VERSION` 17 → 18，旧 `.bui` / `.bum` 需重编。
+
+### 新增 — `<polygon>` / `<polyline>` 编成路径
+
+- 以前两者被拆成一堆 `BINUI_LINE`，**`fill` 完全无效**（多边形填充是最常见的写法，这是真 bug），
+  渐变描边/虚线/连接方式也表达不了。现在有颜料就编成 `BINUI_PATH`（`polygon` 闭合、
+  `polyline` 开放），填充/描边/虚线/linecap/linejoin/渐变全部复用路径通道。
+- 既没 `fill` 也没 `stroke` 的裸 `<polyline>` 仍然不产生节点（不凭空多一个黑块）。
+
+### 新增 — `<line>` 按需升级成路径
+
+`<line>` 保持轻量 `BINUI_LINE`，但写了 `stroke-dasharray` / 渐变描边 / `stroke-linecap` /
+`stroke-linejoin` 时自动升级成两点开放路径 —— 这些能力 LINE 节点表达不了（以前是静默失效）。
+
+### 新增 — 文字与虚线
+
+- `text-anchor="start|middle|end"`：`x` 从"盒子左边"变成"锚点"（用编译期字宽估算折算出盒子左边）。
+- `stroke-dashoffset`：编译期把虚线相位往前推（负值取模）。实测 pattern `10 10`、路径 0→100 时，
+  offset 0/5/10 的首段实线分别是 `[0,10]` / `[0,5]` / `[10,20]`。
+
+### 新增 — `preserveAspectRatio` 的 `slice` 与 9 宫格对齐
+
+`xMinYMin … xMaxYMax` 九种对齐 + `meet`/`slice` + 可选 `defer` 全部支持；
+`slice` 取较大缩放（铺满、超出由 `<svg>` 裁剪）。
+
+### 修复 — 嵌套 `<svg>` 的三处偏移（以前是"整块空白"）
+
+内层 `<svg>` 的 `x/y/width/height` 是父用户坐标，而普通元素的 left/top 是容器像素。三处必须同时
+对齐：① 节点盒要过父变换取包围盒；② viewBox 要映射到**设备尺寸**的内容盒（映射到用户尺寸会把
+父变换算两遍）；③ 运行期重排的 `relX/relY` 必须是相对父内容盒的偏移（写绝对坐标会在 `setSize`
+后再挪一次 —— 这也是为什么 GL 离屏先 `setSize` 时"只有 GL 露馅"）。修完后嵌套 svg 在 GDI 与 GL
+下逐像素一致（`0 diff`）。
+
+### 新增 — 径向焦点 `fx/fy`（SVG 锥形语义）
+
+从焦点 `F` 经 `P` 的射线打到单位圆于 `Q`，`t = |P-F| / |Q-F|`；实现是归一化后解
+`|F + s·(P-F)| = 1` 取正根、`t = 1/s`。焦点在圆外时规范未定义 → 告警并按同心圆画。
+（踩坑记录：二次项符号写反时圆心处 `t` 会变成 1.0，手算应为 `4/9 = 0.444`。）
+
+### 变更 — 格式 v18
+
+- `BinUIPathGradient` 增加 `fx, fy`（92 → 100 字节）；其余能力（polygon/polyline、`<line>` 升级、
+  `text-anchor`、`dashoffset`、`slice`、嵌套 svg）都不改格式。
+
+### 验证
+
+- `make all tools`：0 warning；四套测试全绿。
+- `suite_svgpath` 新增：polygon/polyline → PATH（含"裸 polygon 不产生节点"）、`<line>` 按需升级、
+  text-anchor 盒子左移、虚线三相位的首段区间、`BuildViewBoxMatrix` 的 meet/slice/9 宫格矩阵、
+  径向焦点四个 t 值、嵌套 svg 盒随 `<g>` 缩放平移。
+- 像素基准新增 `svgfinish`（420×260，覆盖上述全部）；`make pixels` **9/9 零差异**。
+- 三端一致性（`gl_shot` GL 离屏 vs GDI 基准）：嵌套 svg 修完后该区差异只剩 125/4096（圆角与描边
+  AA），纯填充区（polygon 星形、径向焦点球）**0 差异**。
+- `check_examples`：11 个 UI 0 问题。
+
 ## [0.7.0] - 2026-11-10
 
 本轮主题：**描边能力补完 + 精确命中**（【格式 v17】）。
