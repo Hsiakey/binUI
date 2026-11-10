@@ -546,6 +546,7 @@ inline bool ParsePathData(const std::string& d, float tolerance, PathShape& out,
 // ============================================================
 // 其它图元 → 折线（椭圆没有 `d`，但走同一套细分才有一致的容差口径）
 // ============================================================
+// 椭圆（走同一套细分容差）
 inline void AppendEllipse(PathShape& out, float cx, float cy, float rx, float ry,
                           float tolerance = 0.1f,
                           int maxPoints = kPathMaxPointsDefault) {
@@ -580,6 +581,157 @@ inline void AppendEllipse(PathShape& out, float cx, float cy, float rx, float ry
             static_cast<uint32_t>(out.pts.size()) - out.contours.back().first;
     }
     out.RecomputeBounds();
+}
+
+// 圆/椭圆的圆弧段（角度制，从 a0 扫到 a1），按容差自适应分段。
+// 只用于圆角矩形；任意椭圆弧走 ParsePathData 的 `A` 命令（三次贝塞尔那条路）。
+inline void AppendEllipseArc(PathShape& out, float cx, float cy, float r,
+                             float a0deg, float a1deg,
+                             float tolerance = 0.1f, int maxPoints = kPathMaxPointsDefault) {
+    if (r <= 0.0f) return;
+    const float kPi = 3.14159265358979323846f;
+    const float a0 = a0deg * kPi / 180.0f;
+    const float a1 = a1deg * kPi / 180.0f;
+    // 弦高 ≤ tolerance 时的最大圆心角：θ ≈ 2·acos(1 - tol/r)
+    float step = 0.35f;
+    if (tolerance > 0.0f && tolerance < r) {
+        step = 2.0f * std::acos(std::max(-1.0f, std::min(1.0f, 1.0f - tolerance / r)));
+        step = std::max(0.05f, std::min(step, 0.35f));
+    }
+    const int n = std::max(1, static_cast<int>(std::ceil(std::fabs(a1 - a0) / step)));
+    for (int i = 1; i <= n; i++) {
+        if (static_cast<int>(out.pts.size()) >= maxPoints) break;
+        const float t = a0 + (a1 - a0) * static_cast<float>(i) / static_cast<float>(n);
+        out.pts.push_back({ cx + r * std::cos(t), cy + r * std::sin(t) });
+    }
+}
+
+// 圆角矩形：四段直线 + 四个 1/4 圆弧（rx<=0 时退化成四段直线）。
+// 用来把 <rect rx> 在"带描边"时编成路径 —— 轻量映射（LIST + radius）只有填充，
+// 描边必须走 path 才有 fill+stroke 并存。
+inline void AppendRoundedRect(PathShape& out, float x, float y, float w, float h,
+                              float rx, float tolerance = 0.1f,
+                              int maxPoints = kPathMaxPointsDefault) {
+    if (w <= 0.0f || h <= 0.0f) return;
+    const float r = std::max(0.0f, std::min(rx, std::min(w, h) * 0.5f));
+    PathShape::Contour c;
+    c.first = static_cast<uint32_t>(out.pts.size());
+    c.closed = true;
+    out.contours.push_back(c);
+    auto push = [&](float px, float py) { out.pts.push_back({ px, py }); };
+    if (r <= 0.0f) {
+        push(x, y);
+        push(x + w, y);
+        push(x + w, y + h);
+        push(x, y + h);
+    } else {
+        // 上边 → 右上弧 → 右边 → 右下弧 → 下边 → 左下弧 → 左边 → 左上弧
+        push(x + r, y);
+        push(x + w - r, y);
+        AppendEllipseArc(out, x + w - r, y + r, r, -90.0f, 0.0f, tolerance, maxPoints);
+        push(x + w, y + h - r);
+        AppendEllipseArc(out, x + w - r, y + h - r, r, 0.0f, 90.0f, tolerance, maxPoints);
+        push(x + r, y + h);
+        AppendEllipseArc(out, x + r, y + h - r, r, 90.0f, 180.0f, tolerance, maxPoints);
+        push(x, y + r);
+        AppendEllipseArc(out, x + r, y + r, r, 180.0f, 270.0f, tolerance, maxPoints);
+    }
+    // 最后一个弧的终点回到起点附近，去掉重复点
+    if (out.pts.size() > c.first + 1) {
+        const PathPointF& a = out.pts.back();
+        const PathPointF& b = out.pts[c.first];
+        if (std::fabs(a.x - b.x) < 1e-3f && std::fabs(a.y - b.y) < 1e-3f) out.pts.pop_back();
+    }
+    out.contours.back().count = static_cast<uint32_t>(out.pts.size()) - c.first;
+    out.RecomputeBounds();
+}
+
+// ============================================================
+// stroke-dasharray：按弧长把子路径切成"实线段"，编译期做完
+//
+// 运行期描边就是"逐段画线"，没有虚线概念；与其给三端加虚线逻辑，
+// 不如在编译期把折线切成一段段实线子路径 —— 运行期照常画，零改动。
+// 代价：虚线间距按**用户单位**在编译期固定，运行期缩放时整条虚线一起缩放
+// （SVG 语义本来就是随用户单位缩放，所以这是对的）。
+// 返回 false 表示"虚线把整条路径吃光了"（调用方应把描边关掉）。
+// ============================================================
+inline bool ApplyDashPattern(PathShape& s, const std::vector<float>& pattern) {
+    if (pattern.empty() || s.Empty()) return false;
+    std::vector<float> pat;
+    for (float v : pattern) pat.push_back(v > 0.0f ? v : 0.0f);
+    float total = 0.0f;
+    for (float v : pat) total += v;
+    if (total <= 1e-4f) return false;   // 全 0 = 不画（SVG 规范）
+
+    PathShape out;
+    size_t patIdx = 0;
+    float remain = pat[0];
+    bool on = true;
+    if (remain <= 0.0f) {               // 开头是 0 长度段：直接跳过
+        for (size_t k = 1; k <= pat.size(); k++) {
+            const size_t i2 = k % pat.size();
+            if (pat[i2] > 0.0f) { patIdx = i2; remain = pat[i2]; on = (i2 % 2) == 0; break; }
+        }
+    }
+
+    for (const PathShape::Contour& c : s.contours) {
+        if (c.count < 2) continue;
+        const size_t segs = c.closed ? c.count : c.count - 1;
+        PathPointF cur = s.pts[c.first];
+        if (on) {
+            PathShape::Contour nc;
+            nc.first = static_cast<uint32_t>(out.pts.size());
+            out.pts.push_back(cur);
+            nc.count = 1;
+            out.contours.push_back(nc);
+        }
+        for (size_t k = 0; k < segs; k++) {
+            const PathPointF a = s.pts[c.first + k];
+            const PathPointF b = s.pts[c.first + (k + 1) % c.count];
+            float segLen = std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+            PathPointF p = a;
+            while (segLen > 1e-6f) {
+                const float take = std::min(remain, segLen);
+                const float t = take / segLen;
+                const PathPointF q{ p.x + (b.x - p.x) * t, p.y + (b.y - p.y) * t };
+                if (on) out.pts.push_back(q);
+                segLen -= take;
+                remain -= take;
+                p = q;
+                if (remain <= 1e-6f) {
+                    if (on) out.contours.back().count =
+                        static_cast<uint32_t>(out.pts.size()) - out.contours.back().first;
+                    patIdx = (patIdx + 1) % pat.size();
+                    on = (patIdx % 2) == 0;
+                    remain = pat[patIdx];
+                    if (on && remain > 0.0f) {
+                        PathShape::Contour nc2;
+                        nc2.first = static_cast<uint32_t>(out.pts.size());
+                        out.pts.push_back(p);
+                        nc2.count = 1;
+                        out.contours.push_back(nc2);
+                    }
+                }
+            }
+        }
+        if (on && !out.contours.empty())       // 收尾：把最后一段的点数补上
+            out.contours.back().count =
+                static_cast<uint32_t>(out.pts.size()) - out.contours.back().first;
+    }
+    // 丢掉只剩一个点的碎片（零长实线段）
+    std::vector<PathShape::Contour> kept;
+    for (const PathShape::Contour& c : out.contours) {
+        if (c.count < 2) continue;
+        PathShape::Contour nc;
+        nc.first = c.first;
+        nc.count = c.count;
+        kept.push_back(nc);
+    }
+    if (kept.empty()) return false;
+    out.contours.swap(kept);
+    out.RecomputeBounds();
+    s = std::move(out);
+    return true;
 }
 
 // 对整条路径套仿射（viewBox 映射 / <g transform> 都在编译期做完）

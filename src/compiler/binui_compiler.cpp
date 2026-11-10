@@ -4439,7 +4439,14 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         bool pathFill = true, pathEvenOdd = false, pathStroke = false;
         uint32_t pathFillColor = 0xFF000000u, pathStrokeColor = 0xFF000000u;
         float pathStrokeW = 0.0f;
-        if (e.tag == "path" || e.tag == "ellipse") {
+        // <path>/<ellipse>：永远是路径。
+        // <circle>/<rect>：只有在**带描边**时才编成路径 —— 轻量映射（LIST + radius）
+        // 只能表达一个颜色，fill 与 stroke 并存走不通；没有描边时继续走轻量映射，
+        // 因为圆角矩形的九宫格填充比扫描线条带更干净（边缘更准、也没有取整毛边）。
+        const bool shapeAsPath = (e.tag == "path" || e.tag == "ellipse") ||
+                                 ((e.tag == "circle" || e.tag == "rect") &&
+                                  eHasStroke && eStrokeW > 0);
+        if (shapeAsPath) {
             if (e.tag == "path") {
                 const std::string d = e.attrs.count("d") ? e.attrs.at("d") : "";
                 std::string perr;
@@ -4448,13 +4455,29 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 } else if (!ParsePathData(d, 0.1f, svgPathShape, &perr)) {
                     Warn("<path> 的 d 解析失败：" + perr);
                 }
-            } else {
+            } else if (e.tag == "ellipse") {
                 const float ecx = parseLen(e.attrs.count("cx") ? e.attrs.at("cx") : "", 0);
                 const float ecy = parseLen(e.attrs.count("cy") ? e.attrs.at("cy") : "", 0);
                 const float erx = parseLen(e.attrs.count("rx") ? e.attrs.at("rx") : "", 0);
                 const float ery = parseLen(e.attrs.count("ry") ? e.attrs.at("ry") : "", 0);
                 if (erx <= 0.0f || ery <= 0.0f) Warn("<ellipse> 的 rx/ry 必须大于 0（跳过）");
                 else AppendEllipse(svgPathShape, ecx, ecy, erx, ery, 0.1f);
+            } else if (e.tag == "circle") {
+                const float ccx = parseLen(e.attrs.count("cx") ? e.attrs.at("cx") : "", 0);
+                const float ccy = parseLen(e.attrs.count("cy") ? e.attrs.at("cy") : "", 0);
+                const float cr = parseLen(e.attrs.count("r") ? e.attrs.at("r") : "", 0);
+                if (cr <= 0.0f) Warn("<circle> 的 r 必须大于 0（跳过）");
+                else AppendEllipse(svgPathShape, ccx, ccy, cr, cr, 0.1f);
+            } else {   // rect（带描边时才走到这里）
+                const float rx0 = parseLen(e.attrs.count("x") ? e.attrs.at("x") : "", 0);
+                const float ry0 = parseLen(e.attrs.count("y") ? e.attrs.at("y") : "", 0);
+                const float rw0 = parseLen(e.attrs.count("width") ? e.attrs.at("width") : "", 0);
+                const float rh0 = parseLen(e.attrs.count("height") ? e.attrs.at("height") : "", 0);
+                float cr = 0.0f;
+                if (e.attrs.count("rx")) cr = parseLen(e.attrs.at("rx"), 0);
+                else if (e.attrs.count("ry")) cr = parseLen(e.attrs.at("ry"), 0);
+                if (rw0 <= 0.0f || rh0 <= 0.0f) Warn("<rect> 的 width/height 必须大于 0（跳过）");
+                else AppendRoundedRect(svgPathShape, rx0, ry0, rw0, rh0, cr, 0.1f);
             }
             if (svgPathShape.truncated)
                 Warn("<path> 细分点数超过上限已截断：简化路径或拆成多段");
@@ -4481,6 +4504,31 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 pathStrokeColor = fade(pathStrokeColor, "stroke-opacity");
                 pathFillColor = fade(pathFillColor, "opacity");
                 pathStrokeColor = fade(pathStrokeColor, "opacity");
+                // stroke-dasharray：编译期按弧长把折线切成实线段（运行期照常画折线）。
+                // 长度是**用户单位**，而几何已经被 svgX 映射过，所以要乘同一个缩放系数。
+                if (pathStroke) {
+                    std::string da = style.count("stroke-dasharray") ? style.at("stroke-dasharray") : "";
+                    if (da.empty() && e.attrs.count("stroke-dasharray"))
+                        da = e.attrs.at("stroke-dasharray");
+                    if (!da.empty() && lowerStr(da) != "none") {
+                        std::vector<float> pat;
+                        std::string cur;
+                        const float xk = PathScaleFactor(svgX);
+                        for (char ch : da) {
+                            if (ch == ',' || ch == ' ' || ch == '\t') {
+                                if (!cur.empty()) { pat.push_back(parseLen(cur, 0) * xk); cur.clear(); }
+                            } else {
+                                cur += ch;
+                            }
+                        }
+                        if (!cur.empty()) pat.push_back(parseLen(cur, 0) * xk);
+                        if (pat.size() % 2 == 1) pat.insert(pat.end(), pat.begin(), pat.end());
+                        if (!ApplyDashPattern(svgPathShape, pat)) {
+                            Warn("stroke-dasharray 把整条路径吃光了（描边已关闭）");
+                            pathStroke = false;
+                        }
+                    }
+                }
                 if (pathStroke) {   // 描边外扩后才是节点盒
                     const float e2 = pathStrokeW * 0.5f;
                     svgPathShape.minX -= e2; svgPathShape.minY -= e2;
@@ -4490,6 +4538,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                     Warn("<path> 的包围盒为零（跳过：只有水平/垂直直线时请改用 <line>）");
                 } else {
                     hasSvgPath = true;   // 包围盒在 <line>/<circle> 那段统一落进 sx/sy/sw/sh
+                    type = BINUI_PATH;   // <circle>/<rect> 带描边时改走路径
                 }
             }
         }
@@ -4567,7 +4616,13 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // SVG 图形属性 -> 通用定位：<line> 用 x1/y1/x2/y2 端点，<circle> 用 cx/cy/r
         // 端点在绘制后端按"起点 + 相对偏移"还原（见节点生成处的 BINUI_LINE 覆盖）
         float svgR = -1, svgLineX1 = 0, svgLineY1 = 0, svgLineX2 = -1, svgLineY2 = -1;
-        if (e.tag == "line") {
+        if (hasSvgPath) {
+            // <path>/<ellipse>，以及带描边的 <circle>/<rect>：几何包围盒（含描边外扩）当节点盒
+            sx = std::to_string(svgPathShape.minX);
+            sy = std::to_string(svgPathShape.minY);
+            sw = std::to_string(svgPathShape.Width());
+            sh = std::to_string(svgPathShape.Height());
+        } else if (e.tag == "line") {
             float x1 = parseLen(e.attrs.count("x1") ? e.attrs.at("x1") : "", 0);
             float y1 = parseLen(e.attrs.count("y1") ? e.attrs.at("y1") : "", 0);
             float x2 = parseLen(e.attrs.count("x2") ? e.attrs.at("x2") : "", 0);
@@ -4603,12 +4658,6 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             // <g> 在 SVG 里不建立坐标系、也不是布局盒子：给它一个零尺寸的绝对定位节点，
             // 子元素直接挂在父容器原点（见下面 push 处对 <g> 的 ox/oy 处理）
             sx = "0"; sy = "0"; sw = "0"; sh = "0";
-        } else if (hasSvgPath) {
-            // <path>/<ellipse>：几何包围盒（含描边外扩）当作节点盒
-            sx = std::to_string(svgPathShape.minX);
-            sy = std::to_string(svgPathShape.minY);
-            sw = std::to_string(svgPathShape.Width());
-            sh = std::to_string(svgPathShape.Height());
         }
 
         // <br>：换行占位——块式布局下每个元素已独占一行，br 只占零高度
@@ -4978,17 +5027,13 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             n.color = eHasStroke ? eStroke : 0xFF000000u;   // 线的默认色：黑
             n.radius = (uint16_t)(eStrokeW > 0 ? eStrokeW : 1);
             n.flags |= BINUI_ABSOLUTE;
-        } else if (e.tag == "circle") {
+        } else if (e.tag == "circle" && !hasSvgPath) {
             n.color = eHasFill ? eFill : 0;                 // fill="none" → 不画底色块
             n.radius = (uint16_t)svgR;
-            if (eHasStroke)
-                Warn("<circle> 不能 fill 与 stroke 并存：需要描边圆请改用 <path>（弧）或 <rect rx>");
-        } else if (e.tag == "rect") {
+        } else if (e.tag == "rect" && !hasSvgPath) {
             n.color = eHasFill ? eFill : 0;
             std::string rx = e.attrs.count("rx") ? e.attrs.at("rx") : "";
             if (!rx.empty()) n.radius = (uint16_t)(parseLen(rx, 0) * PathScaleFactor(svgX));
-            if (eHasStroke)
-                Warn("<rect> 不能 fill 与 stroke 并存：需要描边矩形请改用 <path> 或 <line>");
         }
 
         // 文本来源：元素自身文本 > 输入框/按钮的值 > 图片的 alt 兜底

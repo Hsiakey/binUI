@@ -245,11 +245,13 @@ P1 里这个降级不做，但文档要写清"圆/矩形没有独立描边"。
 
 ---
 
-## 6. 后续（P2 / P3，不阻塞 P1）
+## 6. 后续（P2 / P3）
 
-- **P2**：`stroke-dasharray`、`linecap/linejoin`（miter/bevel）、`linearGradient`/`radialGradient`
-  （逐 span 取色，机制与现有渐变一致）、`<defs>/<use>/<symbol>`、`<text>` → `BINUI_LABEL`、
-  `<image>` → `BINUI_IMAGE`、圆/矩形在带描边时自动降级成 path。
+- **P2 已完成**：`stroke-dasharray`（编译期按弧长切段，三端零改动）、
+  圆/矩形带描边时自动编成路径（`AppendRoundedRect`）。
+- **P2 待做**：`stroke-linecap` / `stroke-linejoin`（miter/bevel）、
+  `linearGradient`/`radialGradient`（逐 span 取色，机制与现有渐变一致）、
+  `<defs>/<use>/<symbol>`、`<text>` → `BINUI_LABEL`、`<image>` → `BINUI_IMAGE`。
 - **P3**：精确命中（点在路径内，可选）、span 缓存、命令级存储 + 运行时再细分、可选灰度抗锯齿
   （只对 path 边缘，全库仍走硬边）。
 
@@ -291,8 +293,10 @@ P1 里这个降级不做，但文档要写清"圆/矩形没有独立描边"。
   会比标准 SVG 略圆。
 - **两条线之间**没有抗锯齿：硬边与整个库一致；GL 端 `fillLine` 的边缘是它自己的 AA，
   所以"填充逐像素一致、描边边缘略有差异"。
-- **`<circle>` / `<rect>` 不能 fill + stroke 并存**：它们仍是轻量映射，要描边请用 `<path>`；
-  编译器对"写了 stroke 的圆/矩形"会明确告警。
+- **`<circle>` / `<rect>` 默认仍走轻量映射**（九宫格填充比扫描线干净）：只有写了 `stroke`
+  才自动编成路径（`AppendRoundedRect` 把 `rx` 变成真圆弧），所以"圆没有独立描边"这条限制已经没了。
+- **`stroke-linecap` / `stroke-linejoin` 未实现**：端帽一律 butt，连接一律圆角（转角 > 15° 补圆点），
+  尖角图标（五角星）会比标准 SVG 略圆。
 - **嵌套 `<svg>`**：内层 svg 自己的 `transform` 与 viewBox 会重新起算，祖先的变换不叠加
   （嵌套 svg 在图标素材里极少见，暂不处理）。
 

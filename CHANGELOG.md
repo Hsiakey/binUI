@@ -6,6 +6,23 @@
 
 ## [Unreleased]
 
+### 新增 — SVG P2-1：带描边的圆/矩形自动走路径 + `stroke-dasharray`
+
+- **`<circle>` / `<rect>` 带描边时自动降级成 `BINUI_PATH`**：以前它们只能走轻量映射
+  （`LIST` + 圆角 = 一个颜色），`fill` 与 `stroke` 并存直接告警、描边被丢掉。
+  现在只要写了 `stroke`（且线宽 > 0）就编成路径，圆角矩形的 `rx` 也会变成真正的
+  四分圆弧（新 `AppendRoundedRect`）。没有描边时**继续走轻量映射** —— 九宫格填充
+  比扫描线条带更干净，不该为了统一而变差。
+- **`stroke-dasharray` 支持**：编译期按弧长把折线切成"实线段"子路径
+  （新 `ApplyDashPattern`），运行期照常画折线 —— 三端零改动，曲线（虚线圆）也对。
+  长度按用户单位再乘坐标变换系数，所以放大后虚线间距一起放大（SVG 语义）。
+  奇数个值按规范重复一遍（`3` → `3 3`）；全 0 视为不画并告警。
+- 仍不支持：`stroke-linecap`（一律 butt）、`stroke-linejoin`（一律圆角连接，转角 > 15° 补圆点）、
+  渐变、`mask`/`clipPath`/`pattern`/`marker`、`<defs>/<use>/<symbol>`、`<text>`、`<image>`。
+- 验证：`suite_svgpath` 增加圆角矩形几何、虚线切段（10 单位 + `2 2` → 3 段、实线总长 6）、
+  "带描边的圆/矩形必须编成路径且 fill+stroke 都在"的端到端断言；像素基准 `svgpath`
+  第二行补上四种新写法（描边圆 / 描边圆角矩形 / 虚线 / 虚线圆），5/5 零差异。
+
 ### 新增 — SVG `<path>` / `<ellipse>`：真正的矢量路径（【格式 v15】）
 
 - **现在能直接粘现成图标**（Lucide / Feather / Material 那一套 `<path d="M…">`），

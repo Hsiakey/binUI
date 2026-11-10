@@ -2853,6 +2853,75 @@ static void TestSvgSemantics() {
     }
 }
 
+// 圆角矩形路径 + stroke-dasharray（编译期切段）+ 圆/矩形带描边时改走路径
+static void TestShapesAndDash() {
+    // 圆角矩形：包围盒 = 外框，四个角是弧
+    {
+        PathShape rr;
+        AppendRoundedRect(rr, 10, 20, 60, 40, 8, 0.05f);
+        CHECK(rr.contours.size() == 1 && rr.contours[0].closed, "圆角矩形：一条闭合子路径");
+        CHECK_NEAR(rr.minX, 10, 0.1f, "圆角矩形：左边界");
+        CHECK_NEAR(rr.maxX, 70, 0.1f, "圆角矩形：右边界");
+        CHECK_NEAR(rr.minY, 20, 0.1f, "圆角矩形：上边界");
+        CHECK_NEAR(rr.maxY, 60, 0.1f, "圆角矩形：下边界");
+        CHECK(PointInPath(rr, 40, 40, false), "圆角矩形：中心在内部");
+        CHECK(!PointInPath(rr, 12, 22, false), "圆角矩形：切掉的外角在外部");
+        CHECK(rr.pts.size() > 4, "圆角矩形：圆角处有细分点");
+    }
+
+    // 虚线：10 单位直线 + dash 2/2 → 3 段实线（0-2 / 4-6 / 8-10）
+    {
+        PathShape line;
+        std::string err;
+        ParsePathData("M0 0 H10", 0.1f, line, &err);
+        std::vector<float> pat{ 2.0f, 2.0f };
+        const bool ok = ApplyDashPattern(line, pat);
+        std::printf("  [svgpath] 虚线：%d 条子路径（期望 3）\n", (int)line.contours.size());
+        CHECK(ok && line.contours.size() == 3, "虚线：切成 3 段实线");
+        double total = 0;
+        for (const auto& c : line.contours) {
+            CHECK(c.count >= 2, "虚线：每段至少两个点");
+            const PathPointF& a = line.pts[c.first];
+            const PathPointF& b = line.pts[c.first + c.count - 1];
+            total += std::sqrt((b.x - a.x) * (b.x - a.x) + (b.y - a.y) * (b.y - a.y));
+        }
+        CHECK_NEAR(total, 6.0, 0.05, "虚线：实线总长 = 3 段 × 2");
+        CHECK(!ApplyDashPattern(line, { 0.0f, 0.0f }), "虚线：全 0 模式 → 不画");
+    }
+
+    // 编译期：带描边的 <circle>/<rect> 必须变成 BINUI_PATH 且 fill/stroke 都在
+    {
+        std::string html =
+            "<app_window width=\"200\" height=\"100\"><html width=\"200\" height=\"100\" bg=\"#000000\">"
+            "<body><svg x=\"0\" y=\"0\" width=\"96\" height=\"96\" viewBox=\"0 0 24 24\">"
+            "<circle cx=\"12\" cy=\"12\" r=\"9\" fill=\"#123456\" stroke=\"#7AAAFF\" stroke-width=\"2\"/>"
+            "<rect x=\"2\" y=\"2\" width=\"8\" height=\"8\" rx=\"2\" fill=\"none\" stroke=\"#4ED17E\"/>"
+            "<path d=\"M0 20 H24\" fill=\"none\" stroke=\"#F59E0B\" stroke-width=\"2\" stroke-dasharray=\"4 2\"/>"
+            "</svg></body></html></app_window>";
+        auto res = binui::CompileBinUIEx(html);
+        for (const auto& w : res.warnings) std::printf("  [svgpath][warn] %s\n", w.c_str());
+        CHECK(res.warnings.empty(), "形状降级：不再告警");
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "形状降级：布局可解析");
+        int pathNodes = 0, fillStroke = 0, dashPaths = 0;
+        for (const auto& n : r.getNodes()) {
+            if (n.type != BINUI_PATH) continue;
+            pathNodes++;
+            const auto* rec = r.pathOf(n.id);
+            if (!rec) continue;
+            const bool hasFill = (rec->head.flags & PATH_FILL) != 0;
+            const bool hasStroke = (rec->head.flags & PATH_STROKE) != 0;
+            if (hasFill && hasStroke) fillStroke++;
+            if (hasStroke && rec->first.size() >= 3) dashPaths++;   // 虚线被切成多条子路径
+        }
+        std::printf("  [svgpath] 形状降级：路径节点 %d，fill+stroke %d，虚线路径 %d\n",
+                    pathNodes, fillStroke, dashPaths);
+        CHECK(pathNodes == 3, "形状降级：三个图形都是路径节点");
+        CHECK(fillStroke == 1, "形状降级：圆是 fill+stroke 并存");
+        CHECK(dashPaths == 1, "形状降级：虚线路径有多条子路径");
+    }
+}
+
 static int run() {
     std::printf("\n[suite_svgpath] 路径几何（binui_path.h）+ 扫描线填充（binui_paint.h）\n");
     TestParse();
@@ -2860,6 +2929,7 @@ static int run() {
     TestStroke();
     TestCompileAndLoad();
     TestSvgSemantics();
+    TestShapesAndDash();
     std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");
     return g_fail;
 }
