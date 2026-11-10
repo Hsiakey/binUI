@@ -17,11 +17,12 @@
 #endif
 
 #include "binui_renderer.h"
+#include "binui_gfx.h"   // IBinUIGfx：后端契约（v19）
 
 namespace binui {
 
 // GPU 场景渲染器：立即模式原语 + 帧呈现（对布局/命中测试零依赖）
-class BinUIGLGdi {
+class BinUIGLGdi : public IBinUIGfx {
 public:
     BinUIGLGdi();
     ~BinUIGLGdi();

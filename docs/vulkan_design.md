@@ -122,6 +122,25 @@ void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const void* c
 2. `BinUID3D : public IBinUIGfx` 同样接上，删掉它那份遍历；
 3. 删掉 GL 那份遍历，`binui_draw_nodes.cpp` 成为唯一实现。
 
+### 3.2a P1 落地记录（2026-11-10，已完成 GL 一半）
+
+- 新增 [`src/backends/binui_gfx.h`](../src/backends/binui_gfx.h)：`IBinUIGfx` 接口全文 + `CanvasFn`。
+- 新增 [`src/backends/binui_draw_nodes.h`](../src/backends/binui_draw_nodes.h)：后端无关遍历 `drawNodesBinUI`
+  （从 GL 的 694 行原样搬出，只把 `BinUIGLGdi&` 换成 `IBinUIGfx&`、`ScaleAlpha` 换成共享的 `GfxScaleAlpha`）。
+  放头文件里是为了**不动 Makefile**（后端对象是按目标逐个链接的，加 .cpp 要改十几条规则）。
+- `BinUIGLGdi : public IBinUIGfx`；GL 侧只留一个薄壳 `drawNodesGLGdi`（把具体回调适配成 `CanvasFn`），
+  demo/tools 一行没改。
+- **像素中性验证**：`make pixels` 10/10 零差异；10 个用例的 `gl_shot` 出图与改前**逐像素 0 差异**；
+  四套测试全绿；`check_examples` 11/11。
+
+### 3.2b 发现的意外：D3D11 后端根本没在构建里
+
+P1 复查时发现 `binui_d3d11.cpp`（2600 行）**既不在 Makefile 也不在 CMakeLists** 里 —— mingw32-make 与
+CMake 都不编译它，也没有任何 demo/tool 使用 `BinUID3D`。所以：
+- 仓库里"三端一致"的说法，在构建层面实际只有 **GDI + GL 两端**；
+- 把它并入共享遍历**当前无法验证**（没有出图工具、没有窗口壳），因此 P1 只完成 GL 那一半，
+  D3D11 的并入推迟到"它真的重新进入构建"时再做（届时直接用 `drawNodesBinUI` 替换它自己那份）。
+
 ### 3.3 GDI 为什么不并进来
 
 `drawNodesGDI`（[`app_win32.cpp:635`](../src/platform/app_win32.cpp)，约 749 行）与 GPU 版**语义不同**：
