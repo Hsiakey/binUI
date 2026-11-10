@@ -7,6 +7,7 @@
 | [keyboard_focus.md](keyboard_focus.md) | **键盘焦点系统**：焦点控制 / 文本编辑 / 鼠标三态与按键表、WASD 移焦点、方向键滚哪个容器、回车两段式、焦点环（:focus-visible + 2 秒自动熄灭）、宿主接法；末尾是层级焦点导航（下潜 / 上浮）的未来开发计划（未实现） |
 | [app_layout.md](app_layout.md) | **应用散装形态**：exe 真实路径解析、UI 文件 6 级查找顺序、`src` 相对规则、`.bex` 容器的映射契约 |
 | [components.md](components.md) | **组件化**：`<use src="x.bum.html">` 编译期内联、参数/合并/CSS 作用域规则、`.bum` 二进制与运行时挂载、目录结构 |
+| [svg.md](svg.md) | **SVG 支持方案（方案稿，未实现）**：现状实测、`BINUI_PATH` 节点 + v15 路径段的格式、编译期 viewBox/变换/继承、三端共用扫描线填充、四阶段拆分与验收 |
 | [bex_container.md](bex_container.md) | **`.bex` 单文件容器规范（设计归档，暂不实现）**：ELF 自定义段 / PE 资源节承载 binUI 布局、节布局与 trailer |
 | [img/](img/) | 文档用图：默认布局渲染、字体渲染对比、伪类演示、语言绑定演示 |
 | [../tests/README.md](../tests/README.md) | **测试用例**：四个主题套件（CSS / 元素 / 字体与输入法 / C ABI）、无窗口能测什么、历史合并记录 |
