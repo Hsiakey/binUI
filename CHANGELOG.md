@@ -8,6 +8,62 @@
 
 （暂无）
 
+## [0.7.0] - 2026-11-10
+
+本轮主题：**描边能力补完 + 精确命中**（【格式 v17】）。
+破坏性：`BINUI_VERSION` 16 → 17，旧 `.bui` / `.bum` 需重编。
+
+### 新增 — 渐变描边 `stroke="url(#id)"`
+
+- 以前只按首个色标纯色画（还带告警），现在真的渐变：**每段线按自己的中点取色**。
+  折线本来就是曲线细分出来的（24 单位图标 ≈ 0.1px 容差），逐段取色等价于逐像素取色，
+  不需要给后端加渐变画刷，三端仍然只画 `fillLine` / `fillRect`。
+- 线性 / 径向、`spreadMethod`、`gradientTransform`、`objectBoundingBox` / `userSpaceOnUse`、
+  2–8 个色标、`href` 继承 —— 与填充渐变同一套能力，坐标折算也**共用同一个函数**
+  （只有 alpha 键不同：`stroke-opacity` 而不是 `fill-opacity`）。
+- 填充与描边可以同时是渐变：路径记录里两条可选渐变记录各占 92 字节，互不影响。
+- 继承：`<svg stroke="url(#g)">` / `<g stroke="url(#g)">` 全子树生效；子元素写纯色 `stroke`
+  会清掉继承来的渐变。
+- `<line>` / `<polyline>` / `<polygon>` 表达不了渐变描边（它们编成线段节点），明确告警并建议改用 `<path>`。
+
+### 新增 — `stroke-linecap="square"`
+
+- 方头 = 端点沿切线各外延半个线宽；转角几何仍用未外延的原始端点（否则拐角会多出一截）。
+  实测：线宽 10、路径 0→100 时 butt 是 `(0,0)-(100,0)`，square 是 `(-5,0)-(105,0)`。
+
+### 新增 — 精确命中（P3 首项）
+
+- `BINUI_PATH` 有填充时，包围盒命中之后再按"点在路径内"判一次（`PointInPathNorm`，
+  与 `PointInPath` 同一套绕数/奇偶逻辑，直接吃 `uint16` 归一化点），顺带取 ±1 设备像素容差。
+  **环的洞、星形的凹口不再误命中**；描边-only 的路径仍按包围盒（细线本来就不好点）。
+
+### 修复 — `fill-opacity` / `stroke-opacity` 作为表现属性时被静默忽略
+
+- `fade()` 以前只查 `style`（内联 style / CSS 规则），没查元素属性，所以
+  `fill-opacity="0.5"`、`stroke-opacity="0.5"` 都不生效。现在按 `style > 属性` 取值 ——
+  渐变描边要折 `stroke-opacity`，正好踩在这条路上。
+
+### 变更 — 格式 v17
+
+- 路径记录在填充渐变之后可再追加一条 `BinUIPathGradient`（`PATH_STROKE_GRAD`）。
+- `stroke-linecap="square"` 落进既有的 `BinUIPathEntry.cap` 字段（`BINUI_CAP_SQUARE`）。
+- 渲染器 / 链接器 / 三端 `BINUI_PATH` 分支都带上描边渐变：`PaintPathNode` 的颜料参数
+  收拢成 `PathPaintSpec`（填充色/描边色/两条渐变/不透明度），描边回调从"固定颜色"改成"逐段取色"；
+  GDI 的画笔缓存改成按"宽度 + 颜色"缓存（否则渐变描边会一直用第一段颜色）。
+
+### 验证
+
+- `make all tools`：0 warning；四套测试全绿。`suite_svgpath` 新增：方头外延、渐变描边逐段取色
+  （纯色同色 / 渐变首末段色差）、精确命中（环带命中、洞心不命中、盒外不命中）、
+  `linecap=square` 落库且不报警告。
+- 像素基准新增 `svgstroke`（420×260）：渐变描边四样（线性/径向/三色标/虚线）+ 线帽三连 +
+  方头虚线 + 三个真图标；`svggrad` 基准重出（`stroke="url(#…)"` 现在是真的渐变）。
+  `make pixels` **8/8 零差异**。
+- 三端一致性（`gl_shot` GL 离屏 vs GDI 基准）：渐变填充区内部像素 **20694 个 0 差异**；
+  `svgjoin` 内部 702 个中 5 个、`svgstroke` 内部 444 个中 12 个不同 —— 差异全在线段边缘
+  （GDI `LineTo` 与 GL `fillLine` 的取整/抗锯齿，与渐变无关）。
+- `check_examples`：11 个 UI 0 问题；`examples/svgdemo` 的心形图标改成三色标渐变描边 + 方头。
+
 ## [0.6.0] - 2026-11-10
 
 本轮主题：**`stroke-linejoin` 的 miter / bevel 补齐**（SVG P2 收尾，格式仍是 v16，
