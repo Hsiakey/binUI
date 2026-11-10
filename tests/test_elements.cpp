@@ -2922,6 +2922,46 @@ static void TestShapesAndDash() {
     }
 }
 
+// <defs>/<symbol> + <use href>：模板不直接画，引用处按 x/y 平移，
+// symbol 的 viewBox 按 use 的 width/height 缩放
+static void TestUseDefs() {
+    std::string html =
+        "<app_window width=\"200\" height=\"80\"><html width=\"200\" height=\"80\" bg=\"#000000\">"
+        "<body><svg x=\"0\" y=\"0\" width=\"200\" height=\"80\" viewBox=\"0 0 200 80\">"
+        "<defs>"
+        "  <g id=\"tile\"><rect x=\"0\" y=\"0\" width=\"20\" height=\"20\" fill=\"#7AAAFF\"/></g>"
+        "</defs>"
+        "<use href=\"#tile\" x=\"10\" y=\"10\"/>"
+        "<use href=\"#tile\" x=\"40\" y=\"10\"/>"
+        "<symbol id=\"sq\" viewBox=\"0 0 10 10\"><rect x=\"0\" y=\"0\" width=\"10\" height=\"10\" fill=\"#F2B544\"/></symbol>"
+        "<use href=\"#sq\" x=\"80\" y=\"10\" width=\"40\" height=\"40\"/>"
+        "</svg></body></html></app_window>";
+    auto res = binui::CompileBinUIEx(html);
+    for (const auto& w : res.warnings) std::printf("  [svgpath][warn] %s\n", w.c_str());
+    CHECK(res.warnings.empty(), "use/defs：不报警告");
+    BinUIRenderer r;
+    CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "use/defs：布局可解析");
+
+    std::vector<const BinUIRenderer::NodeInfo*> tiles;
+    const BinUIRenderer::NodeInfo* bigSq = nullptr;
+    for (const auto& n : r.getNodes()) {
+        // 只有填充的 <rect> 编成 LIST（九宫格），带描边才是 PATH；这里按尺寸认
+        if (std::fabs(n.width - 20.0f) < 0.5f && std::fabs(n.height - 20.0f) < 0.5f &&
+            (n.type == BINUI_PATH || n.type == BINUI_LIST))
+            tiles.push_back(&n);
+        if (std::fabs(n.width - 40.0f) < 1.5f && std::fabs(n.height - 40.0f) < 1.5f) bigSq = &n;
+    }
+    std::printf("  [svgpath] use/defs：20px 方块 %d 个，40px 方块 %s\n",
+                (int)tiles.size(), bigSq ? "有" : "无");
+    CHECK(tiles.size() == 2, "use/defs：模板被引用两次 → 两个方块");
+    if (tiles.size() == 2) {
+        CHECK_NEAR(tiles[0]->x, 10, 1.0f, "use/defs：第一个引用按 x 平移");
+        CHECK_NEAR(tiles[1]->x, 40, 1.0f, "use/defs：第二个引用按 x 平移");
+    }
+    CHECK(bigSq != nullptr, "use/symbol：按 width/height 缩放（40px）");
+    if (bigSq) CHECK_NEAR(bigSq->x, 80, 2.0f, "use/symbol：x 平移生效");
+}
+
 static int run() {
     std::printf("\n[suite_svgpath] 路径几何（binui_path.h）+ 扫描线填充（binui_paint.h）\n");
     TestParse();
@@ -2930,6 +2970,7 @@ static int run() {
     TestCompileAndLoad();
     TestSvgSemantics();
     TestShapesAndDash();
+    TestUseDefs();
     std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");
     return g_fail;
 }

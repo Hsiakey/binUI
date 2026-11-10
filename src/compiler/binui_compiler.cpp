@@ -2359,7 +2359,7 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         // v15 SVG 路径：d 是路径数据；其余是描边/填充规则的表现属性
         "d", "ry", "fill-rule", "fill-opacity", "stroke-opacity",
         "stroke-linecap", "stroke-linejoin", "stroke-dasharray",
-        "viewbox", "preserveaspectratio",
+        "viewbox", "preserveaspectratio", "xlink:href",
     };
     return kSet;
 }
@@ -2831,6 +2831,14 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
 
     for (size_t oi = 0; oi < elems.size(); oi++) {
         HNode& e = elems[oi];
+        // SVG 的 <use href="#id"> 是引用克隆，不是组件内联：原样留下，交给 ExpandSvgUse
+        if (e.tag == "use" && (e.attrs.count("href") || e.attrs.count("xlink:href"))) {
+            HNode copy = e;
+            copy.parentIdx = (copy.parentIdx == SIZE_MAX) ? SIZE_MAX : remap[copy.parentIdx];
+            remap[oi] = out.size();
+            out.push_back(std::move(copy));
+            continue;
+        }
         if (e.tag != "use" && e.tag != "component") {
             HNode copy = e;
             copy.parentIdx = (copy.parentIdx == SIZE_MAX) ? SIZE_MAX : remap[copy.parentIdx];
@@ -2999,6 +3007,196 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
     }
     elems.swap(out);
 }
+// ============================================================
+// SVG 引用展开：<defs>/<symbol> 当模板，<use href="#id"> 克隆一份
+//
+// 为什么在**元素表**里展开而不是等到节点生成：<use> 的语义是"把目标子树搬到
+// 这里再画一遍"，父级变了、祖先的 transform/fill 也变了；在扁平元素表里克隆
+// 一次，后面所有既有逻辑（继承、viewBox、定位、样式）都自动生效。
+//
+// 约定：
+//   · 模板子树打上 `_def` 标记，节点生成时按"隐藏"跳过（不会被直接画出来）；
+//   · 克隆出来的副本去掉 `_def` 与 `id`（避免重复 id），根元素若是 <symbol>/<svg>
+//     改成 <g>（<g> 不建立坐标系，viewBox 改由克隆根的 transform 承担）；
+//   · <use src="x.bum"> 是组件内联，早在 ExpandComponents 里处理完了，这里跳过。
+// ============================================================
+static void MarkSvgDefinitions(std::vector<HNode>& elems) {
+    for (size_t i = 0; i < elems.size(); i++) {
+        size_t k = i;
+        size_t guard = elems.size() + 1;
+        while (k != SIZE_MAX && k < elems.size() && guard-- > 0) {
+            const std::string& t = elems[k].tag;
+            if (t == "defs" || t == "symbol") { elems[i].attrs["_def"] = "1"; break; }
+            k = elems[k].parentIdx;
+        }
+    }
+}
+
+// 纯数值长度（"24" / "24px" / "1.5"）：<use> 的 x/y/width/height 与 viewBox 都只按数字用
+static float SvgLenPlain(const std::string& s, float dflt) {
+    const char* p = s.c_str();
+    while (*p == ' ' || *p == '\t') p++;
+    char* end = nullptr;
+    const float v = static_cast<float>(std::strtod(p, &end));
+    return end == p ? dflt : v;
+}
+
+static void ExpandSvgUse(std::vector<HNode>& elems, std::string (*lowerStr)(std::string)) {
+    // 一份 id 索引（同名取第一个，SVG 里重复 id 本来就是作者错误）
+    for (int pass = 0; pass < 8; pass++) {
+        std::unordered_map<std::string, size_t> ids;
+        for (size_t i = 0; i < elems.size(); i++) {
+            auto it = elems[i].attrs.find("id");
+            if (it != elems[i].attrs.end() && !it->second.empty() && !ids.count(it->second))
+                ids.emplace(it->second, i);
+        }
+        size_t useIdx = SIZE_MAX;
+        for (size_t i = 0; i < elems.size(); i++) {
+            if (lowerStr(elems[i].tag) != "use") continue;
+            if (elems[i].attrs.count("data-binui-link") || elems[i].attrs.count("src")) continue;
+            useIdx = i;
+            break;
+        }
+        if (useIdx == SIZE_MAX) break;
+
+        const HNode& u = elems[useIdx];
+        std::string href;
+        if (u.attrs.count("href")) href = u.attrs.at("href");
+        else if (u.attrs.count("xlink:href")) href = u.attrs.at("xlink:href");
+        if (href.empty() || href[0] != '#') {
+            Warn("<use> 只支持 href=\"#id\" 的本地引用（外链请用 <img>），已忽略");
+            elems[useIdx].attrs.erase("href");
+            elems[useIdx].attrs.erase("xlink:href");
+            elems[useIdx].attrs["_def"] = "1";   // 失败的 <use> 不生成空盒子
+            continue;
+        }
+        const std::string key = href.substr(1);
+        auto tit = ids.find(key);
+        if (tit == ids.end()) {
+            Warn("<use href=\"" + href + "\"> 找不到对应元素（缺 id 或拼错）");
+            elems[useIdx].attrs.erase("href");
+            elems[useIdx].attrs.erase("xlink:href");
+            elems[useIdx].tag = "span"; elems[useIdx].attrs["_def"] = "1";   // 失败的 <use> 不留空盒子   // 退化成普通容器，不再重复告警
+            continue;
+        }
+        size_t target = tit->second;
+        // 自引用 / 引用祖先：直接拒绝（否则会无限展开）
+        for (size_t k = useIdx; k != SIZE_MAX && k < elems.size();) {
+            if (k == target) {
+                Warn("<use href=\"" + href + "\"> 引用了自己的祖先（循环），已忽略");
+                elems[useIdx].tag = "span"; elems[useIdx].attrs["_def"] = "1";   // 失败的 <use> 不留空盒子
+                elems[useIdx].attrs.erase("href");
+                elems[useIdx].attrs.erase("xlink:href");
+                target = SIZE_MAX;
+                break;
+            }
+            k = elems[k].parentIdx;
+        }
+        if (target == SIZE_MAX) continue;
+        // 目标子树在 DFS 前序里是连续区间 [target, end)
+        size_t tend = target + 1;
+        while (tend < elems.size() && elems[tend].parentIdx != SIZE_MAX &&
+               elems[tend].parentIdx >= target)
+            tend++;
+
+        // <use> 自己的 x/y（SVG 语义：平移）+ <symbol>/<svg> 的 viewBox 缩放
+        const float ux = SvgLenPlain(u.attrs.count("x") ? u.attrs.at("x") : "", 0.0f);
+        const float uy = SvgLenPlain(u.attrs.count("y") ? u.attrs.at("y") : "", 0.0f);
+        std::string xf = "translate(" + std::to_string(ux) + " " + std::to_string(uy) + ")";
+        const std::string tt = lowerStr(elems[target].tag);
+        if (tt == "symbol" || tt == "svg") {
+            float vbx = 0, vby = 0, vbw = 0, vbh = 0;
+            bool haveVb = false;
+            if (elems[target].attrs.count("viewbox")) {
+                // 四个数
+                std::string s = elems[target].attrs.at("viewbox");
+                for (char& ch : s) if (ch == ',') ch = ' ';
+                float v[4] = { 0, 0, 0, 0 };
+                int n = 0;
+                std::string cur;
+                for (size_t i2 = 0; i2 <= s.size(); i2++) {
+                    if (i2 == s.size() || s[i2] == ' ' || s[i2] == '\t') {
+                        if (!cur.empty()) {
+                            if (n < 4) v[n++] = static_cast<float>(std::strtod(cur.c_str(), nullptr));
+                            cur.clear();
+                        }
+                    } else {
+                        cur += s[i2];
+                    }
+                }
+                if (n == 4 && v[2] > 0 && v[3] > 0) {
+                    vbx = v[0]; vby = v[1]; vbw = v[2]; vbh = v[3];
+                    haveVb = true;
+                }
+            }
+            const float uw = SvgLenPlain(u.attrs.count("width") ? u.attrs.at("width") : "", 0.0f);
+            const float uh = SvgLenPlain(u.attrs.count("height") ? u.attrs.at("height") : "", 0.0f);
+            if (haveVb && uw > 0.0f && uh > 0.0f) {
+                const float sc = std::min(uw / vbw, uh / vbh);
+                const float tx = ux + (uw - vbw * sc) * 0.5f;
+                const float ty = uy + (uh - vbh * sc) * 0.5f;
+                xf = "translate(" + std::to_string(tx) + " " + std::to_string(ty) + ") scale(" +
+                     std::to_string(sc) + ")";
+            } else if (haveVb) {
+                // 没给显示尺寸：按 viewBox 原尺寸铺开
+                const float tx = ux - vbx;
+                const float ty = uy - vby;
+                xf = "translate(" + std::to_string(tx) + " " + std::to_string(ty) + ")";
+            }
+        }
+
+        std::vector<HNode> out;
+        std::vector<size_t> remap(elems.size(), SIZE_MAX);
+        std::vector<size_t> cremap(elems.size(), SIZE_MAX);
+        out.reserve(elems.size() + (tend - target));
+        for (size_t i = 0; i < elems.size(); i++) {
+            if (i == useIdx) {
+                HNode g = elems[i];
+                g.tag = "g";
+                g.attrs["transform"] = xf;
+                g.attrs.erase("href");
+                g.attrs.erase("xlink:href");
+                remap[i] = out.size();
+                out.push_back(std::move(g));
+                for (size_t k = target; k < tend; k++) {
+                    HNode c = elems[k];
+                    c.attrs.erase("_def");
+                    c.attrs.erase("id");
+                    if (k == target) c.parentIdx = remap[useIdx];
+                    else if (c.parentIdx != SIZE_MAX) c.parentIdx = cremap[c.parentIdx];
+                    const std::string ct = lowerStr(c.tag);
+                    if (ct == "symbol" || ct == "svg") {
+                        c.tag = "g";
+                        c.attrs.erase("viewbox");   // 属性名解析时已统一小写
+                        c.attrs.erase("preserveaspectratio");
+                    }
+                    cremap[k] = out.size();
+                    out.push_back(std::move(c));
+                }
+                continue;
+            }
+            if (i > target && i < tend) {
+                // 模板子树原样保留（带 `_def` 标记，不生成节点）：
+                // 后面还有别的 <use> 要克隆它，每轮只展开一个引用，模板必须留着
+                HNode c = elems[i];
+                if (c.parentIdx != SIZE_MAX && c.parentIdx < remap.size() &&
+                    remap[c.parentIdx] != SIZE_MAX)
+                    c.parentIdx = remap[c.parentIdx];
+                remap[i] = out.size();
+                out.push_back(std::move(c));
+                continue;
+            }
+            HNode c = elems[i];
+            if (c.parentIdx != SIZE_MAX && c.parentIdx < remap.size() &&
+                remap[c.parentIdx] != SIZE_MAX)
+                c.parentIdx = remap[c.parentIdx];
+            remap[i] = out.size();
+            out.push_back(std::move(c));
+        }
+        elems.swap(out);
+    }
+}
+
 std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::string>* outImages) {
     auto lowerStr = [](std::string s) {
         for (auto& c : s) c = static_cast<char>(std::tolower((unsigned char)c));
@@ -3013,6 +3211,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 
     // ---- 1.5 组件内联：<use src="x.bum.html"> 展开成真实元素 ----
     ExpandComponents(elems, styleSheets, tl_uiBaseDir, 0);
+    // ---- 1.6 SVG 引用：<defs>/<symbol> 打模板标记，<use href="#id"> 展开成克隆 ----
+    MarkSvgDefinitions(elems);
+    ExpandSvgUse(elems, lowerStr);
 
     if (elems.empty()) return {};
 
@@ -4066,7 +4267,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             "input", "button", "video", "img", "source", "track", "titlebar", "use", "component",
             // 向量/画布
             "svg", "canvas", "line", "circle", "rect", "polyline", "polygon",
-            "path", "ellipse",
+            "path", "ellipse", "g", "defs", "symbol",
         };
         // 认得但只能糊弄过去的标签：明确说清楚会变成什么，别让人以为生效了
         static const std::unordered_map<std::string, const char*> kShimTags = {
@@ -4093,17 +4294,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             // 这些标签被"当普通容器"时画面是**空**的（不是画歪了），所以必须说清楚换成什么，
             // 否则作者只会看到自己那一段什么都不显示，以为是自己写错了。
             // v15 起 path/ellipse 已实现，从这张表里移出（kKnownTags 里有了）。
-            { "g", "<g> 不建立坐标系（子元素与 g 共用父容器原点），transform 会编译进坐标" },
+            
             { "text", "SVG <text> 不支持：用普通 <span> 绝对定位到同一坐标" },
             { "tspan", "SVG <tspan> 不支持：用普通 <span>" },
-            { "defs", "SVG <defs> 不支持：没有 defs/use 引用机制" },
             { "lineargradient", "SVG <linearGradient> 不支持：用 CSS linear-gradient(...) 画矩形渐变" },
             { "radialgradient", "SVG <radialGradient> 不支持：改画多层同心圆" },
             { "mask", "SVG <mask> 不支持" },
             { "clippath", "SVG <clipPath> 不支持" },
             { "pattern", "SVG <pattern> 不支持" },
             { "marker", "SVG <marker> 不支持" },
-            { "symbol", "SVG <symbol> 不支持" },
             { "image", "SVG <image> 不支持：用 HTML <img>" },
         };
         // 真正被编译器消费的属性（其余一律视为"写了没效果"）
@@ -4141,8 +4340,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                          "translate/scale/rotate/matrix 会编译进坐标）：请直接改坐标");
                     continue;
                 }
-                if (k == "viewbox" && e.tag != "svg") {
-                    Warn("viewBox 只对 <svg> 容器有效，其它元素上写了会忽略");
+                if (k == "viewbox" && e.tag != "svg" && e.tag != "symbol") {
+                    Warn("viewBox 只对 <svg>/<symbol> 有效（当前写在 <" + e.tag + "> 上，已忽略）");
                     continue;
                 }
                 if (kUsedAttrs.count(k)) continue;
@@ -4165,6 +4364,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         const auto& he = elems[hi];
         auto hst = styleOf(he, hi);
         if (lowerStr(pick(he.attrs, hst, "display", "display", "")) == "none") hiddenSelf[hi] = 1;
+        // <defs>/<symbol> 是模板（只在 <use> 的克隆里画），自己永远不生成节点
+        if (he.attrs.count("_def")) hiddenSelf[hi] = 1;
     }
     for (size_t hi = 0; hi < elems.size(); hi++) {
         size_t k = hi;

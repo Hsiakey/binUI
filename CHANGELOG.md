@@ -6,6 +6,21 @@
 
 ## [Unreleased]
 
+### 新增 — SVG P2-2：`<defs>` / `<symbol>` 模板 + `<use href="#id">` 引用
+
+- 图标素材里常见的"一份模板多处引用"现在能用：`<defs>`/`<symbol>` 里的元素是**模板**
+  （自己永远不画），`<use href="#id">`（也认 `xlink:href`）在引用处克隆一份。
+- 语义对齐 SVG：`<use x y>` 平移；引用 `<symbol>`/`<svg>` 且给了 `width`/`height` 时，
+  目标的 `viewBox` 按**等比居中**缩放到这个尺寸；克隆体去掉 `id`（避免重复 id），
+  根元素改写成 `<g>`（`<g>` 不建立坐标系，viewBox 由 transform 承担）。
+- 与组件内联不冲突：`<use src="x.bum">` 是**组件**（编译期内联/运行期挂载），
+  `<use href="#id">` 是 **SVG 引用** —— 按有没有 `src` 分流，两者可以同时存在于一份 UI 里。
+- 容错：引用不存在的 id、循环引用（引自己的祖先）、外链 `href` 都会明确告警，
+  并且不留空盒子（以前会退化成一个 300px 宽的空标签）。
+- 验证：`suite_svgpath` 新增 `<defs>` 模板引用两次 + `<symbol viewBox>` 按 40px 缩放的
+  端到端断言；像素基准 `svgpath` 增加第三行（三个 badge 克隆 + 两个不同尺寸的
+  symbol 三角形）；`make pixels` 5/5 零差异、`check_examples` 11 个 UI 0 问题。
+
 ### 新增 — SVG P2-1：带描边的圆/矩形自动走路径 + `stroke-dasharray`
 
 - **`<circle>` / `<rect>` 带描边时自动降级成 `BINUI_PATH`**：以前它们只能走轻量映射
