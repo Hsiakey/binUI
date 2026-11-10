@@ -82,7 +82,7 @@ $(BIN_DIR)/binui_compile$(EXT): tools/binui_compile.cpp $(LIB_A)
 
 $(BUILD_DIR)/assets/components/%.bum: $(EXA_DIR)/features/%.bum.html $(BIN_DIR)/binui_compile$(EXT)
 	@mkdir -p $(dir $@)
-	$(BIN_DIR)/binui_compile$(EXT) $< -o $@
+	$(BIN_DIR)/binui_compile$(EXT) $< -o $@ --no-srcmap
 
 .PHONY: components
 components: $(COMPONENT_BUMS)
@@ -271,12 +271,18 @@ all: $(LIB_A) $(TEST_BINS) $(DEMO_BINS) $(STD_LIB_STAMP) $(BINUI_C_A) $(BINUI_C_
 # 调试工具（可选，不入 all）：离屏渲染 / 窗口抓取 / 窗口枚举
 TOOL_BINS := \
     $(BIN_DIR)/binui_compile$(EXT) \
+    $(BIN_DIR)/binui_export$(EXT) \
     $(BIN_DIR)/offscreen_render$(EXT) \
     $(BIN_DIR)/gl_shot$(EXT) \
     $(BIN_DIR)/window_capture$(EXT) \
     $(BIN_DIR)/enum_windows$(EXT) \
     $(BIN_DIR)/pixel_diff$(EXT) \
     $(BIN_DIR)/check_examples$(EXT)
+
+# 把 .bui 还原成打包前的目录结构（读旁边的 .bui.srcmap，header-only，不用链接库）
+$(BIN_DIR)/binui_export$(EXT): tools/binui_export.cpp
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $<
 
 # 示例 UI 零警告检查（CMake 也会注册成 ctest 用例）
 $(BIN_DIR)/check_examples$(EXT): tools/check_examples.cpp $(LIB_A)

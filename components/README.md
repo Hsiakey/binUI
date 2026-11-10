@@ -25,7 +25,7 @@ build-mingw/bin/offscreen_render components/preview.html docs/img/std-components
 
 拷贝时**整个目录一起拷、保持相对位置**：`external` 外挂组件和组件图片的路径最终相对宿主
 `.bui` 解析，只搬 `main.bui` 不搬组件目录会挂不上（目录怎么摆见
-[docs/components.md 第十节](../docs/components.md)）。
+[docs/components.md 第十一节](../docs/components.md)）。
 
 标签只有 `<use>`（`<component>` 是旧别名，`<include>` 不存在）；每种组件都是**单一根元素**。
 

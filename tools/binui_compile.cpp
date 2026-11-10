@@ -1,11 +1,16 @@
 // binui_compile.cpp - UI / 组件源码 -> 二进制布局（.bui / .bum）
 //
 // 用法:
-//   binui_compile <src> [-o <out>] [-q]
+//   binui_compile <src> [-o <out>] [-q] [--no-srcmap]
 //
-//   <src>  .bui.xml / .bum.html / .html / .xml / 已编译的 .bui|.bum
-//   -o     输出路径（默认：与源文件同目录，去掉 .xml 换成 .bui/.bum）
+//   <src>  .bui.html / .bum.html / .html / .xml / 已编译的 .bui|.bum
+//   -o     输出路径（默认：x.bum.html -> x.bum，x.bui.html -> x.bui）
 //   -q     静默（只打错误）
+//   --no-srcmap  不产出 <out>.srcmap
+//
+// 默认会在 <out> 旁边写一份 **打包清单** `<out>.srcmap`：主 UI 与每个被内联/外挂的
+// 组件的**原始字节** + 相对 appRootDir 的路径。binui_export 靠它把 .bui 还原成打包前
+// 的目录结构（逐字节一致）。不想泄露源码就不带这个文件，或用 --no-srcmap 不生成。
 //
 // 约定（docs/components.md）：
 //   .bui  单个 UI（应用入口，可直接 loadLayout）
@@ -15,6 +20,7 @@
 // 退出码：0 = 成功（允许编译告警）；1 = 失败（读不到源码 / 编译结果为空）
 #include <cstdio>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -24,10 +30,11 @@
 namespace {
 
 void Usage() {
-    std::printf("用法: binui_compile <src> [-o <out>] [-q]\n"
-                "  <src>  .bui.xml / .bum.html / .html / .xml\n"
-                "  -o     输出路径（默认同目录，.xml -> .bui/.bum）\n"
-                "  -q     静默（只打错误）\n");
+    std::printf("用法: binui_compile <src> [-o <out>] [-q] [--no-srcmap]\n"
+                "  <src>  .bui.html / .bum.html / .html / .xml / 已编译的 .bui|.bum\n"
+                "  -o     输出路径（默认同目录：x.bum.html -> x.bum，x.bui.html -> x.bui）\n"
+                "  -q     静默（只打错误）\n"
+                "  --no-srcmap  不产出 <out>.srcmap（打包清单，binui_export 靠它解包）\n");
 }
 
 bool EndsWith(const std::string& s, const char* tail) {
@@ -61,10 +68,13 @@ std::string DefaultOut(const std::string& in) {
 int main(int argc, char* argv[]) {
     std::string in, out;
     bool quiet = false;
+    bool srcmap = true;   // 默认产出 .bui.srcmap（想"不泄露源码"就 --no-srcmap）
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i] ? argv[i] : "";
         if (a == "-h" || a == "--help") { Usage(); return 0; }
         else if (a == "-q" || a == "--quiet") quiet = true;
+        else if (a == "--no-srcmap") srcmap = false;
+        else if (a == "--srcmap") srcmap = true;
         else if (a == "-o" && i + 1 < argc) { ++i; out = argv[i] ? argv[i] : ""; }
         else if (a.size() && a[0] != '-' && in.empty()) in = a;
         else {
@@ -103,7 +113,9 @@ int main(int argc, char* argv[]) {
         }
     }
 
-    const binui::CompileResult res = binui::CompileBinUIFileEx(in);
+    binui::CompileOptions opt;
+    opt.emitSrcMap = srcmap;
+    const binui::CompileResult res = binui::CompileBinUIFileEx(in, opt);
     for (const auto& w : res.warnings)
         std::fprintf(stderr, "[binui_compile] warning: %s\n", w.c_str());
     if (res.layout.empty()) {
@@ -112,15 +124,37 @@ int main(int argc, char* argv[]) {
     }
     FILE* f = std::fopen(out.c_str(), "wb");
     if (!f) {
+        // 输出目录可能还不存在（-o 指到新目录很常见），建一次再试
+        std::error_code ec;
+        const auto parent = std::filesystem::path(out).parent_path();
+        if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+        f = std::fopen(out.c_str(), "wb");
+    }
+    if (!f) {
         std::fprintf(stderr, "binui_compile: 无法写入 %s\n", out.c_str());
         return 1;
     }
     std::fwrite(res.layout.data(), 1, res.layout.size(), f);
     std::fclose(f);
 
+    // 打包清单：<out>.srcmap（binui_export 靠它还原打包前的目录结构）
+    bool srcmapOk = false;
+    if (!res.srcMap.empty()) {
+        const std::string mapPath = out + ".srcmap";
+        FILE* mf = std::fopen(mapPath.c_str(), "wb");
+        if (mf) {
+            std::fwrite(res.srcMap.data(), 1, res.srcMap.size(), mf);
+            std::fclose(mf);
+            srcmapOk = true;
+        } else {
+            std::fprintf(stderr, "binui_compile: 无法写入 %s（布局已正常产出）\n", mapPath.c_str());
+        }
+    }
+
     if (!quiet) {
         std::printf("[binui_compile] %s -> %s（%zu 字节", in.c_str(), out.c_str(), res.layout.size());
         if (!res.images.empty()) std::printf("，资源 %zu 项", res.images.size());
+        if (srcmapOk) std::printf("，打包清单 %zu 字节", res.srcMap.size());
         std::printf("）\n");
     }
     return 0;

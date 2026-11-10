@@ -42,7 +42,7 @@ examples/           **使用示例**（一组一个子目录：main.cpp + main.h
                       （8 组示例里 features 就是组件化三形态的活示例；设计稿/原型在 docs/mockups/）
 tests/              **测试用例**（按主题分四个套件：CSS / 元素 / 字体与输入法 / C ABI，
                       产物落 bin/tests/，见 tests/README.md）
-tools/              调试工具：离屏渲染 / 窗口抓取 / 窗口枚举 / 示例 UI 检查（见 tools/README.md）
+tools/              调试工具：离屏渲染 / 窗口抓取 / 窗口枚举 / 示例 UI 检查 / 编译与解包（见 tools/README.md）
 docs/               设计文档、图片、设计稿（见 docs/README.md；组件规范见 docs/components.md）
 scripts/            fetch-deps.sh 等辅助脚本
 third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
@@ -62,6 +62,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `include/binui_link.h` | **布局链接器**：把组件布局合并进宿主（节点 id 重编号/坐标平移/各段迁移），编译期内联与运行期挂载共用 |
 | `include/binui_asset.h` | 组件文件探测：二进制优先、源码更新则优先源码（同一份规则供编译器与加载器使用） |
 | `include/binui_component.h` | 外挂组件加载（header-only）：`ex::MountAll()` 按布局里的组件引用段挂载 `.bum` |
+| `include/binui_srcmap.h` | 打包清单（`.bui.srcmap`）的读写（header-only）：让 `binui_export` 能把 `.bui` 逐字节还原成打包前的目录结构 |
 | `include/binui_video.h` | 可选视频编解码模块接口：FFmpeg 解码 + WASAPI 音频（`BINUI_ENABLE_VIDEO`，默认 OFF 桩实现零依赖） |
 | `src/platform/app_win32.*` | 演示用 Win32 窗口外壳 + GDI 绘制后端（可替换为其他平台后端） |
 | `include/binui_paths.h` | 跨平台路径解析：exe 真实路径（`GetModuleFileName`/`/proc/self/exe`）+ UI 查找顺序 + 图片资源加载（`--ui` / `$BINUI_UI`） |
@@ -315,7 +316,7 @@ HTML5 编译规则：
   `binui/` + `components/<分类>/`（带图标的组件单独一个文件夹）。只发 `.bum` 还是只发源码随你，
   两样都给则二进制优先。**发行优先内嵌**（组件并进 `.bui`，运行期一个文件都不读），外挂换的是
   可替换性不是性能。唯一要守的是：`external` 外挂组件和组件图片别挪到别处 —— 它们的相对
-  路径编译期按源码文件、运行期按 `.bui` 解析。详见 [docs/components.md](docs/components.md) 第十节。
+  路径编译期按源码文件、运行期按 `.bui` 解析。详见 [docs/components.md](docs/components.md) 第十一节。
 
 - **长度单位**：`px`（可省略）与 `%` 之外，还支持 `em`（相对该元素 `font-size`）、`rem`（相对根字号，默认 14）、`vw`/`vh`（相对**编译期**视口；不随运行时 resize 重排，需跟随请用 `%`）。**不支持的单位**（`pt/cm/mm/in/ex/ch/vmin/vmax`）与**函数值**（`calc/min/max/clamp`）会**打编译警告并回退默认值**，不再静默当成 px（警告同时收集在 `CompileResult::warnings`）。
 - 颜色：支持 CSS **命名色**（完整 147 色 + `transparent`）、`#RGB`/`#RRGGBB`、`#ARGB`/`#AARRGGBB`（**8 位按 binUI 约定的 AARRGGBB**，与 CSS 的 `#RRGGBBAA` 相反，首次使用会警告）、`rgb()/rgba()`（逗号或空格分隔、通道可写百分比、支持现代 `rgb(0 0 255 / 50%)`）、`hsl()/hsla()`。`!important` 会被剥离。无法识别的颜色**保留默认色并警告**（以前是静默变白/变透明）。

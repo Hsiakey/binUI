@@ -9,6 +9,7 @@
 #include "binui_compiler.h"
 #include "binui_renderer.h"
 #include "binui_format.h"
+#include "binui_srcmap.h"
 #include <cstdio>
 #include <cmath>
 #include <chrono>
@@ -1548,6 +1549,54 @@ int run() {
             if (n.text.find("<use") != std::string::npos) textWithMarkup = 1;
         TEST("component: param value injected as text, not markup", textWithMarkup == 1);
         TEST("component: injection adds no extra nodes", r2.getNodes().size() == 3);
+
+        // ---- 打包清单（.bui.srcmap）：内嵌的包也能还原打包前的目录结构 ----
+        // 存的是"原始字节 + 相对共同祖先的路径"，所以解包是逐字节还原，不是节点反推。
+        {
+            binui::CompileOptions opt;
+            opt.emitSrcMap = true;
+            const auto mres = CompileBinUIFileEx((dir / "host.html").generic_string(), opt);
+            TEST("srcmap: 开关打开就产出", !mres.srcMap.empty());
+
+            std::vector<binui::SrcMapEntry> ents;
+            TEST("srcmap: 可解析", binui::ParseSrcMap(mres.srcMap.data(), mres.srcMap.size(), ents));
+            TEST("srcmap: 第 0 条是主 UI",
+                 !ents.empty() && ents[0].path.find("host.html") != std::string::npos);
+
+            // 清单里的主 UI 内容必须和磁盘上的原文件逐字节一致
+            std::string orig;
+            {
+                std::ifstream f(dir / "host.html", std::ios::binary);
+                std::stringstream ss;
+                ss << f.rdbuf();
+                orig = ss.str();
+            }
+            const bool same = !ents.empty() &&
+                              std::string(ents[0].data.begin(), ents[0].data.end()) == orig;
+            TEST("srcmap: 主 UI 与原文件逐字节一致", same);
+
+            // 内联的源码组件与嵌套组件都要在清单里（同一个组件被 use 两次只记一份）
+            int btnEntries = 0, cardEntries = 0, missingEntries = 0;
+            for (const auto& e : ents) {
+                if (e.path.find("btn.bum.html") != std::string::npos) btnEntries++;
+                if (e.path.find("card.bum.html") != std::string::npos) cardEntries++;
+                if (e.path.find("missing") != std::string::npos) missingEntries++;
+            }
+            TEST("srcmap: 内联组件在清单里（多实例只记一份）", btnEntries == 1);
+            TEST("srcmap: 嵌套组件在清单里", cardEntries == 1);
+            TEST("srcmap: 读不到的组件不进清单", missingEntries == 0);
+
+            // 路径必须是相对的（不能把编译机的绝对路径写进包里）
+            bool allRelative = true;
+            for (const auto& e : ents)
+                if (e.path.empty() || e.path[0] == '/' || (e.path.size() > 1 && e.path[1] == ':'))
+                    allRelative = false;
+            TEST("srcmap: 路径都是相对的", allRelative);
+
+            // 默认（不开开关）一个字节都不产出
+            const auto plain = CompileBinUIFileEx((dir / "host.html").generic_string());
+            TEST("srcmap: 默认不产出", plain.srcMap.empty());
+        }
     }
 
     // ---- v13：扩展绘制段（文字色/边框/渐变/字重/行高/装饰）+ 底色与文字色分家 ----

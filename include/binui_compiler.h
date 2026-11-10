@@ -6,6 +6,15 @@
 
 namespace binui {
 
+// 编译选项
+struct CompileOptions {
+    // 收集"打包清单"（.bui.srcmap）：主 UI 与每个被内联的组件（源码或二进制）的
+    // **原始字节** + 相对 appRootDir（= 主 UI 所在目录）的路径。
+    // 有了它，binui_export 就能把 .bui 还原成打包前的目录结构，逐字节一致。
+    // 关掉它等于"不泄露任何源码"，代价是这份包不可解包。
+    bool emitSrcMap = false;
+};
+
 // 编译结果：布局 + 引用的图片资源（按 imageIndex 顺序）
 struct CompileResult {
     std::vector<uint8_t> layout;
@@ -13,6 +22,8 @@ struct CompileResult {
     // 编译期警告（同一份 UI 内去重）：不支持的单位（calc/em 之外的 pt/cm…）、
     // 无法识别的颜色、函数值等。空 = 没有警告。已同时打到 stderr。
     std::vector<std::string> warnings;
+    // 打包清单（仅在 CompileOptions::emitSrcMap 时非空）：见 binui_srcmap.h。
+    std::vector<uint8_t> srcMap;
 };
 
 // 将 UI 源码（XML 或 HTML5）编译为 binUI（.xhtml）二进制布局。
@@ -20,13 +31,14 @@ struct CompileResult {
 std::vector<uint8_t> CompileBinUISource(const std::string& source);
 
 // 同上，但额外返回引用的图片资源路径
-CompileResult CompileBinUIEx(const std::string& source);
+// opt.emitSrcMap=true 时同时产出"打包清单"（CompileResult::srcMap）
+CompileResult CompileBinUIEx(const std::string& source, const CompileOptions& opt = {});
 
 // 从文件读取并编译（扩展名 .html/.htm/.xml 均支持）
 std::vector<uint8_t> CompileBinUIFile(const std::string& path);
 
 // 同上，但额外返回引用的图片资源路径
-CompileResult CompileBinUIFileEx(const std::string& path);
+CompileResult CompileBinUIFileEx(const std::string& path, const CompileOptions& opt = {});
 
 // XML 描述 -> binUI（节点标签映射为节点类型，见 examples/vision_monitor/main.binui.xml）
 std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>* outImages = nullptr);

@@ -60,6 +60,9 @@ target_link_libraries(binui PUBLIC freetype harfbuzz)
 add_executable(binui_compile tools/binui_compile.cpp)
 target_link_libraries(binui_compile PRIVATE binui)
 
+# .bui / .bum -> 打包前的目录结构（读旁边的 .srcmap；header-only，不依赖库）
+add_executable(binui_export tools/binui_export.cpp)
+
 # =============================================
 # Win32 演示外壳 + 示例
 # =============================================
@@ -112,7 +115,7 @@ if(WIN32)
             OUTPUT "${bum_out}"
             COMMAND ${CMAKE_COMMAND} -E make_directory "${CMAKE_BINARY_DIR}/assets/components"
             COMMAND $<TARGET_FILE:binui_compile>
-                    "${CMAKE_SOURCE_DIR}/examples/features/${cname}.bum.html" -o "${bum_out}"
+                    "${CMAKE_SOURCE_DIR}/examples/features/${cname}.bum.html" -o "${bum_out}" --no-srcmap
             DEPENDS binui_compile "${CMAKE_SOURCE_DIR}/examples/features/${cname}.bum.html"
             COMMENT "binui: ${cname}.bum.html -> ${cname}.bum"
             VERBATIM
@@ -236,6 +239,7 @@ install(FILES
     include/binui_link.h
     include/binui_asset.h
     include/binui_component.h
+    include/binui_srcmap.h
     include/binui_paths.h
     include/binui_hot_reload.h
     include/binui_paint.h

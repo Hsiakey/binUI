@@ -3,6 +3,7 @@
 #include "binui_asset.h"
 #include "binui_format.h"
 #include "binui_link.h"
+#include "binui_srcmap.h"
 #include "binui_text_estimate.h"   // 文本尺寸粗估：与渲染器运行期 setText 重算共用同一口径
 
 #include <fstream>
@@ -156,6 +157,68 @@ static thread_local CompileDiag g_diag;
 // 当前 UI 文件所在目录（组件内联时的相对路径基准）；由 CompileBinUIFileEx 设置，
 // 字符串入口（CompileBinUIEx）为空 → <use src> 按工作目录解析。
 static thread_local std::string tl_uiBaseDir;
+
+// 主 UI 的文件名（不含目录）。打包清单里第 0 条就是它 —— 字符串入口没有文件名，
+// 用 main.bui.html 兜底。
+static thread_local std::string tl_uiSourceName;
+// 主 UI 的绝对路径（有文件入口时才有）；没有就是空，打包清单会退回 CWD/main.bui.html。
+static thread_local std::string tl_uiSourceAbs;
+
+// 打包清单收集器（.bui.srcmap）。非空 = 本次编译正在收集：
+// 主 UI 与每个被内联/外挂的组件的**原始字节** + 绝对路径（最后统一折算成
+// "相对所有文件共同祖先"的相对路径，见 include/binui_srcmap.h）。
+static thread_local std::vector<SrcMapEntry>* tl_srcMap = nullptr;
+static thread_local std::unordered_set<std::string>* tl_srcMapSeen = nullptr;
+
+// 已收集过就跳过（同一个组件被 use 多次只记一份）。absPath 先按原样存。
+static void SrcMapCollect(const std::string& absPath, std::vector<uint8_t> bytes) {
+    if (!tl_srcMap || !tl_srcMapSeen) return;
+    if (absPath.empty()) return;
+    if (!tl_srcMapSeen->insert(absPath).second) return;
+    SrcMapEntry e;
+    e.path = absPath;
+    e.data = std::move(bytes);
+    tl_srcMap->push_back(std::move(e));
+}
+
+static bool IsPathPrefix(const std::filesystem::path& prefix, const std::filesystem::path& p) {
+    auto pi = prefix.begin();
+    auto qi = p.begin();
+    for (; pi != prefix.end(); ++pi, ++qi) {
+        if (qi == p.end()) return false;
+        if (*pi != *qi) return false;
+    }
+    return true;
+}
+
+// 把所有条目路径折算成"相对它们共同祖先目录"的相对路径 —— 也就是打包时的 appRootDir。
+// 主 UI 在 examples/features/、组件用 ../../components/x 引用时，共同祖先是仓库根，
+// 折算结果就是 examples/features/main.html + components/x.bum.html，解包即还原原树。
+// 全都是同级文件时，折算结果就是纯文件名。
+static void NormalizeSrcMapPaths(std::vector<SrcMapEntry>& entries) {
+    if (entries.empty()) return;
+    std::vector<std::filesystem::path> abs;
+    abs.reserve(entries.size());
+    for (const auto& e : entries) {
+        std::error_code ec;
+        std::filesystem::path p = std::filesystem::weakly_canonical(
+            std::filesystem::absolute(e.path, ec), ec);
+        if (ec || p.empty()) p = std::filesystem::absolute(e.path);
+        abs.push_back(p);
+    }
+    std::filesystem::path common = abs[0].parent_path();
+    for (const auto& p : abs) {
+        while (!common.empty() && !IsPathPrefix(common, p))
+            common = common.parent_path();
+        if (common.empty()) break;
+    }
+    for (size_t i = 0; i < entries.size(); i++) {
+        std::error_code ec;
+        std::filesystem::path rel = std::filesystem::relative(abs[i], common, ec);
+        if (ec || rel.empty()) rel = abs[i].filename();
+        entries[i].path = rel.generic_string();
+    }
+}
 
 // 同一条警告只报一次（同一份 UI 里 20 个元素写错单位，不该刷 20 行）。
 // 装了收集器（CompileResult::warnings）就只入列表、不再直写 stderr ——
@@ -996,7 +1059,7 @@ static void AppendPaintSection(std::vector<uint8_t>& buf,
 std::vector<uint8_t> CompileBinUISource(const std::string& source) {    return CompileBinUIEx(source).layout;
 }
 
-CompileResult CompileBinUIEx(const std::string& source) {
+CompileResult CompileBinUIEx(const std::string& source, const CompileOptions& opt) {
     // 找到第一个真实标签（跳过 <?xml?> 处理指令 / <!DOCTYPE> 声明 / <!-- --> 注释），
     // 决定用 XML 还是 HTML 解析
     bool xml = false;
@@ -1044,6 +1107,25 @@ CompileResult CompileBinUIEx(const std::string& source) {
         // 本次编译的警告收集到 res.warnings（同一会话内去重）
         std::unordered_set<std::string> seen;
         DiagGuard guard(&res.warnings, &seen);
+
+        // 打包清单：主 UI 自己排第 0 条，后面是各组件（ExpandComponents 里追加）。
+        // 路径一律相对 appRootDir（= 主 UI 所在目录），所以路径就是文件名本身。
+        std::vector<SrcMapEntry> srcEntries;
+        std::unordered_set<std::string> srcSeen;
+        tl_srcMap = opt.emitSrcMap ? &srcEntries : nullptr;
+        tl_srcMapSeen = opt.emitSrcMap ? &srcSeen : nullptr;
+        if (opt.emitSrcMap) {
+            // 主 UI 排第 0 条；路径先存绝对，最后统一折算成相对 appRootDir
+            const std::string rootPath = tl_uiSourceAbs.empty()
+                ? (std::filesystem::current_path() / "main.bui.html").generic_string()
+                : tl_uiSourceAbs;
+            srcSeen.insert(rootPath);
+            SrcMapEntry root;
+            root.path = rootPath;
+            root.data.assign(source.begin(), source.end());
+            srcEntries.push_back(std::move(root));
+        }
+
         if (xml) {
             // XML 路径已降级为 legacy：没有 CSS 级联、不认 <use> 组件、也没有 v13/v14 的
             // 扩展绘制段。能力上全面落后于 HTML 路径，但没有任何地方提示过作者。
@@ -1054,6 +1136,13 @@ CompileResult CompileBinUIEx(const std::string& source) {
         } else {
             res.layout = CompileHTML(source, &res.images);
         }
+
+        tl_srcMap = nullptr;
+        tl_srcMapSeen = nullptr;
+        if (opt.emitSrcMap && !srcEntries.empty()) {
+            NormalizeSrcMapPaths(srcEntries);
+            res.srcMap = BuildSrcMap(srcEntries);
+        }
     }
     return res;
 }
@@ -1062,18 +1151,31 @@ std::vector<uint8_t> CompileBinUIFile(const std::string& path) {
     return CompileBinUIFileEx(path).layout;
 }
 
-CompileResult CompileBinUIFileEx(const std::string& path) {
+CompileResult CompileBinUIFileEx(const std::string& path, const CompileOptions& opt) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return {};
     std::stringstream ss;
     ss << in.rdbuf();
     // 组件内联（<use src="…">）要相对"当前 UI 文件所在目录"解析路径
     struct BaseDirGuard {
-        std::string prev;
-        explicit BaseDirGuard(const std::string& d) : prev(tl_uiBaseDir) { tl_uiBaseDir = d; }
-        ~BaseDirGuard() { tl_uiBaseDir = prev; }
-    } guard{std::filesystem::path(path).parent_path().generic_string()};
-    return CompileBinUIEx(ss.str());
+        std::string prevDir;
+        std::string prevName;
+        std::string prevAbs;
+        explicit BaseDirGuard(const std::string& d, const std::string& n, const std::string& a)
+            : prevDir(tl_uiBaseDir), prevName(tl_uiSourceName), prevAbs(tl_uiSourceAbs) {
+            tl_uiBaseDir = d;
+            tl_uiSourceName = n;
+            tl_uiSourceAbs = a;
+        }
+        ~BaseDirGuard() {
+            tl_uiBaseDir = prevDir;
+            tl_uiSourceName = prevName;
+            tl_uiSourceAbs = prevAbs;
+        }
+    } guard{std::filesystem::path(path).parent_path().generic_string(),
+            std::filesystem::path(path).filename().generic_string(),
+            std::filesystem::absolute(path).generic_string()};
+    return CompileBinUIEx(ss.str(), opt);
 }
 
 // 追加缩放规格段（v3）：uint32 specCount + BinUISpecNode[] + uint32 flexCount + BinUISpecFlex[]
@@ -2729,11 +2831,18 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
                 Warn("组件 " + srcRel + " 的源码比二进制新，已改用源码内联（建议重编后发布）");
             if (binary || external) {
                 deferred = true;   // 占位节点 + 链接器（编译期）/渲染器（运行期）
+                // 二进制/外挂组件也进打包清单：存原始 .bum 字节，解包时原样还原。
+                std::string compBytes;
+                if (ReadWholeFile(af.path, compBytes))
+                    SrcMapCollect(af.path, std::vector<uint8_t>(compBytes.begin(), compBytes.end()));
             } else {
                 std::string compSrc;
                 if (!ReadWholeFile(af.path, compSrc)) {
                     failReason = "读不到组件文件 " + af.path;
                 } else {
+                    // 打包清单存**替换参数之前**的原始源码：解包出来的组件文件要能
+                    // 原样放回去再编一次，参数占位 {{x=默认}} 必须还在。
+                    SrcMapCollect(af.path, std::vector<uint8_t>(compSrc.begin(), compSrc.end()));
                     compSrc = SubstituteParams(compSrc, params);
                     compElems = ParseElements(compSrc, compStyles);
                     if (compElems.empty()) failReason = "组件 " + af.path + " 解析后没有元素";

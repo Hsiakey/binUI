@@ -189,13 +189,60 @@ binui_compile main.html -o build/main.bui      # 单文件界面
 
 # 已经是二进制就原样拷贝，方便两条流水线共用一条命令
 binui_compile titlebar.bum -o dist/titlebar.bum
+
+# 解包：把 .bui 还原成打包前的目录结构（依赖编译时生成的 .bui.srcmap）
+binui_export build/main.bui -o src_restored/   # 逐字节还原，不是节点反推
+binui_export build/main.bui --list             # 只看包里有哪些文件
 ```
 
 构建集成：`make components` 把 `examples/features/*.bum.html` 编成
 `build-mingw/assets/components/*.bum`；CMake 里是 `components_bums` 目标
 （`cmake --build . --target components_bums`）。产物不落源码树。
 
-## 八、两个必须知道的坑
+## 八、打包清单与解包（`.bui.srcmap`）
+
+**内嵌的包也能还原打包前的目录结构** —— 靠编译时在旁边写的一份打包清单。
+
+```bash
+binui_compile src/main.bui.html -o out/binui/main.bui
+#   -> out/binui/main.bui
+#   -> out/binui/main.bui.srcmap     ← 打包清单
+
+binui_export out/binui/main.bui -o restore/
+#   restore/
+#   ├── examples/features/main.html          ← 和源文件逐字节一致
+#   ├── examples/features/button.bum.html
+#   └── components/titlebar.bum.html
+```
+
+清单里存的是**每个文件的原始字节** + **相对 appRootDir 的路径**（不是编译机的绝对路径，
+所以整包搬到哪都能还原）。记录的是"打包时用到的那些文件"：主 UI、每个被内联的组件源码、
+每个被链接/外挂的 `.bum`。
+
+三条性质：
+
+1. **逐字节还原**：存的就是原文件内容，不是"节点树反推 HTML"那种有损转换
+   （那种会把 CSS 级联、flex、`{{参数}}` 全拍平成绝对值）。
+2. **解包出来的树能再编一次，产出同一个字节的 `.bui`**（实测：SHA256 相同）。
+3. **不想给就不给**：`.srcmap` 是独立文件，不随 `.bui` 走。发行时别带它、或者编译时
+   `--no-srcmap` 不生成，就没有任何源码泄露；主 `.bui` 一个字节都不变。
+
+> 为什么不把清单塞进 `.bui`：那会引入新的格式段、升 `BINUI_VERSION`，还会让包里**一定**
+> 带着源码（没得选）。旁挂文件是"要不要暴露"的开关，而布局格式和加载性能完全不动。
+
+```cpp
+// 程序化用法：编译时打开开关，自己决定清单写到哪
+binui::CompileOptions opt;
+opt.emitSrcMap = true;                                   // 默认 false
+binui::CompileResult res = binui::CompileBinUIFileEx("main.bui.html", opt);
+if (!res.srcMap.empty()) /* 写 main.bui.srcmap */;
+
+// 读回来（header-only）
+std::vector<binui::SrcMapEntry> entries;
+binui::ParseSrcMap(res.srcMap.data(), res.srcMap.size(), entries);
+```
+
+## 九、两个必须知道的坑
 
 1. **组件自带的 `<style>` 是全局的**（并进宿主样式表）：好处是宿主能主题化组件，
    坏处是选择器互相影响——组件内的类名请加前缀（示例统一 `.cmp-`）。
@@ -212,7 +259,7 @@ binui_compile titlebar.bum -o dist/titlebar.bum
 
 组件里的 `:hover` / `:active` / `:focus`、`@keyframes`、`::before/::after` 都照常工作。
 
-## 九、资源路径
+## 十、资源路径
 
 组件里的相对资源路径（`<img src>`、`<video src>`、嵌套组件的 `src`）在合并时
 **改写成宿主相对路径**：
@@ -230,7 +277,7 @@ renderer.setImageOrder(renderer.imagePaths());
 renderer.loadResources(imgs);
 ```
 
-## 十、目录结构
+## 十一、目录结构
 
 两条原则就够了：
 
@@ -328,7 +375,7 @@ A  main.bui 放 bin/，组件留在 assets/            mounted=0 failed=1
 B  组件按原相对位置放进 bin/components/          mounted=1 failed=0
 ```
 
-## 十一、已知限制
+## 十二、已知限制
 
 | 限制 | 现状 |
 |---|---|
@@ -337,4 +384,4 @@ B  组件按原相对位置放进 bin/components/          mounted=1 failed=0
 | 组件作用域 CSS 隔离 | 未实现（CSS 全局，靠类名前缀约定） |
 | 组件内 `<script>` | 忽略（没有脚本引擎） |
 | 运行期卸载组件 | 未实现（挂载后只增不减，`loadLayout` 重来即可） |
-| **从 `.bui` 反向导出组件源码树** | **做不到**：编译期内联把组件边界抹平了，`.bui` 里只剩一棵扁平节点树，没有"这块来自哪个 `.bum`"的信息。要做需要两步：① 编译期记录每个组件实例的节点区间 + 源文件相对路径（新格式段，v15 起）；② 一个节点树 → HTML 的序列化器（节点属性早已解析成绝对值、CSS 已级联展开，导出的是等价骨架而非原始源码）。在那之前，**想"能解包"就只能随发行包带上组件源码/二进制**（外挂或同目录分发）。 |
+| 从**没有** `.srcmap` 的 `.bui` 反推源码 | 做不到：内联把组件边界抹平了，`.bui` 里只剩一棵扁平节点树。想要能解包就编译时保留打包清单（`binui_compile` 默认产出 `.bui.srcmap`），`binui_export` 靠它逐字节还原；没有清单就只能靠外面保存的源码树。 |

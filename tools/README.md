@@ -13,9 +13,24 @@ build-mingw/bin/binui_compile.exe dist/titlebar.bum -o dist2/titlebar.bum   # �
 ```
 
 约定：`.bui` = 单个界面（应用入口），`.bum` = 组件；两者都可以只发源码
-（`.bui.xml` / `.bum.html`）、只发二进制，或两种都发（加载时二进制优先）。
+（`.bum.html`、旧写法 `.bum.xml`）、只发二进制，或两种都发（加载时二进制优先）。
 `make components` / CMake 的 `components_bums` 目标会在构建期生成示例组件二进制。
 详见 [docs/components.md](../docs/components.md)。
+
+默认会在产物旁边写一份 **打包清单** `<out>.srcmap`（主 UI + 每个组件的原始字节与路径），
+`binui_export` 靠它解包；`--no-srcmap` 不生成，等于这个包不可解包。
+
+## binui_export —— 把 .bui 还原成打包前的目录结构
+
+```bash
+make tools && build-mingw/bin/binui_export.exe build/main.bui -o restore/
+#   restore/ 里就是打包时用到的那些文件，逐字节一致
+build-mingw/bin/binui_export.exe build/main.bui --list    # 只看清单，不写文件
+```
+
+读的是旁边那份 `main.bui.srcmap`。存的是**原始文件字节 + 相对 appRootDir 的路径**，
+所以是逐字节还原，不是"节点树反推 HTML"。没带 `.srcmap` 的包不可解包（这正是"不想泄露源码
+就别带"的开关）。解出来的树能再编一次，产出同一个字节的 `.bui`。
 
 ## check_examples —— 示例 UI 零警告检查
 
