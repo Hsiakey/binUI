@@ -4005,6 +4005,24 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             { "include", "<include> 不生效：组件内联用 <use src=\"x.bum.html\">（成对写法也可以，"
                          "宿主子元素会落进组件根容器）" },
             { "import", "<import> 不生效：组件内联用 <use src=\"x.bum.html\">" },
+            // ---- SVG：支持 svg/line/circle/rect/polyline/polygon，其余别猜 ----
+            // 这些标签被"当普通容器"时画面是**空**的（不是画歪了），所以必须说清楚换成什么，
+            // 否则作者只会看到自己那一段什么都不显示，以为是自己写错了。
+            { "g", "<g> 只作分组容器：transform/rotate 之类不生效，子元素按容器内绝对坐标画" },
+            { "path", "<path> 不支持（没有路径解析）：用 <line>/<polyline>/<polygon> 拼，"
+                      "或改用 <canvas> 命令式绘制" },
+            { "ellipse", "<ellipse> 不支持（只有正圆）：用 <circle> 或 <rect rx> 代替" },
+            { "text", "SVG <text> 不支持：用普通 <span> 绝对定位到同一坐标" },
+            { "tspan", "SVG <tspan> 不支持：用普通 <span>" },
+            { "defs", "SVG <defs> 不支持：没有 defs/use 引用机制" },
+            { "lineargradient", "SVG <linearGradient> 不支持：用 CSS linear-gradient(...) 画矩形渐变" },
+            { "radialgradient", "SVG <radialGradient> 不支持：改画多层同心圆" },
+            { "mask", "SVG <mask> 不支持" },
+            { "clippath", "SVG <clipPath> 不支持" },
+            { "pattern", "SVG <pattern> 不支持" },
+            { "marker", "SVG <marker> 不支持" },
+            { "symbol", "SVG <symbol> 不支持" },
+            { "image", "SVG <image> 不支持：用 HTML <img>" },
         };
         // 真正被编译器消费的属性（其余一律视为"写了没效果"）
         const auto& kUsedAttrs = UsedHtmlAttrs();
@@ -4033,6 +4051,17 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 const std::string& k = kv.first;
                 if (k.empty() || k[0] == '_') continue;                    // 编译器内部标记
                 if (k.rfind("data-", 0) == 0 || k.rfind("aria-", 0) == 0) continue;
+                // SVG 的两个"看起来该生效、其实静默无效"的属性：单独说清楚。
+                // （transform 在 UsedHtmlAttrs 里，会被当成"已消费"直接放行，最坑）
+                if (k == "transform") {
+                    Warn("transform 属性不生效（只支持状态样式里的 scale()，见 CSS transform）："
+                         "SVG 的 translate/rotate 请直接改坐标");
+                    continue;
+                }
+                if (k == "viewbox") {
+                    Warn("viewBox 不生效（没有坐标系缩放）：<svg> 里的坐标一律是容器内绝对像素");
+                    continue;
+                }
                 if (kUsedAttrs.count(k)) continue;
                 Warn("HTML 属性 \"" + k + "\"（<" + e.tag + ">）未实现，已忽略");
             }

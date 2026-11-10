@@ -6,6 +6,18 @@
 
 ## [Unreleased]
 
+### 修复 — SVG 不支持的标签/属性从"静默无效"改成明确告警
+
+- 现象：写 `<path d="…">` / `<ellipse>` / `<text>` / `<g transform="translate(…)">` / `viewBox`
+  编译**零提示**，画面上那一段就是空的，只能靠自己猜是写错了还是不支持。
+- 根因：`<path>` 等标签走"未知 HTML 标签，已按普通容器处理"，对 SVG 作者毫无信息量；
+  `transform` 属性更糟 —— 它在 `UsedHtmlAttrs()` 里，被当成"已消费"直接放行，**一条告警都没有**。
+- 修复：`<path>` / `<ellipse>` / `<text>` / `<tspan>` / `<g>` / `<defs>` / `<linearGradient>` /
+  `<radialGradient>` / `<mask>` / `<clipPath>` / `<pattern>` / `<marker>` / `<symbol>` / `<image>`
+  都给出"不支持 + 换成什么"的专用提示；`transform` 属性与 `viewBox` 单独告警并说明替代写法。
+- README 的 `<svg>` 条目补一份**不支持清单**（原来只写了支持什么）。
+- `check_examples` 11 个 UI 仍 0 问题（没有误伤现有写法）。
+
 ### 新增 — 打包清单 `binui.res` + `binui_export`：**内嵌的包也能解包回打包前的目录结构**
 
 - 之前文档里写"从 `.bui` 反推源码树做不到"——那是**没有清单**时的结论。现在补上了：
