@@ -2366,11 +2366,11 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "x1", "y1", "x2", "y2",
         // v15 SVG 路径：d 是路径数据；其余是描边/填充规则的表现属性
         "d", "ry", "fill-rule", "fill-opacity", "stroke-opacity",
-        "stroke-linecap", "stroke-linejoin", "stroke-dasharray", "stroke-miterlimit",
+        "stroke-linecap", "stroke-linejoin", "stroke-dasharray", "stroke-dashoffset", "stroke-miterlimit",
         "viewbox", "preserveaspectratio", "xlink:href",
         // v16 SVG 渐变：端点/圆心/焦点/色标/单位/变换/spread（x1/y1/x2/y2/cx/cy/r 上面已有）
         "fx", "fy", "offset", "stop-color", "stop-opacity",
-        "gradientunits", "gradienttransform", "spreadmethod",
+        "gradientunits", "gradienttransform", "spreadmethod", "text-anchor",
     };
     return kSet;
 }
@@ -3456,6 +3456,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         bool     xformRotated = false;  // 含旋转/斜切（径向渐变会因此变形，要告警）
         float    x1 = 0.0f, y1 = 0.0f, x2 = 1.0f, y2 = 0.0f;  // 线性端点（默认 0%/0% → 100%/0%）
         float    cx = 0.5f, cy = 0.5f, r = 0.5f;              // 径向（默认 50%/50%/50%）
+        // v18：径向焦点（默认 = 圆心 = 普通同心圆）。与圆心不同时运行期按 SVG 锥形语义解。
+        float    fx = 0.5f, fy = 0.5f;
         std::vector<SvgGradStopDef> stops;
         std::unordered_map<std::string, std::string> attrs;   // 沿 href 链合并后的属性
     };
@@ -3644,12 +3646,14 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             g.cx = GradNum(A("cx"), 0.5f);
             g.cy = GradNum(A("cy"), 0.5f);
             g.r  = GradNum(A("r"), 0.5f);
-            // fx/fy：规范里焦点与圆心不同时是"偏心径向渐变"，本版按同心圆画
-            const std::string fx = A("fx"), fy = A("fy");
-            if ((!fx.empty() && std::fabs(GradNum(fx, g.cx) - g.cx) > 1e-4f) ||
-                (!fy.empty() && std::fabs(GradNum(fy, g.cy) - g.cy) > 1e-4f)) {
-                Warn("渐变 #" + kv.first + "：径向渐变的焦点（fx/fy）未实现，按同心圆绘制"
-                     "（改 cx/cy 或去掉 fx/fy）");
+            // v18：径向焦点。没写 fx/fy 就是圆心；写在圆外时规范没定义，按同心圆画并告警。
+            g.fx = GradNum(A("fx"), g.cx);
+            g.fy = GradNum(A("fy"), g.cy);
+            if (g.type == PATH_GRAD_RADIAL && g.r > 1e-6f) {
+                const float dx = (g.fx - g.cx) / g.r, dy = (g.fy - g.cy) / g.r;
+                if (dx * dx + dy * dy >= 1.0f)
+                    Warn("渐变 #" + kv.first + "：径向焦点 fx/fy 落在渐变圆外（规范未定义），"
+                         "已按同心圆绘制（把焦点挪到圆内，或去掉 fx/fy）");
             }
             // 色标上限
             if (g.stops.size() > (size_t)kPathGradMaxStops) {
@@ -4276,6 +4280,11 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         std::string fillGradId{};
         // v17：stroke 用的渐变 id（同样可继承）。子元素写纯色 stroke 时会被清掉。
         std::string strokeGradId{};
+        // v18：fill / stroke 是否被"显式"给过（元素自己或祖先）。
+        // 用途：裸 <polyline points="…"> 按 SVG 默认是"黑填充"，但现成素材里几乎都是手误，
+        // 凭空多一个黑色色块比什么都不画更难查 —— 只画显式给了颜料的（polygon/polyline 用）。
+        bool fillStated = false;
+        bool strokeStated = false;
     };
 
     // 根节点固定 id 0，位于坐标原点。画布默认白色；<app_window bg>/<html bg> 覆盖
@@ -4837,6 +4846,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         bool eEvenOdd = pc.evenOdd;
         std::string fillGradId = pc.fillGradId;   // v16：继承下来的渐变填充（空 = 纯色）
         std::string strokeGradId = pc.strokeGradId;  // v17：继承下来的渐变描边（空 = 纯色）
+        bool eFillStated = pc.fillStated;         // v18：颜料是否被显式给过（含祖先）
+        bool eStrokeStated = pc.strokeStated;
         if (inSvg) {
             // CSS（含内联 style / 类规则）> 表现属性 > 继承 > SVG 默认
             auto pickSvgPaint = [&](const char* key) -> std::string {
@@ -4859,6 +4870,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 std::string gid;
                 if (lowerStr(f) == "none") {
                     eHasFill = false;
+                    eFillStated = false;          // fill="none" 不算"给了颜料"
                     fillGradId.clear();
                 } else if (ParseUrlId(f, gid)) {
                     auto git = svgGrads.find(gid);
@@ -4866,15 +4878,18 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                         Warn("fill=\"url(#" + gid + ")\" 找不到渐变定义（按纯色填充，"
                              "请检查 id 拼写或色标是否写在 <linearGradient> 里）");
                         fillGradId.clear();
+                        eFillStated = true;
                         eHasFill = true;              // 退回纯色（保持原来的 eFill）
                     } else {
                         fillGradId = gid;             // 色标等细节在路径段发射时再展开
+                        eFillStated = true;
                         eHasFill = true;
                         eFill = gradMidColor(git->second);
                     }
                 } else {
                     eFill = parsePaint(f, eFill);
                     eHasFill = true;
+                    eFillStated = true;
                     fillGradId.clear();
                 }
             }
@@ -4883,6 +4898,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 std::string sgid;
                 if (lowerStr(s) == "none") {
                     eHasStroke = false;
+                    eStrokeStated = false;
                     strokeGradId.clear();
                 } else if (ParseUrlId(s, sgid)) {
                     // v17：描边渐变真的用了（以前只能告警退纯色）
@@ -4891,15 +4907,18 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                         Warn("stroke=\"url(#" + sgid + ")\" 找不到渐变定义（按纯色描边，"
                              "请检查 id 拼写或色标是否写在 <linearGradient> 里）");
                         strokeGradId.clear();
+                        eStrokeStated = true;
                         eHasStroke = true;            // 退回纯色（保持原来的 eStroke）
                     } else {
                         strokeGradId = sgid;          // 色标等细节在路径段发射时再展开
+                        eStrokeStated = true;
                         eHasStroke = true;
                         eStroke = git->second.stops[0].color;   // 代表色：首个色标（兜底用）
                     }
                 } else {
                     eStroke = parsePaint(s, eStroke);
                     eHasStroke = true;
+                    eStrokeStated = true;
                     strokeGradId.clear();   // 纯色覆盖祖先继承来的渐变描边
                 }
             }
@@ -4917,64 +4936,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 
         // <polyline points="x,y x,y ..."> / <polygon>：展开成若干 BINUI_LINE 子节点
         // 坐标为 svg 容器坐标系（pc.ox/pc.oy 即容器内容盒原点）
+        // <polyline points="x,y x,y …"> / <polygon>：**编成路径**（v18 之前是拆成一堆 BINUI_LINE，
+        // 于是填充完全无效、渐变描边也用不了）。points 借 ParsePathData 解析 ——
+        // 它能吃 "1.5.5"、"1-2"、逗号/空白混排这些写法，自己手写切词反而漏格式。
+        // 裸 <polyline>（没写 fill 也没写 stroke）不产生节点：SVG 默认黑填充会把漏写属性的
+        // 折线变成一块黑色色块，比"什么都不画"更难查。
+        const bool polyPaintable = (e.tag == "polyline" || e.tag == "polygon") &&
+                                   ((eHasFill && eFillStated) || (eHasStroke && eStrokeStated));
         if (e.tag == "polyline" || e.tag == "polygon") {
-            std::string pts = e.attrs.count("points") ? e.attrs.at("points") : "";
-            std::vector<float> coords;
-            std::string cur;
-            for (char ch : pts) {
-                if (ch==',' || ch==' ' || ch=='\t' || ch=='\n' || ch=='\r') {
-                    if (!cur.empty()) { coords.push_back(parseLen(cur, 0)); cur.clear(); }
-                } else cur += ch;
-            }
-            if (!cur.empty()) coords.push_back(parseLen(cur, 0));
-            size_t m = coords.size() / 2;
-            bool closed = (e.tag == "polygon") && m >= 2;
-            if (!fillGradId.empty()) {
-                Warn("<" + e.tag + "> 不支持渐变填充，按首个色标纯色绘制"
-                     "（要渐变请改用 <path>）");
-            }
-            if (!strokeGradId.empty()) {
-                Warn("<" + e.tag + "> 不支持渐变描边，按首个色标纯色绘制"
-                     "（要渐变描边请改用 <path>）");
-            }
-            if (m >= 2) {
-                // viewBox / <g transform>：逐点映射到内容盒坐标
-                for (size_t k = 0; k < m; k++) {
-                    const PathPointF tp = PathApply(svgX, coords[2 * k], coords[2 * k + 1]);
-                    coords[2 * k] = tp.x;
-                    coords[2 * k + 1] = tp.y;
-                }
-                const float strokeScale = PathScaleFactor(svgX);
-                uint32_t stroke = eHasStroke ? eStroke : 0xFF000000u;
-                uint16_t sw2 = (uint16_t)std::max(1.0f, (float)eStrokeW * strokeScale);
-                uint32_t firstId = 0;
-                auto emitSeg = [&](size_t a, size_t b) {
-                    BinUINode ln = {};
-                    ln.id = id++;
-                    if (!firstId) firstId = ln.id;
-                    ln.parentId = (uint16_t)pnodeId;
-                    ln.type = BINUI_LINE;
-                    ln.flags = BINUI_VISIBLE | BINUI_ABSOLUTE;
-                    ln.x = pc.ox + coords[2*a]; ln.y = pc.oy + coords[2*a+1];
-                    ln.width = pc.ox + coords[2*b]; ln.height = pc.oy + coords[2*b+1];
-                    ln.color = stroke;
-                    ln.radius = sw2;
-                    nodes.push_back(ln);
-                    // 线段的 width/height 是"终点绝对坐标"，不是尺寸：重排规格里存**相对偏移**，
-                    // 运行期按"起点 + 偏移"还原，父容器一动线段才会跟着走（见 renderer relayout）
-                    BinUISpecNode sp = {};
-                    sp.nodeId = ln.id;
-                    sp.relX = coords[2*a];
-                    sp.relY = coords[2*a+1];
-                    sp.relW = coords[2*b] - coords[2*a];
-                    sp.relH = coords[2*b+1] - coords[2*a+1];
-                    specNodes.push_back(sp);
-                };
-                for (size_t k = 0; k + 1 < m; k++) emitSeg(k, k + 1);
-                if (closed) emitSeg(m - 1, 0);
-                hIdxToNodeId[ei] = firstId; // 代表节点：供其后代解析父级（polyline 无子元素）
-            }
-            continue; // 不生成普通节点、不推容器上下文
+            if (!polyPaintable) continue;   // 不生成节点、不推容器上下文
         }
 
         // <path d="…"> / <ellipse cx cy rx ry>：编译期细分成折线
@@ -4995,11 +4965,19 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         BinUIPathGradient pathGrad = {};
         bool pathHasStrokeGrad = false;     // v17：描边用渐变（记录写在填充渐变之后）
         BinUIPathGradient pathStrokeGrad = {};
-        // <path>/<ellipse>：永远是路径。
+        // <line>：只有两个端点，平时用 BINUI_LINE 更省（一个节点、命中测试也简单）；
+        // 但虚线 / 渐变描边 / 端帽 / 连接样式这四样 LINE 节点表达不了，遇到就升级成 2 点开放路径。
+        const bool lineNeedsPath = (e.tag == "line") &&
+            (style.count("stroke-dasharray") || e.attrs.count("stroke-dasharray") ||
+             !strokeGradId.empty() ||
+             style.count("stroke-linecap") || e.attrs.count("stroke-linecap") ||
+             style.count("stroke-linejoin") || e.attrs.count("stroke-linejoin"));
+        // <path>/<ellipse>/<polyline>/<polygon>：永远是路径；<line> 按需升级。
         // <circle>/<rect>：带描边、或填充是渐变时必须编成路径 —— 轻量映射（LIST + radius）
         // 只能表达一个颜色，fill 与 stroke 并存、多条色标都走不通；没有描边也不是渐变时
         // 继续走轻量映射，因为圆角矩形的九宫格填充比扫描线条带更干净（边缘更准、也没有取整毛边）。
-        const bool shapeAsPath = (e.tag == "path" || e.tag == "ellipse") ||
+        const bool shapeAsPath = (e.tag == "path" || e.tag == "ellipse" || e.tag == "polyline" ||
+                                  e.tag == "polygon" || lineNeedsPath) ||
                                  ((e.tag == "circle" || e.tag == "rect") &&
                                   ((eHasStroke && eStrokeW > 0) || !fillGradId.empty()));
         if (shapeAsPath) {
@@ -5011,6 +4989,31 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 } else if (!ParsePathData(d, 0.1f, svgPathShape, &perr)) {
                     Warn("<path> 的 d 解析失败：" + perr);
                 }
+            } else if (e.tag == "polyline" || e.tag == "polygon") {
+                // points 的每对数字等价于 M/L 的参数：借 ParsePathData 的切词与纠错，
+                // "M10 10 20 20 30 30" = 一个 moveto + 两个 lineto，正好是折线语义。
+                const std::string pts = e.attrs.count("points") ? e.attrs.at("points") : "";
+                std::string perr;
+                const std::string d = "M" + pts + (e.tag == "polygon" ? " Z" : "");
+                if (pts.empty()) {
+                    Warn("<" + e.tag + "> 没有 points 属性（空路径不生成节点）");
+                } else if (!ParsePathData(d, 0.1f, svgPathShape, &perr)) {
+                    Warn("<" + e.tag + "> 的 points 解析失败：" + perr);
+                }
+            } else if (e.tag == "line") {
+                // 升级成 2 点开放路径（坐标是用户单位，稍后统一过 svgX）
+                const float x1 = parseLen(e.attrs.count("x1") ? e.attrs.at("x1") : "", 0);
+                const float y1 = parseLen(e.attrs.count("y1") ? e.attrs.at("y1") : "", 0);
+                const float x2 = parseLen(e.attrs.count("x2") ? e.attrs.at("x2") : "", 0);
+                const float y2 = parseLen(e.attrs.count("y2") ? e.attrs.at("y2") : "", 0);
+                PathShape::Contour ct;
+                ct.first = 0;
+                ct.count = 2;
+                ct.closed = false;
+                svgPathShape.pts.push_back({ x1, y1 });
+                svgPathShape.pts.push_back({ x2, y2 });
+                svgPathShape.contours.push_back(ct);
+                svgPathShape.RecomputeBounds();
             } else if (e.tag == "ellipse") {
                 const float ecx = parseLen(e.attrs.count("cx") ? e.attrs.at("cx") : "", 0);
                 const float ecy = parseLen(e.attrs.count("cy") ? e.attrs.at("cy") : "", 0);
@@ -5087,7 +5090,16 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                         }
                         if (!cur.empty()) pat.push_back(parseLen(cur, 0) * xk);
                         if (pat.size() % 2 == 1) pat.insert(pat.end(), pat.begin(), pat.end());
-                        if (!ApplyDashPattern(svgPathShape, pat)) {
+                        // stroke-dashoffset：与 pattern 同一个口径（用户单位 × svgX 缩放），
+                        // 负值由 ApplyDashPattern 内部取模折算
+                        float dashOffset = 0.0f;
+                        std::string doff = style.count("stroke-dashoffset")
+                                            ? style.at("stroke-dashoffset") : "";
+                        if (doff.empty() && e.attrs.count("stroke-dashoffset"))
+                            doff = e.attrs.at("stroke-dashoffset");
+                        if (!doff.empty())
+                            dashOffset = parseLen(doff, 0.0f, "stroke-dashoffset") * xk;
+                        if (!ApplyDashPattern(svgPathShape, pat, dashOffset)) {
                             Warn("stroke-dasharray 把整条路径吃光了（描边已关闭）");
                             pathStroke = false;
                         }
@@ -5216,6 +5228,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                         const PathPointF gc = PathApply(M, gd.cx, gd.cy);
                         pg.x1 = gc.x;
                         pg.y1 = gc.y;
+                        // v18：焦点按同一个 M 折到归一化空间（= 圆心时运行期走快路）
+                        const PathPointF gf = PathApply(M, gd.fx, gd.fy);
+                        pg.fx = gf.x;
+                        pg.fy = gf.y;
                         // 半径按 M 两列的范数放大：仿射变换下圆的轴长正好是这个
                         pg.rx = std::fabs(gd.r) * std::sqrt(M.a * M.a + M.b * M.b);
                         pg.ry = std::fabs(gd.r) * std::sqrt(M.c * M.c + M.d * M.d);
@@ -5377,11 +5393,30 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                                          14.0f);
             const PathPointF tp = PathApply(svgX, tx, ty);
             nodeFontSize = fs;   // font-size 是 SVG 属性名，走 pick("size") 取不到，这里补上
+            // text-anchor：SVG 的 x 是"锚点"，默认锚在文本左端。binUI 的 LABEL 从盒左边画起，
+            // 所以 middle/end 要在编译期把盒子左边左移（盒宽用与运行期同一口径的字宽估算）。
+            std::string ta = style.count("text-anchor") ? style.at("text-anchor")
+                            : (e.attrs.count("text-anchor") ? e.attrs.at("text-anchor") : "");
+            ta = lowerStr(ta);
+            const float estW = estTextWidth(srcText, fs) * PathScaleFactor(svgX);
             sx = std::to_string(tp.x);
             sy = std::to_string(tp.y - fs * 0.8f * PathScaleFactor(svgX));
+            if (ta == "middle") {
+                sx = std::to_string(tp.x - estW * 0.5f);
+            } else if (ta == "end") {
+                sx = std::to_string(tp.x - estW);
+            } else if (!ta.empty() && ta != "start") {
+                Warn("text-anchor=\"" + ta + "\" 不认识，按 start 处理"
+                     "（可选 start / middle / end）");
+            }
             if (sw.empty()) {
-                const float avail = pc.contentW - tp.x;
-                sw = std::to_string(avail > 4.0f ? avail : 4.0f);
+                if (ta == "middle" || ta == "end") {
+                    // 居中/右对齐的盒子必须按估算宽度收窄，否则"撑到容器右边"会把锚点带偏
+                    sw = std::to_string(std::max(4.0f, estW + 2.0f));
+                } else {
+                    const float avail = pc.contentW - tp.x;
+                    sw = std::to_string(avail > 4.0f ? avail : 4.0f);
+                }
             }
             sh = std::to_string(fs * 1.35f * PathScaleFactor(svgX) + 2.0f);
         } else if (e.tag == "image" && inSvg) {
@@ -5563,6 +5598,26 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             // 所以这份"默认"一直没人写；现在后端改成读 flags 了，必须在这里补上，
             // 否则所有没写 text-align 的按钮会突然变左对齐（演示全都要改观感）。
             else if (type == BINUI_BUTTON && ta.empty()) n.flags |= BINUI_TEXT_CENTER;
+        }
+
+        // 嵌套 <svg>：它的 x/y/width/height 是**父用户坐标**，而普通元素的 left/top 是容器像素。
+        // 祖先有 transform 时（例如 `<g transform="scale(2)">` 包一个 <svg>），不折算就会出现
+        // "子图形按变换画、自己的盒子还在原位"—— 盒子把内容全裁掉（踩过：嵌套 svg 整块空白）。
+        // 这里把矩形四个角过一遍父变换取包围盒；旋转时用轴对齐包围盒（子图形仍按真变换画）。
+        if (e.tag == "svg" && pc.inSvg) {
+            const float ux0 = x - pc.ox, uy0 = y - pc.oy;
+            const PathPointF c0 = PathApply(svgX, ux0, uy0);
+            const PathPointF c1 = PathApply(svgX, ux0 + w, uy0);
+            const PathPointF c2 = PathApply(svgX, ux0, uy0 + lh);
+            const PathPointF c3 = PathApply(svgX, ux0 + w, uy0 + lh);
+            const float mnx = std::min(std::min(c0.x, c1.x), std::min(c2.x, c3.x));
+            const float mny = std::min(std::min(c0.y, c1.y), std::min(c2.y, c3.y));
+            const float mxx = std::max(std::max(c0.x, c1.x), std::max(c2.x, c3.x));
+            const float mxy = std::max(std::max(c0.y, c1.y), std::max(c2.y, c3.y));
+            x = pc.ox + mnx;
+            y = pc.oy + mny;
+            w = std::max(0.0f, mxx - mnx);
+            lh = std::max(0.0f, mxy - mny);
         }
 
         // 静态 opacity 在颜色赋值之后处理（见下方），这里先落几何
@@ -5756,13 +5811,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // ---- SVG 图形语义（<line>/<circle>/<rect>）----
         // 颜色一律走继承链（eFill/eStroke，见上面的 SVG 颜料块）：
         // 以前这里各自 pick() 一次，<svg fill="#fff"> 对子元素完全无效。
-        if (e.tag == "line") {
+        if (e.tag == "line" && !hasSvgPath) {
             // x,y = 起点（绝对）；width,height = 终点（绝对）＝ 起点 + 声明偏移
-            // LINE 节点只有一个颜色，渐变描边表达不了（说清楚，别静默退化）
-            if (!strokeGradId.empty()) {
-                Warn("<line> 不支持渐变描边，按首个色标纯色绘制"
-                     "（要渐变描边请改用 <path>）");
-            }
             n.x = pc.ox + parseLen(sx, 0);
             n.y = pc.oy + parseLen(sy, 0);
             n.width = n.x + (svgLineX2 - parseLen(sx, 0));
@@ -5789,6 +5839,11 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             } else if (eHasFill) {
                 n.color = eFill;
             }
+            // 描边对文字完全没有通路（字形是图集位图，没有轮廓可以描）——
+            // 只在元素自己写了 stroke 时提醒，别让 <svg stroke="…"> 的继承把每行文字都刷一遍
+            if (style.count("stroke") || e.attrs.count("stroke"))
+                Warn("SVG <text> 不支持描边（文字没有轮廓描边通路），"
+                     "需要描边请把文字转成 <path>");
         }
 
         // 文本来源：元素自身文本 > 输入框/按钮的值 > 图片的 alt 兜底
@@ -6041,8 +6096,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         sp.relW = (!flexPlaced && hasW && pctW < 0) ? baseW : -1;
         sp.relH = (!flexPlaced && !sh.empty() && pctH < 0) ? baseH : -1;
         // 线段：width/height 是"终点绝对坐标"，重排规格必须存**起点偏移 + 端点增量**，
-        // 否则 relayout 会把终点当尺寸，父容器一挪线段就被拉成一条横贯窗口的直线
-        if (e.tag == "line") {
+        // 否则 relayout 会把终点当尺寸，父容器一挪线段就被拉成一条横贯窗口的直线。
+        // 升级成路径的 <line> 不算：它是普通路径节点，盒子就是包围盒。
+        if (e.tag == "line" && !hasSvgPath) {
             sp.relX = svgLineX1;
             sp.relY = svgLineY1;
             sp.relW = svgLineX2 - svgLineX1;
@@ -6134,17 +6190,37 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 if (!vbs.empty()) {
                     if (ParseViewBox(vbs, vbx, vby, vbw, vbh)) {
                         PathMatrix vb;
+                        // 内容盒用**设备尺寸**：节点盒已经过父变换（嵌套 svg 时是缩放后的 px），
+                        // viewBox 映射到这个设备盒就是对的；若用声明的用户尺寸会少算一次缩放。
                         const float boxW = std::max(0.0f, w - 2.0f * pad);
                         const float boxH = std::max(0.0f, lh - 2.0f * pad);
                         const std::string par = e.attrs.count("preserveaspectratio")
                                                 ? e.attrs.at("preserveaspectratio") : "";
                         if (BuildViewBoxMatrix(vbx, vby, vbw, vbh, boxW, boxH, par, vb)) {
                             base = PathMul(base, vb);
+                            // 9 宫格对齐 + meet/slice + 可选 defer 前缀都由 BuildViewBoxMatrix 解析；
+                            // 这里只把"认不出的值"点出来，免得作者以为写了就生效
                             const std::string lp = lowerStr(par);
-                            if (!lp.empty() && lp != "none" && lp.rfind("xmidymid", 0) != 0 &&
-                                lp.rfind("xmidymin", 0) != 0 && lp.rfind("xmidymax", 0) != 0)
-                                Warn("preserveAspectRatio 只支持 xMidYMid 系列与 none，\"" +
-                                     par + "\" 按居中处理");
+                            bool badTok = false;
+                            std::string tok;
+                            for (size_t ci = 0; ci <= lp.size(); ci++) {
+                                const char ch = ci < lp.size() ? lp[ci] : ' ';
+                                if (ch != ' ' && ch != '\t' && ch != ',') { tok += ch; continue; }
+                                if (tok.empty()) continue;
+                                bool okTok = (tok == "none" || tok == "defer" ||
+                                              tok == "meet" || tok == "slice");
+                                static const char* kAlign[] = {
+                                    "xminymin", "xmidymin", "xmaxymin",
+                                    "xminymid", "xmidymid", "xmaxymid",
+                                    "xminymax", "xmidymax", "xmaxymax" };
+                                for (const char* a2 : kAlign) if (tok == a2) okTok = true;
+                                if (!okTok) badTok = true;
+                                tok.clear();
+                            }
+                            if (badTok)
+                                Warn("preserveAspectRatio=\"" + par + "\" 里有认不出的值，"
+                                     "已按默认 xMidYMid meet 处理（可选 none | "
+                                     "xMinYMin … xMaxYMax | meet | slice）");
                         }
                     } else {
                         Warn("viewBox 解析失败（需要 4 个数：minX minY width height）");

@@ -3251,6 +3251,79 @@ static void TestGradientBands() {
         CHECK_NEAR(BandArea(bands, n), 10000.0, 1.0, "渐变径向：覆盖面积与纯色一致");
     }
 
+    // v18 径向焦点（SVG 锥形语义）：焦点自身 t=0，圆心按 |C-F|/(r-|F-C|)
+    {
+        BinUIPathGradient g{};
+        g.type = PATH_GRAD_RADIAL;
+        g.stopCount = 2;
+        g.x1 = g.y1 = 0.5f;
+        g.rx = g.ry = 0.5f;
+        g.fx = 0.1f; g.fy = 0.5f;         // 焦点在圆心左侧，仍在圆内
+        std::printf("  [svgpath] 径向焦点：焦点=%.3f 圆心=%.3f 右缘=%.3f 上缘=%.3f\n",
+                    (double)PathGradT(g, 0.1f, 0.5f), (double)PathGradT(g, 0.5f, 0.5f),
+                    (double)PathGradT(g, 0.999f, 0.5f), (double)PathGradT(g, 0.5f, 0.001f));
+        CHECK_NEAR(PathGradT(g, 0.1f, 0.5f), 0.0f, 1e-3, "焦点：焦点自身 t=0");
+        // 手算：(0.5-0.1)/(0.5+0.5-0.1) = 0.4/0.9
+        CHECK_NEAR(PathGradT(g, 0.5f, 0.5f), 0.4444f, 2e-3, "焦点：圆心按锥形语义得 4/9");
+        CHECK_NEAR(PathGradT(g, 0.999f, 0.5f), 1.0f, 5e-3, "焦点：右缘 t=1");
+        CHECK_NEAR(PathGradT(g, 0.5f, 0.001f), 1.0f, 5e-3, "焦点：上缘 t=1");
+        // 焦点跑到圆外：必须退回同心圆，不许出鬼影
+        BinUIPathGradient outside = g;
+        outside.fx = 3.0f;
+        CHECK_NEAR(PathGradT(outside, 0.5f, 0.5f), 0.0f, 1e-3, "焦点：焦点在圆外时退回同心圆");
+    }
+
+    // v17 stroke-dashoffset：相位偏移把虚实图案沿弧长前后挪，段数不变
+    {
+        PathShape line;
+        ParsePathData("M0 0 H100", 0.01f, line, &err);
+        PathShape da = line, db = line, dc = line;
+        CHECK(ApplyDashPattern(da, { 10.0f, 10.0f }, 0.0f), "虚线：offset=0 能切");
+        CHECK(ApplyDashPattern(db, { 10.0f, 10.0f }, 5.0f), "虚线：offset=5 能切");
+        CHECK(ApplyDashPattern(dc, { 10.0f, 10.0f }, 10.0f), "虚线：offset=整周期能切");
+        // 第一段实线的 [起点, 终点]
+        auto firstDash = [](const PathShape& sh, float& a, float& b) {
+            if (sh.contours.empty() || sh.contours[0].count < 2) { a = b = -1.0f; return; }
+            const auto& c = sh.contours[0];
+            a = sh.pts[c.first].x;
+            b = sh.pts[c.first + c.count - 1].x;
+        };
+        float a0, b0, a5, b5, a10, b10;
+        firstDash(da, a0, b0);
+        firstDash(db, a5, b5);
+        firstDash(dc, a10, b10);
+        std::printf("  [svgpath] 虚线相位：offset 0/5/10 → 首段实线 [%.0f,%.0f] [%.0f,%.0f] [%.0f,%.0f]\n",
+                    (double)a0, (double)b0, (double)a5, (double)b5, (double)a10, (double)b10);
+        CHECK_NEAR(a0, 0.0f, 1e-3, "虚线：offset=0 从起点开始画");
+        CHECK_NEAR(b0, 10.0f, 1e-3, "虚线：offset=0 首段实线 0..10");
+        // offset=5：图案往后挪 5，起点仍是 0，但首段只剩后半截（0..5）
+        CHECK_NEAR(a5, 0.0f, 1e-3, "虚线：offset=5 起点仍在 0");
+        CHECK_NEAR(b5, 5.0f, 1e-3, "虚线：offset=5 首段实线只剩 0..5");
+        // offset=10：正好落在空隙里 → 首个实线从 10 开始
+        CHECK_NEAR(a10, 10.0f, 1e-3, "虚线：offset=整周期时先空一段，首段实线从 10 开始");
+        CHECK_NEAR(b10, 20.0f, 1e-3, "虚线：offset=整周期 首段实线 10..20");
+    }
+
+    // v17 preserveAspectRatio：slice + 9 宫格对齐
+    {
+        PathMatrix m{};
+        const float vw = 100.0f, vh = 50.0f, bw = 100.0f, bh = 100.0f;
+        BuildViewBoxMatrix(0, 0, vw, vh, bw, bh, "xMidYMid meet", m);
+        CHECK_NEAR(m.a, 1.0f, 1e-4, "viewBox meet：sx=1");
+        CHECK_NEAR(m.f, 25.0f, 1e-4, "viewBox meet：纵向居中");
+        BuildViewBoxMatrix(0, 0, vw, vh, bw, bh, "xMidYMid slice", m);
+        CHECK_NEAR(m.a, 2.0f, 1e-4, "viewBox slice：取较大的缩放 2");
+        CHECK_NEAR(m.e, -50.0f, 1e-4, "viewBox slice：横向居中溢出 -50");
+        BuildViewBoxMatrix(0, 0, vw, vh, bw, bh, "xMinYMin slice", m);
+        CHECK_NEAR(m.e, 0.0f, 1e-4, "viewBox slice+xMin：不偏移");
+        CHECK_NEAR(m.f, 0.0f, 1e-4, "viewBox slice+yMin：不偏移");
+        BuildViewBoxMatrix(0, 0, vw, vh, bw, bh, "xMaxYMax slice", m);
+        CHECK_NEAR(m.e, -100.0f, 1e-4, "viewBox slice+xMax：贴右边");
+        BuildViewBoxMatrix(0, 0, vw, vh, bw, bh, "none", m);
+        CHECK_NEAR(m.a, 1.0f, 1e-4, "viewBox none：sx=boxW/vw");
+        CHECK_NEAR(m.d, 2.0f, 1e-4, "viewBox none：sy=boxH/vh");
+    }
+
     // spreadMethod 的 t 折叠
     CHECK(PathGradSpreadT(-0.5f, PATH_GRAD_PAD) == 0.0f, "渐变 spread：pad 负向夹紧");
     CHECK(PathGradSpreadT(1.5f, PATH_GRAD_PAD) == 1.0f, "渐变 spread：pad 正向夹紧");
@@ -3323,6 +3396,134 @@ static void TestGradientBands() {
 
 // 描边连接：join / miter-limit 落库，以及"斜接尖角把节点盒撑开"（不撑开会被后端切平）
 // 精确命中（v17）：有填充的路径按"点在路径内"判，环的洞 / 星形凹口不再误命中
+// SVG 收尾（v18）：polygon/polyline 编成路径、line 按需升级、text-anchor、
+// stroke-dashoffset、preserveAspectRatio slice、嵌套 svg 继承祖先变换
+static void TestSvgFinish() {
+    auto compile = [](const std::string& body) {
+        const std::string html =
+            "<app_window width=\"120\" height=\"120\"><html width=\"120\" height=\"120\" bg=\"#000000\">"
+            "<body>" + body + "</body></html></app_window>";
+        auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        r.loadLayout(res.layout.data(), res.layout.size());
+        return std::make_pair(res.warnings, r);
+    };
+
+    // ---- polygon / polyline 编成路径 ----
+    {
+        auto [warns, r] = compile(
+            "<svg x=\"0\" y=\"0\" width=\"100\" height=\"100\" viewBox=\"0 0 24 24\">"
+            "<polygon points=\"12 2 22 22 2 22\" fill=\"#F2B544\"/>"
+            "<polyline points=\"2 20 8 6 14 16 20 4\" fill=\"none\" stroke=\"#7AAAFF\" stroke-width=\"2\"/>"
+            "<polygon points=\"2 2 6 2 6 6\"/>"
+            "</svg>");
+        for (const auto& s : warns) std::printf("  [svgpath][warn] %s\n", s.c_str());
+        int paths = 0, lines = 0;
+        for (const auto& n : r.getNodes()) {
+            if (n.type == BINUI_PATH) paths++;
+            if (n.type == BINUI_LINE) lines++;
+        }
+        std::printf("  [svgpath] polygon/polyline：PATH %d 个，LINE %d 个\n", paths, lines);
+        CHECK(paths == 2, "polygon/polyline：有颜料的编成路径（裸 polygon 不产生节点）");
+        CHECK(lines == 0, "polygon/polyline：不再拆成线段节点");
+        CHECK(warns.empty(), "polygon/polyline：不报警告（渐变/填充能力已具备）");
+        bool hasFillPath = false, hasStrokeGradOrStroke = false;
+        for (const auto& n : r.getNodes()) {
+            if (n.type != BINUI_PATH) continue;
+            const auto* pr = r.pathOf(n.id);
+            if (!pr) continue;
+            if (pr->head.flags & PATH_FILL) hasFillPath = true;
+            if (pr->head.flags & PATH_STROKE) hasStrokeGradOrStroke = true;
+        }
+        CHECK(hasFillPath, "polygon：fill 走路径填充");
+        CHECK(hasStrokeGradOrStroke, "polyline：stroke 走路径描边");
+    }
+
+    // ---- <line>：普通线仍是 LINE，需要路径能力时升级 ----
+    {
+        auto [warns, r] = compile(
+            "<svg x=\"0\" y=\"0\" width=\"100\" height=\"100\" viewBox=\"0 0 24 24\">"
+            "<line x1=\"2\" y1=\"4\" x2=\"22\" y2=\"4\" stroke=\"#4ED17E\" stroke-width=\"2\"/>"
+            "<line x1=\"2\" y1=\"12\" x2=\"22\" y2=\"12\" stroke=\"#F25A5A\" stroke-width=\"2\" "
+            "stroke-dasharray=\"3 2\"/>"
+            "</svg>");
+        for (const auto& s : warns) std::printf("  [svgpath][warn] %s\n", s.c_str());
+        int lines = 0, paths = 0;
+        for (const auto& n : r.getNodes()) {
+            if (n.type == BINUI_LINE) lines++;
+            if (n.type == BINUI_PATH) paths++;
+        }
+        std::printf("  [svgpath] line：LINE %d 个，PATH %d 个（虚线那条升级）\n", lines, paths);
+        CHECK(lines == 1, "line：普通线段仍走轻量 LINE 节点");
+        CHECK(paths == 1, "line：写了 dasharray 升级成路径");
+        CHECK(warns.empty(), "line：升级后不再告警");
+    }
+
+    // ---- text-anchor：同一个 x，三种锚点给出不同盒子左边 ----
+    {
+        auto [warns, r] = compile(
+            "<svg x=\"0\" y=\"0\" width=\"120\" height=\"120\" viewBox=\"0 0 120 120\">"
+            "<text x=\"60\" y=\"40\" font-size=\"12\" fill=\"#FFFFFF\">AAAAAAAA</text>"
+            "<text x=\"60\" y=\"70\" font-size=\"12\" fill=\"#FFFFFF\" text-anchor=\"middle\">AAAAAAAA</text>"
+            "<text x=\"60\" y=\"100\" font-size=\"12\" fill=\"#FFFFFF\" text-anchor=\"end\">AAAAAAAA</text>"
+            "</svg>");
+        for (const auto& s : warns) std::printf("  [svgpath][warn] %s\n", s.c_str());
+        std::vector<const BinUIRenderer::NodeInfo*> labels;
+        for (const auto& n : r.getNodes())
+            if (n.type == BINUI_LABEL && !n.text.empty()) labels.push_back(&n);
+        CHECK(labels.size() == 3, "text-anchor：三个标签都编出来");
+        if (labels.size() == 3) {
+            std::printf("  [svgpath] text-anchor：start x=%.1f  middle x=%.1f  end x=%.1f（宽 %.1f）\n",
+                        (double)labels[0]->x, (double)labels[1]->x, (double)labels[2]->x,
+                        (double)labels[0]->width);
+            CHECK(labels[0]->x > labels[1]->x && labels[1]->x > labels[2]->x,
+                  "text-anchor：end < middle < start 的盒子左边依次左移");
+            const float halfW = labels[0]->width * 0.5f;
+            CHECK_NEAR(labels[1]->x, labels[0]->x - halfW, labels[0]->width * 0.6f,
+                       "text-anchor=middle：盒子左移约半个文本宽");
+        }
+        CHECK(warns.empty(), "text-anchor：不报警告");
+    }
+
+    // ---- 嵌套 svg 继承祖先 transform ----
+    {
+        auto [w1, r1] = compile(
+            "<svg x=\"0\" y=\"0\" width=\"120\" height=\"120\" viewBox=\"0 0 120 120\">"
+            "<g transform=\"translate(10 10) scale(0.5)\">"
+            "<svg x=\"0\" y=\"0\" width=\"100\" height=\"100\" viewBox=\"0 0 10 10\">"
+            "<rect x=\"0\" y=\"0\" width=\"10\" height=\"10\" fill=\"#7AAAFF\"/>"
+            "</svg></g></svg>");
+        auto [w2, r2] = compile(
+            "<svg x=\"0\" y=\"0\" width=\"120\" height=\"120\" viewBox=\"0 0 120 120\">"
+            "<svg x=\"0\" y=\"0\" width=\"100\" height=\"100\" viewBox=\"0 0 10 10\">"
+            "<rect x=\"0\" y=\"0\" width=\"10\" height=\"10\" fill=\"#7AAAFF\"/>"
+            "</svg></svg>");
+        for (const auto& s : w1) std::printf("  [svgpath][warn] %s\n", s.c_str());
+        CHECK(w1.empty(), "嵌套 svg：不报警告");
+        // 找那个方块（BINUI_LIST + 不透明底色；<rect> 没描边时走轻量映射）
+        auto findRect = [](BinUIRenderer& r, float& x, float& w) {
+            for (const auto& n : r.getNodes()) {
+                if (n.type != BINUI_LIST) continue;
+                if (((n.color >> 24) & 0xFF) == 0) continue;
+                x = n.x;
+                w = n.width;
+                return;
+            }
+            x = w = -1.0f;
+        };
+        float x1 = 0, w1v = 0, x2 = 0, w2v = 0;
+        findRect(r1, x1, w1v);
+        findRect(r2, x2, w2v);
+        std::printf("  [svgpath] 嵌套 svg：带 g(scale 0.5) 盒 = (%.1f,%.1f)  不带 = (%.1f,%.1f)\n",
+                    (double)x1, (double)w1v, (double)x2, (double)w2v);
+        CHECK(w1v > 0.0f && w2v > 0.0f, "嵌套 svg：两种写法都编出了方块");
+        if (w1v > 0.0f && w2v > 0.0f) {
+            CHECK(w1v < w2v * 0.75f, "嵌套 svg：<g scale> 包住时盒子跟着缩小");
+            CHECK(x1 > x2 + 1.0f, "嵌套 svg：<g translate> 包住时盒子跟着平移");
+        }
+    }
+}
+
 static void TestPathHitTest() {
     // 一个 20x20 的环（evenodd 挖洞），放在 100x100 窗口里
     const std::string html =
@@ -3571,6 +3772,7 @@ static int run() {
     TestGradientCompile();
     TestLineJoin();
     TestPathHitTest();
+    TestSvgFinish();
     std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");
     return g_fail;
 }

@@ -655,7 +655,8 @@ inline void AppendRoundedRect(PathShape& out, float x, float y, float w, float h
 // （SVG 语义本来就是随用户单位缩放，所以这是对的）。
 // 返回 false 表示"虚线把整条路径吃光了"（调用方应把描边关掉）。
 // ============================================================
-inline bool ApplyDashPattern(PathShape& s, const std::vector<float>& pattern) {
+inline bool ApplyDashPattern(PathShape& s, const std::vector<float>& pattern,
+                              float offset = 0.0f) {
     if (pattern.empty() || s.Empty()) return false;
     std::vector<float> pat;
     for (float v : pattern) pat.push_back(v > 0.0f ? v : 0.0f);
@@ -671,6 +672,25 @@ inline bool ApplyDashPattern(PathShape& s, const std::vector<float>& pattern) {
         for (size_t k = 1; k <= pat.size(); k++) {
             const size_t i2 = k % pat.size();
             if (pat[i2] > 0.0f) { patIdx = i2; remain = pat[i2]; on = (i2 % 2) == 0; break; }
+        }
+    }
+
+    // stroke-dashoffset：先把虚线相位往前推 offset 个弧长（SVG 语义；负值取模）。
+    // 做法是"空转"模式指针，不动几何 —— 后面的切段逻辑一行都不用改。
+    if (offset != 0.0f) {
+        float ph = std::fmod(offset, total);
+        if (ph < 0.0f) ph += total;
+        size_t guard = pat.size() * 4 + 8;      // 防全 0 模式死循环
+        while (ph > 1e-6f && guard-- > 0) {
+            if (remain > ph) {
+                remain -= ph;
+                ph = 0.0f;
+            } else {
+                ph -= remain;
+                patIdx = (patIdx + 1) % pat.size();
+                on = (patIdx % 2) == 0;
+                remain = pat[patIdx];
+            }
         }
     }
 
@@ -836,25 +856,40 @@ inline bool ParseSvgTransform(const std::string& text, PathMatrix& out,
 // viewBox → 内容盒的映射矩阵。
 //   preserveAspectRatio 默认 "xMidYMid meet"：等比缩放 + 居中（完整显示）
 //   "none"：sx/sy 各自拉伸（不做等比）
-// 只解析是否以 none 开头，其余对齐方式一律按居中处理并告警一次（调用方负责告警）。
+//   "… slice"：等比放大到**铺满**盒子（超出部分由 <svg> 容器裁剪）
+//   对齐前缀 xMin/xMid/xMax + YMin/YMid/YMax 决定多余空间往哪边靠（9 宫格）
+// 解析失败时按默认 xMidYMid meet 处理（调用方可以提前告警，这里不报）。
 inline bool BuildViewBoxMatrix(float vx, float vy, float vw, float vh,
                                float boxW, float boxH, const std::string& preserve,
                                PathMatrix& out) {
     if (vw <= 0.0f || vh <= 0.0f || boxW <= 0.0f || boxH <= 0.0f) return false;
     float sx = boxW / vw, sy = boxH / vh;
-    const std::string p = [&] {
-        std::string s;
-        for (char c : preserve) s += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        return s;
-    }();
-    if (p.rfind("none", 0) == 0) {
-        // 非等比：直接铺满
-    } else {
-        const float k = std::min(sx, sy);
+    std::string p;
+    for (char c : preserve) p += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    // 去掉可选的 defer 前缀
+    {
+        const size_t d = p.find("defer");
+        if (d != std::string::npos && p.find_first_not_of(" \t") == d) p = p.substr(d + 5);
+    }
+    const bool none = p.find("none") != std::string::npos;
+    const bool slice = p.find("slice") != std::string::npos;
+    // 对齐（缺省 xMidYMid）
+    auto axisFrac = [](const std::string& q, char axis) -> float {
+        const size_t at = q.find(axis);
+        if (at == std::string::npos || at + 3 >= q.size()) return 0.5f;
+        const std::string tok = q.substr(at, 4);      // xMin / xMid / xMax（Y 同理）
+        if (tok.find("min") != std::string::npos) return 0.0f;
+        if (tok.find("max") != std::string::npos) return 1.0f;
+        return 0.5f;
+    };
+    const float fx = axisFrac(p, 'x');
+    const float fy = axisFrac(p, 'y');
+    if (!none) {
+        const float k = slice ? std::max(sx, sy) : std::min(sx, sy);
         sx = sy = k;
     }
-    const float tx = (boxW - vw * sx) * 0.5f - vx * sx;
-    const float ty = (boxH - vh * sy) * 0.5f - vy * sy;
+    const float tx = (boxW - vw * sx) * fx - vx * sx;
+    const float ty = (boxH - vh * sy) * fy - vy * sy;
     out = { sx, 0.0f, 0.0f, sy, tx, ty };
     return true;
 }

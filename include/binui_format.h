@@ -15,7 +15,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v15: 路径段（SVG <path>/<ellipse> 的归一化折线），见 BinUIPathEntry
 // v16: 路径渐变（SVG <linearGradient>/<radialGradient> 填充），见 BinUIPathGradient
 // v17: 渐变描边（stroke="url(#id)"）+ stroke-linecap="square"，多一条可选渐变记录
-constexpr uint32_t BINUI_VERSION    = 17;
+// v18: 径向渐变的焦点 fx/fy（BinUIPathGradient 92 -> 100 字节）
+constexpr uint32_t BINUI_VERSION    = 18;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -512,10 +513,14 @@ struct BinUIPathGradient {
     // 一个半径表达不了（userSpaceOnUse 下两轴缩放不同也会走到这条路）。
     float    x1, y1, x2, y2;
     float    rx, ry;
+    // v18：径向渐变的焦点。等于圆心时就是普通同心圆（绝大多数素材如此）；
+    // 不等于圆心时按 SVG 的锥形语义解（从焦点出发的射线打到椭圆的位置定义 t）。
+    // 线性渐变忽略这两个字段。
+    float    fx, fy;
     BinUIPathGradStop stops[kPathGradMaxStops];   // 前 stopCount 个有效
 };
 #pragma pack(pop)
-static_assert(sizeof(BinUIPathGradient) == 92, "BinUIPathGradient must be 92 bytes");
+static_assert(sizeof(BinUIPathGradient) == 100, "BinUIPathGradient must be 100 bytes");
 
 
 

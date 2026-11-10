@@ -497,7 +497,11 @@ inline float PathGradSpreadT(float t, uint8_t spread) {
 }
 
 // 归一化点 → 渐变轴位置 t
-//   线性：投影到 (x1,y1)→(x2,y2)；径向：到椭圆的归一化距离（rx/ry 各自缩放）。
+//   线性：投影到 (x1,y1)→(x2,y2)
+//   径向：把坐标按 (rx,ry) 归一化后
+//     · 焦点 = 圆心（绝大多数素材）：t 就是到圆心的距离，t=1 在椭圆边界上
+//     · 焦点 ≠ 圆心（v18）：按 SVG 的锥形语义 —— 从焦点 F 出发经过 P 的射线打到
+//       单位圆于 Q，t = |P-F| / |Q-F|。也就是解 |F + s·(P-F)| = 1 取正根，再 t = 1/s。
 //   两轴都用**包围盒归一化坐标**算，所以包围盒非正方时径向天然是椭圆（SVG 语义）。
 inline float PathGradT(const BinUIPathGradient& g, float nx, float ny) {
     if (g.type == PATH_GRAD_RADIAL) {
@@ -505,6 +509,25 @@ inline float PathGradT(const BinUIPathGradient& g, float nx, float ny) {
         const float ry = std::fabs(g.ry) > 1e-6f ? std::fabs(g.ry) : 1e-6f;
         const float u = (nx - g.x1) / rx;
         const float v = (ny - g.y1) / ry;
+        const float fu = (g.fx - g.x1) / rx;    // 焦点（同样归一化）
+        const float fv = (g.fy - g.y1) / ry;
+        const bool hasFocus = (std::fabs(fu) > 1e-4f) || (std::fabs(fv) > 1e-4f);
+        if (hasFocus) {
+            // 焦点必须落在单位圆内；跑到外面就退回同心圆（规范没定义，别画出鬼影）
+            const float fr2 = fu * fu + fv * fv;
+            if (fr2 < 0.9999f) {
+                const float dx = u - fu, dy = v - fv;
+                const float a = dx * dx + dy * dy;
+                if (a <= 1e-12f) return PathGradSpreadT(0.0f, g.spread);   // 正好点在焦点上
+                const float b = 2.0f * (fu * dx + fv * dy);
+                const float c = fr2 - 1.0f;
+                const float disc = b * b - 4.0f * a * c;
+                if (disc > 0.0f) {
+                    const float s2 = (-b + std::sqrt(disc)) / (2.0f * a);   // 正根 = 打到圆上的位置
+                    if (s2 > 1e-6f) return PathGradSpreadT(1.0f / s2, g.spread);
+                }
+            }
+        }
         return PathGradSpreadT(std::sqrt(u * u + v * v), g.spread);
     }
     const float ax = g.x2 - g.x1, ay = g.y2 - g.y1;

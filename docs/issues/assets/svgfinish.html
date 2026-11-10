@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<app_window width="420" height="260" bg="#151517" title="svg finish probe">
+<html width="420" height="260" bg="#151517">
+<head><meta charset="UTF-8"><style> body { font-size: 12px; color: #ADB2B8; } </style></head>
+<body>
+<defs>
+    <linearGradient id="gLine" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#7AAAFF"/><stop offset="1" stop-color="#F25A5A"/>
+    </linearGradient>
+    <radialGradient id="gFocus" cx="0.5" cy="0.5" r="0.5" fx="0.2" fy="0.35">
+        <stop offset="0" stop-color="#FFF6C8"/><stop offset="1" stop-color="#8A4B00"/>
+    </radialGradient>
+</defs>
+
+<!-- 第一行：<polygon> 填充（以前拆成线段、fill 完全无效）、<polyline> 渐变描边 -->
+<svg style="position:absolute; left:16; top:12; width:64; height:64" viewBox="0 0 24 24">
+    <polygon points="12 2 15.1 8.3 22 9.3 17 14.1 18.2 21 12 17.8 5.8 21 7 14.1 2 9.3 8.9 8.3"
+             fill="#F2B544"/>
+</svg>
+<svg style="position:absolute; left:96; top:12; width:64; height:64" viewBox="0 0 24 24">
+    <polygon points="3 20 12 3 21 20" fill="#7AAAFF" stroke="#F25A5A" stroke-width="1.6"
+             stroke-linejoin="miter"/>
+</svg>
+<svg style="position:absolute; left:176; top:12; width:64; height:64" viewBox="0 0 24 24">
+    <polyline points="2 18 7 6 12 16 17 4 22 14" fill="none" stroke="url(#gLine)"
+              stroke-width="2.4" stroke-linejoin="miter" stroke-linecap="square"/>
+</svg>
+<!-- <line> 写了 dasharray → 自动升级成路径（虚线 + 方头 + 渐变） -->
+<svg style="position:absolute; left:256; top:12; width:148; height:64" viewBox="0 0 148 64">
+    <line x1="8" y1="20" x2="140" y2="20" stroke="url(#gLine)" stroke-width="6"
+          stroke-dasharray="14 9" stroke-linecap="square"/>
+    <line x1="8" y1="42" x2="140" y2="42" stroke="#4ED17E" stroke-width="6"
+          stroke-dasharray="14 9" stroke-dashoffset="6" stroke-linecap="square"/>
+</svg>
+
+<!-- 第二行：text-anchor 三连（同一条 x 上左/中/右锚点）+ preserveAspectRatio slice -->
+<svg style="position:absolute; left:16; top:96; width:200; height:56" viewBox="0 0 100 28">
+    <line x1="50" y1="2" x2="50" y2="26" stroke="#4A4A52" stroke-width="0.6"/>
+    <text x="50" y="10" font-size="7" fill="#7AAAFF" text-anchor="start">start</text>
+    <text x="50" y="18" font-size="7" fill="#F2B544" text-anchor="middle">middle</text>
+    <text x="50" y="26" font-size="7" fill="#F25A5A" text-anchor="end">end</text>
+</svg>
+<!-- slice：方形 viewBox 塞进宽盒子，等比放大后左右被裁掉（贴左上） -->
+<svg style="position:absolute; left:232; top:96; width:172; height:56" viewBox="0 0 24 24"
+     preserveAspectRatio="xMinYMin slice">
+    <rect x="0" y="0" width="24" height="24" fill="#2B3A55"/>
+    <circle cx="12" cy="12" r="9" fill="none" stroke="#4ED17E" stroke-width="2"/>
+    <path d="M2 2 H6 V6 H2 Z" fill="#F2B544"/>
+</svg>
+
+<!-- 第三行：径向焦点（偏心高光）+ 嵌套 svg 继承祖先 transform -->
+<svg style="position:absolute; left:16; top:172; width:64; height:64" viewBox="0 0 24 24">
+    <circle cx="12" cy="12" r="10" fill="url(#gFocus)"/>
+</svg>
+<svg style="position:absolute; left:96; top:172; width:64; height:64" viewBox="0 0 24 24">
+    <g transform="translate(12 12) scale(0.7)">
+        <svg x="-12" y="-12" width="24" height="24" viewBox="0 0 24 24">
+            <rect x="0" y="0" width="24" height="24" rx="4" fill="#7AAAFF"/>
+            <circle cx="12" cy="12" r="6" fill="#151517"/>
+        </svg>
+    </g>
+</svg>
+<span style="position:absolute; left:176; top:178; width:228; height:52; font-size:11px; color:#81858C">polygon 填充 / polyline 渐变描边 / line 升路径（虚线+方头）/ text-anchor / slice / 径向焦点 / 嵌套 svg 继承变换</span>
+<span style="position:absolute; left:16; top:242; width:400; height:14; font-size:11px; color:#81858C">svg finish: polygon · polyline · line→path · text-anchor · dashoffset · slice · focal · nested</span>
+</body></html>
+</app_window>

@@ -2001,7 +2001,11 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
                 if (pit == byId.end()) continue;
                 const auto& par = nodes[pit->second];
                 if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
-                gfx.pushClip(par.x, par.y, par.width, par.height);
+                if (std::getenv("BINUI_DEBUG_CLIP"))
+                std::fprintf(stderr, "        anc node=%u type=%u clip=(%.1f,%.1f %.1fx%.1f)\n",
+                             (unsigned)par.id, (unsigned)par.type, (double)par.x,
+                             (double)par.y, (double)par.width, (double)par.height);
+            gfx.pushClip(par.x, par.y, par.width, par.height);
             }
             if (draw) gfx.fillLine(x1, y1, x2, y2, (float)node.radius, dc);
             gfx.popClipTo(savedDepth);
@@ -2038,6 +2042,12 @@ void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* 
         // 裁剪链：自身 + 祖先 + 本次重绘范围（scissor 求交）。
         // 关键：持久离屏上节点重绘若不做脏矩形裁剪，会把整个节点矩形重涂，
         // 覆盖掉脏区以外（未重绘）的子元素/兄弟元素 → 悬停时内部元素消失。
+        if (const char* dbg = std::getenv("BINUI_DEBUG_CLIP")) {
+            (void)dbg;
+            std::fprintf(stderr, "[clip] node=%u type=%u own=(%d,%d %dx%d) dx=%.1f dy=%.1f\n",
+                         (unsigned)node.id, (unsigned)node.type, x, y, nw, nh,
+                         (double)dx, (double)dy);
+        }
         int savedDepth = gfx.pushClip(static_cast<float>(x), static_cast<float>(y),
                                       static_cast<float>(nw), static_cast<float>(nh));
         gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
