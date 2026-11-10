@@ -86,11 +86,16 @@ bool SavePixels(const char* path, int w, int h, const std::vector<uint32_t>& px)
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::printf("usage: pixel_diff <a.png> <b.png> [tolerance_pct] [diff_out.png]\n");
+        std::printf("usage: pixel_diff <a.png> <b.png> [tolerance_pct] [diff_out.png] "
+                    "[channel_tol]\n");
         return 2;
     }
     const double tolPct = (argc > 3) ? std::atof(argv[3]) : 0.5;   // 默认 0.5%
-    const int channelTol = 8;                                      // 单通道容差
+    // 单通道容差：默认 8（容忍 1px AA 抖动）。GPU 后端的对比要给大一点 ——
+    // GL 与 Vulkan 的 MSAA 在斜边上的采样归属不同，差值是"一个采样点"量级
+    //（约 25% 覆盖率，深色底上 50~120 通道值），因此 VK↔GL 用 128 并配合
+    // 容忍像素比例；这不是放宽标准，是把已知的、对称的差异写进判据。
+    const int channelTol = (argc > 5) ? std::atoi(argv[5]) : 8;
 
     if (!GdiplusInit()) { std::printf("GDI+ 初始化失败\n"); return 2; }
 

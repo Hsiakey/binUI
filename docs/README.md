@@ -9,7 +9,7 @@
 | [components.md](components.md) | **组件化**：`<use src="x.bum.html">` 编译期内联、参数/合并/CSS 作用域规则、`.bum` 二进制与运行时挂载、目录结构 |
 | [svg.md](svg.md) | **SVG 支持（P1 已实现）**：现状实测、`BINUI_PATH` 节点 + v15 路径段的格式、编译期 viewBox/变换/继承、三端共用扫描线填充、四阶段拆分与验收 |
 | [vulkan.md](vulkan.md) | **Vulkan 后端调研（结论：现在 NO-GO）**：本机实测（loader 1.4.341 / RTX 4060 Ti）、三份节点遍历的重复（749/694/530 行）与 `IBinUIGfx` 抽取方案、Windows 独立翻转对 GL/Vulkan 同样生效、透明窗口只能读回、局部重绘必须用持久累积帧、原语映射表、20~30 人日估算、GO/NO-GO 条件 |
-| [vulkan_design.md](vulkan_design.md) | **Vulkan 后端设计（P1~P5）**：六条后端契约、`IBinUIGfx` 接口全文与三份遍历的合并步骤、Vulkan 模块/同步模型/交换链协商表、字节序与色卡验收线、三路 present、鲁棒性清单、12~17 人日时间线与回滚点 |
+| [vulkan_design.md](vulkan_design.md) | **Vulkan 后端设计（P1~P5）**：六条后端契约、`IBinUIGfx` 接口全文与三份遍历的合并步骤、Vulkan 模块/同步模型/交换链协商表、字节序与色卡验收线、三路 present、鲁棒性清单、12~17 人日时间线与回滚点；P3 落地记录（共享字形图集、帧内上传、`vkCmdClearColorImage` 陷阱、14 个用例的 VK↔GL↔GDI 三方 diff 表）见 §5.9 |
 | [bex_container.md](bex_container.md) | **`.bex` 单文件容器规范（设计归档，暂不实现）**：ELF 自定义段 / PE 资源节承载 binUI 布局、节布局与 trailer |
 | [img/](img/) | 文档用图：默认布局渲染、字体渲染对比、伪类演示、语言绑定演示 |
 | [../tests/README.md](../tests/README.md) | **测试用例**：四个主题套件（CSS / 元素 / 字体与输入法 / C ABI）、无窗口能测什么、历史合并记录 |

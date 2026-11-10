@@ -319,7 +319,9 @@ $(BIN_DIR)/vk_shot$(EXT): tools/vk_shot.cpp $(BUILD_DIR)/binui_vk.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c tools/vk_shot.cpp -o $(BUILD_DIR)/vk_shot.o
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
-		-luser32 -lgdi32 -lgdiplus -lole32
+		-luser32 -lgdi32 -lgdiplus -lole32 \
+		-Lthird_party/freetype/build -lfreetype \
+		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
 $(BIN_DIR)/pixel_diff$(EXT): tools/pixel_diff.cpp
 	@mkdir -p $(BIN_DIR)
@@ -360,6 +362,41 @@ pixels-update: tools
 	    $(BIN_DIR)/offscreen_render$(EXT) docs/issues/assets/$$c.html $(PIXEL_GOLD)/$$c.png >/dev/null 2>&1 || exit 1; \
 	    echo "更新基准: $(PIXEL_GOLD)/$$c.png"; \
 	done
+
+# =============================================
+# Vulkan 后端的像素回归（P3 起）：与 GL **逐像素**比。
+#
+# 判据：不同像素 < $(PIXEL_VK_TOL)%，单通道容差 $(PIXEL_VK_CHTOL)。
+# 为什么不是 0：GL 与 Vulkan 的 4x MSAA 在**斜边**上采样归属不同（同一个 GPU、
+# 两套驱动前端），实测差值恰好是"一个采样点"量级（≈25% 覆盖率），逐像素正负
+# 各半（对称、零净偏）。互不斜边的用例（圆/圆角/文本/纵向 AA 条带）是 0 差异。
+# 实测两张后端与 GDI 基准的距离相同（差 ≤ 34 像素 / 109200），所以这里比的不是
+# "谁更对"，而是"新后端有没有引入新的绘制差异"。
+# =============================================
+PIXEL_VK_OUT   := $(BUILD_DIR)/pixels-vk
+PIXEL_VK_TOL   ?= 1.5
+PIXEL_VK_CHTOL ?= 128
+# 真实示例（整页 UI，不是单点卡片）：文本、图片、组件、SVG 混排
+VK_DEMO_CASES  := features fontshow svgdemo texturedemo
+
+.PHONY: pixels-vk
+
+pixels-vk: tools
+	@mkdir -p $(PIXEL_VK_OUT)
+	@fail=0; \
+	for c in $(PIXEL_CASES); do \
+	    echo "--- $$c ---"; \
+	    $(BIN_DIR)/vk_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_VK_OUT)/$$c.png >/dev/null 2>&1 || { echo "VK 渲染失败: $$c"; fail=1; continue; }; \
+	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_VK_OUT)/$$c.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$c"; fail=1; continue; }; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/$$c.gl.png $(PIXEL_VK_OUT)/$$c.png $(PIXEL_VK_TOL) $(PIXEL_VK_OUT)/$$c.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	done; \
+	for d in $(VK_DEMO_CASES); do \
+	    echo "--- demo/$$d ---"; \
+	    $(BIN_DIR)/vk_shot$(EXT) examples/$$d/main.html $(PIXEL_VK_OUT)/demo-$$d.png >/dev/null 2>&1 || { echo "VK 渲染失败: $$d"; fail=1; continue; }; \
+	    $(BIN_DIR)/gl_shot$(EXT) examples/$$d/main.html $(PIXEL_VK_OUT)/demo-$$d.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$d"; fail=1; continue; }; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/demo-$$d.gl.png $(PIXEL_VK_OUT)/demo-$$d.png $(PIXEL_VK_TOL) $(PIXEL_VK_OUT)/demo-$$d.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	done; \
+	exit $$fail
 
 else
 

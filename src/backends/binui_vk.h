@@ -1,4 +1,4 @@
-// binui_vk.h - Vulkan 绘制后端（v19，P2：离屏核心）
+// binui_vk.h - Vulkan 绘制后端（v19，P3：全原语离屏）
 //
 // 定位与 GL/D3D11 后端同构：实现 IBinUIGfx，节点树遍历是共享的
 //（src/backends/binui_draw_nodes.h），本文件只管"把四边形画到 Vulkan 上"。
@@ -6,9 +6,10 @@
 // 运行期依赖：**只** LoadLibrary("vulkan-1.dll") + vkGetInstanceProcAddr，
 // 不链接 vulkan-1.lib、不需要 Vulkan SDK（头文件在 third_party/vulkan）。
 //
-// P2 范围（见 docs/vulkan_design.md §4）：离屏渲染 + fillRect/fillRounded/fillLine/
-// strokeRounded + 裁剪栈 + 4x MSAA 累积帧 + 读回。文本/图片是桩，P3 补齐；
-// 窗口 + 交换链在 P2b。
+// 当前范围（见 docs/vulkan_design.md §4、§5.9）：离屏渲染 + 全部 7 个原语
+//（矩形/圆角/线段/描边/图片/文本/换行文本）+ 裁剪栈 + 4x MSAA 累积帧 + 读回。
+// 文本与图片走与 GL 共用的一份实现（src/backends/binui_glyph_atlas.h、
+// binui_win_image.h），所以在像素回归里两端逐位相同。窗口 + 交换链在 P2b。
 #ifndef BINUI_VK_H
 #define BINUI_VK_H
 

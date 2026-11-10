@@ -34,6 +34,8 @@
 #include "binui_font_renderer.h"
 #include "binui_paint.h"
 #include "backends/binui_draw_nodes.h"   // v13 扩展绘制的条带几何（与 GDI/D3D11 后端共用同一份数学）
+#include "backends/binui_glyph_atlas.h"  // 字形图集 + 排版（v19：与 Vulkan 后端共用同一份）
+#include "backends/binui_win_image.h"    // GDI+ 图片解码（与 Vulkan 后端共用）
 #include "platform/binui_win32_foreground.h"
 
 using namespace binui;
@@ -252,71 +254,6 @@ std::wstring Utf8ToWide(const std::string& s) {
     return w;
 }
 
-bool gdiplusReady() {
-    static bool ok = [] {
-        Gdiplus::GdiplusStartupInput in;
-        ULONG_PTR token = 0;
-        return Gdiplus::GdiplusStartup(&token, &in, nullptr) == Gdiplus::Ok;
-    }();
-    return ok;
-}
-
-// PNG/JPEG 原始字节 -> BGRA8 像素（失败返回空）
-std::vector<uint8_t> DecodeImagePixels(const uint8_t* data, size_t size, int& w, int& h) {
-    w = h = 0;
-    if (!gdiplusReady() || !data || size == 0) return {};
-
-    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, size);
-    if (!hg) return {};
-    {
-        void* p = GlobalLock(hg);
-        if (p) { memcpy(p, data, size); GlobalUnlock(hg); }
-    }
-    IStream* stream = nullptr;
-    if (CreateStreamOnHGlobal(hg, TRUE, &stream) != S_OK) { GlobalFree(hg); return {}; }
-    Gdiplus::Bitmap* bmp = Gdiplus::Bitmap::FromStream(stream);
-    stream->Release();
-    if (!bmp || bmp->GetLastStatus() != Gdiplus::Ok) { delete bmp; return {}; }
-
-    w = bmp->GetWidth();
-    h = bmp->GetHeight();
-    std::vector<uint8_t> px;
-    if (w > 0 && h > 0) {
-        Gdiplus::Rect r(0, 0, w, h);
-        Gdiplus::BitmapData bd;
-        if (bmp->LockBits(&r, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &bd) == Gdiplus::Ok) {
-            px.resize(static_cast<size_t>(w) * h * 4);
-            const uint8_t* src = static_cast<const uint8_t*>(bd.Scan0);
-            uint8_t* dst = px.data();
-            for (int y = 0; y < h; y++) {
-                memcpy(dst + static_cast<size_t>(y) * w * 4,
-                       src + static_cast<size_t>(y) * bd.Stride, static_cast<size_t>(w) * 4);
-            }
-            bmp->UnlockBits(&bd);
-        }
-    }
-    delete bmp;
-    return px;
-}
-
-// UTF-8 → 码点迭代
-struct Utf8Iter {
-    const std::string& s;
-    size_t i = 0;
-    uint32_t cp = 0;
-    bool next() {
-        if (i >= s.size()) return false;
-        uint8_t b0 = static_cast<uint8_t>(s[i]);
-        if (b0 < 0x80) { cp = b0; i++; return true; }
-        int n = (b0 & 0xE0) == 0xC0 ? 2 : (b0 & 0xF0) == 0xE0 ? 3 : 4;
-        uint32_t c = b0 & (0xFF >> (n + 1));
-        for (int k = 1; k < n && i + k < s.size(); k++)
-            c = (c << 6) | (static_cast<uint8_t>(s[i + k]) & 0x3F);
-        cp = c;
-        i += n;
-        return true;
-    }
-};
 
 // 颜色预乘（着色器输出为预乘 alpha，图集/模板本身已预乘）
 void Premult(uint32_t& c) {
@@ -344,108 +281,12 @@ struct Batch {
     GLuint tex = 0;      // 采样纹理（0 = 未初始化；白色 1×1 用于纯色）
 };
 
-struct Glyph {
-    uint16_t cell = 0;
-    uint8_t advW = 0;
-};
-
-struct Atlas {
-    GLuint tex = 0;
-    int sizePx = 1024;
-    int cellW = 0, cellH = 0;
-    int cols = 0;
-    int next = 1;             // 格子 0 保留给纯色用（见下）
-    int ascent = 0, descent = 0;
-    float size = 0;
-    int weight = 400;
-    int faceIdx = 0;          // 回退链上的面下标（0 = 主面；缺字的豆腐块也放这里）
-    bool italic = false;
-    std::string face;
-    bool warnedFull = false;  // 图集满时只喊一次
-    std::unordered_map<uint32_t, Glyph> glyphs;
-};
-
 struct RoundTex {
     GLuint tex = 0;
     int t = 0;         // 模板边长（RoundTemplateSize：2r+4）
     uint64_t lastUse = 0;   // LRU 计数（缓存满了按它淘汰）
 };
 
-// ---------- emoji 簇检测（与 D3D11 后端一致） ----------
-bool IsEmojiCp(uint32_t cp) {
-    if (cp >= 0x1F000 && cp <= 0x1FAFF) return true;
-    if (cp >= 0x2190 && cp <= 0x21FF) return true;
-    if (cp >= 0x2300 && cp <= 0x27BF) return true;
-    if (cp >= 0x2900 && cp <= 0x297F) return true;
-    if (cp >= 0x2B00 && cp <= 0x2BFF) return true;
-    if (cp >= 0x1F1E6 && cp <= 0x1F1FF) return true;
-    if (cp >= 0xFE00 && cp <= 0xFE0F) return true;
-    if (cp == 0x200D) return true;
-    if (cp == 0x20E3) return true;
-    return cp == 0x00A9 || cp == 0x00AE || cp == 0x203C || cp == 0x2049 ||
-           cp == 0x2122 || cp == 0x2139 || cp == 0x3030 || cp == 0x303D ||
-           cp == 0x3297 || cp == 0x3299;
-}
-
-size_t EmojiClusterLen(const uint32_t* cps, size_t n) {
-    uint32_t first = cps[0];
-    if ((first == '#' || first == '*' || (first >= '0' && first <= '9')) && n > 1) {
-        if (cps[1] == 0xFE0F && n > 2 && cps[2] == 0x20E3) return 3;
-        if (cps[1] == 0x20E3) return 2;
-    }
-    if (!IsEmojiCp(first)) return 1;
-    size_t j = 1;
-    int ris = (first >= 0x1F1E6 && first <= 0x1F1FF) ? 1 : 0;
-    while (j < n) {
-        uint32_t c = cps[j];
-        if (c == 0x200D) {
-            if (j + 1 >= n) break;
-            j += 2;
-            continue;
-        }
-        if (c == 0xFE0F || c == 0xFE0E || c == 0x20E3) { j++; continue; }
-        if (c >= 0x1F3FB && c <= 0x1F3FF) { j++; continue; }
-        if (c >= 0x1F1E6 && c <= 0x1F1FF) {
-            if (ris == 1) { j++; ris = 2; continue; }
-            break;
-        }
-        break;
-    }
-    return j;
-}
-
-uint64_t EmojiClusterKey(const uint32_t* cps, size_t n) {
-    uint64_t h = 14695981039346656037ull;
-    for (size_t i = 0; i < n; i++) {
-        uint64_t c = cps[i];
-        for (int b = 0; b < 4; b++) {
-            h ^= (c & 0xFF);
-            h *= 1099511628211ull;
-            c >>= 8;
-        }
-    }
-    return h;
-}
-
-// ---------- 彩色字形（FreeType COLR 合成） ----------
-struct ColorGlyph {
-    uint16_t cell = 0;
-    uint16_t advW = 0;
-    uint16_t w = 0;
-    uint16_t h = 0;
-    uint16_t baseline = 0;
-};
-
-struct ColorAtlas {
-    GLuint tex = 0;
-    int sizePx = 1024;
-    int cellW = 0, cellH = 0;
-    int cols = 0;
-    int next = 0;
-    float size = 0;
-    bool warnedFull = false;  // 图集满时只喊一次
-    std::unordered_map<uint64_t, ColorGlyph> glyphs;
-};
 
 constexpr size_t kMaxVerts = 100000; // 2MB 动态缓冲上限（约 16.6k 四边形）
 
@@ -468,6 +309,25 @@ void UploadTexSub(GLuint tex, int x, int y, int w, int h, const void* data) {
     glBindTexture(GL_TEXTURE_2D, tex);
     glTexSubImage2D(GL_TEXTURE_2D, 0, x, y, w, h, GL_BGRA, GL_UNSIGNED_BYTE, data);
 }
+
+// 字形图集的纹理宿主：binui::GlyphAtlas 负责排版与光栅化，这里只做"位图→GL 纹理"。
+// 句柄直接用 GLuint 装进 void*（GL 名字是 32 位无符号，0 表示失败）。
+struct GLGlyphTexHost : binui::IGlyphTexHost {
+    void* createTex(int w, int h) override {
+        // 必须给零缓冲：图集里的"空格子"（空格/控符）会被当真字形画，
+        // 未初始化的显存会把这些位置画成垃圾像素
+        std::vector<uint8_t> zeros(static_cast<size_t>(w) * h * 4, 0);
+        const GLuint t = CreateTexture2D(w, h, zeros.data(), false);
+        return reinterpret_cast<void*>(static_cast<uintptr_t>(t));
+    }
+    void updateTex(void* tex, int x, int y, int w, int h, const uint8_t* bgra) override {
+        UploadTexSub(static_cast<GLuint>(reinterpret_cast<uintptr_t>(tex)), x, y, w, h, bgra);
+    }
+    void destroyTex(void* tex) override {
+        GLuint t = static_cast<GLuint>(reinterpret_cast<uintptr_t>(tex));
+        if (t) glDeleteTextures(1, &t);
+    }
+};
 
 } // namespace
 
@@ -505,55 +365,11 @@ struct BinUIGLGdi::Impl {
     int scissorDepth = 0;
     GLuint curTex = 0;
 
-    // 字形图集（按 size/weight/字体族）
-    // 每个 key 可以有多个"代"：图集满了就再开一张，而不是丢字（见 getAtlasForCp）
-    std::unordered_map<uint64_t, std::vector<Atlas*>> atlases;
-    std::string asciiFont = "Segoe UI";
-    static constexpr const char* cjkFont = "Microsoft YaHei";
-    static constexpr const char* emojiFont = "Segoe UI Emoji";
+    // 字形图集 + 文本排版：整份逻辑在 backends/binui_glyph_atlas.h（与 Vulkan 后端共用）。
+    // 后端只提供纹理宿主与四边形发射 —— 两个 GPU 后端的文字因此是同一份像素。
+    GLGlyphTexHost glyphHost;
+    GlyphAtlas atlas;
 
-    binui_font::FontEngine font;
-    bool fontReady = false;
-
-    // ---------- 逐字形回退 ----------
-    // 谁有字形是字体自报的 cmap，不是码点区间能推出来的（Unicode 的 Block 只是
-    // 管理分组，标准明确说不能用来选字体）。所以这里就一件事：问字体。
-    // 返回该码点该用哪张图集的面下标；字体服务返回 -1 = 所有候选都没有。
-    // 缺字的豆腐块借 0 号面的图集 —— 它是几何，跟哪个字体无关。
-    int faceIdxForCp(uint32_t cp) {
-        if (!fontReady) return 0;
-        const int idx = font.faceIndexFor(cp);
-        return idx < 0 ? 0 : idx;
-    }
-
-    // 设计上就不可见的码点：不画豆腐块（否则一串 emoji 里会凭空多出方框）
-    static bool IsInvisibleCp(uint32_t cp) {
-        if (cp < 0x20) return true;                                    // C0 控制符
-        if (cp == 0x200B || cp == 0x200C || cp == 0x200D || cp == 0xFEFF) return true;
-        if (cp >= 0xFE00 && cp <= 0xFE0F) return true;                  // 变体选择符 VS1–16
-        if (cp >= 0xE0100 && cp <= 0xE01EF) return true;                // 变体选择符 VS17–256
-        if (cp == 0x20E3) return true;                                  // 键帽组合符
-        return false;
-    }
-
-    // emoji 面在链上的下标（-1 = 没有这个候选）。彩色路径只在这个面上尝试：
-    // 真 emoji 走彩色，符号（⌘⌫✕）命中 Segoe UI Symbol 就不会被画成彩色图形。
-    int emojiFaceIdx() {
-        if (!emojiIdxInit) {
-            emojiIdxInit = true;
-            emojiIdx = -1;
-            if (fontReady) {
-                const auto& chain = font.fallbackChain();
-                for (size_t i = 0; i < chain.size(); i++)
-                    if (chain[i] == emojiFont) { emojiIdx = static_cast<int>(i); break; }
-            }
-        }
-        return emojiIdx;
-    }
-    bool emojiIdxInit = false;
-    int emojiIdx = -1;
-
-    std::unordered_map<uint32_t, ColorAtlas*> colorAtlases;
     std::unordered_map<int, RoundTex> rounds;
     RoundTex emptyRound_;   // roundFor 失败时的空返回（调用方据此退回 fillRect）
     uint64_t roundClock_ = 0;   // 圆角模板缓存 LRU 时钟
@@ -780,262 +596,6 @@ struct BinUIGLGdi::Impl {
         return true;
     }
 
-    uint64_t atlasKey(float size, int weight, int faceIdx, bool italic) const {
-        // 斜体与粗体一样是"另一张图集"：合成倾斜发生在光栅化阶段，不能共用缓存。
-        // 低 6 位放**面下标**（原来是 cjk / emoji 两个布尔）：同一个码点解析到不同
-        // 字体时必须分图集，否则字形会串。
-        const uint32_t fidx = static_cast<uint32_t>(faceIdx < 0 ? 0 : faceIdx) & 0x3Fu;
-        return (static_cast<uint64_t>(std::lround(size)) << 32) |
-               (static_cast<uint64_t>((weight & 0x7FFF) | (italic ? 0x8000 : 0)) << 16) | fidx;
-    }
-
-    // 某一代还能不能放新字形
-    static bool hasRoom(const Atlas* a) {
-        return a && a->next < a->cols * (a->sizePx / a->cellH);
-    }
-
-    Atlas* makeAtlas(uint64_t key, float size, int weight, int faceIdx, bool italic) {
-        const uint32_t fidx = static_cast<uint32_t>(faceIdx < 0 ? 0 : faceIdx) & 0x3Fu;
-        Atlas* a = new Atlas();
-        a->size = size;
-        a->weight = weight;
-        a->faceIdx = static_cast<int>(fidx);
-        a->italic = italic;
-        a->cellH = static_cast<int>(std::ceil(size * 1.4f)) + 2;
-        a->cellW = a->cellH;
-        a->cols = a->sizePx / a->cellW;
-        a->face = fontReady ? font.faceName(a->faceIdx) : asciiFont;
-        std::vector<uint8_t> zeros(static_cast<size_t>(a->sizePx) * a->sizePx * 4, 0);
-        a->tex = CreateTexture2D(a->sizePx, a->sizePx, zeros.data(), false);
-        if (!a->tex) {
-            delete a;
-            return nullptr;
-        }
-        binui_font::FontMetrics fm = font.metrics(a->face, size);
-        a->ascent = fm.ascent;
-        a->descent = fm.descent;
-
-        atlases[key].push_back(a);
-        return a;
-    }
-
-    // 主图集（不带码点）：测量用。有空间就用第一代，否则开新一代。
-    Atlas* getAtlas(float size, int weight, int faceIdx, bool italic = false) {
-        const uint64_t key = atlasKey(size, weight, faceIdx, italic);
-        auto it = atlases.find(key);
-        if (it != atlases.end()) {
-            for (Atlas* a : it->second)
-                if (hasRoom(a)) return a;
-            return it->second.back();   // 全满：交给 rasterGlyph 的告警兜底
-        }
-        return makeAtlas(key, size, weight, faceIdx, italic);
-    }
-
-    // 按码点取图集：优先返回**已经含有该字形**的那一代（UV 必须和纹理对得上），
-    // 否则找有空间的一代，都没有就再开一代 —— 这样图集满了是"多占一张纹理"，
-    // 不再是"新字直接不出现"。
-    Atlas* getAtlasForCp(float size, int weight, int faceIdx, bool italic, uint32_t cp) {
-        const uint64_t key = atlasKey(size, weight, faceIdx, italic);
-        auto it = atlases.find(key);
-        if (it != atlases.end()) {
-            for (Atlas* a : it->second)
-                if (a->glyphs.count(cp)) return a;
-            for (Atlas* a : it->second)
-                if (hasRoom(a)) return a;
-            // 全满：开新一代（上限 8 代，再多就说明字号/字重组合失控）
-            if (it->second.size() < 8) return makeAtlas(key, size, weight, faceIdx, italic);
-            return it->second.back();
-        }
-        return makeAtlas(key, size, weight, faceIdx, italic);
-    }
-
-    // 把单个码点光栅化进图集格子（FreeType 灰度字形 → 白字预乘 alpha）
-    void rasterGlyph(Atlas* a, uint32_t cp) {
-        int total = a->cols * (a->sizePx / a->cellH);
-        if (a->next >= total) {
-            // 图集满了：以前这里**静默 return**，新字形直接不出现 —— 用户看到的是
-            // "某些字时有时无"，最难查。至少喊一声（同一张图集只喊一次）。
-            if (!a->warnedFull) {
-                a->warnedFull = true;
-                std::fprintf(stderr,
-                    "[gl] 字形图集已满（%.0fpx / weight %d / face #%d，共 %d 格）："
-                    "该组合下的新字形将被丢弃。\n"
-                    "     这是容量上限，不是排版问题；减少字号/字重组合，或把这一条当 bug 报。\n",
-                    static_cast<double>(a->size), a->weight, a->faceIdx, total);
-            }
-            return;
-        }
-        binui_font::GrayGlyph g;
-        // 粗体：atlas key 里带 weight，粗体是独立的一张图集；这里按新签名让 FreeType
-        // 合成加粗（FT_GlyphSlot_Embolden），否则 font-weight:700 只是换个空图集重复光栅化
-        bool ok = font.renderGlyph(a->face, a->size, cp, a->weight >= 600, a->italic, g);
-        if (!ok && !IsInvisibleCp(cp)) {
-            // 缺字 → 画豆腐块。留白会被当成"引擎显示 bug"，空方框才是给用户的
-            // 明确信号：这个字体链里没有这个字符。浏览器和终端都是这么做的。
-            ok = font.renderMissingGlyph(a->size, a->weight >= 600, a->italic, g);
-        }
-        if (!ok || !g.alpha || g.height <= 0) {
-            // 空白字形（如空格）：无像素但有有效 advance —— 仍占一格并缓存，
-            // 否则 glyphFor 返回 null，测宽/绘制都不推进，单词会挤在一起
-            if (ok && g.advance > 0) {
-                Glyph gl;
-                gl.cell = static_cast<uint16_t>(a->next++); // 格子保持全零纹理（不可见）
-                gl.advW = static_cast<uint8_t>(std::min(255, std::max(0, g.advance)));
-                a->glyphs[cp] = gl;
-            }
-            return;
-        }
-
-        ensureRasterDC(a->cellW, a->cellH);
-        memset(rasterBits, 0, static_cast<size_t>(a->cellW) * a->cellH * 4);
-        int ox = 1 + g.left;
-        int oy = (a->ascent + 1) - g.top;
-        uint8_t* dst = static_cast<uint8_t*>(rasterBits);
-        for (int y = 0; y < g.height; y++) {
-            int py = oy + y;
-            if (py < 0 || py >= a->cellH) continue;
-            const uint8_t* src = g.alpha + static_cast<size_t>(y) * g.pitch;
-            uint8_t* row = dst + static_cast<size_t>(py) * a->cellW * 4;
-            for (int x = 0; x < g.width; x++) {
-                int px = ox + x;
-                if (px < 0 || px >= a->cellW) continue;
-                uint8_t al = src[x];
-                if (al == 0) continue;
-                uint8_t* p = row + static_cast<size_t>(px) * 4;
-                p[0] = p[1] = p[2] = p[3] = al;
-            }
-        }
-
-        int cell = a->next++;
-        int cx = (cell % a->cols) * a->cellW;
-        int cy = (cell / a->cols) * a->cellH;
-        UploadTexSub(a->tex, cx, cy, a->cellW, a->cellH, rasterBits);
-
-        Glyph gl;
-        gl.cell = static_cast<uint16_t>(cell);
-        // advance 用 HarfBuzz/FreeType 的真实值（以前 +1，每个字形多占 1px：
-        // 文字比真实排版宽、组合符号被推离基字、换行宽度与实际绘制不符）
-        gl.advW = static_cast<uint8_t>(std::min(255, std::max(0, g.advance)));
-        a->glyphs[cp] = gl;
-    }
-
-    const Glyph* glyphFor(Atlas* a, uint32_t cp) {
-        auto it = a->glyphs.find(cp);
-        if (it != a->glyphs.end()) return &it->second;
-        rasterGlyph(a, cp);
-        it = a->glyphs.find(cp);
-        return it != a->glyphs.end() ? &it->second : nullptr;
-    }
-
-    // ---------- 彩色字形（FreeType COLR 合成） ----------
-    bool rasterColorCluster(ColorAtlas* a, uint64_t key, const uint32_t* cps, size_t n) {
-        int total = a->cols * (a->sizePx / a->cellH);
-        if (a->next >= total) {
-            if (!a->warnedFull) {
-                a->warnedFull = true;
-                std::fprintf(stderr,
-                    "[gl] 彩色字形图集已满（%.0fpx，共 %d 格）：emoji 将退回灰度/豆腐块。\n",
-                    static_cast<double>(a->size), total);
-            }
-            return false;
-        }
-
-        binui_font::ColorGlyph cg;
-        if (!font.renderColorCluster(emojiFont, a->size, cps, n, cg)) return false;
-        if (cg.width <= 0 || cg.height <= 0 || !cg.bgra) return false;
-
-        ensureRasterDC(a->cellW, a->cellH);
-        memset(rasterBits, 0, static_cast<size_t>(a->cellW) * a->cellH * 4);
-        int cw = std::min(cg.width, a->cellW);
-        int ch = std::min(cg.height, a->cellH);
-        uint8_t* dst = static_cast<uint8_t*>(rasterBits);
-        for (int y = 0; y < ch; y++)
-            memcpy(dst + static_cast<size_t>(y) * a->cellW * 4,
-                   cg.bgra + static_cast<size_t>(y) * cg.width * 4,
-                   static_cast<size_t>(cw) * 4);
-
-        int cell = a->next++;
-        int cx = (cell % a->cols) * a->cellW;
-        int cy = (cell / a->cols) * a->cellH;
-        UploadTexSub(a->tex, cx, cy, a->cellW, a->cellH, rasterBits);
-
-        ColorGlyph g;
-        g.cell = static_cast<uint16_t>(cell);
-        g.advW = static_cast<uint16_t>(std::min(4095, cg.advance + 1));
-        g.w = static_cast<uint16_t>(cw);
-        g.h = static_cast<uint16_t>(ch);
-        g.baseline = static_cast<uint16_t>(std::min(4095, cg.baseline));
-        a->glyphs[key] = g;
-        return true;
-    }
-
-    ColorAtlas* getColorAtlas(float size) {
-        uint32_t key = static_cast<uint32_t>(std::lround(size));
-        auto it = colorAtlases.find(key);
-        if (it != colorAtlases.end()) return it->second;
-
-        ColorAtlas* a = new ColorAtlas();
-        a->size = size;
-        a->cellH = static_cast<int>(std::ceil(size * 1.4f)) + 2;
-        a->cellW = a->cellH * 4;
-        a->cols = a->sizePx / a->cellW;
-        if (a->cols < 1) { delete a; return nullptr; }
-        std::vector<uint8_t> zeros(static_cast<size_t>(a->sizePx) * a->sizePx * 4, 0);
-        a->tex = CreateTexture2D(a->sizePx, a->sizePx, zeros.data(), false);
-        if (!a->tex) {
-            delete a;
-            return nullptr;
-        }
-        colorAtlases[key] = a;
-        return a;
-    }
-
-    const ColorGlyph* colorGlyphFor(ColorAtlas* a, const uint32_t* cps, size_t n) {
-        uint64_t key = EmojiClusterKey(cps, n);
-        auto it = a->glyphs.find(key);
-        if (it != a->glyphs.end()) return &it->second;
-        rasterColorCluster(a, key, cps, n);
-        it = a->glyphs.find(key);
-        return it != a->glyphs.end() ? &it->second : nullptr;
-    }
-
-    struct ClusterMetric {
-        size_t len = 1;
-        float adv = 0;
-        bool color = false;
-    };
-
-    ClusterMetric clusterMetric(float size, int weight, const uint32_t* cps, size_t n,
-                                bool italic = false) {
-        ClusterMetric m;
-        m.len = EmojiClusterLen(cps, n);
-        const float fallback = std::ceil(size * 0.6f);
-        const int firstFace = faceIdxForCp(cps[0]);
-        // 彩色只在该码点确实由 emoji 面覆盖时才尝试：符号（⌘⌫✕）命中 Segoe UI Symbol
-        // 就走灰度，不会被画成彩色图形；真 emoji 才走 COLR。
-        const bool tryColor = fontReady && (m.len > 1 || firstFace == emojiFaceIdx());
-        if (tryColor) {
-            ColorAtlas* ca = getColorAtlas(size);
-            const ColorGlyph* g = ca ? colorGlyphFor(ca, cps, m.len) : nullptr;
-            if (g) {
-                m.adv = static_cast<float>(g->advW);
-                m.color = true;
-                return m;
-            }
-        }
-        if (m.len <= 1) {
-            Atlas* a = getAtlasForCp(size, weight, firstFace, italic, cps[0]);
-            const Glyph* g = a ? glyphFor(a, cps[0]) : nullptr;
-            m.adv = g ? static_cast<float>(g->advW) : fallback;
-            return m;
-        }
-        for (size_t i = 0; i < m.len; i++) {
-            Atlas* a = getAtlasForCp(size, weight, faceIdxForCp(cps[i]), italic, cps[i]);
-            const Glyph* g = a ? glyphFor(a, cps[i]) : nullptr;
-            m.adv += g ? static_cast<float>(g->advW) : fallback;
-        }
-        return m;
-    }
 
     // 圆角模板（九宫格）：把"圆弧紧贴边"的圆角矩形光栅化到临时 DIB，再传成纹理。
     // 模板边长 RoundTemplateSize(r) = 2r+4：角片只采样 [0,r]（圆弧的包围盒），
@@ -1242,24 +802,15 @@ struct BinUIGLGdi::Impl {
     }
 
     void shutdown() {
+        // 先放图集纹理：销毁上下文之后再 glDeleteTextures 是没有意义的
+        atlas.clear();
+        atlas.setHost(nullptr);
         if (ctx) {
             wglMakeCurrent(nullptr, nullptr);
             wglDeleteContext(ctx);
             ctx = nullptr;
         }
         if (hdc) { ReleaseDC(hwnd, hdc); hdc = nullptr; }
-        for (auto& kv : atlases) {
-            for (Atlas* a : kv.second) {
-                if (a && a->tex) glDeleteTextures(1, &a->tex);
-                delete a;
-            }
-        }
-        atlases.clear();
-        for (auto& kv : colorAtlases) {
-            if (kv.second->tex) glDeleteTextures(1, &kv.second->tex);
-            delete kv.second;
-        }
-        colorAtlases.clear();
         for (auto& kv : rounds)
             if (kv.second.tex) glDeleteTextures(1, &kv.second.tex);
         rounds.clear();
@@ -1303,8 +854,8 @@ bool BinUIGLGdi::init(void* hwnd, int width, int height, bool vsync) {
     if (!impl_->createOffscreen()) { impl_->shutdown(); return false; }
     glViewport(0, 0, width, height);
     glUniform2fP(impl_->uniView, static_cast<float>(width), static_cast<float>(height));
-    impl_->fontReady = impl_->font.init();
-    binui_font::registerSystemFonts(impl_->font);
+    impl_->atlas.setHost(&impl_->glyphHost);
+    impl_->atlas.initFonts();
     wglSwapIntervalEXT = reinterpret_cast<PFNWGLSWAPINTERVALEXT>(
         GetGLProc("wglSwapIntervalEXT"));
     if (impl_->vsync && wglSwapIntervalEXT) wglSwapIntervalEXT(1);
@@ -1607,149 +1158,43 @@ void BinUIGLGdi::strokeRounded(float x, float y, float w, float h, float radius,
 
 float BinUIGLGdi::textWidth(float size, int weight, const std::string& utf8, bool italic) {
     if (!impl_->ready) return 0;
-    std::vector<uint32_t> cps;
-    Utf8Iter it{ utf8 };
-    while (it.next()) cps.push_back(it.cp);
-    float w = 0;
-    size_t i = 0;
-    while (i < cps.size()) {
-        auto m = impl_->clusterMetric(size, weight, cps.data() + i, cps.size() - i, italic);
-        w += m.adv;
-        i += m.len;
-    }
-    return w;
+    return impl_->atlas.textWidth(size, weight, utf8, italic);
 }
 
 void BinUIGLGdi::fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic) {
-    Atlas* a = impl_->getAtlas(size, weight, 0, italic);   // 度量用主面
-    if (!a) { ascent = lineHeight = static_cast<int>(size); return; }
-    ascent = a->ascent;
-    lineHeight = a->ascent + a->descent;
+    impl_->atlas.fontMetrics(size, weight, ascent, lineHeight, italic);
 }
 
+// 文本排版/光栅化/图集全在 binui::GlyphAtlas 里（与 Vulkan 后端同一份代码），
+// 这里只把回调给出的字形四边形丢进本后端的顶点批次。
 void BinUIGLGdi::drawText(float x, float y, float size, int weight,
                        const std::string& utf8, uint32_t color,
                        bool centerH, bool centerV, bool italic) {
     if (!impl_->ready || utf8.empty()) return;
-    float w = textWidth(size, weight, utf8, italic);
-    if (centerH) x -= w / 2;
-
-    int ascent = 0, lineH = 0;
-    fontMetrics(size, weight, ascent, lineH, italic);
-    if (centerV) y -= lineH / 2.0f;
-    // 像素对齐：字形位图天生是整数像素设计，落在半像素上会被双线性过滤糊一层。
-    // advance 本身是整数，所以只要把起点/基线取整，整行字形就都在整数像素上。
-    float baseline = std::floor(y + 0.5f);
-    x = std::floor(x + 0.5f);
-
-    std::vector<uint32_t> cps;
-    Utf8Iter it{ utf8 };
-    while (it.next()) cps.push_back(it.cp);
-
-    Premult(color);
     impl_->curTex = impl_->whiteTex;
-    float cx = x;
-    auto drawGray = [&](uint32_t cp) {
-        Atlas* a = impl_->getAtlasForCp(size, weight, impl_->faceIdxForCp(cp), italic, cp);
-        if (!a) return;
-        const Glyph* g = impl_->glyphFor(a, cp);
-        if (!g) return;
-        float t = static_cast<float>(a->sizePx);
-        float cell = static_cast<float>(a->cellW);
-        float gx = (g->cell % a->cols) * cell;
-        float gy = (g->cell / a->cols) * cell;
-        float top = baseline - (a->ascent + 1);
-        impl_->curTex = a->tex;
-        impl_->emitQuad(cx, top, cx + cell, top + cell,
-                        gx / t, gy / t, (gx + cell) / t, (gy + cell) / t, color);
-        cx += g->advW;
-    };
-
-    size_t i = 0;
-    while (i < cps.size()) {
-        size_t n = EmojiClusterLen(cps.data() + i, cps.size() - i);
-        // 彩色只在该码点确实由 emoji 面覆盖时尝试（真 emoji 走 COLR；符号走灰度）
-        bool colorCp = impl_->fontReady &&
-                       (n > 1 || impl_->faceIdxForCp(cps[i]) == impl_->emojiFaceIdx());
-        if (colorCp) {
-            ColorAtlas* ca = impl_->getColorAtlas(size);
-            const ColorGlyph* g = ca ? impl_->colorGlyphFor(ca, cps.data() + i, n) : nullptr;
-            if (g) {
-                float t = static_cast<float>(ca->sizePx);
-                float cell = static_cast<float>(ca->cellW);
-                float gx = (g->cell % ca->cols) * cell;
-                float gy = (g->cell / ca->cols) * ca->cellH;
-                float top = baseline - g->baseline;
-                impl_->curTex = ca->tex;
-                impl_->emitQuad(cx, top, cx + g->w, top + g->h,
-                                gx / t, gy / t, (gx + g->w) / t, (gy + g->h) / t,
-                                0xFFFFFFFF);   // 彩色字形：白色顶点，不染色
-                cx += g->advW;
-                i += n;
-                continue;
-            }
-        }
-        for (size_t k = 0; k < n; k++) drawGray(cps[i + k]);
-        i += n;
-    }
+    impl_->atlas.drawText(x, y, size, weight, utf8, color, centerH, centerV, italic,
+                          [this](const GlyphQuad& q) {
+                              impl_->curTex = static_cast<GLuint>(
+                                  reinterpret_cast<uintptr_t>(q.tex));
+                              impl_->emitQuad(q.x, q.y, q.x + q.w, q.y + q.h,
+                                              q.u0, q.v0, q.u1, q.v1, q.color);
+                          });
     impl_->curTex = impl_->whiteTex;
 }
 
 void BinUIGLGdi::drawTextWrapped(float x, float y, float maxW, float size, int weight,
                               const std::string& utf8, uint32_t color, int align, bool italic) {
     if (!impl_->ready || utf8.empty()) return;
-    int ascent = 0, lineH = 0;
-    fontMetrics(size, weight, ascent, lineH, italic);
-
-    std::vector<uint32_t> cps;
-    Utf8Iter it{ utf8 };
-    while (it.next()) cps.push_back(it.cp);
-
-    float ly = y;
-    size_t pos = 0;
-    while (pos < cps.size()) {
-        float w = 0;
-        size_t end = pos;
-        while (end < cps.size()) {
-            uint32_t c = cps[end];
-            if (c == '\n') break;
-            auto m = impl_->clusterMetric(size, weight, cps.data() + end, cps.size() - end, italic);
-            if (end > pos && w + m.adv > maxW) break;
-            w += m.adv;
-            end += m.len;
-        }
-        if (end == pos) end++;
-        bool newline = end < cps.size() && cps[end] == '\n';
-        std::string seg;
-        for (size_t k = pos; k < end && cps[k] != '\n'; k++) {
-            uint32_t c = cps[k];
-            if (c < 0x80) seg += static_cast<char>(c);
-            else if (c < 0x800) {
-                seg += static_cast<char>(0xC0 | (c >> 6));
-                seg += static_cast<char>(0x80 | (c & 0x3F));
-            } else if (c < 0x10000) {
-                seg += static_cast<char>(0xE0 | (c >> 12));
-                seg += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-                seg += static_cast<char>(0x80 | (c & 0x3F));
-            } else {
-                seg += static_cast<char>(0xF0 | (c >> 18));
-                seg += static_cast<char>(0x80 | ((c >> 12) & 0x3F));
-                seg += static_cast<char>(0x80 | ((c >> 6) & 0x3F));
-                seg += static_cast<char>(0x80 | (c & 0x3F));
-            }
-        }
-        if (!seg.empty()) {
-            float lx = x;
-            if (align == 1)      lx = x + (maxW - w) / 2.0f;
-            else if (align == 2) lx = x + (maxW - w);
-            if (lx < x) lx = x; // 超长行不向左溢出
-            drawText(lx, ly + ascent, size, weight, seg, color, false, false, italic);
-        }
-        ly += lineH;
-        pos = newline ? end + 1 : end;
-    }
+    impl_->curTex = impl_->whiteTex;
+    impl_->atlas.drawTextWrapped(x, y, maxW, size, weight, utf8, color, align, italic,
+                                 [this](const GlyphQuad& q) {
+                                     impl_->curTex = static_cast<GLuint>(
+                                         reinterpret_cast<uintptr_t>(q.tex));
+                                     impl_->emitQuad(q.x, q.y, q.x + q.w, q.y + q.h,
+                                                     q.u0, q.v0, q.u1, q.v1, q.color);
+                                 });
+    impl_->curTex = impl_->whiteTex;
 }
-
 bool BinUIGLGdi::prepareImage(uint16_t index, const uint8_t* data, size_t size, uint32_t generation) {
     if (!impl_->ready) return false;
     return impl_->uploadImage(index, data, size, generation);
@@ -1794,7 +1239,7 @@ void BinUIGLGdi::popClipTo(int depth) {
 }
 
 void BinUIGLGdi::setFontName(const char* name) {
-    if (name && *name) impl_->asciiFont = name;
+    impl_->atlas.setFontName(name);
 }
 
 namespace binui {

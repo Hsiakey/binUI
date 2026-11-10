@@ -15,6 +15,7 @@
 
 #include "binui_compiler.h"
 #include "binui_renderer.h"
+#include "binui_paths.h"   // ex::LoadImages / DirOf（与 gl_shot 同一份图片加载）
 #include "backends/binui_draw_nodes.h"
 #include "backends/binui_vk.h"
 
@@ -104,6 +105,15 @@ int main(int argc, char** argv) {
     }
     renderer.setSize(w, h);
 
+    // 布局里的图片资源（与 gl_shot 同一份加载逻辑；后端按图片 index 上传纹理）
+    {
+        const auto& paths = renderer.imagePaths();
+        if (!paths.empty()) {
+            auto imgs = binui::ex::LoadImages(binui::ex::DirOf(uiPath), paths, std::string());
+            if (!imgs.empty()) renderer.loadResources(imgs);
+        }
+    }
+
     binui::BinUIVK gfx;
     if (!gfx.init(nullptr, w, h, false)) {
         std::fprintf(stderr, "[vk_shot] Vulkan 后端初始化失败\n");
@@ -111,13 +121,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // 渲两帧：第 1 帧把圆角模板/图集等资源补建起来（帧内不许上传纹理），
-    // 第 2 帧才是要出图的画面 —— 与真机窗口的"首帧预热"同构。
-    for (int frame = 0; frame < 2; frame++) {
-        gfx.beginFrame(nullptr);
-        binui::drawNodesBinUI(gfx, renderer, nullptr, binui::CanvasFn{});
-        gfx.present();
-    }
+    // 只渲一帧：P3 起纹理上传可以发生在帧内（帧外产生的上传在 beginFrame 里补录），
+    // 没有"预热帧"这回事。一帧出图本身就是对它的验收 —— 需要两帧就说明还有资源
+    // 是延迟一帧才就绪的。
+    gfx.beginFrame(nullptr);
+    binui::drawNodesBinUI(gfx, renderer, nullptr, binui::CanvasFn{});
+    gfx.present();
 
     int rw = 0, rh = 0;
     const uint8_t* px = gfx.readbackPixels(rw, rh);

@@ -1,13 +1,15 @@
-// binui_vk.cpp - Vulkan 绘制后端（v19，P2：离屏核心）
+// binui_vk.cpp - Vulkan 绘制后端（v19，P3：全原语离屏）
 //
-// 设计（docs/vulkan_design.md §4）：
+// 设计（docs/vulkan_design.md §4、§5.9）：
 //   · 运行期只 LoadLibrary("vulkan-1.dll") + vkGetInstanceProcAddr，不链 vulkan-1.lib；
 //   · 每帧画进一张**持久 MSAA 累积图**（loadOp = LOAD），脏矩形靠 scissor + vkCmdClearAttachments；
 //   · present = resolve(MSAA → 单采样) → vkCmdCopyImageToBuffer → 等 fence → 交给读回方；
 //   · 顶点 20 字节，与 GL 的 GLVertex 逐位相同；颜色走 B8G8R8A8_UNORM，
-//     让 AARRGGBB 的 R/G/B 落到正确的通道（见 MakeVertexFormat 注释）。
+//     让 AARRGGBB 的 R/G/B 落到正确的通道（见 MakeVertexFormat 注释）；
+//   · 文本/图片与 GL 共用一份实现（binui_glyph_atlas.h / binui_win_image.h），
+//     所以像素回归里两个 GPU 后端对轴对齐几何是**逐位相同**的。
 //
-// P2 只做离屏 + 4 个几何原语；文本/图片是桩（P3）；窗口交换链在 P2b。
+// 窗口交换链在 P2b。
 #include "backends/binui_vk.h"
 
 #ifndef _WIN32
@@ -21,12 +23,15 @@
 #include <cstdio>
 #include <cstring>
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "backends/binui_vk_shaders.h"
 #include "binui_paint.h"   // RoundTemplateSize / BuildRoundedNineSlice / PaintQuad
+#include "backends/binui_glyph_atlas.h"   // 字形图集 + 排版（与 GL 后端共用）
+#include "backends/binui_win_image.h"     // GDI+ 图片解码（与 GL 后端共用）
 
 // 不链接 vulkan-1.lib：全部函数指针自己取（与 binui_gl_ext_min.h 同思路，但这里用官方头，
 // 只靠 VK_NO_PROTOTYPES 关掉原型声明）。
@@ -94,6 +99,7 @@ struct VkApi {
     BINUI_VK_FN(vkDestroyDescriptorPool)
     BINUI_VK_FN(vkAllocateDescriptorSets)
     BINUI_VK_FN(vkUpdateDescriptorSets)
+    BINUI_VK_FN(vkFreeDescriptorSets)
     BINUI_VK_FN(vkCreatePipelineLayout)
     BINUI_VK_FN(vkDestroyPipelineLayout)
     BINUI_VK_FN(vkCreateGraphicsPipelines)
@@ -111,6 +117,7 @@ struct VkApi {
     BINUI_VK_FN(vkCmdPipelineBarrier)
     BINUI_VK_FN(vkCmdCopyImageToBuffer)
     BINUI_VK_FN(vkCmdCopyBufferToImage)
+    BINUI_VK_FN(vkCmdClearColorImage)
 #undef BINUI_VK_FN
 
     bool load() {
@@ -232,6 +239,8 @@ struct VkApi {
         BINUI_VK_LOAD(vkCmdPipelineBarrier)
         BINUI_VK_LOAD(vkCmdCopyImageToBuffer)
         BINUI_VK_LOAD(vkCmdCopyBufferToImage)
+        BINUI_VK_LOAD(vkCmdClearColorImage)
+        BINUI_VK_LOAD(vkFreeDescriptorSets)
 #undef BINUI_VK_LOAD
         return true;
     }
@@ -307,7 +316,7 @@ void Premult(uint32_t& c) {
 // ============================================================
 // Impl
 // ============================================================
-struct BinUIVK::Impl {
+struct BinUIVK::Impl : binui::IGlyphTexHost {
     // ---- 设备 ----
     VkInstance instance = VK_NULL_HANDLE;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
@@ -343,15 +352,25 @@ struct BinUIVK::Impl {
     VkPipelineLayout pipeLayout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
     VkDescriptorPool dsPool = VK_NULL_HANDLE;
-    VkSampler samplerNearest = VK_NULL_HANDLE;
 
-    // ---- 纹理（白 + 圆角模板 + 每纹理 descriptor set）----
+    // ---- 采样器 ----
+    VkSampler samplerNearest = VK_NULL_HANDLE;
+    VkSampler samplerLinear = VK_NULL_HANDLE;
+    std::vector<VkDescriptorPool> dsPools;   // 池满就再加一个（不回收 descriptor set 池本身）
+
+    // ---- 纹理 ----
+    // 句柄：Tex* 直接当 IGlyphTexHost 的 void* 用（unordered_map 的节点地址稳定）。
     struct Tex {
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory mem = VK_NULL_HANDLE;
         VkImageView view = VK_NULL_HANDLE;
         VkDescriptorSet ds = VK_NULL_HANDLE;
-        int size = 0;
+        int w = 0, h = 0;
+        bool linear = false;
+        bool needClear = true;      // 新建图像内容未定义：第一次用之前必须清零
+        // 已经**记录进命令缓冲**的布局（每帧一开始 cmd 重置，但上一帧提交时
+        // 我们就等到 fence 了，所以这个字段始终等于图像的真实布局）
+        VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     };
     Tex white;
     struct RoundTex {
@@ -359,10 +378,26 @@ struct BinUIVK::Impl {
         int t = 0;
     };
     std::unordered_map<int, RoundTex> rounds;   // key = 半径（描边用负值，与 GL 同）
-    // 帧内不许做纹理上传（uploadTexture 会重置正在录制的命令缓冲）。
-    // 缺失的圆角模板记在这里，下一帧 beginFrame 之前补上；这一帧调用方退回 fillRect。
-    std::vector<std::pair<int, bool>> pendingRounds;
-    std::unordered_map<int, Tex> images;        // 图片（P3）
+    std::unordered_map<int, Tex> images;        // 图片（按 index）
+    std::unordered_map<int, uint32_t> imageGen; // 换图 generation：不匹配时重新上传
+
+    // 帧外产生的上传（测量文本时会光栅化字形，那时命令缓冲还没开始录制）。
+    // 这些先攒着，在下一个 beginFrame 里、render pass 开始之前一次性录进去 ——
+    // 所以**不需要预热帧**：同一帧内先上传后绘制，像素就在这一帧里。
+    struct PendingUpload {
+        Tex* tex = nullptr;
+        int x = 0, y = 0, w = 0, h = 0;
+        int rowBytes = 0;
+        std::vector<uint8_t> data;
+    };
+    std::vector<PendingUpload> pendingUploads;
+    // 已记录进本帧命令缓冲的 staging（帧末等 fence 后释放）
+    std::vector<std::pair<VkBuffer, VkDeviceMemory>> stagingToFree;
+    bool cmdOpen = false;   // 命令缓冲正在录制（帧内，或一次性的初始化提交）
+
+    // ---- 文本（排版/图集在共享头里，本类只当纹理宿主）----
+    GlyphAtlas atlas;
+    std::vector<Tex*> glyphTexes;   // 图集纹理（shutdown 时统一释放）
 
     // ---- 顶点环 ----
     VkBuffer vbuf = VK_NULL_HANDLE;
@@ -373,7 +408,7 @@ struct BinUIVK::Impl {
     struct Batch {
         uint32_t first = 0;
         uint32_t count = 0;
-        VkDescriptorSet ds = VK_NULL_HANDLE;
+        Tex* tex = nullptr;      // 采样纹理（nullptr = 纯白 1×1，纯色四边形）
         int sx = 0, sy = 0, sw = 0, sh = 0;
     };
     std::vector<Batch> batches;
@@ -696,93 +731,79 @@ struct BinUIVK::Impl {
 
     // ============================================================
     // 纹理
+    // ------------------------------------------------------------
+    // 与 P2 的差别（P2 是"上传不能发生在帧内"）：
+    //   · 上传**可以发生在帧内**：staging 拷进本帧命令缓冲，帧末等 fence 后释放，
+    //     所以不需要预热帧，也不会 reset 正在录制的命令缓冲；
+    //   · 帧外产生的上传（排版阶段光栅化字形、prepareImage）先排进 pendingUploads，
+    //     下一个 beginFrame 里在 render pass 开始之前一次性录进去 ——
+    //     同一帧内先上传后绘制，像素就在这一帧里；
+    //   · 图像内容不会被驱动清零，新建图像第一次用之前必须 clear：
+    //     图集里的"空格子"（空格）会被当真字形画，脏显存就是噪点。
     // ============================================================
-    bool uploadTexture(Tex& t, int tw, int th, const uint32_t* bgra, bool linear) {
-        t.size = tw;
-        std::fprintf(stderr, "[vk] uploadTexture %dx%d linear=%d\n", tw, th, (int)linear);
+
+    // 建纹理（图像 + view + descriptor set），不带数据
+    bool createTexImage(Tex& t, int tw, int th, bool linear) {
         if (!createImage2D(tw, th, kColorFormat,
                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
                            VK_SAMPLE_COUNT_1_BIT, t.image, t.mem, VK_IMAGE_ASPECT_COLOR_BIT))
             return false;
         t.view = makeView(t.image, kColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
-        if (!t.view) { std::fprintf(stderr, "[vk] uploadTexture: view 失败\n"); return false; }
-
-        // staging buffer → image
-        VkBuffer stage = VK_NULL_HANDLE;
-        VkDeviceMemory stageMem = VK_NULL_HANDLE;
-        const VkDeviceSize bytes = static_cast<VkDeviceSize>(tw) * th * 4;
-        if (!createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                          stage, stageMem)) {
-            std::fprintf(stderr, "[vk] uploadTexture: staging buffer 失败 (%llu 字节)\n",
-                         (unsigned long long)bytes);
+        if (!t.view) {
+            std::fprintf(stderr, "[vk] createTexImage: vkCreateImageView 失败\n");
             return false;
         }
-        void* mapped = nullptr;
-        if (g_vk.vkMapMemory(device, stageMem, 0, bytes, 0, &mapped) != VK_SUCCESS) {
-            std::fprintf(stderr, "[vk] uploadTexture: 映射 staging 失败\n");
+        t.w = tw;
+        t.h = th;
+        t.linear = linear;
+        t.needClear = true;
+        t.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        return allocTexDs(t);
+    }
+
+    // 池满就再开一个（纹理数量随图片/图集代数增长，固定容量迟早会满）
+    bool growPool() {
+        VkDescriptorPoolSize sz{};
+        sz.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        sz.descriptorCount = 256;
+        VkDescriptorPoolCreateInfo pi{};
+        pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+        pi.maxSets = 256;
+        pi.poolSizeCount = 1;
+        pi.pPoolSizes = &sz;
+        VkDescriptorPool p = VK_NULL_HANDLE;
+        if (g_vk.vkCreateDescriptorPool(device, &pi, nullptr, &p) != VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] growPool: vkCreateDescriptorPool 失败\n");
             return false;
         }
-        std::memcpy(mapped, bgra, static_cast<size_t>(bytes));
-        g_vk.vkUnmapMemory(device, stageMem);
+        dsPools.push_back(p);
+        dsPool = p;
+        return true;
+    }
 
-        VkCommandBufferBeginInfo bi{};
-        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        g_vk.vkResetCommandBuffer(cmd, 0);
-        VK_CHECK(g_vk.vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer(upload)");
-        barrier(t.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                0, VK_ACCESS_TRANSFER_WRITE_BIT,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
-        VkBufferImageCopy region{};
-        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        region.imageSubresource.layerCount = 1;
-        region.imageExtent = {static_cast<uint32_t>(tw), static_cast<uint32_t>(th), 1};
-        g_vk.vkCmdCopyBufferToImage(cmd, stage, t.image,
-                                    VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-        barrier(t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
-                VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        VK_CHECK(g_vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer(upload)");
-        VkSubmitInfo si{};
-        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.commandBufferCount = 1;
-        si.pCommandBuffers = &cmd;
-        VK_CHECK(g_vk.vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE), "vkQueueSubmit(upload)");
-        g_vk.vkQueueWaitIdle(queue);
-        g_vk.vkDestroyBuffer(device, stage, nullptr);
-        g_vk.vkFreeMemory(device, stageMem, nullptr);
-
-        // descriptor set（每纹理一个，与 ImGui 的做法一致）
-        VkDescriptorSetAllocateInfo ai{};
-        ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-        ai.descriptorPool = dsPool;
-        ai.descriptorSetCount = 1;
-        ai.pSetLayouts = &dsLayout;
-        const VkResult dsr = g_vk.vkAllocateDescriptorSets(device, &ai, &t.ds);
-        if (dsr != VK_SUCCESS) {
-            std::fprintf(stderr, "[vk] uploadTexture: descriptor set 失败 %s\n", VkResultText(dsr));
-            return false;
+    bool allocTexDs(Tex& t) {
+        for (int attempt = 0; attempt < 2; attempt++) {
+            VkDescriptorSetAllocateInfo ai{};
+            ai.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+            ai.descriptorPool = dsPool;
+            ai.descriptorSetCount = 1;
+            ai.pSetLayouts = &dsLayout;
+            if (g_vk.vkAllocateDescriptorSets(device, &ai, &t.ds) == VK_SUCCESS) {
+                writeTexDs(t);
+                return true;
+            }
+            if (!growPool()) return false;
         }
+        std::fprintf(stderr, "[vk] allocTexDs: descriptor set 分配失败\n");
+        return false;
+    }
 
-        VkSamplerCreateInfo sci{};
-        sci.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
-        sci.magFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-        sci.minFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-        sci.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sci.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sci.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-        sci.maxLod = 0.0f;
-        VkSampler sampler = VK_NULL_HANDLE;
-        if (g_vk.vkCreateSampler(device, &sci, nullptr, &sampler) != VK_SUCCESS) {
-            std::fprintf(stderr, "[vk] uploadTexture: vkCreateSampler 失败\n");
-            return false;
-        }
-
+    void writeTexDs(Tex& t) {
         VkDescriptorImageInfo dii{};
         dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         dii.imageView = t.view;
-        dii.sampler = sampler;
+        dii.sampler = t.linear ? samplerLinear : samplerNearest;
         VkWriteDescriptorSet wr{};
         wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         wr.dstSet = t.ds;
@@ -791,13 +812,231 @@ struct BinUIVK::Impl {
         wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         wr.pImageInfo = &dii;
         g_vk.vkUpdateDescriptorSets(device, 1, &wr, 0, nullptr);
-        g_vk.vkDestroySampler(device, sampler, nullptr);
+    }
+
+    // 释放一个纹理（图像/view/descriptor set）。调用前它不能再被本帧的顶点引用。
+    void freeTex(Tex& t) {
+        // 队列里还没录进去的上传：跟着作废（否则会在下一帧写进已销毁的图像）
+        for (size_t i = 0; i < pendingUploads.size();) {
+            if (pendingUploads[i].tex == &t)
+                pendingUploads.erase(pendingUploads.begin() + static_cast<long>(i));
+            else
+                i++;
+        }
+        if (t.ds) g_vk.vkFreeDescriptorSets(device, dsPool, 1, &t.ds);
+        if (t.view) g_vk.vkDestroyImageView(device, t.view, nullptr);
+        if (t.image) g_vk.vkDestroyImage(device, t.image, nullptr);
+        if (t.mem) g_vk.vkFreeMemory(device, t.mem, nullptr);
+        t = Tex{};
+    }
+
+    // ---------- IGlyphTexHost：字形图集的纹理宿主 ----------
+    // 句柄就是 Tex*（unordered_map 的节点地址稳定，图集代不会被搬走）。
+    void* createTex(int tw, int th) override {
+        Tex* t = new Tex();
+        if (!createTexImage(*t, tw, th, false)) {
+            freeTex(*t);
+            delete t;
+            return nullptr;
+        }
+        glyphTexes.push_back(t);
+        return t;
+    }
+
+    void updateTex(void* tex, int x, int y, int w, int h, const uint8_t* bgra) override {
+        Tex* t = static_cast<Tex*>(tex);
+        if (t) uploadRegion(*t, x, y, w, h, bgra, w * 4);
+    }
+
+    void destroyTex(void* tex) override {
+        Tex* t = static_cast<Tex*>(tex);
+        if (!t) return;
+        freeTex(*t);
+        glyphTexes.erase(std::remove(glyphTexes.begin(), glyphTexes.end(), t), glyphTexes.end());
+        delete t;
+    }
+
+    // 记录一次布局转换（cmd 必须在录制中）
+    void setTexLayout(Tex& t, VkImageLayout dst) {
+        if (t.layout == dst || !cmdOpen || !t.image) return;
+        VkAccessFlags srcAccess = 0, dstAccess = 0;
+        VkPipelineStageFlags srcStage = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        VkPipelineStageFlags dstStage = VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT;
+        switch (t.layout) {
+            case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+                srcAccess = VK_ACCESS_TRANSFER_WRITE_BIT;
+                srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                break;
+            case VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL:
+                srcAccess = VK_ACCESS_TRANSFER_READ_BIT;
+                srcStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                break;
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+                srcAccess = VK_ACCESS_SHADER_READ_BIT;
+                srcStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                break;
+            default:   // UNDEFINED：内容丢弃，无需等待
+                break;
+        }
+        switch (dst) {
+            case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+                dstAccess = VK_ACCESS_TRANSFER_WRITE_BIT;
+                dstStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
+                break;
+            case VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL:
+                dstAccess = VK_ACCESS_SHADER_READ_BIT;
+                dstStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+                break;
+            default:
+                break;
+        }
+        barrier(t.image, t.layout, dst, srcAccess, dstAccess, srcStage, dstStage);
+        t.layout = dst;
+    }
+
+    // 把一块 BGRA 像素拷进纹理的 (x,y,w,h)：staging → vkCmdCopyBufferToImage
+    bool stageCopy(Tex& t, int x, int y, int w, int h, const void* src, int rowBytes) {
+        if (!cmdOpen || !t.image || w <= 0 || h <= 0) return false;
+        if (rowBytes <= 0) rowBytes = w * 4;
+        const VkDeviceSize bytes = static_cast<VkDeviceSize>(rowBytes) * h;
+        VkBuffer stage = VK_NULL_HANDLE;
+        VkDeviceMemory stageMem = VK_NULL_HANDLE;
+        if (!createBuffer(bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          stage, stageMem)) {
+            std::fprintf(stderr, "[vk] stageCopy: staging buffer 失败 (%llu 字节)\n",
+                         (unsigned long long)bytes);
+            return false;
+        }
+        void* mapped = nullptr;
+        if (g_vk.vkMapMemory(device, stageMem, 0, bytes, 0, &mapped) != VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] stageCopy: 映射 staging 失败\n");
+            g_vk.vkDestroyBuffer(device, stage, nullptr);
+            g_vk.vkFreeMemory(device, stageMem, nullptr);
+            return false;
+        }
+        std::memcpy(mapped, src, static_cast<size_t>(bytes));
+        g_vk.vkUnmapMemory(device, stageMem);
+
+        setTexLayout(t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        VkBufferImageCopy region{};
+        region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.layerCount = 1;
+        region.imageOffset = {x, y, 0};
+        region.imageExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
+        g_vk.vkCmdCopyBufferToImage(cmd, stage, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                                    1, &region);
+        // staging 的生命期到本帧 fence 为止（拷贝是异步的，现在还不能释放）
+        stagingToFree.emplace_back(stage, stageMem);
         return true;
     }
 
+    // 把纹理清成全透明。
+    //
+    // 注意：这里**不能**用 vkCmdClearColorImage —— 该命令不允许在 render pass 内调用，
+    // 而文本的第一次光栅化就发生在帧内（遍历到一个新字形时）。实测症状：只要画面里
+    // 有文字，整帧变成纯底色（NVIDIA 直接丢掉这条命令缓冲）。
+    // 改为用一块全零的 staging 上传：一次性代价 4MB/图集，换来"帧内建纹理"这条简单路径。
+    bool zeroTex(Tex& t) {
+        if (!cmdOpen || !t.image) return false;
+        const size_t bytes = static_cast<size_t>(t.w) * t.h * 4;
+        static std::vector<uint8_t> zeros;   // 零页复用，避免每次 4MB 分配
+        if (zeros.size() < bytes) zeros.assign(bytes, 0);
+        return stageCopy(t, 0, 0, t.w, t.h, zeros.data(), t.w * 4);
+    }
+
+    bool stageUpload(Tex& t, int x, int y, int w, int h, const void* src, int rowBytes) {
+        if (t.needClear) {
+            t.needClear = false;
+            // 整张覆盖的上传可以免掉清零
+            if (!(x == 0 && y == 0 && w == t.w && h == t.h && rowBytes == t.w * 4))
+                if (!zeroTex(t)) return false;
+        }
+        return stageCopy(t, x, y, w, h, src, rowBytes);
+    }
+
+    // 上传入口：帧内直接录，帧外排队（下一个 beginFrame 里补）
+    bool uploadRegion(Tex& t, int x, int y, int w, int h, const void* src, int rowBytes) {
+        if (!t.image || w <= 0 || h <= 0 || !src) return false;
+        if (rowBytes <= 0) rowBytes = w * 4;
+        if (cmdOpen) return stageUpload(t, x, y, w, h, src, rowBytes);
+        PendingUpload pu;
+        pu.tex = &t;
+        pu.x = x; pu.y = y; pu.w = w; pu.h = h;
+        pu.rowBytes = rowBytes;
+        const auto* p = static_cast<const uint8_t*>(src);
+        pu.data.assign(p, p + static_cast<size_t>(rowBytes) * h);
+        pendingUploads.push_back(std::move(pu));
+        return true;
+    }
+
+    void drainPendingUploads() {
+        if (pendingUploads.empty() || !cmdOpen) return;
+        std::vector<PendingUpload> q;
+        q.swap(pendingUploads);
+        for (const PendingUpload& pu : q)
+            if (pu.tex) stageUpload(*pu.tex, pu.x, pu.y, pu.w, pu.h, pu.data.data(), pu.rowBytes);
+    }
+
+    void freeStaging() {
+        for (auto& kv : stagingToFree) {
+            g_vk.vkDestroyBuffer(device, kv.first, nullptr);
+            g_vk.vkFreeMemory(device, kv.second, nullptr);
+        }
+        stagingToFree.clear();
+    }
+
+    // 一次性提交：初始化期（白纹理）没有帧，用它把像素/清零送上去
+    bool oneShot(const std::function<void()>& fn) {
+        VkCommandBufferBeginInfo bi{};
+        bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+        g_vk.vkResetCommandBuffer(cmd, 0);
+        if (g_vk.vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS) return false;
+        cmdOpen = true;
+        fn();
+        cmdOpen = false;
+        if (g_vk.vkEndCommandBuffer(cmd) != VK_SUCCESS) return false;
+        VkSubmitInfo si{};
+        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+        si.commandBufferCount = 1;
+        si.pCommandBuffers = &cmd;
+        if (g_vk.vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] oneShot: vkQueueSubmit 失败\n");
+            return false;
+        }
+        if (g_vk.vkQueueWaitIdle(queue) != VK_SUCCESS) return false;
+        freeStaging();
+        return true;
+    }
+
+    bool createSamplers() {
+        auto make = [this](bool linear, VkSampler& out) {
+            VkSamplerCreateInfo si{};
+            si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+            si.magFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+            si.minFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+            si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            si.maxLod = 0.0f;
+            if (g_vk.vkCreateSampler(device, &si, nullptr, &out) != VK_SUCCESS) {
+                std::fprintf(stderr, "[vk] createSamplers: vkCreateSampler 失败 (linear=%d)\n",
+                             (int)linear);
+                return false;
+            }
+            return true;
+        };
+        return make(false, samplerNearest) && make(true, samplerLinear);
+    }
+
     bool createWhite() {
-        uint32_t px = 0xFFFFFFFFu;
-        return uploadTexture(white, 1, 1, &px, false);
+        if (!createTexImage(white, 1, 1, false)) return false;
+        const uint32_t px = 0xFFFFFFFFu;   // 预乘白：纯色四边形 × 1.0
+        return oneShot([&] {
+            white.needClear = false;       // 整张上传，不用再清零
+            stageUpload(white, 0, 0, 1, 1, &px, 4);
+        });
     }
 
     // 圆角模板：与 GL 的 roundFor 同一份解析式覆盖率（像素级同源）
@@ -806,11 +1045,10 @@ struct BinUIVK::Impl {
         return e;
     }
 
-    // 真正建模板（只在 beginFrame 之前调用：此时没有正在录制的命令缓冲）
+    // 建模板：现在可以在帧内直接建（上传走命令缓冲）
     void buildRound(int radius, bool stroke) {
         const int r = std::max(1, radius);
         const int key = stroke ? -r : r;
-        if (rounds.count(key)) return;
         const int t = RoundTemplateSize(r);
         std::vector<uint32_t> px(static_cast<size_t>(t) * t);
         const float half = static_cast<float>(t) / 2.0f;
@@ -828,27 +1066,32 @@ struct BinUIVK::Impl {
                 px[static_cast<size_t>(i) * t + j] = (lum << 24) | (lum << 16) | (lum << 8) | lum;
             }
         }
-        RoundTex rt;
+        auto old = rounds.find(key);
+        if (old != rounds.end()) {
+            freeTex(old->second.tex);
+            rounds.erase(old);
+        }
+        RoundTex& rt = rounds[key];
         rt.t = t;
-        if (!uploadTexture(rt.tex, t, t, px.data(), false)) return;   // 失败：下一帧还会重登记
-        rounds.emplace(key, rt);
+        if (!createTexImage(rt.tex, t, t, false)) {
+            rounds.erase(key);
+            return;
+        }
+        rt.tex.needClear = false;   // 整张覆盖
+        if (!uploadRegion(rt.tex, 0, 0, t, t, px.data(), t * 4)) {
+            freeTex(rt.tex);
+            rounds.erase(key);
+        }
     }
 
     RoundTex& roundFor(int radius, bool stroke) {
         const int r = std::max(1, radius);
         const int key = stroke ? -r : r;
         auto it = rounds.find(key);
-        if (it != rounds.end()) return it->second;
-        // 本帧没有：登记到下一帧补建，这次让调用方退回 fillRect（宁可方角，不要脏内存）
-        pendingRounds.emplace_back(r, stroke);
-        return emptyRound();
-    }
-
-    void drainPendingRounds() {
-        if (pendingRounds.empty()) return;
-        auto q = pendingRounds;
-        pendingRounds.clear();
-        for (const auto& pr : q) buildRound(pr.first, pr.second);
+        if (it != rounds.end() && it->second.tex.view) return it->second;
+        buildRound(r, stroke);
+        it = rounds.find(key);
+        return it != rounds.end() ? it->second : emptyRound();
     }
 
     // ============================================================
@@ -873,11 +1116,15 @@ struct BinUIVK::Impl {
         psz.descriptorCount = 256;
         VkDescriptorPoolCreateInfo pi{};
         pi.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        // 纹理销毁时单独回收它那一套 set（图集换代 / 换图都走这里），
+        // 否则池子会被"每换一代图集就泄漏一套"慢慢吃穿
+        pi.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
         pi.maxSets = 256;
         pi.poolSizeCount = 1;
         pi.pPoolSizes = &psz;
         VK_CHECK(g_vk.vkCreateDescriptorPool(device, &pi, nullptr, &dsPool),
                  "vkCreateDescriptorPool");
+        dsPools.push_back(dsPool);
 
         // push constant：vec2 viewSize
         VkPushConstantRange pcr{};
@@ -1011,8 +1258,8 @@ struct BinUIVK::Impl {
         batches.reserve(kMaxBatches);
     }
 
-    void switchBatch(VkDescriptorSet ds) {
-        if (cur.ds == ds && cur.sx == clipL && cur.sy == clipT && cur.sw == clipR - clipL &&
+    void switchBatch(Tex* tex) {
+        if (cur.tex == tex && cur.sx == clipL && cur.sy == clipT && cur.sw == clipR - clipL &&
             cur.sh == clipB - clipT)
             return;
         if (cur.count > 0 && batches.size() < static_cast<size_t>(kMaxBatches)) {
@@ -1023,14 +1270,14 @@ struct BinUIVK::Impl {
         }
         cur = Batch{};
         cur.first = static_cast<uint32_t>(verts.size());
-        cur.ds = ds;
+        cur.tex = tex;
         cur.sx = clipL; cur.sy = clipT; cur.sw = clipR - clipL; cur.sh = clipB - clipT;
     }
 
     void emitQuad(float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
-                  uint32_t color, VkDescriptorSet ds) {
+                  uint32_t color, Tex* tex = nullptr) {
         if (verts.size() + 6 > kMaxVertices) return;
-        switchBatch(ds);
+        switchBatch(tex);
         const VkVertex a{x0, y0, color, u0, v0};
         const VkVertex b{x1, y0, color, u1, v0};
         const VkVertex c{x0, y1, color, u0, v1};
@@ -1066,9 +1313,13 @@ struct BinUIVK::Impl {
             sc.extent = {static_cast<uint32_t>(std::max(0, std::min(b.sw, w - b.sx))),
                          static_cast<uint32_t>(std::max(0, std::min(b.sh, h - b.sy)))};
             if (sc.extent.width == 0 || sc.extent.height == 0) continue;
+            Tex* tex = b.tex ? b.tex : &white;
+            // 上传留下的 TRANSFER_DST 必须在这里转成只读：绘制是 flush 时才录进
+            // 命令缓冲的，所以转换点只能是 draw 之前（不是 emit 那一刻）。
+            setTexLayout(*tex, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
             g_vk.vkCmdSetScissor(cmd, 0, 1, &sc);
             g_vk.vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeLayout, 0, 1,
-                                         &b.ds, 0, nullptr);
+                                         &tex->ds, 0, nullptr);
             g_vk.vkCmdDraw(cmd, b.count * 3, 1, b.first, 0);   // count 是三角形数，first 是顶点索引
         }
         batches.clear();
@@ -1142,15 +1393,16 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     VK_CHECK(g_vk.vkCreateFence(d.device, &fci, nullptr, &d.fence), "vkCreateFence");
 
     d.clipL = 0; d.clipT = 0; d.clipR = width; d.clipB = height;
-    std::fprintf(stderr, "[vk] step: createTargets\n");
     if (!d.createTargets()) return false;
-    std::fprintf(stderr, "[vk] step: createPipeline\n");
     if (!d.createPipeline()) return false;
-    std::fprintf(stderr, "[vk] step: createWhite\n");
+    if (!d.createSamplers()) return false;
 
-    // 建白纹理（uploadTexture 内部会用 cmd 做一次独立提交，这里不能处于 recording）
+    // 建白纹理（一次性提交，此时还没有帧在录制）
     if (!d.createWhite()) { std::fprintf(stderr, "[vk] createWhite 返回 false\n"); return false; }
-    std::fprintf(stderr, "[vk] step: createWhite done\n");
+
+    // 字形图集：排版/光栅化在共享头里，本类自己当纹理宿主
+    d.atlas.setHost(&d);
+    d.atlas.initFonts();
 
     d.ready = true;
     std::fprintf(stderr, "[vk] 离屏就绪 %dx%d（MSAA %dx）\n", width, height,
@@ -1162,25 +1414,27 @@ void BinUIVK::shutdown() {
     Impl& d = *impl_;
     if (!d.device) return;
     g_vk.vkDeviceWaitIdle(d.device);
-    for (auto& kv : d.rounds) {
-        Impl::Tex& t = kv.second.tex;
-        if (t.view) g_vk.vkDestroyImageView(d.device, t.view, nullptr);
-        if (t.image) g_vk.vkDestroyImage(d.device, t.image, nullptr);
-        if (t.mem) g_vk.vkFreeMemory(d.device, t.mem, nullptr);
+    // 图集纹理要先释放（自己 new 出来的 Tex）
+    d.atlas.clear();
+    d.atlas.setHost(nullptr);
+    for (Impl::Tex* t : d.glyphTexes) {
+        if (t) { d.freeTex(*t); delete t; }
     }
+    d.glyphTexes.clear();
+    for (auto& kv : d.rounds) d.freeTex(kv.second.tex);
     d.rounds.clear();
-    for (auto& kv : d.images) {
-        Impl::Tex& t = kv.second;
-        if (t.view) g_vk.vkDestroyImageView(d.device, t.view, nullptr);
-        if (t.image) g_vk.vkDestroyImage(d.device, t.image, nullptr);
-        if (t.mem) g_vk.vkFreeMemory(d.device, t.mem, nullptr);
-    }
+    for (auto& kv : d.images) d.freeTex(kv.second);
     d.images.clear();
-    if (d.white.view) g_vk.vkDestroyImageView(d.device, d.white.view, nullptr);
-    if (d.white.image) g_vk.vkDestroyImage(d.device, d.white.image, nullptr);
-    if (d.white.mem) g_vk.vkFreeMemory(d.device, d.white.mem, nullptr);
-    d.white = Impl::Tex{};
-    if (d.dsPool) g_vk.vkDestroyDescriptorPool(d.device, d.dsPool, nullptr);
+    d.imageGen.clear();
+    d.pendingUploads.clear();
+    d.freeTex(d.white);
+    for (VkDescriptorPool p : d.dsPools)
+        if (p) g_vk.vkDestroyDescriptorPool(d.device, p, nullptr);
+    d.dsPools.clear();
+    d.dsPool = VK_NULL_HANDLE;
+    if (d.samplerNearest) g_vk.vkDestroySampler(d.device, d.samplerNearest, nullptr);
+    if (d.samplerLinear) g_vk.vkDestroySampler(d.device, d.samplerLinear, nullptr);
+    d.samplerNearest = d.samplerLinear = VK_NULL_HANDLE;
     if (d.pipeline) g_vk.vkDestroyPipeline(d.device, d.pipeline, nullptr);
     if (d.pipeLayout) g_vk.vkDestroyPipelineLayout(d.device, d.pipeLayout, nullptr);
     if (d.dsLayout) g_vk.vkDestroyDescriptorSetLayout(d.device, d.dsLayout, nullptr);
@@ -1217,7 +1471,7 @@ void BinUIVK::resize(int width, int height) {
 
 void BinUIVK::setVsync(bool on) { impl_->vsync = on; }
 void BinUIVK::setTransparent(bool) { /* 离屏模式无意义；窗口模式在 P2b */ }
-void BinUIVK::setFontName(const char*) { /* P3：字形图集 */ }
+void BinUIVK::setFontName(const char* name) { impl_->atlas.setFontName(name); }
 
 void BinUIVK::beginFrame(const void* clipRect) {
     Impl& d = *impl_;
@@ -1231,16 +1485,20 @@ void BinUIVK::beginFrame(const void* clipRect) {
     }
     d.clipL = l; d.clipT = t; d.clipR = r; d.clipB = b;
     d.scissorDepth = 0;
-    d.drainPendingRounds();   // 必须在开始录制之前（内部会 begin/end/submit 命令缓冲）
 
     g_vk.vkWaitForFences(d.device, 1, &d.fence, VK_TRUE, UINT64_MAX);
     g_vk.vkResetFences(d.device, 1, &d.fence);
+    d.freeStaging();          // 上一帧的 staging 到这里才能释放（GPU 已停下）
     g_vk.vkResetCommandBuffer(d.cmd, 0);
 
     VkCommandBufferBeginInfo bi{};
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
     g_vk.vkBeginCommandBuffer(d.cmd, &bi);
     d.recording = true;
+    d.cmdOpen = true;
+    // 帧外攒下的上传（排版阶段光栅化的字形、prepareImage）在这里补录：
+    // 放在 render pass 之前，于是"先上传后绘制"在同一帧内天然成立，不需要预热帧。
+    d.drainPendingUploads();
 
     VkRenderPassBeginInfo rpb{};
     rpb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -1280,7 +1538,7 @@ void BinUIVK::beginFrame(const void* clipRect) {
     d.verts.clear();
     d.batches.clear();
     d.cur = Impl::Batch{};
-    d.switchBatch(d.white.ds);
+    d.switchBatch(&d.white);
 }
 
 void BinUIVK::present() {
@@ -1303,6 +1561,7 @@ void BinUIVK::present() {
               VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     g_vk.vkEndCommandBuffer(d.cmd);
     d.recording = false;
+    d.cmdOpen = false;
 
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1313,6 +1572,7 @@ void BinUIVK::present() {
         return;
     }
     g_vk.vkWaitForFences(d.device, 1, &d.fence, VK_TRUE, UINT64_MAX);
+    d.freeStaging();   // 本帧的 staging 到这里才算用完（拷贝已经执行完）
 }
 
 const uint8_t* BinUIVK::readbackPixels(int& outW, int& outH) {
@@ -1335,7 +1595,7 @@ void BinUIVK::fillRect(float x, float y, float w, float h, uint32_t color) {
     if (!d.ready || w <= 0 || h <= 0) return;
     uint32_t c = ScaleAlphaU32(color, 1.0f);
     Premult(c);
-    d.emitQuad(x, y, x + w, y + h, 0.5f, 0.5f, 0.5f, 0.5f, c, d.white.ds);
+    d.emitQuad(x, y, x + w, y + h, 0.5f, 0.5f, 0.5f, 0.5f, c, &d.white);
 }
 
 void BinUIVK::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
@@ -1353,7 +1613,7 @@ void BinUIVK::fillRounded(float x, float y, float w, float h, float radius, uint
     Premult(color);
     for (int i = 0; i < n; i++)
         d.emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
-                   q[i].u0, q[i].v0, q[i].u1, q[i].v1, color, rt.tex.ds);
+                   q[i].u0, q[i].v0, q[i].u1, q[i].v1, color, &rt.tex);
 }
 
 void BinUIVK::fillLine(float x0, float y0, float x1, float y1, float width, uint32_t color) {
@@ -1367,7 +1627,7 @@ void BinUIVK::fillLine(float x0, float y0, float x1, float y1, float width, uint
     uint32_t c = color;
     Premult(c);
     // 旋转四边形：两个三角形，法向偏移半线宽
-    d.switchBatch(d.white.ds);
+    d.switchBatch(&d.white);
     if (d.verts.size() + 6 > kMaxVertices) return;
     const VkVertex a{x0 + nx, y0 + ny, c, 0.5f, 0.5f};
     const VkVertex b{x1 + nx, y1 + ny, c, 0.5f, 0.5f};
@@ -1402,37 +1662,108 @@ void BinUIVK::strokeRounded(float x, float y, float w, float h, float radius,
     Premult(color);
     for (int i = 0; i < n; i++)
         d.emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
-                   q[i].u0, q[i].v0, q[i].u1, q[i].v1, color, rt.tex.ds);
+                   q[i].u0, q[i].v0, q[i].u1, q[i].v1, color, &rt.tex);
 }
 
-void BinUIVK::drawImage(uint16_t, float, float, float, float) {
-    static bool warned = false;
-    if (!warned) {
-        warned = true;
-        std::fprintf(stderr, "[vk] 图片绘制在 P3 实现（当前忽略）\n");
+// ---------- 文本 ----------
+// 排版、字形光栅化、图集代管理全在 binui::GlyphAtlas（与 GL 后端同一份代码）；
+// 这里只把字形四边形交给本后端的批次。图集纹理走 IGlyphTexHost 回调（见 Impl）。
+void BinUIVK::drawText(float x, float y, float size, int weight, const std::string& utf8,
+                       uint32_t color, bool centerH, bool centerV, bool italic) {
+    Impl& d = *impl_;
+    if (!d.ready || utf8.empty()) return;
+    d.atlas.drawText(x, y, size, weight, utf8, color, centerH, centerV, italic,
+                     [&d](const GlyphQuad& q) {
+                         d.emitQuad(q.x, q.y, q.x + q.w, q.y + q.h, q.u0, q.v0, q.u1, q.v1,
+                                    q.color, static_cast<Impl::Tex*>(q.tex));
+                     });
+}
+
+void BinUIVK::drawTextWrapped(float x, float y, float maxW, float size, int weight,
+                              const std::string& utf8, uint32_t color, int align, bool italic) {
+    Impl& d = *impl_;
+    if (!d.ready || utf8.empty()) return;
+    d.atlas.drawTextWrapped(x, y, maxW, size, weight, utf8, color, align, italic,
+                            [&d](const GlyphQuad& q) {
+                                d.emitQuad(q.x, q.y, q.x + q.w, q.y + q.h, q.u0, q.v0, q.u1, q.v1,
+                                           q.color, static_cast<Impl::Tex*>(q.tex));
+                            });
+}
+
+float BinUIVK::textWidth(float size, int weight, const std::string& utf8, bool italic) {
+    if (!impl_->ready) return 0;
+    return impl_->atlas.textWidth(size, weight, utf8, italic);
+}
+
+void BinUIVK::fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic) {
+    impl_->atlas.fontMetrics(size, weight, ascent, lineHeight, italic);
+}
+
+// ---------- 图片 ----------
+// generation = "这份资源被换了"的代号：相同就复用，不重复解码/上传。
+bool BinUIVK::prepareImage(uint16_t index, const uint8_t* data, size_t size,
+                           uint32_t generation) {
+    Impl& d = *impl_;
+    if (!d.ready) return false;
+    auto gi = d.imageGen.find(index);
+    auto ti = d.images.find(index);
+    if (gi != d.imageGen.end() && gi->second == generation && ti != d.images.end())
+        return ti->second.view != VK_NULL_HANDLE;
+
+    int iw = 0, ih = 0;
+    std::vector<uint8_t> px = DecodeImagePixels(data, size, iw, ih);
+    if (px.empty()) {
+        d.imageGen[index] = generation;
+        return false;
     }
-}
-
-void BinUIVK::drawText(float, float, float, int, const std::string&, uint32_t, bool, bool, bool) {
-    static bool warned = false;
-    if (!warned) {
-        warned = true;
-        std::fprintf(stderr, "[vk] 文本绘制在 P3 实现（当前忽略）\n");
+    if (ti != d.images.end()) d.freeTex(ti->second);   // 换图：旧图像必须放掉
+    Impl::Tex& t = d.images[index];
+    if (!d.createTexImage(t, iw, ih, true)) {
+        d.images.erase(index);
+        return false;
     }
+    t.needClear = false;   // 整张覆盖，不用先清零
+    const bool ok = d.uploadRegion(t, 0, 0, iw, ih, px.data(), iw * 4);
+    d.imageGen[index] = generation;
+    return ok;
 }
 
-void BinUIVK::drawTextWrapped(float, float, float, float, int, const std::string&, uint32_t, int,
-                              bool) {}
+// 原始像素直传（RGBA 字节序，没有解码）：BGRA 目标格式要换一下 R/B 通道
+bool BinUIVK::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
+                              uint32_t generation) {
+    Impl& d = *impl_;
+    if (!d.ready || w <= 0 || h <= 0 || !rgba) return false;
+    auto gi = d.imageGen.find(index);
+    auto ti = d.images.find(index);
+    if (gi != d.imageGen.end() && gi->second == generation && ti != d.images.end())
+        return ti->second.view != VK_NULL_HANDLE;
 
-float BinUIVK::textWidth(float, int, const std::string&, bool) { return 0.0f; }
-
-void BinUIVK::fontMetrics(float, int, int& ascent, int& lineHeight, bool) {
-    ascent = 0;
-    lineHeight = 0;
+    std::vector<uint8_t> bgra(static_cast<size_t>(w) * h * 4);
+    for (size_t i = 0; i < static_cast<size_t>(w) * h; i++) {
+        bgra[i * 4 + 0] = rgba[i * 4 + 2];
+        bgra[i * 4 + 1] = rgba[i * 4 + 1];
+        bgra[i * 4 + 2] = rgba[i * 4 + 0];
+        bgra[i * 4 + 3] = rgba[i * 4 + 3];
+    }
+    if (ti != d.images.end()) d.freeTex(ti->second);
+    Impl::Tex& t = d.images[index];
+    if (!d.createTexImage(t, w, h, true)) {
+        d.images.erase(index);
+        return false;
+    }
+    t.needClear = false;
+    const bool ok = d.uploadRegion(t, 0, 0, w, h, bgra.data(), w * 4);
+    d.imageGen[index] = generation;
+    return ok;
 }
 
-bool BinUIVK::prepareImage(uint16_t, const uint8_t*, size_t, uint32_t) { return false; }
-bool BinUIVK::prepareImageRaw(uint16_t, int, int, const uint8_t*, uint32_t) { return false; }
+void BinUIVK::drawImage(uint16_t index, float x, float y, float w, float h) {
+    Impl& d = *impl_;
+    if (!d.ready || w <= 0 || h <= 0) return;
+    auto it = d.images.find(index);
+    if (it == d.images.end() || !it->second.view) return;
+    d.emitQuad(x, y, x + w, y + h, 0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFF, &it->second);
+}
 
 int BinUIVK::pushClip(float x, float y, float w, float h) {
     Impl& d = *impl_;
@@ -1449,7 +1780,7 @@ int BinUIVK::pushClip(float x, float y, float w, float h) {
     if (d.clipB < d.clipT) d.clipB = d.clipT;
     if (d.scissorDepth < 31) d.scissorStack[d.scissorDepth++] = depth;
     // 裁剪变了：下一批要换 scissor
-    d.switchBatch(d.cur.ds);
+    d.switchBatch(d.cur.tex);
     return depth;
 }
 
@@ -1461,7 +1792,7 @@ void BinUIVK::popClipTo(int depth) {
     d.clipT = 0;
     d.clipR = d.w;
     d.clipB = d.h;
-    d.switchBatch(d.cur.ds);
+    d.switchBatch(d.cur.tex);
 }
 
 } // namespace binui

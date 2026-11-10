@@ -6,7 +6,40 @@
 
 ## [Unreleased]
 
-（暂无）
+### 新增 — Vulkan 后端 P3：全原语（文本 / 图片 / 线段），离屏
+
+`BinUIVK` 现在 7 个原语全通，并且**文本与图片的实现与 GL 共用一份代码**，
+所以在像素回归里两个 GPU 后端对轴对齐几何逐位相同。格式号不变（无二进制布局改动）。
+
+- 新文件 `src/backends/binui_glyph_atlas.h`：字形图集 + 文本排版（UTF-8 迭代、emoji 簇、
+  逐字形回退、图集多代、COLR 彩色 emoji、换行/对齐）。GL 与 Vulkan 都只实现一个
+  `IGlyphTexHost`（位图 → 纹理）并消费 `GlyphQuad` 回调 —— 后端不再有自己的排版代码。
+  落地方式：把 GL 里的实现整块搬出来，改完与搬迁前逐像素对比（阈值 0，3 个用例 **0 差异**）。
+- 新文件 `src/backends/binui_win_image.h`：GDI+ 图片解码（原本 GL 与 D3D11 各一份拷贝）。
+- Vulkan 纹理系统重写：上传**可以发生在帧内**（staging 拷进本帧命令缓冲，帧末等 fence 后释放），
+  帧外的上传排队到下一个 `beginFrame` 开头。**因此不再需要预热帧** —— `vk_shot` 从渲两帧
+  改成渲一帧，结果不变；P2 的"首帧缺圆角"瑕疵随之消失。
+- 图片：`prepareImage`（PNG/JPEG 解码）/ `prepareImageRaw`（原始 RGBA，CPU 侧换 R/B 通道）/
+  `drawImage`（线性采样），`generation` 不变则复用。
+- 采样器拆成 nearest / linear 两个（原先每张纹理建一个 sampler，白建白删）。
+- descriptor pool 加 `FREE_DESCRIPTOR_SET` 并在纹理销毁时回收，池满自动再开一个。
+
+### 修复 — `vkCmdClearColorImage` 在 render pass 内调用会丢掉整帧
+
+文本首次光栅化发生在帧内，于是"清零新图集"落在 render pass 里。Vulkan 不允许，
+NVIDIA 驱动**静默丢掉整条命令缓冲** —— 现象是"只要画面里有文字，整帧只剩底色"。
+改为用全零 staging 上传清零（`zeroTex()`），一次性 4MB/图集。
+
+### 新增 — `make pixels-vk`
+
+14 个用例（10 个像素卡片 + 4 个真实示例：`features` / `fontshow` / `svgdemo` / `texturedemo`）
+跑 Vulkan ↔ OpenGL 逐像素对比。判据：不同像素 < 1.5%、单通道 ≤ 128（`pixel_diff` 新增第 5 个
+参数）。为什么不是 0：4x MSAA 在**非轴对齐边缘**上，GL 与 Vulkan 的采样归属会差一个点
+（实测逐像素正负各半、净偏 ≈ 0），这是实现差异而非绘制 bug；两类后端与 GDI 基准的距离相同
+（svgjoin：VK↔GDI 7494 vs GL↔GDI 7505，共 109200 像素）。
+
+实测：6 个纯轴对齐用例 + 4 个真实示例 **0 差异**（`fontshow` 最大通道差 0），
+4 个 SVG 描边用例残差 0.2%~1.0%，全部 ≤ 128 通道。
 
 ## [0.9.1] - 2026-11-10
 
