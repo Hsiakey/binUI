@@ -3,7 +3,7 @@
 > 一句话：**一个界面 = 一个 `.bui`（单文件，组件全内联）；想拆开就拆成 `.bui` + 若干 `.bum`，
 > 二进制和源码可以混放，加载时二进制优先、源码用于改和热更新。**
 
-![组件化三种形态](img/components.png)
+![组件化三种形态](img/features.png)
 
 示例：[`examples/features/`](../examples/features/)（上图就是它渲染出来的）。
 标题栏 `titlebar.bum`（二进制）、按钮 `button.bum.html`（源码 + 参数）、卡片 `card.bum`（二进制，
@@ -232,7 +232,12 @@ renderer.loadResources(imgs);
 
 ## 十、目录结构
 
-**一句话：全放一个目录就行。** `src` 一律相对"写出这个 `<use>` 的文件"解析，同级引用最省事：
+两条原则就够了：
+
+1. **`src` 相对"写出这个 `<use>` 的文件"解析** —— 同级引用最省事，嵌套组件再相对组件自己。
+2. **相对路径最终按宿主 UI 文件解析** —— 编译期是源码文件，运行期是 `.bui`。所以组件别挪到别处。
+
+### 几个组件：全放一个目录
 
 ```
 myapp/
@@ -251,8 +256,57 @@ myapp/
 <use src="dock.bum.html" external x="16" y="120" w="200"/>                <!-- 运行期挂载 -->
 ```
 
-这套实测跑通：编译产出 `main.bui` 810 字节，`MountAll(目录)` → `mounted=1 failed=0`，
-两个按钮和外挂组件的坐标都对。
+### 几十上百个：`binui/` 树 + `components/<分类>/`
+
+成品 App 的组件化会拆出很多小零件，一屏放不下。这时候按下面收进一棵 `binui/` 树：
+
+```
+appRootDir/
+└── binui/
+    ├── main.bui                      # 或 main.bui.html（源码）
+    ├── titlebar.bum                  # 或 titlebar.bum.html
+    └── components/
+        ├── button.bum(.html)
+        ├── Button/                   # 分类目录：组件 + 它自己的资源放一起
+        │   ├── primary.bum.html
+        │   └── star.png
+        └── Label/
+            └── tag.bum.html
+```
+
+```html
+<!-- binui/main.bui.html -->
+<use src="titlebar.bum.html" x="0" y="0" w="960"/>
+<use src="components/Button/primary.bum.html" x="20" y="60" w="140"/>
+<use src="components/Label/tag.bum.html"      x="20" y="130" w="80"/>
+```
+
+```html
+<!-- binui/components/Button/primary.bum.html：组件自己的资源与嵌套都相对组件目录 -->
+<div style="width:{{w=120}}; height:40; background:#3E8BFF">
+    <img src="../Icon/star.png" style="position:absolute; left:8; top:12; width:16; height:16"/>
+    <use src="../Label/tag.bum.html" x="32" y="10" w="80" text="内嵌标签"/>
+</div>
+```
+
+实测这套的编译结果：`736 字节，资源 1 项`，资源段里记的是 **`components/Icon/star.png`**
+（组件里的 `../Icon/star.png` 被改写成宿主相对路径），嵌套 `../Label/tag.bum.html` 正常展开。
+
+**为什么要给组件单独一个文件夹**：带资源的组件（图标、字体、贴图）把自己的文件放在自己目录里，
+搬运/删除/替换都是整块操作，不会散落在 `components/` 根上。纯样式组件（`button`、`divider`）
+放平铺的 `components/x.bum.html` 就够了。
+
+### 内嵌 vs 外挂（发行建议）
+
+| | 内嵌（默认，`<use src>` 不写 `external`） | 外挂（`<use … external>`） |
+|---|---|---|
+| 运行期开销 | **零**：组件已经并进 `.bui`，一个文件都不读 | 每个组件一次读文件 + 合并 |
+| 启动 | 一次 `loadLayout` | `loadLayout` + `MountAll` 逐个挂 |
+| 换组件 | 要重编主 `.bui` | 直接替换组件文件 |
+| 适用 | **发行版**（默认推荐） | 皮肤 / 插件 / 按需加载的大模块 |
+
+所以"发行优先内嵌"是对的：简单、快、零依赖。组件化换来的是**可替换性**，不是性能 ——
+只有当组件多到"一次性全加载太重"或者需要运行期换皮肤时，外挂才划算。
 
 ### 分发随你
 
@@ -261,9 +315,6 @@ myapp/
 | 保护源码 | 只给 `button.bum` | 二进制，发行版该给这个 |
 | 让人能改 | 只给 `button.bum.html` | 运行期就地编译（首次启动慢一点） |
 | 两样都给 | 都放 | **二进制优先**；源码 mtime 更新时改用源码并告警（改完保存就见效） |
-
-默认（`<use src="x.bum.html">` 不写 `external`）组件是**编译期内联**进 `.bui` 的，
-此时运行期一个组件文件都不需要 —— 上面这张表只对 `external` 外挂组件有意义（皮肤 / 插件 / 按需加载）。
 
 ### 唯一要守的：别把组件挪到别处
 
@@ -277,10 +328,6 @@ A  main.bui 放 bin/，组件留在 assets/            mounted=0 failed=1
 B  组件按原相对位置放进 bin/components/          mounted=1 failed=0
 ```
 
-组件多到一屏放不下，就开个 `components/` 子目录（`src="components/panel.bum.html"`）——
-原则不变：**UI 文件和能找到组件的相对路径，编译期和运行期一致**。组件的图片/视频也照着
-这个相对位置放（编译期会被改写成宿主相对路径，见上一节）。
-
 ## 十一、已知限制
 
 | 限制 | 现状 |
@@ -290,3 +337,4 @@ B  组件按原相对位置放进 bin/components/          mounted=1 failed=0
 | 组件作用域 CSS 隔离 | 未实现（CSS 全局，靠类名前缀约定） |
 | 组件内 `<script>` | 忽略（没有脚本引擎） |
 | 运行期卸载组件 | 未实现（挂载后只增不减，`loadLayout` 重来即可） |
+| **从 `.bui` 反向导出组件源码树** | **做不到**：编译期内联把组件边界抹平了，`.bui` 里只剩一棵扁平节点树，没有"这块来自哪个 `.bum`"的信息。要做需要两步：① 编译期记录每个组件实例的节点区间 + 源文件相对路径（新格式段，v15 起）；② 一个节点树 → HTML 的序列化器（节点属性早已解析成绝对值、CSS 已级联展开，导出的是等价骨架而非原始源码）。在那之前，**想"能解包"就只能随发行包带上组件源码/二进制**（外挂或同目录分发）。 |

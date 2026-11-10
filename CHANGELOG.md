@@ -6,20 +6,20 @@
 
 ## [Unreleased]
 
-### 新增 — 文档：目录结构（一个目录全放一起；附"别把组件挪走"的实测）
+### 新增 — 文档：目录结构（单目录 / `binui/` 树 + 分类子目录；内嵌 vs 外挂的取舍）
 
-- `docs/components.md` 新增第十节「目录结构」：`main.bui` + `main.bui.html` + `button.bum.html`
-  + 图片**全放一个目录**就能跑（`input.bui.html` 这种命名与产物对称，`binui_compile` 也按这个
-  约定推默认输出名）。实测：`main.bui.html` 编译出 `main.bui` 810 字节，同级引用
-  `<use src="button.bum.html">`、裸名字 `<use src="button.bum">`、外挂
-  `<use src="dock.bum.html" external>` 全部成立，`MountAll(目录)` → `mounted=1 failed=0`。
-- 分发随意：只给 `.bum`（保护源码）/ 只给 `.bum.html`（可改、就地编译）/ 都给（二进制优先，
-  源码更新时改用源码并告警）。编译期内联的组件运行期一个文件都不读。
-- 唯一约束写清楚了：相对路径最终按**宿主 UI 文件**解析（编译期源码文件、运行期 `.bui`），
-  所以 `external` 组件和组件图片别挪到别处（实测不镜像 `failed=1`、按原相对位置放回 `mounted=1`）。
-- 第四节补一句"发行版想绝对走二进制就只发 `.bum`/`.bui`"（源码候选不存在时 mtime 比较根本
-  不发生），并附六种组合的实测表：只有二进制 / 只有源码 / 都有且二进制新 / 都有且源码新 /
-  裸名字探测 / 都没有。
+- `docs/components.md` 新增第十节「目录结构」：
+  - 几个组件 → **全放一个目录**（`main.bui`、`main.bui.html`、`button.bum(.html)`、图片）；
+  - 几十上百个 → **`binui/` 树 + `components/<分类>/`**，带资源的组件（图标/字体/贴图）
+    单独一个文件夹（`components/Button/primary.bum.html` + `star.png`），纯样式组件平铺即可。
+  - 实测多级目录：宿主 `<use src="components/Button/primary.bum.html">`，组件内
+    `<img src="../Icon/star.png">` 与嵌套 `<use src="../Label/tag.bum.html">`，
+    编译产出 `736 字节，资源 1 项`，资源段里记的是宿主的 `components/Icon/star.png`。
+- 内嵌 vs 外挂列了对照表并给出结论：**发行优先内嵌**（运行期零文件读取），外挂换来的是
+  可替换性（皮肤/插件/按需加载），不是性能。
+- 分发随意：只给 `.bum`（保护源码）/ 只给源码（可改、就地编译）/ 都给（二进制优先）。
+- 已知限制补一条：**从 `.bui` 反向导出组件源码树现在做不到**（内联抹平了组件边界），
+  要做需要"组件区间段 + 节点树→HTML 序列化器"两步，v15 起才可能。
 - `README.md`、`components/README.md`、`docs/README.md` 同步一句指引；原「十、已知限制」顺延为十一。
 
 ### 变更 — 组件源码统一改名为 `.bum.html`（标准组件库 11 个 + examples/features 3 个）
