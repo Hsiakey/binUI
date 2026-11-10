@@ -3458,6 +3458,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         float    cx = 0.5f, cy = 0.5f, r = 0.5f;              // 径向（默认 50%/50%/50%）
         // v18：径向焦点（默认 = 圆心 = 普通同心圆）。与圆心不同时运行期按 SVG 锥形语义解。
         float    fx = 0.5f, fy = 0.5f;
+        // 哪些字段写的是百分比：objectBoundingBox 下 /100 就是对的，
+        // userSpaceOnUse 下还要再乘 viewport 尺寸（在 toNormSpace 里折算）。
+        bool x1Pct = false, y1Pct = false, x2Pct = false, y2Pct = false;
+        bool cxPct = false, cyPct = false, rPct = false, fxPct = false, fyPct = false;
         std::vector<SvgGradStopDef> stops;
         std::unordered_map<std::string, std::string> attrs;   // 沿 href 链合并后的属性
     };
@@ -3604,27 +3608,18 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 return it == g.attrs.end() ? std::string() : it->second;
             };
             g.userSpace = (lowerStr(A("gradientunits")) == "userspaceonuse");
-            // userSpaceOnUse 下的百分比：规范是按**视口**比例算，本库按"数值 /100"当用户单位
-            // （x1="50%" → 0.5 用户单位）。两者差一个数量级，画出来是一条几乎看不见的渐变，
-            // 而作者完全看不出原因 —— 这种"写了不生效"必须明确告警并给替代写法。
-            // 每条渐变只报一次（把命中的属性列出来），别按属性刷屏。
-            // objectBoundingBox（默认）下的百分比是对的（包围盒的百分比），不报。
-            if (g.userSpace) {
-                static const char* kPctKeys[] = { "x1", "y1", "x2", "y2", "cx", "cy", "r" };
-                std::string badKeys;
-                for (const char* key : kPctKeys) {
-                    std::string v = A(key);
-                    while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
-                    if (v.empty() || v.back() != '%') continue;
-                    if (!badKeys.empty()) badKeys += "/";
-                    badKeys += key;
-                }
-                if (!badKeys.empty()) {
-                    Warn("渐变 #" + kv.first + " 在 userSpaceOnUse 下用了百分比（" + badKeys +
-                         "）：百分比在这里按\"用户单位\"折半折算（不是 viewport 比例），"
-                         "建议改成具体用户单位，如 x1=\"12\" x2=\"36\"");
-                }
-            }
+            // 百分比记号：objectBoundingBox 下 /100 就是"包围盒的比例"（正确）；
+            // userSpaceOnUse 下规范是"视口尺寸的比例"，要在 toNormSpace 里乘 viewport 尺寸。
+            // 这里只记下"哪些字段写的是百分比"，两种单位各自的折算放到用的时候做。
+            auto markPct = [&](const char* key, bool& flag) {
+                std::string v = A(key);
+                while (!v.empty() && (v.back() == ' ' || v.back() == '\t')) v.pop_back();
+                flag = !v.empty() && v.back() == '%';
+            };
+            markPct("x1", g.x1Pct); markPct("y1", g.y1Pct);
+            markPct("x2", g.x2Pct); markPct("y2", g.y2Pct);
+            markPct("cx", g.cxPct); markPct("cy", g.cyPct);
+            markPct("r", g.rPct);   markPct("fx", g.fxPct); markPct("fy", g.fyPct);
             const std::string gt = A("gradienttransform");
             g.xform = PathMatrix{};
             if (!gt.empty()) {
@@ -4275,6 +4270,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         bool     hasStroke = false;
         uint8_t  strokeW = 1;
         bool     evenOdd = false;                     // fill-rule="evenodd"
+        // 当前 <svg> 视口在**用户单位**下的尺寸：userSpaceOnUse 里写百分比时要按它折算，
+        // 例如 x1="50%" 等于 viewport 宽度的一半（SVG 规范）。没有 viewBox 时取 width/height。
+        float    vpW = 0.0f, vpH = 0.0f;
         // v16：fill 用的渐变 id（空 = 纯色）。渐变是继承属性，<svg>/<g> 上写一次全子树生效；
         // fillColor 同时存"中间色标的代表色"，供运行期兜底与不支持渐变的通路使用。
         std::string fillGradId{};
@@ -5183,6 +5181,30 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 // 抄两份的代价是"改一处忘一处"，而这种几何最容易出现两处差一点点。
                 auto toNormSpace = [&](const SvgGradDef& gd, const char* alphaKey,
                                        const std::string& idForWarn) -> BinUIPathGradient {
+                    // userSpaceOnUse 的百分比按**视口尺寸**折算（SVG 规范）：x/y 用宽高，
+                    // r 用对角线等效半径 sqrt((w²+h²)/2)。objectBoundingBox 下百分比就是包围盒比例，
+                    // 已经在 /100 时算好了，不用动。
+                    const SvgGradDef* gdp = &gd;
+                    SvgGradDef gLocal;
+                    if (gd.userSpace) {
+                        const float vpW = pc.vpW > 1e-6f ? pc.vpW : 0.0f;
+                        const float vpH = pc.vpH > 1e-6f ? pc.vpH : 0.0f;
+                        if (vpW > 0.0f && vpH > 0.0f) {
+                            gLocal = gd;
+                            if (gLocal.x1Pct) gLocal.x1 *= vpW;
+                            if (gLocal.x2Pct) gLocal.x2 *= vpW;
+                            if (gLocal.cxPct) gLocal.cx *= vpW;
+                            if (gLocal.fxPct) gLocal.fx *= vpW;
+                            if (gLocal.y1Pct) gLocal.y1 *= vpH;
+                            if (gLocal.y2Pct) gLocal.y2 *= vpH;
+                            if (gLocal.cyPct) gLocal.cy *= vpH;
+                            if (gLocal.fyPct) gLocal.fy *= vpH;
+                            if (gLocal.rPct)
+                                gLocal.r *= std::sqrt((vpW * vpW + vpH * vpH) * 0.5f);
+                            gdp = &gLocal;
+                        }
+                    }
+                    const SvgGradDef& g = *gdp;
                     const float boxX = svgPathShape.minX, boxY = svgPathShape.minY;
                     const float boxW = svgPathShape.Width(), boxH = svgPathShape.Height();
                     // N：设备坐标 → 节点盒归一化（先把盒原点挪到 0，再除以盒尺寸）。
@@ -5193,8 +5215,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                                   boxH > 1e-6f ? 1.0f / boxH : 0.0f),
                         PathTranslate(-boxX, -boxY));
                     PathMatrix M = N;
-                    if (gd.userSpace) {
-                        M = PathMul(M, PathMul(svgX, gd.xform));
+                    if (g.userSpace) {
+                        M = PathMul(M, PathMul(svgX, g.xform));
                     } else {
                         // objectBoundingBox：坐标是"几何包围盒（**不含描边**）的单位正方形"。
                         // 注意不能拿节点盒减 2·e2 反推：斜接撑盒可能是不对称的，
@@ -5203,41 +5225,41 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                         const float fh = std::max(1e-6f, geomH);
                         M = PathMul(M, PathMul(PathTranslate(geomMinX, geomMinY),
                                                PathScale(fw, fh)));
-                        M = PathMul(M, gd.xform);
+                        M = PathMul(M, g.xform);
                     }
                     BinUIPathGradient pg = {};
-                    pg.type = gd.type;
-                    pg.spread = gd.spread;
+                    pg.type = g.type;
+                    pg.spread = g.spread;
                     // 色标：元素级的 fill-opacity / stroke-opacity + opacity 在这里折进 alpha
                     const int ns = static_cast<int>(
-                        std::min<size_t>(kPathGradMaxStops, gd.stops.size()));
+                        std::min<size_t>(kPathGradMaxStops, g.stops.size()));
                     pg.stopCount = static_cast<uint8_t>(std::max(2, ns));
                     for (int si = 0; si < ns; si++) {
-                        float off = gd.stops[si].off;
+                        float off = g.stops[si].off;
                         off = off < 0.0f ? 0.0f : (off > 1.0f ? 1.0f : off);
                         pg.stops[si].offset = off;
-                        pg.stops[si].color = fade(gd.stops[si].color, alphaKey);
+                        pg.stops[si].color = fade(g.stops[si].color, alphaKey);
                         pg.stops[si].color = fade(pg.stops[si].color, "opacity");
                     }
                     if (ns < 2) pg.stops[1] = pg.stops[0];   // 兜底（注册表已保证 ≥ 2）
-                    if (gd.type == PATH_GRAD_RADIAL) {
-                        if (gd.xformRotated) {
+                    if (g.type == PATH_GRAD_RADIAL) {
+                        if (g.xformRotated) {
                             Warn("渐变 #" + idForWarn + "：径向渐变的 gradientTransform 含旋转/斜切，"
                                  "已近似为轴对齐椭圆（去掉旋转，或改用线性渐变）");
                         }
-                        const PathPointF gc = PathApply(M, gd.cx, gd.cy);
+                        const PathPointF gc = PathApply(M, g.cx, g.cy);
                         pg.x1 = gc.x;
                         pg.y1 = gc.y;
                         // v18：焦点按同一个 M 折到归一化空间（= 圆心时运行期走快路）
-                        const PathPointF gf = PathApply(M, gd.fx, gd.fy);
+                        const PathPointF gf = PathApply(M, g.fx, g.fy);
                         pg.fx = gf.x;
                         pg.fy = gf.y;
                         // 半径按 M 两列的范数放大：仿射变换下圆的轴长正好是这个
-                        pg.rx = std::fabs(gd.r) * std::sqrt(M.a * M.a + M.b * M.b);
-                        pg.ry = std::fabs(gd.r) * std::sqrt(M.c * M.c + M.d * M.d);
+                        pg.rx = std::fabs(g.r) * std::sqrt(M.a * M.a + M.b * M.b);
+                        pg.ry = std::fabs(g.r) * std::sqrt(M.c * M.c + M.d * M.d);
                     } else {
-                        const PathPointF gp1 = PathApply(M, gd.x1, gd.y1);
-                        const PathPointF gp2 = PathApply(M, gd.x2, gd.y2);
+                        const PathPointF gp1 = PathApply(M, g.x1, g.y1);
+                        const PathPointF gp2 = PathApply(M, g.x2, g.y2);
                         pg.x1 = gp1.x; pg.y1 = gp1.y;
                         pg.x2 = gp2.x; pg.y2 = gp2.y;
                     }
@@ -6187,6 +6209,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 if (hasOwnXform) base = PathMul(base, svgOwn); // 整个 svg 组一起变换
                 std::string vbs = e.attrs.count("viewbox") ? e.attrs.at("viewbox") : "";
                 float vbx = 0, vby = 0, vbw = 0, vbh = 0;
+                // 视口尺寸（用户单位）：userSpaceOnUse 的百分比按它折算。
+                // 有 viewBox 就是 viewBox 的宽高；没有就退回声明的 width/height。
+                if (!vbs.empty() && ParseViewBox(vbs, vbx, vby, vbw, vbh) && vbw > 0 && vbh > 0) {
+                    child.vpW = vbw;
+                    child.vpH = vbh;
+                } else {
+                    child.vpW = parseLen(sw, w);
+                    child.vpH = parseLen(sh, lh);
+                }
                 if (!vbs.empty()) {
                     if (ParseViewBox(vbs, vbx, vby, vbw, vbh)) {
                         PathMatrix vb;
@@ -6233,8 +6264,12 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 child.oy = pc.oy;
                 child.contentW = pc.contentW;
                 child.svgXform = svgX;
+                child.vpW = pc.vpW;      // 视口尺寸跟着祖先走（userSpaceOnUse 的百分比要用）
+                child.vpH = pc.vpH;
             } else {
                 child.svgXform = svgX;
+                child.vpW = pc.vpW;
+                child.vpH = pc.vpH;
             }
         }
     }

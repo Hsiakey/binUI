@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "binui_format.h"
+#include "binui_paint.h"   // 路径条带缓存（PathBandCacheEntry）
 #include "binui_link.h"
 
 namespace binui {
@@ -122,6 +123,20 @@ public:
     const PathRecord* pathOf(uint16_t nodeId) const {
         auto it = pathIdx_.find(nodeId);
         return it == pathIdx_.end() ? nullptr : &paths_[it->second];
+    }
+    // v19 路径条带缓存：按 nodeId 取一个可写的缓存条目（不存在就地建）。
+    // 布局一变（loadLayout / relayout / 增删节点 / 挂载组件）就整表作废，
+    // 所以条目里只需要"代数"而不必逐项追踪失效。
+    PathBandCacheEntry* pathBandCache(uint16_t nodeId) const {
+        if (!pathBands_.count(nodeId) && pathBands_.size() >= kMaxPathCacheEntries) return nullptr;
+        PathBandCacheEntry& e = pathBands_[nodeId];
+        if (e.gen != pathCacheGen_) { e.gen = pathCacheGen_; e.key = 0; e.bands.clear(); }
+        return &e;
+    }
+    uint64_t pathCacheGen() const { return pathCacheGen_; }
+    void invalidatePathBands() {
+        pathBands_.clear();
+        ++pathCacheGen_;
     }
     // 该节点是否只是"裁剪容器"（CSS overflow:hidden）：可裁剪但不可滚动
     bool isClipOnly(uint16_t nodeId) const { return clipOnly_.count(nodeId) != 0; }
@@ -477,6 +492,11 @@ private:
     std::unordered_map<uint16_t, size_t> paintIdx_;      // nodeId -> paints_ 下标
     std::vector<PathRecord> paths_;                      // v15 路径段
     std::unordered_map<uint16_t, size_t> pathIdx_;       // nodeId -> paths_ 下标
+    // v19 路径条带的跨帧缓存（条带数量有上限，条目数也封顶）。
+    // mutable：三个绘制后端拿到的是 const renderer，缓存属于"绘制期副作用"。
+    mutable std::unordered_map<uint16_t, PathBandCacheEntry> pathBands_;
+    mutable uint64_t pathCacheGen_ = 1;                  // 布局代数（变化即整表作废）
+    static constexpr size_t kMaxPathCacheEntries = 256;
     // 边框宽度快照（与 paints_ 同下标）：ui_scale="fixed" 子树在等比缩放时按比例重设边框，
     // 每次都从这份原始值算，避免多次 setSize 累乘
     std::vector<std::array<uint8_t, 4>> designBorderW_;

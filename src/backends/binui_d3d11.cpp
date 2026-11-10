@@ -2164,7 +2164,8 @@ void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clip
                         pr->head, pr->pts.data(), pr->first.data(), pr->count.data(),
                         pr->closed.data(), static_cast<int>(pr->first.size()),
                         static_cast<float>(x), static_cast<float>(y),
-                        static_cast<float>(nw), static_cast<float>(nh), pspec, pbuf,
+                        static_cast<float>(nw), static_cast<float>(nh), pspec,
+                        renderer.pathBandCache(node.id), renderer.pathCacheGen(), pbuf,
                         [&](const binui::PaintBand* b, int n) {
                             for (int k = 0; k < n; k++)
                                 gfx.fillRect(b[k].x, b[k].y, b[k].w, b[k].h, b[k].color);

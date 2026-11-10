@@ -29,6 +29,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <cstring>
 #include <vector>
 
 #include "binui_format.h"
@@ -483,6 +484,7 @@ constexpr int kMaxOpenRuns = 96;         // 跨行合并的"正在延伸的条�
 // 代价是**色阶可见**：levels 每级约 2 设备像素，放大到 400px 的高饱和度渐变能看出
 // 台阶。这与"不做抗锯齿、只用 fillRect"是同一条底线，不是这里偷懒。
 constexpr int kMaxGradSplits = 96;       // 单行条带内最多再切几段
+constexpr int kMaxCachedBands = 1024;    // 单节点缓存上限（超了就不缓存，省内存）
 constexpr int kPathGradLevelsMin = 8;
 constexpr int kPathGradLevelsMax = 96;
 
@@ -867,6 +869,17 @@ inline int PaintPathStroke(const PaintPath& path, float width, uint8_t cap,
 // 描边线宽按"节点盒高 / 设计盒高"缩放：归一化点会自动跟随节点盒，线宽必须显式跟，
 // 否则等比缩放后"形状变大、线条没变粗"。与边框、字号只跟纵向比例是同一处取舍。
 //
+// 条带缓存条目（v19）：把"形状 → 条带"的结果按节点缓存起来，避免每帧重算。
+//
+// 为什么放在这里而不是各后端：条带是后端无关的 POD，缓存也只有一份实现时
+// 三端才必然一致。命中条件由调用方给出的 key 决定（节点盒尺寸、颜色、透明度、
+// 是否渐变都在 key 里），布局变化时由渲染器整表作废。
+struct PathBandCacheEntry {
+    uint64_t key = 0;               // 0 = 空（永不命中：编译期 key 从 1 起）
+    uint64_t gen = 0;               // 渲染器布局代数（作废判断）
+    std::vector<PaintBand> bands;
+};
+
 // 颜料集中成 PathPaintSpec：填充/描边各有"纯色 + 可选渐变"两组，v17 起描边也能带渐变。
 struct PathPaintSpec {
     uint32_t fillColor   = 0xFF000000u;
@@ -882,12 +895,34 @@ struct PathRenderBuffers {
     std::vector<PaintBand> bands;   // 填充条带（含降级重试时的容量）
 };
 
+// 条带缓存的 key：形状盒尺寸 + 填充颜料 + 透明度 + 相关 flags（渐变指针也进去，
+// 因为换渐变会改颜色）。key==0 表示"不缓存"。
+inline uint64_t MakePathBandKey(float x, float y, float w, float h,
+                                const PathPaintSpec& spec, uint16_t flags) {
+    uint64_t k = 0x9E3779B97F4A7C15ull;
+    auto mix = [&](uint64_t v) { k ^= v + 0x9E3779B97F4A7C15ull + (k << 6) + (k >> 2); };
+    auto mixF = [&](float f) {
+        uint32_t u = 0;
+        std::memcpy(&u, &f, sizeof(u));
+        mix(u);
+    };
+    mixF(x); mixF(y); mixF(w); mixF(h);
+    mix(spec.fillColor); mix(spec.strokeColor);
+    mixF(spec.opacity);
+    mix((uint64_t)(uintptr_t)spec.fillGrad);
+    mix((uint64_t)(uintptr_t)spec.strokeGrad);
+    mix(flags);
+    return k ? k : 1;   // 0 留给"空条目"
+}
+
 template <class FillBands, class LineFn, class DotFn>
 inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
                           const uint32_t* first, const uint32_t* count,
                           const uint8_t* closed, int contours,
                           float x, float y, float w, float h,
                           const PathPaintSpec& spec,
+                          PathBandCacheEntry* cache,   // 可为 nullptr（不缓存）
+                          uint64_t cacheGen,
                           PathRenderBuffers& buf,
                           FillBands&& fillBands, LineFn&& line, DotFn&& dot) {
     if (!normPts || !first || !count || contours <= 0 || head.pointCount == 0) return;
@@ -904,21 +939,40 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
     const PaintPath view{ buf.xy.data(), first, count, closed, contours };
 
     if (head.flags & PATH_FILL) {
-        if (buf.bands.size() < static_cast<size_t>(kMaxPathBands))
-            buf.bands.resize(kMaxPathBands);
-        const bool evenOdd = (head.flags & PATH_EVENODD) != 0;
-        // v16：渐变填充（无渐变时退化成纯色取样器，与老路径完全一致）
-        const PathShade shade = MakePathShade((head.flags & PATH_FILL_GRAD) ? spec.fillGrad : nullptr,
-                                              spec.fillColor, spec.opacity, x, y, w, h);
-        int n = 0;
-        bool truncated = false;
-        // 撞上限：按行步长降级重来（1 → 2 → 4 → 8），保证画完而不是画一半
-        for (int step = 1; step <= 8; step *= 2) {
-            n = BuildPathFillBands(view, evenOdd, x, y, x + w, y + h, shade,
-                                   buf.bands.data(), kMaxPathBands, step, &truncated);
-            if (!truncated) break;
+        // v19：先看缓存 —— 形状、尺寸、颜色、透明度都没变时直接重放上一次的条带。
+        // 命不中就算一遍并（在预算内）存下来；条带太多（>kMaxCachedBands）就不缓存，
+        // 免得一个 400px 大图把内存吃掉。
+        const uint64_t key = cache ? MakePathBandKey(x, y, w, h, spec, head.flags) : 0;
+        if (cache && cache->key == key && cache->gen == cacheGen && !cache->bands.empty()) {
+            fillBands(cache->bands.data(), static_cast<int>(cache->bands.size()));
+        } else {
+            if (buf.bands.size() < static_cast<size_t>(kMaxPathBands))
+                buf.bands.resize(kMaxPathBands);
+            const bool evenOdd = (head.flags & PATH_EVENODD) != 0;
+            // v16：渐变填充（无渐变时退化成纯色取样器，与老路径完全一致）
+            const PathShade shade =
+                MakePathShade((head.flags & PATH_FILL_GRAD) ? spec.fillGrad : nullptr,
+                              spec.fillColor, spec.opacity, x, y, w, h);
+            int n = 0;
+            bool truncated = false;
+            // 撞上限：按行步长降级重来（1 → 2 → 4 → 8），保证画完而不是画一半
+            for (int step = 1; step <= 8; step *= 2) {
+                n = BuildPathFillBands(view, evenOdd, x, y, x + w, y + h, shade,
+                                       buf.bands.data(), kMaxPathBands, step, &truncated);
+                if (!truncated) break;
+            }
+            if (n > 0) fillBands(buf.bands.data(), n);
+            if (cache) {
+                if (n > 0 && n <= kMaxCachedBands) {
+                    cache->bands.assign(buf.bands.data(), buf.bands.data() + n);
+                    cache->key = key;
+                    cache->gen = cacheGen;
+                } else {
+                    cache->bands.clear();
+                    cache->key = 0;
+                }
+            }
         }
-        if (n > 0) fillBands(buf.bands.data(), n);
     }
 
     if (head.flags & PATH_STROKE) {

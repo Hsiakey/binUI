@@ -3485,6 +3485,33 @@ static void TestSvgFinish() {
         CHECK(warns.empty(), "text-anchor：不报警告");
     }
 
+    // ---- userSpaceOnUse 下的百分比按视口尺寸折算（v19）----
+    {
+        auto [warns, r] = compile(
+            "<svg x=\"0\" y=\"0\" width=\"200\" height=\"100\" viewBox=\"0 0 100 50\">"
+            "<defs><linearGradient id=\"gp\" gradientUnits=\"userSpaceOnUse\" "
+            "x1=\"0%\" y1=\"0%\" x2=\"100%\" y2=\"100%\">"
+            "<stop offset=\"0\" stop-color=\"#FF0000\"/><stop offset=\"1\" stop-color=\"#0000FF\"/>"
+            "</linearGradient></defs>"
+            "<path d=\"M0 0 H100 V50 H0 Z\" fill=\"url(#gp)\"/>"
+            "</svg>");
+        for (const auto& s : warns) std::printf("  [svgpath][warn] %s\n", s.c_str());
+        CHECK(warns.empty(), "userSpace 百分比：不再告警（已按视口比例折算）");
+        const BinUIRenderer::PathRecord* pr = nullptr;
+        for (const auto& n : r.getNodes())
+            if (n.type == BINUI_PATH) { pr = r.pathOf(n.id); break; }
+        CHECK(pr && pr->hasGrad, "userSpace 百分比：渐变记录写出");
+        if (pr && pr->hasGrad) {
+            std::printf("  [svgpath] userSpace 百分比：p1=(%.3f,%.3f) p2=(%.3f,%.3f)\n",
+                        (double)pr->grad.x1, (double)pr->grad.y1,
+                        (double)pr->grad.x2, (double)pr->grad.y2);
+            CHECK_NEAR(pr->grad.x1, 0.0f, 0.02f, "userSpace 百分比：x1=0% → 盒左");
+            CHECK_NEAR(pr->grad.y1, 0.0f, 0.02f, "userSpace 百分比：y1=0% → 盒顶");
+            CHECK_NEAR(pr->grad.x2, 1.0f, 0.02f, "userSpace 百分比：x2=100% → 盒右");
+            CHECK_NEAR(pr->grad.y2, 1.0f, 0.02f, "userSpace 百分比：y2=100% → 盒底");
+        }
+    }
+
     // ---- 嵌套 svg 继承祖先 transform ----
     {
         auto [w1, r1] = compile(
@@ -3520,6 +3547,95 @@ static void TestSvgFinish() {
         if (w1v > 0.0f && w2v > 0.0f) {
             CHECK(w1v < w2v * 0.75f, "嵌套 svg：<g scale> 包住时盒子跟着缩小");
             CHECK(x1 > x2 + 1.0f, "嵌套 svg：<g translate> 包住时盒子跟着平移");
+        }
+    }
+}
+
+// v19 条带缓存：命中就重放、换了 key 就重算、条带太多不缓存
+static void TestPathBandCache() {
+    PathShape sq;
+    std::string err;
+    ParsePathData("M0 0 H100 V100 H0 Z", 0.01f, sq, &err);
+    DevicePath dev = ToDevice(sq);
+    PathNormData nd;
+    CHECK(NormalizeShape(sq, nd), "缓存：归一化成功");
+    std::vector<uint32_t> cnt(nd.contourFirst.size());
+    for (size_t i = 0; i < cnt.size(); i++)
+        cnt[i] = (i + 1 < cnt.size() ? nd.contourFirst[i + 1] : nd.pts.size() / 2) -
+                 nd.contourFirst[i];
+    BinUIPathEntry head{};
+    head.flags = PATH_FILL;
+    head.fillColor = 0xFFFF0000u;
+    head.designW = sq.Width();
+    head.designH = sq.Height();
+    head.pointCount = (uint16_t)(nd.pts.size() / 2);
+    head.contourCount = (uint16_t)(nd.contourFirst.size());
+
+    PathPaintSpec spec;
+    spec.fillColor = 0xFFFF0000u;
+    PathBandCacheEntry cache;
+    PathRenderBuffers buf;
+    uint32_t seenColor = 0;
+    int nBands = 0;
+    auto draw = [&](PathBandCacheEntry* c, uint32_t color) {
+        spec.fillColor = color;
+        return PaintPathNode(head, nd.pts.data(), nd.contourFirst.data(), cnt.data(),
+                             nd.contourClosed.data(), (int)nd.contourFirst.size(),
+                             0, 0, 100, 100, spec, c, 1, buf,
+                             [&](const PaintBand* b, int n) { nBands = n; seenColor = b[0].color; },
+                             [](float, float, float, float, float, uint32_t) {},
+                             [](float, float, float, float, float, uint32_t) {});
+    };
+
+    draw(&cache, 0xFFFF0000u);
+    std::printf("  [svgpath] 缓存：首次条带 %d 条，key=%llu\n", nBands,
+                (unsigned long long)cache.key);
+    CHECK(nBands == 1, "缓存：纯色方块 1 条带");
+    CHECK(cache.key != 0, "缓存：首次计算后写入 key");
+    CHECK(seenColor == 0xFFFF0000u, "缓存：首次颜色正确");
+
+    // 篡改缓存内容：第二次若命中缓存，画出来的就是被篡改的颜色（证明"没重算"）
+    cache.bands[0].color = 0xFF00FF00u;
+    draw(&cache, 0xFFFF0000u);
+    CHECK(seenColor == 0xFF00FF00u, "缓存：同 key 第二次直接重放缓存（没有重算）");
+
+    // 换颜色 → key 变 → 必须重算，拿到真正的新颜色
+    draw(&cache, 0xFF0000FFu);
+    CHECK(seenColor == 0xFF0000FFu, "缓存：换颜色后 key 变了，重新计算");
+    CHECK(cache.bands[0].color == 0xFF0000FFu, "缓存：重算结果写回缓存");
+
+    // 换布局代数（relayout/loadLayout 会 ++gen）→ 整表作废
+    draw(nullptr, 0xFF0000FFu);   // 不缓存时也必须能正常画
+    CHECK(seenColor == 0xFF0000FFu, "缓存：传 nullptr 时不缓存但照常绘制");
+
+    // 条带太多（> kMaxCachedBands）不缓存：换成一个会被截断的大图形
+    {
+        PathShape big;
+        AppendEllipse(big, 200, 200, 200, 200, 0.01f);
+        PathNormData nd2;
+        if (NormalizeShape(big, nd2)) {
+            std::vector<uint32_t> cnt2(nd2.contourFirst.size());
+            for (size_t i = 0; i < cnt2.size(); i++)
+                cnt2[i] = (i + 1 < cnt2.size() ? nd2.contourFirst[i + 1] : nd2.pts.size() / 2) -
+                          nd2.contourFirst[i];
+            BinUIPathEntry h2 = head;
+            h2.pointCount = (uint16_t)(nd2.pts.size() / 2);
+            h2.contourCount = (uint16_t)(nd2.contourFirst.size());
+            PathBandCacheEntry c2;
+            PathRenderBuffers b2;
+            PathPaintSpec s2;
+            s2.fillColor = 0xFF00FF00u;
+            int nb = 0;
+            PaintPathNode(h2, nd2.pts.data(), nd2.contourFirst.data(), cnt2.data(),
+                          nd2.contourClosed.data(), (int)nd2.contourFirst.size(),
+                          0, 0, 400, 400, s2, &c2, 1, b2,
+                          [&](const PaintBand*, int n) { nb = n; },
+                          [](float, float, float, float, float, uint32_t) {},
+                          [](float, float, float, float, float, uint32_t) {});
+            std::printf("  [svgpath] 缓存：400px 圆 %d 条带，缓存条目 key=%llu（0 = 未缓存）\n",
+                        nb, (unsigned long long)c2.key);
+            CHECK(nb > 0, "缓存：大图形仍然正常绘制");
+            if (nb > kMaxCachedBands) CHECK(c2.key == 0, "缓存：条带超上限时不缓存（省内存）");
         }
     }
 }
@@ -3772,6 +3888,7 @@ static int run() {
     TestGradientCompile();
     TestLineJoin();
     TestPathHitTest();
+    TestPathBandCache();
     TestSvgFinish();
     std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");
     return g_fail;

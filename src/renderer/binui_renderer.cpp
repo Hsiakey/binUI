@@ -196,6 +196,7 @@ void BinUIRenderer::shutdown() {
 }
 
 bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
+    invalidatePathBands();
     if (size < sizeof(BinUIHeader)) {
         std::cerr << "[binui] Invalid binUI data: too small" << std::endl;
         return false;
@@ -733,6 +734,7 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
 // 组件挂载（外挂 .bum）：编译期同款链接器，运行期现场合并
 // ============================================================
 bool BinUIRenderer::mountComponent(const uint8_t* data, size_t size, uint16_t anchorId) {
+    invalidatePathBands();
     if (!data || size == 0) {
         std::cerr << "[binui] mountComponent: 组件数据为空" << std::endl;
         return false;
@@ -1005,6 +1007,7 @@ void BinUIRenderer::setSize(int width, int height) {
 // 规格段缺省（静态布局）时仅把根节点尺寸同步为窗口尺寸。
 void BinUIRenderer::relayout(int width, int height) {
     if (nodes_.empty()) return;
+    invalidatePathBands();   // 盒子尺寸变了，条带缓存全部失效
 
     // 等比 UI 缩放模式（ui_scale="proportional"）：整棵节点树随窗口缩放，
     // 坐标写回 nodes_（命中/绘制/滚动自动一致），不做流式/百分比/flex 重排。
