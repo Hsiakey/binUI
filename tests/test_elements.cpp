@@ -2743,12 +2743,123 @@ static void TestCompileAndLoad() {
     }
 }
 
+// SVG 语义层：viewBox / preserveAspectRatio / <g transform> / 颜料继承 / CSS 优先级。
+// 全部用"编译 → 加载 → 量节点盒"验证，不需要渲染后端。
+static void TestSvgSemantics() {
+    auto compile1 = [](const char* svgBody, float& x, float& y, float& w, float& h,
+                       uint32_t* fillOut, bool* ok) -> bool {
+        std::string html = std::string(
+            "<app_window width=\"300\" height=\"200\"><html width=\"300\" height=\"200\" bg=\"#000000\">"
+            "<head><style>.cssfill{fill:#0000FF;}</style></head><body>") + svgBody +
+            "</body></html></app_window>";
+        auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        *ok = !res.layout.empty() && r.loadLayout(res.layout.data(), res.layout.size());
+        if (!*ok) return false;
+        for (const auto& n : r.getNodes()) {
+            if (n.type != BINUI_PATH) continue;
+            x = n.x; y = n.y; w = n.width; h = n.height;
+            if (fillOut) {
+                const auto* rec = r.pathOf(n.id);
+                if (rec) *fillOut = rec->head.fillColor;
+            }
+            return true;
+        }
+        return false;
+    };
+
+    float x = 0, y = 0, w = 0, h = 0;
+    bool ok = false;
+
+    // viewBox 0 0 24 24 → 96x96：铺满
+    {
+        compile1("<svg x=\"10\" y=\"10\" width=\"96\" height=\"96\" viewBox=\"0 0 24 24\">"
+                 "<path d=\"M0 0 H24 V24 H0 Z\" fill=\"#FF0000\"/></svg>", x, y, w, h, nullptr, &ok);
+        CHECK(ok, "viewBox：编译并加载");
+        std::printf("  [svgpath] viewBox 铺满：盒 = (%.1f,%.1f %.1fx%.1f)\n",
+                    (double)x, (double)y, (double)w, (double)h);
+        CHECK_NEAR(w, 96, 1.0f, "viewBox：24 单位铺满 96px");
+        CHECK_NEAR(h, 96, 1.0f, "viewBox：高度同样铺满");
+        CHECK_NEAR(x, 10, 1.0f, "viewBox：位置跟着 svg 走");
+    }
+
+    // 非等比容器 + meet：等比缩到 50，水平居中
+    {
+        compile1("<svg x=\"0\" y=\"0\" width=\"100\" height=\"50\" viewBox=\"0 0 24 24\">"
+                 "<path d=\"M0 0 H24 V24 H0 Z\" fill=\"#FF0000\"/></svg>", x, y, w, h, nullptr, &ok);
+        CHECK(ok, "meet：编译并加载");
+        std::printf("  [svgpath] meet 居中：盒 = (%.1f,%.1f %.1fx%.1f)\n",
+                    (double)x, (double)y, (double)w, (double)h);
+        CHECK_NEAR(w, 50, 1.0f, "preserveAspectRatio：等比缩到短边");
+        CHECK_NEAR(x, 25, 1.0f, "preserveAspectRatio：水平居中");
+        CHECK_NEAR(h, 50, 1.0f, "preserveAspectRatio：高度铺满");
+    }
+
+    // 颜料继承：<svg fill> 管到子元素
+    {
+        uint32_t col = 0;
+        compile1("<svg x=\"0\" y=\"0\" width=\"48\" height=\"48\" viewBox=\"0 0 24 24\" fill=\"#00FF00\">"
+                 "<path d=\"M0 0 H24 V24 H0 Z\"/></svg>", x, y, w, h, &col, &ok);
+        CHECK(ok, "继承：编译并加载");
+        CHECK(col == 0xFF00FF00u, "继承：<svg fill> 传给子 <path>");
+    }
+
+    // CSS 规则优先于表现属性（SVG 规范；与 binUI 其它属性的口径相反）
+    {
+        uint32_t col = 0;
+        compile1("<svg x=\"0\" y=\"0\" width=\"48\" height=\"48\" viewBox=\"0 0 24 24\">"
+                 "<path class=\"cssfill\" fill=\"#FF0000\" d=\"M0 0 H24 V24 H0 Z\"/></svg>",
+                 x, y, w, h, &col, &ok);
+        CHECK(ok, "CSS 优先级：编译并加载");
+        CHECK(col == 0xFF0000FFu, "CSS 优先级：类规则盖掉 fill 属性（蓝）");
+    }
+
+    // <g transform="scale(2)">：坐标翻倍
+    {
+        compile1("<svg x=\"0\" y=\"0\" width=\"96\" height=\"96\" viewBox=\"0 0 48 48\">"
+                 "<g transform=\"scale(2)\"><path d=\"M2 2 H10 V10 H2 Z\" fill=\"#FF0000\"/></g></svg>",
+                 x, y, w, h, nullptr, &ok);
+        CHECK(ok, "g transform：编译并加载");
+        std::printf("  [svgpath] g scale(2)：盒 = (%.1f,%.1f %.1fx%.1f)\n",
+                    (double)x, (double)y, (double)w, (double)h);
+        // 2..10 用户单位 × 2（g）× 2（viewBox 48→96）= 8..40
+        CHECK_NEAR(x, 8, 1.0f, "g transform：起点跟着缩放");
+        CHECK_NEAR(w, 32, 1.0f, "g transform：尺寸跟着缩放");
+    }
+
+    // stroke-width 跟着 viewBox 一起放大（否则放大后线条还是细的）
+    {
+        std::string html =
+            "<app_window width=\"200\" height=\"100\"><html width=\"200\" height=\"100\" bg=\"#000000\">"
+            "<body><svg x=\"0\" y=\"0\" width=\"96\" height=\"96\" viewBox=\"0 0 24 24\">"
+            "<path d=\"M0 0 H24\" fill=\"none\" stroke=\"#FFFFFF\" stroke-width=\"2\"/></svg>"
+            "</body></html></app_window>";
+        auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        CHECK(!res.layout.empty() && r.loadLayout(res.layout.data(), res.layout.size()),
+              "stroke 缩放：编译并加载");
+        bool found = false;
+        for (const auto& n : r.getNodes()) {
+            if (n.type != BINUI_PATH) continue;
+            const auto* rec = r.pathOf(n.id);
+            if (rec) {
+                found = true;
+                std::printf("  [svgpath] stroke-width 2 → 落库 %u（viewBox 24→96 应为 8）\n",
+                            (unsigned)rec->head.strokeW);
+                CHECK(rec->head.strokeW == 8, "stroke 缩放：2 单位 × 4 = 8px");
+            }
+        }
+        CHECK(found, "stroke 缩放：取到路径记录");
+    }
+}
+
 static int run() {
     std::printf("\n[suite_svgpath] 路径几何（binui_path.h）+ 扫描线填充（binui_paint.h）\n");
     TestParse();
     TestFill();
     TestStroke();
     TestCompileAndLoad();
+    TestSvgSemantics();
     std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");
     return g_fail;
 }

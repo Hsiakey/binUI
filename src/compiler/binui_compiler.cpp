@@ -2359,6 +2359,7 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         // v15 SVG 路径：d 是路径数据；其余是描边/填充规则的表现属性
         "d", "ry", "fill-rule", "fill-opacity", "stroke-opacity",
         "stroke-linecap", "stroke-linejoin", "stroke-dasharray",
+        "viewbox", "preserveaspectratio",
     };
     return kSet;
 }
@@ -3765,6 +3766,18 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         uint32_t textColor;   // 生效文字色（CSS color 的继承值）
         bool     hasText;     // 祖先是否显式给过文字色
         bool     flow;        // 这个容器是被父级流光标摆进去的（不是显式 y / flex）
+        // ---- SVG（v15）----
+        // 约定：绝对坐标 = (ox, oy) + svgXform × 用户坐标。
+        // svgXform 只描述"用户坐标 → 本容器内容盒局部坐标"，把 viewBox 与
+        // 祖先 <g transform> 全部折进来，所以后面的几何代码还是只加 ox/oy。
+        PathMatrix svgXform{};
+        bool     inSvg = false;                       // 在 <svg> 子树里才受 SVG 语义影响
+        uint32_t fillColor = 0xFF000000u;             // SVG 默认：黑色填充
+        bool     hasFill = true;
+        uint32_t strokeColor = 0xFF000000u;           // SVG 默认：无描边
+        bool     hasStroke = false;
+        uint8_t  strokeW = 1;
+        bool     evenOdd = false;                     // fill-rule="evenodd"
     };
 
     // 根节点固定 id 0，位于坐标原点。画布默认白色；<app_window bg>/<html bg> 覆盖
@@ -3793,6 +3806,36 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 
     std::vector<Ctx> stack;
     stack.push_back({ 0, 0, 0, 0, rootW, 0, 0xFFFFFFFFu, false, false });
+
+    // viewBox="minX minY w h"：四个数（SVG 允许逗号/空白分隔）
+    auto ParseViewBox = [](const std::string& s, float& vx, float& vy,
+                           float& vw, float& vh) -> bool {
+        float v[4] = { 0, 0, 0, 0 };
+        int n = 0;
+        std::string cur;
+        auto flush = [&]() {
+            if (cur.empty() || n >= 4) return;
+            v[n++] = static_cast<float>(std::strtod(cur.c_str(), nullptr));
+            cur.clear();
+        };
+        for (char c : s) {
+            if (c == ' ' || c == ',' || c == '\t' || c == '\n' || c == '\r') flush();
+            else cur += c;
+        }
+        flush();
+        if (n < 4) return false;
+        vx = v[0]; vy = v[1]; vw = v[2]; vh = v[3];
+        return vw > 0.0f && vh > 0.0f;
+    };
+    // 元素是否落在某个 <svg> 子树里（健康检查要用：transform/viewBox 的告警只对 SVG 之外报）
+    auto InSvgSubtree = [&](size_t idx) -> bool {
+        size_t guard = elems.size() + 1;
+        while (idx != SIZE_MAX && idx < elems.size() && guard-- > 0) {
+            if (lowerStr(elems[idx].tag) == "svg") return true;
+            idx = elems[idx].parentIdx;
+        }
+        return false;
+    };
 
     // 容器高度不足时自动扩展到容纳流式内容（滚动容器保持固定视口）
     auto growToContent = [&](Ctx& c) {
@@ -4050,7 +4093,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             // 这些标签被"当普通容器"时画面是**空**的（不是画歪了），所以必须说清楚换成什么，
             // 否则作者只会看到自己那一段什么都不显示，以为是自己写错了。
             // v15 起 path/ellipse 已实现，从这张表里移出（kKnownTags 里有了）。
-            { "g", "<g> 只作分组容器：transform/rotate 之类不生效，子元素按容器内绝对坐标画" },
+            { "g", "<g> 不建立坐标系（子元素与 g 共用父容器原点），transform 会编译进坐标" },
             { "text", "SVG <text> 不支持：用普通 <span> 绝对定位到同一坐标" },
             { "tspan", "SVG <tspan> 不支持：用普通 <span>" },
             { "defs", "SVG <defs> 不支持：没有 defs/use 引用机制" },
@@ -4066,7 +4109,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // 真正被编译器消费的属性（其余一律视为"写了没效果"）
         const auto& kUsedAttrs = UsedHtmlAttrs();
         bool inlineNestedWarned = false;   // 行内嵌套警告全文档只报一次
-        for (const auto& e : elems) {
+        for (size_t idx = 0; idx < elems.size(); idx++) {
+            const auto& e = elems[idx];
             if (e.tag.empty() || e.tag == "head" || e.tag == "meta" || e.tag == "link" ||
                 e.tag == "script" || e.tag == "style")
                 continue;
@@ -4090,15 +4134,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 const std::string& k = kv.first;
                 if (k.empty() || k[0] == '_') continue;                    // 编译器内部标记
                 if (k.rfind("data-", 0) == 0 || k.rfind("aria-", 0) == 0) continue;
-                // SVG 的两个"看起来该生效、其实静默无效"的属性：单独说清楚。
-                // （transform 在 UsedHtmlAttrs 里，会被当成"已消费"直接放行，最坑）
-                if (k == "transform") {
-                    Warn("transform 属性不生效（只支持状态样式里的 scale()，见 CSS transform）："
-                         "SVG 的 translate/rotate 请直接改坐标");
+                // SVG 里 transform / viewBox 现在真的生效（v15）；SVG 之外仍然是"写了没效果"，
+                // 这两条只在非 SVG 子树里报，避免给正常的 SVG 素材刷告警。
+                if (k == "transform" && !InSvgSubtree(idx)) {
+                    Warn("transform 属性不生效（HTML 元素不支持几何变换；只有 <svg> 子树里的 "
+                         "translate/scale/rotate/matrix 会编译进坐标）：请直接改坐标");
                     continue;
                 }
-                if (k == "viewbox") {
-                    Warn("viewBox 不生效（没有坐标系缩放）：<svg> 里的坐标一律是容器内绝对像素");
+                if (k == "viewbox" && e.tag != "svg") {
+                    Warn("viewBox 只对 <svg> 容器有效，其它元素上写了会忽略");
                     continue;
                 }
                 if (kUsedAttrs.count(k)) continue;
@@ -4268,6 +4312,68 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             popAndPropagate();
         Ctx& pc = stack.back();
 
+        // ---- SVG 坐标与颜料继承（v15）----
+        // 坐标：约定 绝对坐标 = (pc.ox, pc.oy) + svgX × 用户坐标，
+        //   所以下面所有图形代码照旧只加 pc.ox/pc.oy，变换全部折进 svgX。
+        // 颜料：fill/stroke/stroke-width/fill-rule 是**可继承**的表现属性；
+        //   CSS 规则优先于表现属性（SVG 规范，与 binUI 其它属性"属性盖 CSS"相反 ——
+        //   这里按规范来，因为现成 SVG 素材都是属性写法，与 CSS 冲突才会踩到）。
+        const bool inSvg = pc.inSvg || (e.tag == "svg");
+        PathMatrix svgOwn;          // 本元素自己的 transform（父空间）
+        bool hasOwnXform = false;
+        PathMatrix svgX = pc.svgXform;
+        if (inSvg) {
+            auto tfIt = e.attrs.find("transform");
+            if (tfIt != e.attrs.end() && !tfIt->second.empty()) {
+                std::string terr;
+                if (ParseSvgTransform(tfIt->second, svgOwn, &terr)) {
+                    hasOwnXform = true;
+                    if (e.tag != "svg") svgX = PathMul(svgX, svgOwn);
+                } else {
+                    Warn("transform 属性解析失败（支持 translate/scale/rotate/skewX/skewY/matrix）：" + terr);
+                }
+            }
+        }
+        uint32_t eFill = pc.fillColor;
+        bool eHasFill = pc.hasFill;
+        uint32_t eStroke = pc.strokeColor;
+        bool eHasStroke = pc.hasStroke;
+        uint8_t eStrokeW = pc.strokeW;
+        bool eEvenOdd = pc.evenOdd;
+        if (inSvg) {
+            // CSS（含内联 style / 类规则）> 表现属性 > 继承 > SVG 默认
+            auto pickSvgPaint = [&](const char* key) -> std::string {
+                auto it = style.find(key);
+                if (it != style.end() && !it->second.empty()) return it->second;
+                auto a = e.attrs.find(key);
+                return a != e.attrs.end() ? a->second : std::string();
+            };
+            const uint32_t curCol = pc.hasText ? pc.textColor : defaultTextCol;
+            auto parsePaint = [&](const std::string& v, uint32_t dflt) -> uint32_t {
+                return lowerStr(v) == "currentcolor" ? curCol : parseColorWith(v, dflt, "SVG 颜色");
+            };
+            const std::string f = pickSvgPaint("fill");
+            if (!f.empty()) {
+                if (lowerStr(f) == "none") eHasFill = false;
+                else { eFill = parsePaint(f, eFill); eHasFill = true; }
+            }
+            const std::string s = pickSvgPaint("stroke");
+            if (!s.empty()) {
+                if (lowerStr(s) == "none") eHasStroke = false;
+                else { eStroke = parsePaint(s, eStroke); eHasStroke = true; }
+            }
+            const std::string swv = pickSvgPaint("stroke-width");
+            if (!swv.empty()) {
+                // 用户单位 → 设备像素（与坐标同一个变换系数），否则放大后线还那么细
+                float wv = parseLen(swv, 1.0f) * PathScaleFactor(svgX);
+                if (wv < 0.0f) wv = 0.0f;
+                eStrokeW = (uint8_t)std::min(255.0f, wv);
+                if (eStrokeW == 0) eHasStroke = false;
+            }
+            const std::string fr = pickSvgPaint("fill-rule");
+            if (!fr.empty()) eEvenOdd = (lowerStr(fr) == "evenodd");
+        }
+
         // <polyline points="x,y x,y ..."> / <polygon>：展开成若干 BINUI_LINE 子节点
         // 坐标为 svg 容器坐标系（pc.ox/pc.oy 即容器内容盒原点）
         if (e.tag == "polyline" || e.tag == "polygon") {
@@ -4283,10 +4389,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             size_t m = coords.size() / 2;
             bool closed = (e.tag == "polygon") && m >= 2;
             if (m >= 2) {
-                std::string st = pick(e.attrs, style, "stroke", "stroke", "");
-                uint32_t stroke = st.empty() ? 0xFF000000u : parseColor(st);
-                std::string swt = pick(e.attrs, style, "stroke-width", "stroke-width", "");
-                uint16_t sw2 = (uint16_t)parseLen(swt, 1.0f);
+                // viewBox / <g transform>：逐点映射到内容盒坐标
+                for (size_t k = 0; k < m; k++) {
+                    const PathPointF tp = PathApply(svgX, coords[2 * k], coords[2 * k + 1]);
+                    coords[2 * k] = tp.x;
+                    coords[2 * k + 1] = tp.y;
+                }
+                const float strokeScale = PathScaleFactor(svgX);
+                uint32_t stroke = eHasStroke ? eStroke : 0xFF000000u;
+                uint16_t sw2 = (uint16_t)std::max(1.0f, (float)eStrokeW * strokeScale);
                 uint32_t firstId = 0;
                 auto emitSeg = [&](size_t a, size_t b) {
                     BinUINode ln = {};
@@ -4348,20 +4459,15 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             if (svgPathShape.truncated)
                 Warn("<path> 细分点数超过上限已截断：简化路径或拆成多段");
             if (!svgPathShape.Empty()) {
-                // fill / stroke：属性优先（与其它 SVG 属性同一口径），none = 不画
-                const std::string fl = pick(e.attrs, style, "fill", "fill", "");
-                const std::string st = pick(e.attrs, style, "stroke", "stroke", "");
-                const std::string swt = pick(e.attrs, style, "stroke-width", "stroke-width", "");
-                pathFill = !(lowerStr(fl) == "none");
-                if (pathFill) pathFillColor = fl.empty() ? 0xFF000000u : parseColor(fl); // SVG 默认黑填充
-                pathStroke = !st.empty() && lowerStr(st) != "none";
-                if (pathStroke) {
-                    pathStrokeColor = parseColor(st);
-                    pathStrokeW = parseLen(swt, 1.0f);
-                    if (pathStrokeW < 0.0f) pathStrokeW = 0.0f;
-                    if (pathStrokeW <= 0.0f) pathStroke = false;
-                }
-                pathEvenOdd = lowerStr(pick(e.attrs, style, "fill-rule", "fill-rule", "")) == "evenodd";
+                // viewBox / <g transform>（含自己的 transform）一次性映射完
+                TransformShape(svgPathShape, svgX);
+                // fill / stroke 走继承链（见上面的 SVG 颜料块），none = 不画
+                pathFill = eHasFill;
+                pathFillColor = eFill;
+                pathStroke = eHasStroke && eStrokeW > 0;
+                pathStrokeColor = eStroke;
+                pathStrokeW = (float)eStrokeW;
+                pathEvenOdd = eEvenOdd;
                 // 半透明折进 alpha（与 static opacity 同一做法，不做离屏合成）
                 auto fade = [&](uint32_t c, const char* key) {
                     auto oit = style.find(key);
@@ -4373,6 +4479,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 };
                 pathFillColor = fade(pathFillColor, "fill-opacity");
                 pathStrokeColor = fade(pathStrokeColor, "stroke-opacity");
+                pathFillColor = fade(pathFillColor, "opacity");
+                pathStrokeColor = fade(pathStrokeColor, "opacity");
                 if (pathStroke) {   // 描边外扩后才是节点盒
                     const float e2 = pathStrokeW * 0.5f;
                     svgPathShape.minX -= e2; svgPathShape.minY -= e2;
@@ -4402,6 +4510,16 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (lowerStr(sy) == "auto") sy.clear();
         if (lowerStr(sw) == "auto") sw.clear();
         if (lowerStr(sh) == "auto") sh.clear();
+
+        // <svg> 没写 width/height 时按 viewBox 的尺寸（否则落到通用默认 40px，图标被压扁）
+        if (e.tag == "svg") {
+            std::string vbs = e.attrs.count("viewbox") ? e.attrs.at("viewbox") : "";
+            float vbx = 0, vby = 0, vbw = 0, vbh = 0;
+            if (!vbs.empty() && ParseViewBox(vbs, vbx, vby, vbw, vbh)) {
+                if (sw.empty()) sw = std::to_string(vbw);
+                if (sh.empty()) sh = std::to_string(vbh);
+            }
+        }
 
         // 先确定本元素字号：width/height/margin/padding 里写的 em 以此为基准
         // （没有 CSS 级联，em 取元素自身字号；font-size 自身写 em 时按默认字号近似）
@@ -4454,6 +4572,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             float y1 = parseLen(e.attrs.count("y1") ? e.attrs.at("y1") : "", 0);
             float x2 = parseLen(e.attrs.count("x2") ? e.attrs.at("x2") : "", 0);
             float y2 = parseLen(e.attrs.count("y2") ? e.attrs.at("y2") : "", 0);
+            // 端点走 SVG 变换（viewBox / <g transform>）
+            const PathPointF p1 = PathApply(svgX, x1, y1);
+            const PathPointF p2 = PathApply(svgX, x2, y2);
+            x1 = p1.x; y1 = p1.y; x2 = p2.x; y2 = p2.y;
             sx = std::to_string(x1); sy = std::to_string(y1);
             sw = std::to_string(x2); sh = std::to_string(y2);
             svgLineX1 = x1; svgLineY1 = y1;
@@ -4461,10 +4583,26 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         } else if (e.tag == "circle") {
             float cx = parseLen(e.attrs.count("cx") ? e.attrs.at("cx") : "", 0);
             float cy = parseLen(e.attrs.count("cy") ? e.attrs.at("cy") : "", 0);
-            svgR = parseLen(e.attrs.count("r") ? e.attrs.at("r") : "", 0);
+            svgR = parseLen(e.attrs.count("r") ? e.attrs.at("r") : "", 0) * PathScaleFactor(svgX);
+            const PathPointF cp = PathApply(svgX, cx, cy);
+            cx = cp.x; cy = cp.y;
             sx = std::to_string(cx - svgR); sy = std::to_string(cy - svgR);
             sw = std::to_string(2 * svgR); sh = std::to_string(2 * svgR);
 
+        } else if (e.tag == "rect" && inSvg) {
+            // 矩形两角映射后当"声明值"用，下游流式/百分比/规格段全部一致
+            const float rx0 = parseLen(sx, 0), ry0 = parseLen(sy, 0);
+            const float rw0 = parseLen(sw, 0), rh0 = parseLen(sh, 0);
+            const PathPointF p0 = PathApply(svgX, rx0, ry0);
+            const PathPointF p1 = PathApply(svgX, rx0 + rw0, ry0 + rh0);
+            sx = std::to_string(std::min(p0.x, p1.x));
+            sy = std::to_string(std::min(p0.y, p1.y));
+            sw = std::to_string(std::fabs(p1.x - p0.x));
+            sh = std::to_string(std::fabs(p1.y - p0.y));
+        } else if (e.tag == "g" && inSvg) {
+            // <g> 在 SVG 里不建立坐标系、也不是布局盒子：给它一个零尺寸的绝对定位节点，
+            // 子元素直接挂在父容器原点（见下面 push 处对 <g> 的 ox/oy 处理）
+            sx = "0"; sy = "0"; sw = "0"; sh = "0";
         } else if (hasSvgPath) {
             // <path>/<ellipse>：几何包围盒（含描边外扩）当作节点盒
             sx = std::to_string(svgPathShape.minX);
@@ -4829,26 +4967,28 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         }
 
         // ---- SVG 图形语义（<line>/<circle>/<rect>）----
+        // 颜色一律走继承链（eFill/eStroke，见上面的 SVG 颜料块）：
+        // 以前这里各自 pick() 一次，<svg fill="#fff"> 对子元素完全无效。
         if (e.tag == "line") {
             // x,y = 起点（绝对）；width,height = 终点（绝对）＝ 起点 + 声明偏移
             n.x = pc.ox + parseLen(sx, 0);
             n.y = pc.oy + parseLen(sy, 0);
             n.width = n.x + (svgLineX2 - parseLen(sx, 0));
             n.height = n.y + (svgLineY2 - parseLen(sy, 0));
-            std::string st = pick(e.attrs, style, "stroke", "stroke", "");
-            n.color = st.empty() ? 0xFF000000u : parseColor(st);
-            std::string swt = pick(e.attrs, style, "stroke-width", "stroke-width", "");
-            n.radius = (uint16_t)parseLen(swt, 1.0f);
+            n.color = eHasStroke ? eStroke : 0xFF000000u;   // 线的默认色：黑
+            n.radius = (uint16_t)(eStrokeW > 0 ? eStrokeW : 1);
             n.flags |= BINUI_ABSOLUTE;
         } else if (e.tag == "circle") {
-            std::string fl = pick(e.attrs, style, "fill", "fill", "");
-            n.color = fl.empty() ? 0xFF000000u : parseColor(fl); // SVG 默认 fill=黑
+            n.color = eHasFill ? eFill : 0;                 // fill="none" → 不画底色块
             n.radius = (uint16_t)svgR;
+            if (eHasStroke)
+                Warn("<circle> 不能 fill 与 stroke 并存：需要描边圆请改用 <path>（弧）或 <rect rx>");
         } else if (e.tag == "rect") {
-            std::string fl = pick(e.attrs, style, "fill", "fill", "");
-            n.color = fl.empty() ? 0xFF000000u : parseColor(fl);
+            n.color = eHasFill ? eFill : 0;
             std::string rx = e.attrs.count("rx") ? e.attrs.at("rx") : "";
-            if (!rx.empty()) n.radius = (uint16_t)parseLen(rx, 0);
+            if (!rx.empty()) n.radius = (uint16_t)(parseLen(rx, 0) * PathScaleFactor(svgX));
+            if (eHasStroke)
+                Warn("<rect> 不能 fill 与 stroke 并存：需要描边矩形请改用 <path> 或 <line>");
         }
 
         // 文本来源：元素自身文本 > 输入框/按钮的值 > 图片的 alt 兜底
@@ -5159,6 +5299,54 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 
         stack.push_back({ n.id, x + pad, y + pad, 0, w - 2 * pad, nodes.size() - 1,
                           textCol, hasOwnText || pc.hasText, !hasY && !flexPlaced });
+        {
+            // SVG 上下文：坐标系与颜料继承往下传
+            Ctx& child = stack.back();
+            child.inSvg = inSvg;
+            child.fillColor = eFill;
+            child.hasFill = eHasFill;
+            child.strokeColor = eStroke;
+            child.hasStroke = eHasStroke;
+            child.strokeW = eStrokeW;
+            child.evenOdd = eEvenOdd;
+            if (e.tag == "svg") {
+                // 子元素坐标 = viewBox 用户单位 → 本容器内容盒局部坐标。
+                // 注意**不乘位移**：Ctx.ox 已经是内容盒原点，再加一次就是双重偏移
+                // （踩过：节点盒从 8.3 变成 18.3，图形整体右下漂 10px）。
+                PathMatrix base = svgX;                       // = pc.svgXform（自己的 transform 还没乘）
+                if (hasOwnXform) base = PathMul(base, svgOwn); // 整个 svg 组一起变换
+                std::string vbs = e.attrs.count("viewbox") ? e.attrs.at("viewbox") : "";
+                float vbx = 0, vby = 0, vbw = 0, vbh = 0;
+                if (!vbs.empty()) {
+                    if (ParseViewBox(vbs, vbx, vby, vbw, vbh)) {
+                        PathMatrix vb;
+                        const float boxW = std::max(0.0f, w - 2.0f * pad);
+                        const float boxH = std::max(0.0f, lh - 2.0f * pad);
+                        const std::string par = e.attrs.count("preserveaspectratio")
+                                                ? e.attrs.at("preserveaspectratio") : "";
+                        if (BuildViewBoxMatrix(vbx, vby, vbw, vbh, boxW, boxH, par, vb)) {
+                            base = PathMul(base, vb);
+                            const std::string lp = lowerStr(par);
+                            if (!lp.empty() && lp != "none" && lp.rfind("xmidymid", 0) != 0 &&
+                                lp.rfind("xmidymin", 0) != 0 && lp.rfind("xmidymax", 0) != 0)
+                                Warn("preserveAspectRatio 只支持 xMidYMid 系列与 none，\"" +
+                                     par + "\" 按居中处理");
+                        }
+                    } else {
+                        Warn("viewBox 解析失败（需要 4 个数：minX minY width height）");
+                    }
+                }
+                child.svgXform = base;
+            } else if (e.tag == "g") {
+                // <g> 不建立坐标系：子元素与 g 共用父容器原点与内容宽度
+                child.ox = pc.ox;
+                child.oy = pc.oy;
+                child.contentW = pc.contentW;
+                child.svgXform = svgX;
+            } else {
+                child.svgXform = svgX;
+            }
+        }
     }
 
     // 收尾：弹出剩余容器并自动扩展，最后扩展根

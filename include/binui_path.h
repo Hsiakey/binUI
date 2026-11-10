@@ -588,6 +588,125 @@ inline void TransformShape(PathShape& s, const PathMatrix& m) {
     if (!s.pts.empty()) s.RecomputeBounds();
 }
 
+// 仿射的等比缩放系数（面积比的平方根）：描边线宽、圆半径要按它缩放。
+// 非等比拉伸时取几何平均 —— 与"线宽只跟纵向比例"的既有权衡一致。
+inline float PathScaleFactor(const PathMatrix& m) {
+    const float det = std::fabs(m.a * m.d - m.b * m.c);
+    return std::sqrt(det);
+}
+
+// ============================================================
+// SVG transform 属性 → 矩阵
+//
+// 支持 translate / scale / rotate / skewX / skewY / matrix，可按空格/逗号串联，
+// 多个变换从**左到右依次作用**（SVG 语义：左边先作用在坐标上，等价于
+// 矩阵按 m1 * m2 乘）。解析失败返回 false 并保留 out 不变，调用方告警。
+// ============================================================
+inline bool ParseSvgTransform(const std::string& text, PathMatrix& out,
+                              std::string* err = nullptr) {
+    PathMatrix acc;   // 单位阵
+    size_t i = 0;
+    const size_t n = text.size();
+    auto skipSep = [&]() {
+        while (i < n && (text[i] == ' ' || text[i] == '\t' || text[i] == '\n' ||
+                         text[i] == '\r' || text[i] == ',')) i++;
+    };
+    auto readNumber = [&](float& v) -> bool {
+        skipSep();
+        if (i >= n) return false;
+        const size_t start = i;
+        if (text[i] == '+' || text[i] == '-') i++;
+        bool digits = false, dot = false;
+        while (i < n) {
+            const char c = text[i];
+            if (c >= '0' && c <= '9') { digits = true; i++; continue; }
+            if (c == '.' && !dot) { dot = true; i++; continue; }
+            break;
+        }
+        if (!digits) { i = start; return false; }
+        v = static_cast<float>(std::strtod(text.substr(start, i - start).c_str(), nullptr));
+        return true;
+    };
+    auto fail = [&](const char* why) {
+        if (err) *err = std::string(why) + "（位置 " + std::to_string(i) + "）";
+        return false;
+    };
+
+    for (;;) {
+        skipSep();
+        if (i >= n) break;
+        const size_t nameStart = i;
+        while (i < n && ((text[i] >= 'a' && text[i] <= 'z') || (text[i] >= 'A' && text[i] <= 'Z'))) i++;
+        if (i == nameStart) return fail("transform 里有无法识别的内容");
+        std::string name;
+        for (size_t k = nameStart; k < i; k++)
+            name += static_cast<char>(std::tolower(static_cast<unsigned char>(text[k])));
+        if (i >= n || text[i] != '(') return fail("transform 函数缺少 '('");
+        i++;   // '('
+        PathMatrix m;
+        if (name == "translate") {
+            float tx = 0.0f, ty = 0.0f;
+            if (!readNumber(tx)) return fail("translate 缺少参数");
+            if (!readNumber(ty)) ty = 0.0f;
+            m = PathTranslate(tx, ty);
+        } else if (name == "scale") {
+            float sx = 1.0f, sy = 1.0f;
+            if (!readNumber(sx)) return fail("scale 缺少参数");
+            if (!readNumber(sy)) sy = sx;
+            m = PathScale(sx, sy);
+        } else if (name == "rotate") {
+            float a = 0.0f, cx = 0.0f, cy = 0.0f;
+            if (!readNumber(a)) return fail("rotate 缺少角度");
+            if (readNumber(cx) && readNumber(cy)) m = PathRotate(a, cx, cy);
+            else m = PathRotate(a);
+        } else if (name == "matrix") {
+            float v[6];
+            for (float& f : v) if (!readNumber(f)) return fail("matrix 需要 6 个数");
+            m = { v[0], v[1], v[2], v[3], v[4], v[5] };
+        } else if (name == "skewx" || name == "skewy") {
+            float a = 0.0f;
+            if (!readNumber(a)) return fail("skew 缺少角度");
+            const float t = std::tan(a * 3.14159265358979323846f / 180.0f);
+            if (name == "skewx") m = { 1.0f, 0.0f, t, 1.0f, 0.0f, 0.0f };
+            else                 m = { 1.0f, t, 0.0f, 1.0f, 0.0f, 0.0f };
+        } else {
+            return fail("不支持的 transform 函数");
+        }
+        skipSep();
+        if (i >= n || text[i] != ')') return fail("transform 函数缺少 ')'");
+        i++;
+        acc = PathMul(acc, m);   // 左边的先作用
+    }
+    out = acc;
+    return true;
+}
+
+// viewBox → 内容盒的映射矩阵。
+//   preserveAspectRatio 默认 "xMidYMid meet"：等比缩放 + 居中（完整显示）
+//   "none"：sx/sy 各自拉伸（不做等比）
+// 只解析是否以 none 开头，其余对齐方式一律按居中处理并告警一次（调用方负责告警）。
+inline bool BuildViewBoxMatrix(float vx, float vy, float vw, float vh,
+                               float boxW, float boxH, const std::string& preserve,
+                               PathMatrix& out) {
+    if (vw <= 0.0f || vh <= 0.0f || boxW <= 0.0f || boxH <= 0.0f) return false;
+    float sx = boxW / vw, sy = boxH / vh;
+    const std::string p = [&] {
+        std::string s;
+        for (char c : preserve) s += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        return s;
+    }();
+    if (p.rfind("none", 0) == 0) {
+        // 非等比：直接铺满
+    } else {
+        const float k = std::min(sx, sy);
+        sx = sy = k;
+    }
+    const float tx = (boxW - vw * sx) * 0.5f - vx * sx;
+    const float ty = (boxH - vh * sy) * 0.5f - vy * sy;
+    out = { sx, 0.0f, 0.0f, sy, tx, ty };
+    return true;
+}
+
 // ============================================================
 // 命中测试（填充规则）：P1 用包围盒，这个函数留给 P3 的"点在路径内"
 //   evenOdd=true → 奇偶规则；false → 非零环绕数
