@@ -262,6 +262,37 @@ vkCreateWin32SurfaceKHR / vkDestroySurfaceKHR / vkCreateSwapchainKHR / vkDestroy
 vkGetSwapchainImagesKHR / vkAcquireNextImageKHR / vkQueuePresentKHR / vkQueueSubmit / vkQueueWaitIdle`，
 外加 `vkCreate*Pipeline/ShaderModule/DescriptorSet*`、`vkCmd*` 一批（P3 再补）。
 
+### 4.5a P2 落地记录（2026-11-11，已完成）
+
+代码：`src/backends/binui_vk.h` + `.cpp`（离屏核心，约 1.5k 行）、`tools/vk_shot.cpp`、
+`tools/vk_shaders/{quad.vert,quad.frag}` + 生成的 `src/backends/binui_vk_shaders.h`、
+`third_party/vulkan/include/`（官方头，Apache-2.0，取自 Android NDK 27 的 `vulkan/` 与 `vk_video/`）。
+
+**踩到并修掉的四个坑**（都已写进代码注释）：
+
+1. **fence 必须建出来就是 signaled**。`beginFrame` 第一步是等本帧 fence；建造成 unsignaled 会让
+   第一帧死等（实测挂死、CPU 0%）。
+2. **帧内不许上传纹理**。`uploadTexture` 会 reset/提交命令缓冲——如果在录制中调用，
+   等于把正在录的 cmd 掀掉（实测访问违例 0xC0000005）。改成"缺资源就登记，下一帧 beginFrame 之前补建"，
+   因此首帧是预热帧：`vk_shot` 渲两帧，第 2 帧出图。
+3. **批次的 scissor 要取"批次开始那一刻"的裁剪区**。第一版在关闭批次时才写 scissor，
+   于是整页底色矩形被裁成一小块、四周露白（`vkcolor` 用例一眼看出）。
+4. **Vulkan 的 NDC y 向下**，顶点着色器不能照抄 GL 的 `1 - y/h*2`，否则整幅画面上下颠倒。
+
+**颜色字节序**：顶点色属性用 `VK_FORMAT_B8G8R8A8_UNORM`（0xAARRGGBB 的小端内存序正好是 BB GG RR AA），
+目标图也用 `B8G8R8A8_UNORM`，两头一致 → 屏幕像素与 GDI/GL 一致；三色卡用例一次通过。
+
+**验收实测**（`docs/issues/assets/vkcolor.html`，420×260，含纯色卡、半透明、SVG 矩形/圆/多边形/线、
+圆角边框、胶囊）：
+
+| 对比 | 差异 |
+|---|---|
+| **Vulkan ↔ OpenGL** | **0 像素（0.000%）** —— 两个 GPU 后端逐位一致 |
+| Vulkan ↔ GDI 基准 | 537 像素（0.492%），全部在 AA 边缘 |
+| OpenGL ↔ GDI 基准（改前既有） | **537 像素**，同一区域 —— 也就是说 Vulkan 与 GL 的差异**等于** GL 与 GDI 的既有 AA 差异 |
+
+结论：Vulkan 后端复用了同一份几何与遍历后，像素行为与 GL 完全对齐，没有引入新的渲染差异。
+
 ### 4.6 P2 验收
 
 ```sh

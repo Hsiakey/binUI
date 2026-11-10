@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<!-- vkcolor: Vulkan 后端的 P2 验收用例（色卡 + 几何原语）。
+     只含矩形/圆角/线段，不含文字与图片 —— 那两项在 P3。
+     验收方式：vk_shot 出图与 offscreen_render（GDI 基准）逐像素比。 -->
+<app_window width="420" height="260" bg="#101418" title="vk color card">
+<html width="420" height="260" bg="#101418">
+<body>
+<!-- 第一行：纯色三卡，专治颜色字节序（AARRGGBB 在小端内存里是 BB GG RR AA） -->
+<div style="position:absolute; left:16; top:16; width:120; height:56; background:#FF0000"></div>
+<div style="position:absolute; left:148; top:16; width:120; height:56; background:#00FF00"></div>
+<div style="position:absolute; left:280; top:16; width:120; height:56; background:#0000FF"></div>
+
+<!-- 第二行：十六进制 / 半透明叠加（预乘 alpha 与混合是否正确） -->
+<div style="position:absolute; left:16; top:84; width:120; height:56; background:#F2B544"></div>
+<div style="position:absolute; left:148; top:84; width:120; height:56; background:#7AAAFF"></div>
+<div style="position:absolute; left:280; top:84; width:120; height:56; background:#8033FF66"></div>
+
+<!-- 第三行：SVG 几何（矩形/圆角/圆/多边形/直线），覆盖 fillRect/fillRounded/fillLine -->
+<svg style="position:absolute; left:16; top:152; width:180; height:92" viewBox="0 0 90 46">
+  <rect x="2" y="2" width="40" height="20" fill="#F25A5A"/>
+  <rect x="48" y="2" width="40" height="20" rx="6" fill="#4ED17E"/>
+  <circle cx="22" cy="34" r="10" fill="#7AAAFF"/>
+  <polygon points="48,44 68,24 88,44" fill="#F2B544"/>
+  <line x1="2" y1="46" x2="88" y2="46" stroke="#FFFFFF" stroke-width="1.5"/>
+</svg>
+
+<!-- 右下：圆角边框（strokeRounded）+ 胶囊（半径=短边一半） -->
+<div style="position:absolute; left:208; top:152; width:196; height:44; border:2px solid #7AAAFF; border-radius:10"></div>
+<div style="position:absolute; left:208; top:204; width:120; height:40; background:#2FBF9A; border-radius:20"></div>
+<div style="position:absolute; left:340; top:204; width:64; height:40; background:#E6EDF7; border-radius:8"></div>
+</body></html>
+</app_window>

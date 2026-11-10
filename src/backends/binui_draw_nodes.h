@@ -10,6 +10,7 @@
 #define BINUI_DRAW_NODES_H
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>

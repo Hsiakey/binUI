@@ -60,6 +60,13 @@ $(BUILD_DIR)/binui_gl-gdi.o: $(SRC_DIR)/backends/binui_gl-gdi.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
 
+# Vulkan 后端（P2）：需要 third_party/vulkan 的头；运行期只 LoadLibrary("vulkan-1.dll")，
+# 不链接 vulkan-1.lib，所以构建不需要 Vulkan SDK。
+VK_INC   := -Ithird_party/vulkan/include
+$(BUILD_DIR)/binui_vk.o: $(SRC_DIR)/backends/binui_vk.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
+
 $(BUILD_DIR)/examples/app_win32.o: $(SRC_DIR)/platform/app_win32.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
@@ -277,7 +284,8 @@ TOOL_BINS := \
     $(BIN_DIR)/window_capture$(EXT) \
     $(BIN_DIR)/enum_windows$(EXT) \
     $(BIN_DIR)/pixel_diff$(EXT) \
-    $(BIN_DIR)/check_examples$(EXT)
+    $(BIN_DIR)/check_examples$(EXT) \
+    $(BIN_DIR)/vk_shot$(EXT)
 
 # 把 .bui 还原成打包前的目录结构（读同目录的 binui.res，header-only，不用链接库）
 $(BIN_DIR)/binui_export$(EXT): tools/binui_export.cpp
@@ -306,6 +314,12 @@ $(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -o $@ $< \
 	    $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
+
+$(BIN_DIR)/vk_shot$(EXT): tools/vk_shot.cpp $(BUILD_DIR)/binui_vk.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c tools/vk_shot.cpp -o $(BUILD_DIR)/vk_shot.o
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
+		-luser32 -lgdi32 -lgdiplus -lole32
 
 $(BIN_DIR)/pixel_diff$(EXT): tools/pixel_diff.cpp
 	@mkdir -p $(BIN_DIR)
