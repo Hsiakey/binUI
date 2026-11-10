@@ -240,6 +240,53 @@ $(DEMO_DIR)/buttonshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/
 	cp -f $(EXA_DIR)/buttonshow/main.html $(DEMO_DIR)/buttonshow/main.html
 
 # =============================================
+# Vulkan 版示例（P5）：同一份 demo 源码 + -DBINUI_GPU_VK，链接 binui_vk.o。
+#   make demos-vk        → examples/*_vk.exe（与 GL 版并存，便于 A/B）
+#   make GPU=vk all      → 额外产出 vk 版示例（仍保留 GL 版）
+# 默认 `make all` 不受影响（GPU=gl）。
+# =============================================
+VK_DEMOS := svgdemo fontshow animshow buttonshow flexshow cubedemo texturedemo
+
+define VK_DEMO_RULE
+$(DEMO_DIR)/$(1)_vk$(EXT): $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/$(1)/main_vk.o $(LIB_A) $(EXA_DIR)/$(1)/main.html
+	@mkdir -p $(DEMO_DIR)/$(1)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $$@ $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/$(1)/main_vk.o $(LIB_A) \
+	    $(WINLIBS) -ldwmapi -limm32 \
+	    -Lthird_party/freetype/build -lfreetype \
+	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
+	cp -f $(EXA_DIR)/$(1)/main.html $(DEMO_DIR)/$(1)/main.html
+
+$(BUILD_DIR)/examples/$(1)/main_vk.o: examples/$(1)/main.cpp
+	@mkdir -p $(BUILD_DIR)/examples/$(1)
+	$(CXX) $(CXXFLAGS) -DBINUI_GPU_VK -I$(INC_DIR) -Isrc $(VK_INC) -c examples/$(1)/main.cpp -o $$@
+endef
+
+$(foreach d,$(VK_DEMOS),$(eval $(call VK_DEMO_RULE,$(d))))
+
+# features 的 vk 版目标文件（宏里那条只覆盖 VK_DEMOS 里的示例）
+$(BUILD_DIR)/examples/features/main_vk.o: examples/features/main.cpp
+	@mkdir -p $(BUILD_DIR)/examples/features
+	$(CXX) $(CXXFLAGS) -DBINUI_GPU_VK -I$(INC_DIR) -Isrc $(VK_INC) -c examples/features/main.cpp -o $@
+# features 有外挂组件（.bum），单独写规则：宏里那条只拷 main.html
+$(DEMO_DIR)/features_vk$(EXT): $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/features/main_vk.o $(LIB_A) \
+		$(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
+	@mkdir -p $(DEMO_DIR)/features
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/features/main_vk.o $(LIB_A) \
+	    $(WINLIBS) -ldwmapi -limm32 \
+	    -Lthird_party/freetype/build -lfreetype \
+	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
+	cp -f $(EXA_DIR)/features/main.html $(DEMO_DIR)/features/main.html
+	cp -f $(EXA_DIR)/features/button.bum.html $(DEMO_DIR)/features/button.bum.html
+	cp -f $(BUILD_DIR)/assets/components/card.bum $(DEMO_DIR)/features/card.bum
+	cp -f $(BUILD_DIR)/assets/components/dock.bum $(DEMO_DIR)/features/dock.bum
+
+DEMO_VK_BINS := $(DEMO_DIR)/features_vk$(EXT) $(foreach d,$(VK_DEMOS),$(DEMO_DIR)/$(d)_vk$(EXT))
+
+.PHONY: demos-vk
+demos-vk: $(DEMO_VK_BINS)
+	@echo "vk demos -> $(DEMO_VK_BINS)"
+
+# =============================================
 # C ABI：给 Python / Go / Rust 等宿主语言的绑定入口（include/binui_c.h）
 #   build-mingw/libbinui_c.a    静态库：C / C++ / Rust 直接链
 #   build-mingw/bin/binui_c.dll 动态库：Python ctypes / Go cgo（免编译，随包分发）
@@ -429,13 +476,16 @@ vk-window: tools
 	@fail=0; \
 	for c in $(VK_WINDOW_CASES); do \
 	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_VK_OUT)/$$c.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$c"; fail=1; continue; }; \
-	    for mode in "" "--gdi" "--transparent" "--resize"; do \
+	    for mode in "" "--gdi" "--transparent" "--dirty" "--resize"; do \
 	        tag=$$(echo "win$$mode" | tr -d '-'); \
 	        echo "--- $$c $$mode ---"; \
 	        $(BIN_DIR)/vk_window$(EXT) docs/issues/assets/$$c.html --frames 20 $$mode \
 	            --out $(PIXEL_VK_OUT)/$$c.$$tag.png >/dev/null 2>&1 || { echo "window failed: $$c $$mode"; fail=1; continue; }; \
 	        if [ "$$mode" = "--resize" ]; then continue; fi; \
 	        $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/$$c.gl.png $(PIXEL_VK_OUT)/$$c.$$tag.png $(PIXEL_VK_TOL) $(PIXEL_VK_OUT)/$$c.$$tag.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	        if [ "$$mode" = "--dirty" ]; then \
+	            $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/$$c.png $(PIXEL_VK_OUT)/$$c.$$tag.png 0 || fail=1; \
+	        fi; \
 	    done; \
 	done; \
 	echo "--- fullscreen guard (window covers monitor -> expect GDI readback) ---"; \

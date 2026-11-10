@@ -10,7 +10,7 @@
 
 #include "binui_compiler.h"
 #include "binui_renderer.h"
-#include "backends/binui_gl-gdi.h"
+#include "backends/binui_ui.h"   // 编译期选后端：默认 GL，-DBINUI_GPU_VK 走 Vulkan
 #include "binui_paths.h"
 #include "binui_hot_reload.h"
 #include <windows.h>
@@ -54,7 +54,7 @@ int main(int argc, char* argv[]) {
     int width  = wd.present ? (int)wd.width  : (nodes.empty() ? 960 : (int)nodes[0].width);
     int height = wd.present ? (int)wd.height : (nodes.empty() ? 660 : (int)nodes[0].height);
 
-    BinUIAppGLGdi app(width, height);
+    UiApp app(width, height);
     app.setWindowOptions(wd.present ? wd.resizable() : true,
                          wd.present ? wd.aspect : 0,
                          wd.present && wd.transparent(),
@@ -94,7 +94,7 @@ int main(int argc, char* argv[]) {
     for (int k = 0; k < kN; k++) bars[k] = 0.2f + 0.6f * (float)k / (float)kN;
 
     // ---- 绘制：节点树 + <canvas> 命令式回调 ----
-    auto canvasCb = [&](BinUIGLGdi& gfx, uint16_t id, float x, float y, float w, float h) {
+    auto canvasCb = [&](UiBackend& gfx, uint16_t id, float x, float y, float w, float h) {
         if (id != cvId) return;
         float gap = 4.0f;
         float bw = (w - (kN + 1) * gap) / kN;
@@ -104,8 +104,8 @@ int main(int argc, char* argv[]) {
             gfx.fillRounded(x + gap + k * (bw + gap), y + h - bh, bw, bh, bw / 2, c);
         }
     };
-    app.setDrawFn([&](BinUIGLGdi& gfx, const void* clip) {
-        drawNodesGLGdi(gfx, renderer, clip, canvasCb);
+    app.setDrawFn([&](UiBackend& gfx, const void* clip) {
+        drawUi(gfx, renderer, clip, canvasCb);
     });
 
     app.setMoveFn([&](float x, float y) {

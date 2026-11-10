@@ -16,6 +16,7 @@
 #include <cstdint>
 #include <string>
 
+#include "backends/binui_app.h"   // 无边框窗口外壳模板（与 GL 共用同一份）
 #include "binui_gfx.h"
 
 namespace binui {
@@ -85,11 +86,17 @@ public:
     // 测试用它区分「后端漏了显存」和「驱动把释放的显存留在池里」。
     size_t deviceMemoryBytes() const;
 
+    // 窗口类名（无边框外壳用；同一进程里 GL 与 VK 两个外壳并存时不冲突）
+    static const wchar_t* appClassName() { return L"BinUIAppVKWindow"; }
+
 private:
     struct Impl;
     Impl* impl_;
 };
 
+
+// 无边框窗口 + 事件循环：与 GL 后端共用同一份实现（src/backends/binui_app.h）
+using BinUIAppVK = BinUIAppT<BinUIVK>;
 } // namespace binui
 
 #endif // BINUI_VK_H

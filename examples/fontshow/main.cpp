@@ -16,7 +16,7 @@
 
 #include "binui_compiler.h"
 #include "binui_renderer.h"
-#include "backends/binui_gl-gdi.h"
+#include "backends/binui_ui.h"   // 编译期选后端：默认 GL，-DBINUI_GPU_VK 走 Vulkan
 #include "binui_paths.h"
 #include "binui_hot_reload.h"
 #include <windows.h>
@@ -73,7 +73,7 @@ int main(int argc, char* argv[]) {
     int width  = wd.present ? (int)wd.width  : (nodes.empty() ? 900 : (int)nodes[0].width);
     int height = wd.present ? (int)wd.height : (nodes.empty() ? 760 : (int)nodes[0].height);
 
-    BinUIAppGLGdi app(width, height);
+    UiApp app(width, height);
     app.setWindowOptions(wd.present ? wd.resizable() : true, wd.present ? wd.aspect : 0,
                          wd.present && wd.transparent(), wd.title.c_str());
 
@@ -143,8 +143,8 @@ int main(int argc, char* argv[]) {
         std::printf("[fontshow] char: %s  U+%04X\n", utf8.c_str(), FirstCodePoint(utf8));
     });
 
-    app.setDrawFn([&](BinUIGLGdi& gfx, const void* clip) {
-        drawNodesGLGdi(gfx, renderer, clip, nullptr);
+    app.setDrawFn([&](UiBackend& gfx, const void* clip) {
+        drawUi(gfx, renderer, clip, nullptr);
     });
     app.setMoveFn([&](float x, float y) {
         int old = renderer.hoveredNode();

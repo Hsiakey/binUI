@@ -69,6 +69,7 @@ int main(int argc, char** argv) {
     bool forceGdi = false;
     bool fullscreen = false;
     bool transparent = false;
+    bool dirtyMode = false;   // 只重画脏矩形（验证持久累积帧 + 局部清屏这条不变量）
     for (int i = 2; i < argc; i++) {
         const std::string a = argv[i];
         if (a == "--frames" && i + 1 < argc) frames = std::atoi(argv[++i]);
@@ -77,6 +78,7 @@ int main(int argc, char** argv) {
         else if (a == "--gdi") forceGdi = true;
         else if (a == "--fullscreen") fullscreen = true;
         else if (a == "--transparent") transparent = true;
+        else if (a == "--dirty") dirtyMode = true;
     }
 
     SetProcessDPIAware();
@@ -165,8 +167,18 @@ int main(int argc, char** argv) {
             std::printf("[vk_window] resize -> %dx%d\n", W, H);
             i += 2;   // resize 帧不算常规帧（交换链可能这一帧才建好）
         }
-        gfx.beginFrame(nullptr);
-        binui::drawNodesBinUI(gfx, renderer, nullptr, binui::CanvasFn{});
+        if (dirtyMode && i > 0) {
+            // 只清/只画四分之一区域，四帧轮完一整幅：内容应与会全量重画的完全一致
+            const int q = i % 4;
+            int rc[4] = {(q & 1) ? W / 2 : 0, (q & 2) ? H / 2 : 0, 0, 0};
+            rc[2] = rc[0] + W / 2;
+            rc[3] = rc[1] + H / 2;
+            gfx.beginFrame(rc);
+            binui::drawNodesBinUI(gfx, renderer, rc, binui::CanvasFn{});
+        } else {
+            gfx.beginFrame(nullptr);
+            binui::drawNodesBinUI(gfx, renderer, nullptr, binui::CanvasFn{});
+        }
         if (forceGdi) gfx.presentViaGdi();
         else gfx.present();
         ++i;

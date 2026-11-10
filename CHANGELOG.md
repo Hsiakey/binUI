@@ -4,7 +4,46 @@
 `【格式 vN】` 指 binUI 二进制布局的 `BINUI_VERSION`（`include/binui_format.h`），
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
-## [Unreleased]
+
+## [0.10.0] - 2026-11-11
+
+本轮主题：**Vulkan 绘制后端（P1~P5 全部落地）**。新后端 = MINOR；`BINUI_VERSION` 仍是 19
+（无二进制布局改动，旧 `.bui`/`.bum` 不用重编）。
+
+### 新增 — Vulkan 后端 P5：共享窗口外壳 + `GPU=vk` 示例
+
+- **窗口外壳也抽成共享模板**：`BinUIAppGLGdi` 原来整块（1134 行）长在 GL 后端里，实际只调用
+  后端的 8 个方法（`init/shutdown/resize/beginFrame/present/presentViaGdi/setTransparent/isReady`）。
+  搬到 `src/backends/binui_app.h` 变成 `template <class Gfx> class BinUIAppT`：
+  `BinUIAppGLGdi = BinUIAppT<BinUIGLGdi>`、`BinUIAppVK = BinUIAppT<BinUIVK>`。
+  时间轴/输入/IME/无边框拖拽/帧节流/脏矩形/直翻转守卫两个后端只有一份；
+  `FramePerf`/`BINUI_PERF` 统计一起共享（Vulkan 侧同样可读）。
+- 后端只多提供一个 `static const wchar_t* appClassName()`：同进程两个后端并存时窗口类不冲突。
+- 新文件 `src/backends/binui_ui.h`：示例/工具的统一入口（`UiBackend` / `UiApp` / `drawUi()` /
+  `placeCaretAtClick()`），由 `-DBINUI_GPU_VK` 选后端；8 个示例改成这套名字，逻辑不变
+  （`placeCaretAtClick` 也从 GL 后端搬进共享模板）。
+- `make demos-vk` → `examples/*_vk.exe`（同一份源码 + `-DBINUI_GPU_VK`，链接 `binui_vk.o`），
+  与 GL 版并存便于 A/B。
+- 版本：`binui_version()` → **0.10.0**。
+
+#### 与设计的一处偏差
+
+设计里写的是"构建开关 + 运行期 `BINUI_GPU`"。实际只做了编译期：运行期切换要在同一进程装两套
+后端，而示例的 `UiBackend&` 是**具体类型**（`<canvas>` 回调要调原语），要么再加一层类型擦除、
+要么每个示例写两份 switch —— 收益不抵复杂度。像素/压力/窗口三套判据已分别覆盖两个后端。
+
+#### 验收（v0.10.0）
+
+| 项 | 结果 |
+|---|---|
+| 干净重编 | **0 warning**（`-Wall -Wextra`） |
+| 四套测试 | `test_elements` / `test_css` / `test_font` / `test_capi` 全绿 |
+| `make pixels` | 10/10 零差异 |
+| `make pixels-vk` | 14/14 通过（6 个用例 0 差异，4 个 SVG 描边 ≤1 个 MSAA 采样） |
+| `make vk-window` | 12 项阈值 128 全过；脏矩形重绘 vs 全量重绘 **3/3 逐位相同（阈值 0）** |
+| `make vk-stress` | 8 阶段全 `[ok]`；shutdown 后后端显存记账 0.0 MB |
+| `make demos-vk` | 8 个 `*_vk.exe`；`svgdemo`/`svgdemo_vk` 各跑 5 秒无崩溃，`BINUI_PERF` 输出一致 |
+| `check_examples` | 11/11 |
 
 ### 新增 — Vulkan 后端 P4：鲁棒性加固 + 压力测试工具
 

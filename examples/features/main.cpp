@@ -13,7 +13,7 @@
 #include "binui_compiler.h"
 #include "binui_component.h"
 #include "binui_renderer.h"
-#include "backends/binui_gl-gdi.h"
+#include "backends/binui_ui.h"   // 编译期选后端：默认 GL，-DBINUI_GPU_VK 走 Vulkan
 #include "binui_paths.h"
 #include "binui_hot_reload.h"
 #include <windows.h>
@@ -67,7 +67,7 @@ int main(int argc, char* argv[]) {
     int width  = wd.present ? (int)wd.width  : (nodes0.empty() ? 900 : (int)nodes0[0].width);
     int height = wd.present ? (int)wd.height : (nodes0.empty() ? 840 : (int)nodes0[0].height);
 
-    BinUIAppGLGdi app(width, height);
+    UiApp app(width, height);
     app.setWindowOptions(wd.present ? wd.resizable() : true,
                          wd.present ? wd.aspect : 0,
                          wd.present && wd.transparent(),
@@ -109,8 +109,8 @@ int main(int argc, char* argv[]) {
     };
     reindexNodes();
 
-    app.setDrawFn([&](BinUIGLGdi& gfx, const void* clip) {
-        drawNodesGLGdi(gfx, renderer, clip, nullptr);
+    app.setDrawFn([&](UiBackend& gfx, const void* clip) {
+        drawUi(gfx, renderer, clip, nullptr);
     });
 
     app.setMoveFn([&](float x, float y) {
@@ -127,7 +127,7 @@ int main(int argc, char* argv[]) {
         int old = renderer.keyboardNode();   // :focus 可能在按下时变化
         renderer.press(x, y);
         // 点输入框中部：光标落在点击位置，而不是永远跳到末尾
-        if (renderer.isEditing()) placeCaretAtClickGLGdi(renderer, app.gfx(), x, y);
+        if (renderer.isEditing()) placeCaretAtClick(renderer, app.gfx(), x, y);
         int n = renderer.hitTest(x, y);
         if (n >= 0) invalidateNode((uint16_t)n);
         if (old >= 0 && old != renderer.keyboardNode()) invalidateNode((uint16_t)old);

@@ -229,7 +229,7 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
     // ---- 双击：选中双击位置所在的"词" ----
     sh.setDoubleClickFn([a](float x, float y) {
         if (!a->renderer.isEditing()) return;
-        const size_t u16 = binui::placeCaretAtClickGLGdi(a->renderer, a->shell->gfx(), x, y);
+        const size_t u16 = binui::placeCaretAtClick(a->renderer, a->shell->gfx(), x, y);
         if (a->renderer.selectWordByUtf16Index(u16)) {
             InvalidateNode(a, a->renderer.edit().nodeId);
         }
@@ -271,7 +271,7 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
     sh.setMoveFn([a](float x, float y) {
         // 按住左键在输入框里移动 = 拖选：只挪 caret，选区起点保持按下时的锚点
         if (a->renderer.isEditing() && (::GetKeyState(VK_LBUTTON) & 0x8000)) {
-            binui::placeCaretAtClickGLGdi(a->renderer, a->shell->gfx(), x, y, /*extend*/ true);
+            binui::placeCaretAtClick(a->renderer, a->shell->gfx(), x, y, /*extend*/ true);
             InvalidateNode(a, a->renderer.edit().nodeId);
         }
         const int oldId = a->renderer.hoveredNode();
@@ -300,7 +300,7 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
         if (oldFocus != a->renderer.keyboardNode()) InvalidateNode(a, oldFocus);
         // 点输入框中部：光标落在点击位置，而不是永远跳到末尾
         if (a->renderer.isEditing())
-            binui::placeCaretAtClickGLGdi(a->renderer, a->shell->gfx(), x, y);
+            binui::placeCaretAtClick(a->renderer, a->shell->gfx(), x, y);
         if (a->renderer.isEditing()) InvalidateNode(a, a->renderer.edit().nodeId);
     });
 
@@ -420,7 +420,7 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
 
 extern "C" {
 
-const char* BINUI_C_CALL binui_version(void) { return "0.9.1"; }
+const char* BINUI_C_CALL binui_version(void) { return "0.10.0"; }
 
 int32_t BINUI_C_CALL binui_abi_version(void) { return BINUI_C_ABI_VERSION; }
 

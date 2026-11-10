@@ -119,7 +119,7 @@ static void DrawVideoControlsTmpl(Gfx& gfx, const BinUIRenderer& renderer,
                  12.0f, 400, label, timeC);
 }
 
-void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const void* clipRect,
+inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const void* clipRect,
                  const CanvasFn& canvas) {
     const auto& nodes = renderer.getNodes();
     int winW = gfx.width();

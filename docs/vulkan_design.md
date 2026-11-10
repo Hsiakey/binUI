@@ -590,6 +590,58 @@ mingw32-make pixels GPU=vk               # 10 个用例，输出三方 diff 表�
 - 文档：`docs/vulkan.md` 补"已实现"章节、README 后端矩阵加一行、`CHANGELOG` 记 **0.10.0**（新后端 = MINOR）。
 - 发版门槛同现有规矩：干净重编 0 warning、四套测试全绿、`make pixels` 10/10、`check_examples` 11/11。
 
+### 7.1 P5 落地记录（2026-11-11，已完成，v0.10.0）
+
+#### 7.1.1 关键决定：把"窗口外壳"也抽成共享模板，而不是给 Vulkan 再写一份
+
+`BinUIAppGLGdi` 原来整块长在 `binui_gl-gdi.cpp` 里（**1134 行**）。做 `GPU=vk` 时发现它只调用后端的
+8 个方法：`init / shutdown / resize / beginFrame / present / presentViaGdi / setTransparent / isReady`
+—— 跟 GL 一点关系都没有。所以：
+
+- 新文件 `src/backends/binui_app.h`：`template <class Gfx> class BinUIAppT`（整块搬过来，机械替换），
+  连同 `FramePerf`/`Perf()`/`NowMs()`/`caretBlinkOn()`/`isTitlebarDrag()`/`imeCaretFromRenderer()`/
+  `placeCaretAtClick()` 一起变成共享代码；
+- `BinUIAppGLGdi = BinUIAppT<BinUIGLGdi>`、`BinUIAppVK = BinUIAppT<BinUIVK>`；
+- 后端只需要多提供一个 `static const wchar_t* appClassName()`（同进程两个后端并存时窗口类不冲突）。
+- 新文件 `src/backends/binui_ui.h`：示例/工具的统一入口，`UiBackend` / `UiApp` / `drawUi()`，
+  由 `-DBINUI_GPU_VK` 选后端；8 个示例改成这套名字（`BinUIAppGLGdi` → `UiApp` 等），
+  逻辑一行没动。
+
+结果：时间轴/输入/IME/无边框拖拽/帧节流/脏矩形/直翻转守卫这些"边角逻辑"两个后端**只有一份**，
+不会再各自演进。
+
+#### 7.1.2 与设计的一处偏差：编译期开关，没做运行期 `BINUI_GPU`
+
+设计里写的是"`GPU=gl|vk` 构建开关 + `BINUI_GPU` 运行期开关"。实际只做了**编译期**：
+
+- `make demos-vk` 产出 `examples/*_vk.exe`（同一份源码 + `-DBINUI_GPU_VK`，链接 `binui_vk.o`），
+  与 GL 版并存，便于 A/B 对比；
+- 运行期切换要在同一个进程里装两套后端，而示例的 `UiBackend&` 是**具体类型**（`<canvas>` 回调里要调
+  原语），要么再加一层类型擦除、要么每个示例写两份 switch —— 收益不抵复杂度。像素/压力/窗口三套
+  判据已经分别覆盖两个后端，运行期切换属于"能选但不必须"。
+
+#### 7.1.3 验收实测（v0.10.0）
+
+| 项 | 结果 |
+|---|---|
+| 干净重编 | **0 warning**（`-Wall -Wextra`） |
+| 四套测试 | `test_elements` / `test_css` / `test_font` / `test_capi` 全绿 |
+| `make pixels`（GDI 基准） | 10/10 **零差异** |
+| `make pixels-vk`（VK ↔ GL，14 用例） | 14/14 通过（6 个用例 0 差异，4 个 SVG 描边 ≤1 个 MSAA 采样） |
+| `make vk-window`（窗口 5 种走法 × 3 用例） | 12 项阈值 128 全过；**脏矩形重绘 vs 全量重绘 3/3 逐位相同**（阈值 0） |
+| `make vk-stress`（8 阶段压力 + 泄漏复跑） | 全部 `[ok]`，shutdown 后后端显存记账 0.0 MB |
+| `make demos-vk` | 8 个 `*_vk.exe` 链接成功；`svgdemo` / `svgdemo_vk` 各跑 5 秒无崩溃，`BINUI_PERF` 两边输出一致（120Hz → budget 8.33ms） |
+| `check_examples` | 11/11 无问题 |
+| 版本 | `binui_version()` → `0.10.0`（新后端 = MINOR） |
+
+#### 7.1.4 这轮之后仍然没做的
+
+- 运行期 `BINUI_GPU`（见 7.1.2）；
+- frames-in-flight 并行（仍是单命令缓冲 + 每帧等 fence），性能上"能用但不是最强"，
+  设计 §5.1 的环形顶点缓冲也留在这里；
+- 跨显示器 DPI / RDP / 验证层 0 error：条件不具备（见 §6.1.3）；
+- 把 D3D11 后端并进共享遍历（它至今不在构建里，见 §3.2b）。
+
 ---
 
 ## 8. 风险与回滚

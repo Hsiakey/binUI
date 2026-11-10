@@ -115,6 +115,20 @@ CMake 会直接 `add_subdirectory` 编译为静态库（MSVC/MinGW 均可）；M
 | GDI（`app_win32`） | 标准标题栏 | GDI 局部重绘 + 脏矩形 | `DrawTextW`（UTF-8→UTF-16） | 单色字形 |
 | D3D11（`binui_d3d11`） | WS_POPUP 无边框 | GPU 四边形（图集/九宫格模板/离屏缓冲），VSync 按需呈现 | **FreeType 字形图集（灰度 8bit；≤16px 轻 hinting + gamma + 像素对齐）** | **彩色（FreeType COLR/CPAL 层合成）** |
 | OpenGL（`binui_gl-gdi`） | WS_POPUP 无边框 | 同 D3D11 架构：GL 3.3 core + 顶点四边形/图集/九宫格/FBO，VSync（wglSwapIntervalEXT）；resize 拖拽期走 GDI `StretchDIBits` 呈现（规避 NVIDIA 驱动 SwapBuffers 崩溃） | 同 D3D11（共享 `binui_font_renderer`） | 同 D3D11 |
+| **Vulkan**（`binui_vk`，0.10.0 起） | WS_POPUP 无边框，`VK_KHR_swapchain` 呈现；透明窗/全屏直翻转/拖拽期自动走读回 + GDI 贴屏 | 同架构：Vulkan 1.0 + 顶点四边形/图集/九宫格 + **持久 4× MSAA 累积帧**（脏矩形局部清屏）；只 `LoadLibrary("vulkan-1.dll")`，不链 `vulkan-1.lib`、不需要 SDK | **与 GL 共用同一份** `binui_glyph_atlas.h`（逐像素同源） | 同 GL |
+
+后端契约是同一份 `IBinUIGfx`（`src/backends/binui_gfx.h`），节点树遍历（`binui_draw_nodes.h`）、
+字形图集与排版（`binui_glyph_atlas.h`）、无边框窗口外壳（`binui_app.h`，模板化在具体后端上）
+都是**多后端共用的一份代码** —— 所以 GL 与 Vulkan 在像素回归里对轴对齐几何逐位相同
+（`make pixels-vk`，14 个用例）。右键：
+
+```sh
+mingw32-make SHELL=sh tools        # 含 vk_shot / vk_window / vk_stress
+mingw32-make SHELL=sh pixels-vk    # VK ↔ GL 逐像素回归
+mingw32-make SHELL=sh vk-window    # 窗口/交换链/GDI/透明/脏矩形/resize/全屏守卫
+mingw32-make SHELL=sh vk-stress    # 8 阶段鲁棒性压测（含泄漏复跑）
+mingw32-make SHELL=sh demos-vk     # 同一份 demo 源码编出 examples/*_vk.exe
+```
 
 GPU 后端绘制原语（`fillRect`/`fillRounded`/`fillLine`/`strokeRounded`/`drawText`/`drawImage`）：纯色与圆角矩形为顶点四边形（九宫格模板），`fillLine` 用旋转四边形画**任意角度实心线段**（`x0,y0→x1,y1` + 线宽），文本走字形图集。GL 后端离屏帧缓冲为 **4× MSAA**（渲染到多采样渲染缓冲，`present()` 时 `glBlitFramebuffer` 解析到单采样离屏纹理），线条/圆角/圆的边缘全部抗锯齿；D3D 后端可直接用 `fillLine` 画线段。
 

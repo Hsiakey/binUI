@@ -9,7 +9,7 @@
 
 #include "binui_compiler.h"
 #include "binui_renderer.h"
-#include "backends/binui_gl-gdi.h"
+#include "backends/binui_ui.h"   // 编译期选后端：默认 GL，-DBINUI_GPU_VK 走 Vulkan
 #include "binui_paths.h"
 #include <windows.h>
 
@@ -83,7 +83,7 @@ int main(int argc, char* argv[]) {
     int width  = wd.present ? (int)wd.width  : (nodes0.empty() ? 900 : (int)nodes0[0].width);
     int height = wd.present ? (int)wd.height : (nodes0.empty() ? 640 : (int)nodes0[0].height);
 
-    BinUIAppGLGdi app(width, height);
+    UiApp app(width, height);
     app.setWindowOptions(wd.present ? wd.resizable() : true, wd.present ? wd.aspect : 0,
                          wd.present && wd.transparent(), wd.title.c_str());
 
@@ -111,8 +111,8 @@ int main(int argc, char* argv[]) {
     const float vpCy = 56 + 520 * 0.5f + 20;   // 稍微下移，给标题留位置
     float spinX = 0.5f, spinY = 0.6f;
 
-    app.setDrawFn([&](BinUIGLGdi& gfx, const void* clip) {
-        drawNodesGLGdi(gfx, renderer, clip, nullptr);   // 先把 UI 画完
+    app.setDrawFn([&](UiBackend& gfx, const void* clip) {
+        drawUi(gfx, renderer, clip, nullptr);   // 先把 UI 画完
         // 再把 3D 线框画在 UI 之上（视口区域内没有别的节点，不会挡住控件）
         const float dist = 4.0f, scale = 300.0f;
         float sx[8], sy[8], sd[8];
