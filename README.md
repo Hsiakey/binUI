@@ -4,7 +4,7 @@
 [![Version](https://img.shields.io/badge/version-0.3.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
-[![Format v14](https://img.shields.io/badge/binUI%20format-v14-orange.svg)](include/binui_format.h)
+[![Format v15](https://img.shields.io/badge/binUI%20format-v15-orange.svg)](include/binui_format.h)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](#跨平台方向)
 
 把 **UI 描述源码（XML / HTML5）编译为紧凑的二进制布局（binUI），再解析为节点树供任何渲染后端绘制**。纯 C++17，核心（编译/解析/命中测试/事件）无平台 API 依赖；字体渲染基于 FreeType + HarfBuzz（`third_party` 静态源码，跨平台一致）。
@@ -75,7 +75,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `examples/fontshow` | **字体与输入法**：字号阶梯 / 字重 400–800 / 斜体 / 行高 / 文字装饰 / 中英混排与符号 + IME 组字·候选框跟随光标·选词上屏（`BINUI_IME_LOG=1` 出消息日志） |
 | `examples/buttonshow` | **按钮样式**：语义色 / 尺寸 / 圆角 / 纯色·渐变·描边·幽灵底 / :hover·`:active`·`:checked`·disabled 状态 / 图标·文本·块级形态 |
 | `examples/flexshow` | **自适应布局**：百分比 / `flex:1` / `min·max-width` / `width:content` / `flex:1`+`overflow:auto` —— 整份 UI 无绝对定位，拖窗口边框实时重排（唯一可缩放窗口的示例） |
-| `examples/svgdemo` | **2D 渲染**：`<svg>` 声明式矢量（line/polyline/polygon/rect/circle）+ `<canvas>` 命令式绘制面 |
+| `examples/svgdemo` | **2D 渲染**：`<svg>` 声明式矢量（path/ellipse/line/polyline/polygon/rect/circle + viewBox/transform/图标）+ `<canvas>` 命令式绘制面 |
 | `examples/cubedemo` | **3D 渲染**：应用自己算顶点与透视，只用 `fillLine` 画线框立方体（引擎不做 3D） |
 | `examples/texturedemo` | **纹理**：`updateImageRaw` 运行期上传，同一张纹理多尺寸采样 |
 | `components/` | **标准组件库**：标题栏 / 按钮 / 输入框 / 胶囊 / 开关 / 面板 / 对话框 / 指标 / 头像 / 分隔线 / 状态栏（见 [`components/README.md`](components/README.md)） |
@@ -355,8 +355,8 @@ HTML5 编译规则：
 - 图片：`img src="icon.png"` 会分配 `imageIndex`，编译器通过 `CompileBinUIEx` 返回资源路径表；渲染后端解码并绘制真实图片（无资源时回退为圆形）。**运行时换图**：`renderer.updateImage(index, data, size)` 以新编码数据替换，`renderer.updateImageRaw(index, w, h, rgba)` 以原始 RGBA8 像素替换（无解码）；渲染后端按 `imageGeneration(index)` 版本号自动重传纹理，GL/D3D 后端均支持 `prepareImageRaw`（RGBA 字节序直传）。
 - `<app_window>` 作根元素：若正文含 `DOCTYPE/<html>/<body>/<head>` 按 HTML 解析；否则识别为 **XML 并自动合成 ROOT 节点**（id 0，尺寸/背景取窗口属性，子元素挂其下）——无需 `<binui>`/`<root>` 包裹层。
 - flexbox：`display:flex` 容器编译期布局，支持 `flex-direction`（row/column）、`justify-content`（flex-start/flex-end/center/space-between/space-around）、`align-items`（flex-start/center/flex-end）、`gap`。**主轴分配**：声明尺寸（含百分比）先占位，`flex:N` 与（row 下）未声明宽度按权重分**剩余**主轴长度；`width:content` 表示"按文字宽度排"（用编译器自己的字宽估算 ×1.08 + 4px，宁可多几像素也不裁字）—— 标题/标签后面跟一行副标题这类"紧挨着"的排版靠它，不用手调像素；**column 下主轴是高度**——`flex:1` 分高度，未声明宽度则沿交叉轴拉伸到内容盒。`space-around` 按 CSS 首尾各半间距。**溢出**按 CSS 处理（自由空间钳到 0，不产生负间距，子项允许溢出容器）；**flex-shrink 未实现**（溢出时固定项不收缩，弹性项被钳到 0）。未声明高度容器自动扩展。运行时 `setSize` 重排走同一套算法（`BinUISpecFlex` + 子项 `flexWeight`）。
-- `<svg>` 声明式矢量：`<svg>` 是透明容器（子图形坐标相对容器、绘制裁剪到容器），子标签全部编译为**普通节点**（支持 CSS transition/animation 与命中）——`<line x1 y1 x2 y2 stroke stroke-width>`→`BINUI_LINE`、`<circle cx cy r fill>`/`<rect x y width height rx fill>`→圆角块、`<polyline points="x,y x,y …" stroke …>`/`<polygon points>`→展开成多条线段。默认 `fill`/`stroke` 为黑（SVG 规范默认），未给底色时 `<svg>` 透明。
-  **不支持**（各自有明确编译告警，不再静默）：`<path>`（无路径解析）、`<ellipse>`（只有正圆）、`<text>/<tspan>`（用 `<span>` 绝对定位）、`<g>` 的 `transform`（只作分组容器）、`viewBox`（坐标一律容器内绝对像素）、`<defs>/<linearGradient>/<mask>/<clipPath>/<pattern>/<marker>/<symbol>/<image>`。要曲线/任意路径请改用 `<canvas>` 的命令式回调。
+- `<svg>` 声明式矢量：`<svg>` 是透明容器（子图形坐标相对容器、**绘制裁剪到容器**），子标签全部编译为**普通节点**（支持 CSS transition/animation 与命中）。**支持**：`<path d="…">`（`M L H V C S Q T A Z` 全命令集，绝对/相对/隐式重复/弧标志紧贴；`fill`+`stroke` 并存、`fill-rule="evenodd"`）→`BINUI_PATH`；`<ellipse cx cy rx ry>`；`<line x1 y1 x2 y2 stroke stroke-width>`→`BINUI_LINE`；`<circle cx cy r fill>`/`<rect x y width height rx fill>`→圆角块；`<polyline points="x,y x,y …" stroke …>`/`<polygon points>`→展开成多条线段。**坐标系**：`viewBox`（等比 `meet` 居中，`preserveAspectRatio="none"` 直接拉伸）+ `<g transform>`（`translate/scale/rotate/skewX/skewY/matrix`，`<g>` 不建立坐标系）。**颜料继承**：`fill`/`stroke`/`stroke-width`/`fill-rule` 从祖先继承（含 `currentColor`），`stroke-width` 跟着缩放；优先级按 SVG 规范 **CSS > 表现属性 > 继承 > 默认**（默认黑填充、无描边）。内部存储是`uint16` 归一化折线（曲线在编译期按 0.1px 容差细分），所以缩放/重排不会走形，极限放大能看到折线。
+  **不支持**（各自有明确编译告警，不再静默）：`<text>/<tspan>`（用 `<span>` 绝对定位）、`<defs>/<use>/<symbol>`、`linearGradient`/`radialGradient`、`mask`/`clipPath`/`pattern`/`marker`、`<image>`、`stroke-dasharray`；`<circle>`/`<rect>` 仍是轻量映射，**不能 fill 与 stroke 并存**（要描边请用 `<path>`）。
 - `<canvas>` 命令式绘制面：定位矩形节点（`BINUI_CANVAS`），默认透明；应用在 `drawFn` 里给 `drawNodesGLGdi`（或 `drawNodesD3D`）传一个 `CanvasDrawFn` 回调（`nodeId, x, y, w, h`），后端绘制到该节点时**已裁剪到画布矩形**地调用回调——把"HTML 管布局、代码管数据"落到画布上，适合频谱/波形等每帧重绘的动态内容。
 - `<video>` 视频播放（v9）：编译为 `BINUI_VIDEO` 节点 + 视频描述段；属性 `src`（相对 UI 文件目录）、`autoplay`、`loop`、`muted`、`controls`（浏览器式控制条）、`volume="0..1"`。播放状态机（play/pause/seek/回绕/ENDED 事件）在渲染器内实现，**解码像素由可选模块推送**——见「视频播放」章节；未启用模块时仅绘制底色，控制条交互照常。
 - 滚动容器：`overflow:auto/scroll` 产生固定视口（不再自动扩展高度），运行时支持 `scrollTo`/`scrollBy`/滚轮（`scrollAt`）/滚动条拖动，命中测试与绘制均按滚动偏移并裁剪视口，`SCROLL` 事件通知变化。**`overflow:hidden` 只裁剪不滚动**（v13 起与 `auto/scroll` 区分：不出滚动条、不响应滚轮，`renderer.isUserScrollable()` 为 false）。**裁剪子元素只由这三类容器触发**（判定口径见 `renderer.clippingAncestors()`）：普通 div（包括组件自己的根 div）按 CSS 语义**不**裁剪，子元素放大/溢出会画出去 —— 以前三个后端无脑按每个祖先矩形裁，组件按钮 `:hover` 放大 1.04 会被与它等大的组件根 div 切回原状，看着像“被困在盒子里放大”。

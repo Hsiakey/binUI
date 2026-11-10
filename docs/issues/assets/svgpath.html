@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<app_window width="420" height="160" bg="#151517" title="svg path probe">
+<html width="420" height="160" bg="#151517">
+<head><meta charset="UTF-8"><style> body { font-size: 12px; color: #ADB2B8; } </style></head>
+<body>
+<!-- 环形：evenodd 挖洞（填充规则 + 多子路径） -->
+<svg style="position:absolute; left:20; top:20; width:60; height:60" viewBox="0 0 24 24">
+    <path d="M2 2 H22 V22 H2 Z M8 8 H16 V16 H8 Z" fill="#7AAAFF" fill-rule="evenodd"/>
+</svg>
+<!-- 椭圆（两个方向半径不同） -->
+<svg style="position:absolute; left:100; top:20; width:60; height:40" viewBox="0 0 24 24">
+    <ellipse cx="12" cy="12" rx="10" ry="7" fill="#4ED17E"/>
+</svg>
+<!-- 描边折线（fill=none）：转角补圆 + 线宽跟随 viewBox 缩放 -->
+<svg style="position:absolute; left:180; top:20; width:60; height:60" viewBox="0 0 24 24">
+    <path d="M3 20 L8 6 L13 16 L18 4 L21 12" fill="none" stroke="#F59E0B" stroke-width="2"/>
+</svg>
+<!-- 真实图标（Lucide heart，含弧与相对命令） -->
+<svg style="position:absolute; left:260; top:20; width:48; height:48" viewBox="0 0 24 24">
+    <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"
+          fill="none" stroke="#F25A5A" stroke-width="2"/>
+</svg>
+<!-- 继承 + CSS 优先级：svg 给绿色，类规则把第二个改成蓝 -->
+<svg style="position:absolute; left:330; top:20; width:70; height:60" viewBox="0 0 24 24" fill="#4ED17E">
+    <path d="M2 2 H11 V22 H2 Z"/>
+    <path class="blue" fill="#F25A5A" d="M13 2 H22 V22 H13 Z"/>
+</svg>
+<span style="position:absolute; left:20; top:110; width:400; height:16; font-size:11px; color:#81858C">svg path: evenodd / ellipse / stroked line / heart icon / inherit+css</span>
+<style> .blue { fill: #7AAAFF; } </style>
+</body></html>
+</app_window>

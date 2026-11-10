@@ -6,6 +6,40 @@
 
 ## [Unreleased]
 
+### 新增 — SVG `<path>` / `<ellipse>`：真正的矢量路径（【格式 v15】）
+
+- **现在能直接粘现成图标**（Lucide / Feather / Material 那一套 `<path d="M…">`），
+  不再是"五个图元 + 路径不支持"。命令集 `M L H V C S Q T A Z` 全支持（绝对/相对、
+  隐式重复、紧贴负数、弧标志紧贴写法），`A` 在编译期转三次贝塞尔后统一细分。
+- **格式**：新增节点类型 `BINUI_PATH = 10`（`BINUI_NODE_PATH`）。节点 `x/y/w/h`
+  就是几何包围盒（有描边时外扩 `strokeW/2`，笔画不溢出、命中区盖得住），
+  折线放在新的**路径段**里（定长头 + 子路径表 + `uint16` 归一化点），
+  段序在扩展绘制段之后、名称段之前。
+- **为什么存折线**：运行期只做"归一化点 × 节点盒"的两次乘加 —— 不解析、不缓存、
+  重排/等比缩放下形状自动跟随；曲线细分在编译期一次做完（容差 0.1 用户单位，
+  实测半径 10 的圆弧离真圆最大偏差 0.0196px）。代价是极限放大能看到折线。
+- **三端共用一份几何**（`include/binui_paint.h`）：扫描线求交 → 轴对齐条带 →
+  `fillRect`，相邻同宽行自动合并；撞条带上限时按行步长降级（1→2→4→8）保证画完
+  （400px 的圆：cap=16 触发截断，cap=256 + 步长 8 → 47 条完整画完）。
+  描边逐段画线、转角超过 15° 补一个圆点（圆角连接）。
+- **SVG 语义**：`viewBox`（等比 `meet` 居中，`preserveAspectRatio="none"` 直接拉伸）、
+  `<g transform>`（`translate/scale/rotate/skewX/skewY/matrix` 可串联，且 `<g>` 不建立坐标系）、
+  `fill`/`stroke`/`stroke-width`/`fill-rule` 变成**可继承**属性（含 `currentColor`），
+  `stroke-width` 跟着坐标变换一起缩放（放大后线不会还是 2px）。
+  **SVG 颜料属性按规范走 CSS > 表现属性 > 继承 > 默认**（与 binUI 其它属性"属性盖 CSS"
+  相反，单独一条 `pickSvgPaint`）。
+- **顺手修掉一个真 bug**：`<svg>` 的注释从第一条就说"绘制裁剪到容器"，但三端都没实现，
+  子图形一直能画到容器外面。现在 `clippingAncestors()` 把 `<svg>` 也算裁剪祖先。
+- **破坏性**：`BINUI_VERSION` 14 → 15，旧 `.bui` / `.bum` 一律拒载，需重编
+  （与历史每次 bump 一致；`binui.res` 里存的是源码，重编即可）。
+- 仍不支持（有明确告警）：渐变 `linearGradient/radialGradient`、`stroke-dasharray`、
+  `mask`/`clipPath`/`pattern`/`marker`、`<defs>/<use>/<symbol>`、`<text>`、`<image>`。
+  `<circle>` / `<rect>` 仍是轻量映射（不能 fill 与 stroke 并存），需要描边请用 `<path>`。
+- 验证：`test_elements` 新增 `suite_svgpath`（解析/精度/容差/错误/上限、面积与采样
+  双向验证填充、evenodd 与 nonzero 差异、条带合并、描边接缝、viewBox/g transform/继承/
+  CSS 优先级）；像素基准新增 `docs/pixels/svgpath.png`；GDI 与 GL 对照 —— 填充 0 像素差，
+  描边只在边缘因 GL 的 `fillLine` 抗锯齿不同。
+
 ### 修复 — SVG 不支持的标签/属性从"静默无效"改成明确告警
 
 - 现象：写 `<path d="…">` / `<ellipse>` / `<text>` / `<g transform="translate(…)">` / `viewBox`

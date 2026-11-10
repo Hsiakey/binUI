@@ -7,7 +7,7 @@
 | [keyboard_focus.md](keyboard_focus.md) | **键盘焦点系统**：焦点控制 / 文本编辑 / 鼠标三态与按键表、WASD 移焦点、方向键滚哪个容器、回车两段式、焦点环（:focus-visible + 2 秒自动熄灭）、宿主接法；末尾是层级焦点导航（下潜 / 上浮）的未来开发计划（未实现） |
 | [app_layout.md](app_layout.md) | **应用散装形态**：exe 真实路径解析、UI 文件 6 级查找顺序、`src` 相对规则、`.bex` 容器的映射契约 |
 | [components.md](components.md) | **组件化**：`<use src="x.bum.html">` 编译期内联、参数/合并/CSS 作用域规则、`.bum` 二进制与运行时挂载、目录结构 |
-| [svg.md](svg.md) | **SVG 支持方案（方案稿，未实现）**：现状实测、`BINUI_PATH` 节点 + v15 路径段的格式、编译期 viewBox/变换/继承、三端共用扫描线填充、四阶段拆分与验收 |
+| [svg.md](svg.md) | **SVG 支持（P1 已实现）**：现状实测、`BINUI_PATH` 节点 + v15 路径段的格式、编译期 viewBox/变换/继承、三端共用扫描线填充、四阶段拆分与验收 |
 | [bex_container.md](bex_container.md) | **`.bex` 单文件容器规范（设计归档，暂不实现）**：ELF 自定义段 / PE 资源节承载 binUI 布局、节布局与 trailer |
 | [img/](img/) | 文档用图：默认布局渲染、字体渲染对比、伪类演示、语言绑定演示 |
 | [../tests/README.md](../tests/README.md) | **测试用例**：四个主题套件（CSS / 元素 / 字体与输入法 / C ABI）、无窗口能测什么、历史合并记录 |
@@ -25,7 +25,7 @@
 | [img/std-components.png](img/std-components.png) | `components/preview.html` 的离屏渲染（标准组件库全览） |
 | [img/animshow.png](img/animshow.png) | `examples/animshow` 的离屏渲染（关键帧 / 过渡；静态呈现，动态需真实运行） |
 | [img/fontshow.png](img/fontshow.png) | `examples/fontshow` 的离屏渲染（字号 / 字重 / 斜体 / 行高 / 文字装饰 + ⑤ 输入法区；组字串与候选框是运行时行为，静态图里看不到） |
-| [img/svgdemo.png](img/svgdemo.png) | `examples/svgdemo` 的**GL 真机截屏**（`<svg>` 矢量 + `<canvas>` 频谱；canvas 内容离屏渲染看不到） |
+| [img/svgdemo.png](img/svgdemo.png) | `examples/svgdemo` 的**GL 真机截屏**（`<svg>` 矢量 + 6 个现成 `<path>` 图标 + `<canvas>` 频谱；canvas 内容离屏渲染看不到） |
 | [img/cubedemo.png](img/cubedemo.png) | `examples/cubedemo` 的**GL 真机截屏**（应用自己算顶点/投影、用 `fillLine` 画的线框立方体；离屏渲染只有空画布） |
 | [img/texturedemo.png](img/texturedemo.png) | `examples/texturedemo` 的**GL 真机截屏**（`updateImageRaw` 每帧上传的程序化纹理多尺寸采样；离屏渲染拿不到运行时纹理） |
 | [img/python-binding.png](img/python-binding.png) | Python 绑定演示界面（`bindings/python/demo_ui.html`） |

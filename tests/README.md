@@ -6,7 +6,7 @@
 | 套件 | 覆盖什么 | 依赖 |
 |---|---|---|
 | [`test_css.cpp`](test_css.cpp) | CSS 属性落到节点字段的口径、选择器（单段）、伪元素 `::before/::after`、结构伪类、编译器告警、`docs/issues` 的编译器侧回归 | 核心库 |
-| [`test_elements.cpp`](test_elements.cpp) | 二进制格式往返、元素树与布局、命中测试与事件、伪元素绘制几何、圆角/边框条带、滚动、键盘路由（WASD 焦点 / 方向键滚页面 / 回车进出编辑 / 焦点环超时）、动画与过渡、热重载 | 核心库 |
+| [`test_elements.cpp`](test_elements.cpp) | 二进制格式往返、元素树与布局、命中测试与事件、伪元素绘制几何、圆角/边框条带、**SVG 路径几何与扫描线填充**（`suite_svgpath`：`d` 解析/细分精度/填充规则/条带合并/viewBox/transform/颜料继承）、滚动、键盘路由（WASD 焦点 / 方向键滚页面 / 回车进出编辑 / 焦点环超时）、动画与过渡、热重载 | 核心库 |
 | [`test_font.cpp`](test_font.cpp) | 字体发现 / 灰度光栅化 / 整形度量 / 豆腐块，以及**输入法（IME）的 UTF-16 光标桥接**（全角字、代理对 emoji、上屏插入、失焦提交） | 核心库 + FreeType/HarfBuzz |
 | [`test_capi.cpp`](test_capi.cpp) | C ABI 的字段顺序/返回值语义/两段式取文本（不开窗口） | 核心库 + GL 后端对象 |
 

@@ -1,6 +1,6 @@
 # 像素回归基准图
 
-`docs/pixels/*.png` 是 `docs/issues/assets/` 下四份自检布局的**基准渲染结果**（GDI 离屏）。
+`docs/pixels/*.png` 是 `docs/issues/assets/` 下五份自检布局的**基准渲染结果**（GDI 离屏）。
 
 ## 怎么用
 
