@@ -12,7 +12,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v12: 资源段（imageIndex -> 图片路径，布局自描述）+ 组件引用段（外挂 .bum 的锚点与路径）
 // v13: 扩展绘制段（文字色/四边边框/渐变底色/字重/行高/下划线），见 BinUIPaintNode
 // v14: 扩展绘制段追加 textFlags（斜体/占位符/只读/初始勾选），BinUIPaintNode 40 -> 44 字节
-constexpr uint32_t BINUI_VERSION    = 14;
+// v15: 路径段（SVG <path>/<ellipse> 的归一化折线），见 BinUIPathEntry
+constexpr uint32_t BINUI_VERSION    = 15;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -25,6 +26,9 @@ enum BinUINodeType : uint8_t {
     BINUI_SVG    = 7,   // <svg> 透明容器（子图形按容器坐标系定位，绘制裁剪到容器）
     BINUI_CANVAS = 8,   // <canvas> 绘制面：绘制其矩形 + 触发应用侧 canvas 回调
     BINUI_VIDEO  = 9,   // <video>：帧像素经伪 imageIndex 推送（updateImageRaw），控制条由后端绘制
+    // v15: SVG 路径。节点 x/y/w/h 就是几何包围盒（有描边时外扩 strokeW/2），
+    // 折线数据在同名路径段里（按 nodeId 索引），见 BinUIPathEntry。
+    BINUI_PATH   = 10,
 };
 
 enum BinUINodeFlag : uint8_t {
@@ -404,6 +408,62 @@ struct BinUIPaintNode {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIPaintNode) == 44, "BinUIPaintNode must be 44 bytes");
+
+// ============================================================
+// 路径段（v15，恒定写出，位于扩展绘制段之后、名称段之前）
+//
+// 为什么单独一段而不是复用扩展绘制段：路径数据是变长的（点数组），
+// 而 paint 段是定长条目数组，混在一起会让"按 nodeId 线性查找"变成跳读。
+//
+// 布局：uint32 pathBytes（0 = 无路径）+ uint32 pathCount
+//       + pathCount 条子记录，顺序拼接：
+//           BinUIPathEntry              定长头
+//           uint32 contourFirst[n]      每条子路径的起始**点下标**（升序）
+//           uint8  contourClosed[n]     1 = 原始 Z（描边时连接首尾）
+//           uint16 points[m*2]          归一化坐标（x,y 交替，0..65535 映射包围盒）
+//
+// 为什么存折线、不存 `d` 命令：运行期只做"归一化点 × 节点盒"的两次乘加，
+// 不用解析、不用缓存；曲线细分在编译期一次做完（容差按设备像素取）。
+// 代价是极限放大能看到折线 —— 这里留了 flags 位给将来的"命令 + 运行时再细分"。
+// ============================================================
+enum BinUIPathFlag : uint16_t {
+    PATH_FILL    = 1 << 0, // 填充（fill 有效且不透明）
+    PATH_STROKE  = 1 << 1, // 描边（stroke 有效且线宽 > 0）
+    PATH_EVENODD = 1 << 2, // fill-rule="evenodd"；否则非零环绕
+};
+
+enum BinUIPathJoin : uint8_t {
+    BINUI_JOIN_ROUND = 0, // 本版唯一实现（折线接缝补圆）
+    BINUI_JOIN_MITER = 1, // 预留
+    BINUI_JOIN_BEVEL = 2, // 预留
+};
+
+enum BinUIPathCap : uint8_t {
+    BINUI_CAP_BUTT   = 0, // 默认
+    BINUI_CAP_ROUND  = 1, // 预留
+    BINUI_CAP_SQUARE = 2, // 预留
+};
+
+#pragma pack(push, 1)
+struct BinUIPathEntry {
+    uint16_t nodeId;
+    uint16_t flags;         // BinUIPathFlag
+    uint32_t fillColor;     // AARRGGBB（已折入 fill-opacity / opacity）
+    uint32_t strokeColor;   // AARRGGBB（已折入 stroke-opacity / opacity）
+    // 编译期包围盒尺寸：运行期按 node.height / designH 求描边缩放系数。
+    // 归一化点已经自带缩放，只有线宽需要这个（与边框/字号同一条取舍：只跟纵向比例）。
+    float    designW;
+    float    designH;
+    uint16_t pointCount;    // 点总数（points 数组里是 2×pointCount 个 uint16）
+    uint16_t contourCount;  // 子路径数
+    uint8_t  strokeW;       // 设计线宽（像素，0 = 不描边）
+    uint8_t  join;          // BinUIPathJoin
+    uint8_t  cap;           // BinUIPathCap
+    uint8_t  reserve;
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUIPathEntry) == 28, "BinUIPathEntry must be 28 bytes");
+
 
 // 文字装饰线（下划线/删除线/上划线）在节点文字盒中的位置：
 // 后端只需按 (x, y, w, h) 画一条 height 高的实心条；返回值 0 = 该装饰线不需要画。

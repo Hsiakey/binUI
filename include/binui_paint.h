@@ -29,8 +29,10 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <vector>
 
 #include "binui_format.h"
+#include "binui_path.h"
 
 namespace binui {
 
@@ -615,8 +617,8 @@ inline bool PathNeedJoin(float ax, float ay, float bx, float by, float cx, float
     return cs < PathJoinCosThreshold();
 }
 
-// line(x0,y0,x1,y1) → 后端画一根 lineWidth 粗的线
-// dot(x,y,w,h,r)    → 后端画一个实心圆（转角补洞）
+// line(x0,y0,x1,y1,w) → 后端画一根 w 粗的线
+// dot(x,y,w,h,r)     → 后端画一个实心圆（转角补洞）
 // roundCap 为 true 时开放子路径的两端也补圆（P2 的 linecap=round）
 // 返回画出的线段数（供调用方估算开销）
 template <class LineFn, class DotFn>
@@ -636,7 +638,7 @@ inline int PaintPathStroke(const PaintPath& path, float width, bool roundCap,
             const uint32_t ib = first + (i + 1) % cnt;
             const float ax = path.pts[ia * 2], ay = path.pts[ia * 2 + 1];
             const float bx = path.pts[ib * 2], by = path.pts[ib * 2 + 1];
-            line(ax, ay, bx, by);
+            line(ax, ay, bx, by, width);
             segs++;
             // 顶点 b 上还有没有下一段：闭合子路径的最后一段也有
             const bool hasNext = (i + 1 < segCount) || closed;
@@ -655,6 +657,64 @@ inline int PaintPathStroke(const PaintPath& path, float width, bool roundCap,
         }
     }
     return segs;
+}
+
+// 渲染一个 BINUI_PATH 节点的全部几何：归一化点 → 设备折线 → 填充 + 描边。
+//
+// 三端共用：每端只传三个"怎么画"的回调（条带 / 线 / 圆），几何与颜色顺序只写一份。
+// 缓冲由后端持有（PathRenderBuffers），避免每帧分配。
+//
+// 颜色由调用方先乘好 opacity（GDI 端没有合成，淡出要折进 alpha）。
+// 描边线宽按"节点盒高 / 设计盒高"缩放：归一化点会自动跟随节点盒，线宽必须显式跟，
+// 否则等比缩放后"形状变大、线条没变粗"。与边框、字号只跟纵向比例是同一处取舍。
+struct PathRenderBuffers {
+    std::vector<PathPointF> pts;    // 设备坐标
+    std::vector<float> xy;          // PaintPath 需要的 x,y 交错布局
+    std::vector<PaintBand> bands;   // 填充条带（含降级重试时的容量）
+};
+
+template <class FillBands, class LineFn, class DotFn>
+inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
+                          const uint32_t* first, const uint32_t* count,
+                          const uint8_t* closed, int contours,
+                          float x, float y, float w, float h,
+                          uint32_t fillColor,
+                          PathRenderBuffers& buf,
+                          FillBands&& fillBands, LineFn&& line, DotFn&& dot) {
+    if (!normPts || !first || !count || contours <= 0 || head.pointCount == 0) return;
+    if (w <= 0.0f || h <= 0.0f) return;
+
+    const uint32_t total = head.pointCount;
+    buf.pts.resize(total);
+    buf.xy.resize(static_cast<size_t>(total) * 2);
+    DenormPoints(normPts, total, x, y, w, h, buf.pts.data());
+    for (uint32_t i = 0; i < total; i++) {
+        buf.xy[i * 2] = buf.pts[i].x;
+        buf.xy[i * 2 + 1] = buf.pts[i].y;
+    }
+    const PaintPath view{ buf.xy.data(), first, count, closed, contours };
+
+    if (head.flags & PATH_FILL) {
+        if (buf.bands.size() < static_cast<size_t>(kMaxPathBands))
+            buf.bands.resize(kMaxPathBands);
+        const bool evenOdd = (head.flags & PATH_EVENODD) != 0;
+        int n = 0;
+        bool truncated = false;
+        // 撞上限：按行步长降级重来（1 → 2 → 4 → 8），保证画完而不是画一半
+        for (int step = 1; step <= 8; step *= 2) {
+            n = BuildPathFillBands(view, evenOdd, x, y, x + w, y + h, fillColor,
+                                   buf.bands.data(), kMaxPathBands, step, &truncated);
+            if (!truncated) break;
+        }
+        if (n > 0) fillBands(buf.bands.data(), n);
+    }
+
+    if (head.flags & PATH_STROKE) {
+        const float k = head.designH > 0.0f ? h / head.designH : 1.0f;
+        const float sw = static_cast<float>(head.strokeW) * k;
+        if (sw > 0.05f)
+            PaintPathStroke(view, sw, head.cap == BINUI_CAP_ROUND, line, dot);
+    }
 }
 
 } // namespace binui

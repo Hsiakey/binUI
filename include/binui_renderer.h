@@ -104,6 +104,19 @@ public:
         auto it = paintIdx_.find(nodeId);
         return it == paintIdx_.end() ? nullptr : &paints_[it->second];
     }
+
+    // v15 路径段：BINUI_PATH 节点的折线（归一化坐标 + 子路径表；无条目返回 nullptr）
+    struct PathRecord {
+        BinUIPathEntry head{};
+        std::vector<uint16_t> pts;      // x,y 交替，0..65535 映射节点盒
+        std::vector<uint32_t> first;    // 每条子路径起始点下标
+        std::vector<uint32_t> count;    // 每条子路径点数
+        std::vector<uint8_t>  closed;   // 1 = 原始 Z
+    };
+    const PathRecord* pathOf(uint16_t nodeId) const {
+        auto it = pathIdx_.find(nodeId);
+        return it == pathIdx_.end() ? nullptr : &paths_[it->second];
+    }
     // 该节点是否只是"裁剪容器"（CSS overflow:hidden）：可裁剪但不可滚动
     bool isClipOnly(uint16_t nodeId) const { return clipOnly_.count(nodeId) != 0; }
     // 该节点是否可被滚轮/拖动滚动（SCROLLABLE 且不是 clip-only）
@@ -456,6 +469,8 @@ private:
     std::vector<ComponentRef> componentRefs_;            // v12 组件引用段：运行期挂载点
     std::vector<BinUIPaintNode> paints_;                 // v13 扩展绘制段
     std::unordered_map<uint16_t, size_t> paintIdx_;      // nodeId -> paints_ 下标
+    std::vector<PathRecord> paths_;                      // v15 路径段
+    std::unordered_map<uint16_t, size_t> pathIdx_;       // nodeId -> paths_ 下标
     // 边框宽度快照（与 paints_ 同下标）：ui_scale="fixed" 子树在等比缩放时按比例重设边框，
     // 每次都从这份原始值算，避免多次 setSize 累乘
     std::vector<std::array<uint8_t, 4>> designBorderW_;

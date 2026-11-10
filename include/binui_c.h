@@ -141,6 +141,7 @@ typedef struct BinUIEvent {
 #define BINUI_NODE_SVG    7
 #define BINUI_NODE_CANVAS 8
 #define BINUI_NODE_VIDEO  9
+#define BINUI_NODE_PATH   10  /* SVG 路径：x,y,w,h = 几何包围盒；折线在 v15 路径段里 */
 
 /* 节点标志位（BinUINodeFlag） */
 #define BINUI_NF_VISIBLE      (1u << 0)

@@ -768,7 +768,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             // GDI 没有 alpha 合成：全透明节点画出来是一块黑。图片/视频帧例外（只看自身像素）
             const bool drawsOwnPixels =
                 (node.type == BINUI_IMAGE && renderer.getImage(node.imageIndex) != nullptr) ||
-                node.type == BINUI_VIDEO;
+                node.type == BINUI_VIDEO || node.type == BINUI_PATH;
             if (!drawsOwnPixels) continue;
         }
 
@@ -1264,6 +1264,60 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             }
             default:
                 break;
+            case BINUI_PATH: {
+                // v15 SVG 路径：节点盒 = 几何包围盒，折线在路径段里。
+                // 填充走条带 + FillPaintBands（GDI 没有 alpha 合成，按页面底色混合近似）；
+                // 描边逐段画线、转角补圆 —— 几何与 GL/D3D 共用 binui_paint.h 那一份。
+                const auto* pr = renderer.pathOf(node.id);
+                if (!pr || pr->first.empty()) break;
+                const float pop = disabled ? renderer.drawOpacity(node.id) * 0.55f
+                                           : renderer.drawOpacity(node.id);
+                auto fadeA = [&](uint32_t c) -> uint32_t {
+                    if (pop >= 1.0f) return c;
+                    const uint32_t a = (uint32_t)(((c >> 24) & 0xFFu) * pop + 0.5f);
+                    return (a << 24) | (c & 0x00FFFFFFu);
+                };
+                const uint32_t pfc = fadeA(pr->head.fillColor);
+                const uint32_t psc = fadeA(pr->head.strokeColor);
+                const uint32_t pbg = underBg;   // 与边框/文字同一底色口径
+                static thread_local binui::PathRenderBuffers pbuf;
+                // 描边笔按宽度缓存：一条折线几十上百段，每段建/删笔纯属浪费
+                HPEN pen = nullptr;
+                int penW = -1;
+                auto penFor = [&](float lw) -> HPEN {
+                    const int iw = std::max(1, (int)std::lround(lw));
+                    if (pen && penW == iw) return pen;
+                    if (pen) DeleteObject(pen);
+                    const uint32_t c = BlendOver(psc, pbg);
+                    pen = CreatePen(PS_SOLID, iw, RGB((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF));
+                    penW = iw;
+                    return pen;
+                };
+                binui::PaintPathNode(
+                    pr->head, pr->pts.data(), pr->first.data(), pr->count.data(),
+                    pr->closed.data(), static_cast<int>(pr->first.size()),
+                    nfx, nfy, nfw, nfh, pfc, pbuf,
+                    [&](const binui::PaintBand* b, int n) { FillPaintBands(hdc, b, n, pbg); },
+                    [&](float x0, float y0, float x1, float y1, float lw) {
+                        HPEN hp = penFor(lw);
+                        if (!hp) return;
+                        HGDIOBJ old = SelectObject(hdc, hp);
+                        MoveToEx(hdc, (int)std::lround(x0), (int)std::lround(y0), nullptr);
+                        LineTo(hdc, (int)std::lround(x1), (int)std::lround(y1));
+                        SelectObject(hdc, old);
+                    },
+                    [&](float rx, float ry, float rw, float rh, float) {
+                        const uint32_t c = BlendOver(psc, pbg);
+                        HBRUSH br = CreateSolidBrush(RGB((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF));
+                        HGDIOBJ ob = SelectObject(hdc, br);
+                        Ellipse(hdc, (int)std::lround(rx), (int)std::lround(ry),
+                                (int)std::lround(rx + rw), (int)std::lround(ry + rh));
+                        SelectObject(hdc, ob);
+                        DeleteObject(br);
+                    });
+                if (pen) DeleteObject(pen);
+                break;
+            }
         }
 
         // 边框（v13）：画在节点内侧，四边可不同宽，压在底色之上

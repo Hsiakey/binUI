@@ -4,6 +4,7 @@
 #include "binui_format.h"
 #include "binui_link.h"
 #include "binui_srcmap.h"
+#include "binui_path.h"            // SVG 路径几何：d 解析 / 细分 / 包围盒（与运行期同一份数学）
 #include "binui_text_estimate.h"   // 文本尺寸粗估：与渲染器运行期 setText 重算共用同一口径
 
 #include <fstream>
@@ -1056,6 +1057,39 @@ static void AppendPaintSection(std::vector<uint8_t>& buf,
     memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
 
+// 路径段的编译期暂存：定长头 + 三条变长表（子路径起点 / 闭合标记 / 归一化点）
+// 点用 uint16 归一化存（0..65535 映射包围盒），比 float 省一半且精度远超显示能力。
+struct PendingPath {
+    BinUIPathEntry head = {};
+    std::vector<uint32_t> first;
+    std::vector<uint8_t>  closed;
+    std::vector<uint16_t> pts;
+};
+
+// 追加路径段（v15）：uint32 pathBytes + uint32 pathCount + 每条子记录
+// 恒定写出（无路径时 pathBytes=4），位于扩展绘制段之后、名称段之前。
+static void AppendPathSection(std::vector<uint8_t>& buf,
+                              const std::vector<PendingPath>& paths) {
+    size_t start = buf.size();
+    std::vector<uint8_t> data;
+    auto wbytes = [&](const void* p, size_t n) {
+        const uint8_t* b = static_cast<const uint8_t*>(p);
+        data.insert(data.end(), b, b + n);
+    };
+    uint32_t count = (uint32_t)paths.size();
+    wbytes(&count, sizeof(count));
+    for (const PendingPath& pp : paths) {
+        wbytes(&pp.head, sizeof(pp.head));
+        if (!pp.first.empty())  wbytes(pp.first.data(),  pp.first.size()  * sizeof(uint32_t));
+        if (!pp.closed.empty()) wbytes(pp.closed.data(), pp.closed.size());
+        if (!pp.pts.empty())    wbytes(pp.pts.data(),    pp.pts.size()    * sizeof(uint16_t));
+    }
+    uint32_t nbytes = (uint32_t)data.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
+
 std::vector<uint8_t> CompileBinUISource(const std::string& source) {    return CompileBinUIEx(source).layout;
 }
 
@@ -1733,6 +1767,7 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     }
     AppendComponentSection(buf, {}); // XML 路径：无 <use>，段恒定写出保证解析链确定
     AppendPaintSection(buf, {});     // v13：XML 路径无扩展绘制，段同样恒定写出
+    AppendPathSection(buf, {});      // v15：XML 路径无 SVG 路径，段同样恒定写出
     AppendNameSection(buf, nodeNames, offsets);
 
     return buf;
@@ -2321,6 +2356,9 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "volume", "autoplay", "loop", "muted", "controls",
         "points", "stroke", "stroke-width", "fill", "rx", "cx", "cy", "r",
         "x1", "y1", "x2", "y2",
+        // v15 SVG 路径：d 是路径数据；其余是描边/填充规则的表现属性
+        "d", "ry", "fill-rule", "fill-opacity", "stroke-opacity",
+        "stroke-linecap", "stroke-linejoin", "stroke-dasharray",
     };
     return kSet;
 }
@@ -3083,6 +3121,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (tag == "svg") return BINUI_SVG;
         if (tag == "canvas") return BINUI_CANVAS;
         if (tag == "line") return BINUI_LINE;
+        if (tag == "path" || tag == "ellipse") return BINUI_PATH;
         if (tag == "video") return BINUI_VIDEO;
         if (tag == "rect" || tag == "circle") return BINUI_LIST;
         return BINUI_LIST;
@@ -3704,6 +3743,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::vector<BinUIVideoDesc> videoDescs;    // v9 视频描述段（<video> 节点）
     std::vector<BinUIStateStyle> stateStyles;  // v11 状态样式段（:hover/:active/:focus/:checked）
     std::vector<BinUIPaintNode> paintNodes;    // v13 扩展绘制段（文字色/边框/渐变/字重/行高/装饰）
+    std::vector<PendingPath> pendingPaths;     // v15 路径段（SVG <path>/<ellipse> 的折线）
     std::vector<std::string> strings;
     strings.push_back(""); // 字符串表首位 = 空串：无文本节点的 textOffset=0 指向空串
     std::unordered_map<uint32_t, std::string> textMap;
@@ -3983,6 +4023,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             "input", "button", "video", "img", "source", "track", "titlebar", "use", "component",
             // 向量/画布
             "svg", "canvas", "line", "circle", "rect", "polyline", "polygon",
+            "path", "ellipse",
         };
         // 认得但只能糊弄过去的标签：明确说清楚会变成什么，别让人以为生效了
         static const std::unordered_map<std::string, const char*> kShimTags = {
@@ -4005,13 +4046,11 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             { "include", "<include> 不生效：组件内联用 <use src=\"x.bum.html\">（成对写法也可以，"
                          "宿主子元素会落进组件根容器）" },
             { "import", "<import> 不生效：组件内联用 <use src=\"x.bum.html\">" },
-            // ---- SVG：支持 svg/line/circle/rect/polyline/polygon，其余别猜 ----
+            // ---- SVG：path/ellipse/line/circle/rect/polyline/polygon 已支持，其余别猜 ----
             // 这些标签被"当普通容器"时画面是**空**的（不是画歪了），所以必须说清楚换成什么，
             // 否则作者只会看到自己那一段什么都不显示，以为是自己写错了。
+            // v15 起 path/ellipse 已实现，从这张表里移出（kKnownTags 里有了）。
             { "g", "<g> 只作分组容器：transform/rotate 之类不生效，子元素按容器内绝对坐标画" },
-            { "path", "<path> 不支持（没有路径解析）：用 <line>/<polyline>/<polygon> 拼，"
-                      "或改用 <canvas> 命令式绘制" },
-            { "ellipse", "<ellipse> 不支持（只有正圆）：用 <circle> 或 <rect rx> 代替" },
             { "text", "SVG <text> 不支持：用普通 <span> 绝对定位到同一坐标" },
             { "tspan", "SVG <tspan> 不支持：用普通 <span>" },
             { "defs", "SVG <defs> 不支持：没有 defs/use 引用机制" },
@@ -4278,6 +4317,75 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             continue; // 不生成普通节点、不推容器上下文
         }
 
+        // <path d="…"> / <ellipse cx cy rx ry>：编译期细分成折线
+        //
+        // 坐标与 <line>/<circle> 一致：svg 容器坐标系（pc.ox/pc.oy 为内容盒原点），
+        // 节点盒 = 几何包围盒（有描边时外扩 strokeW/2，笔画就不会溢出节点盒、命中区也盖得住）。
+        // 细分容差 0.1 用户单位：24 单位的图标 ≈ 0.1px，放大 3 倍也就 0.3px。
+        // 归一化点由路径段存，运行期只做"归一化点 × 节点盒"，不重算曲线。
+        PathShape svgPathShape;
+        bool hasSvgPath = false;
+        bool pathFill = true, pathEvenOdd = false, pathStroke = false;
+        uint32_t pathFillColor = 0xFF000000u, pathStrokeColor = 0xFF000000u;
+        float pathStrokeW = 0.0f;
+        if (e.tag == "path" || e.tag == "ellipse") {
+            if (e.tag == "path") {
+                const std::string d = e.attrs.count("d") ? e.attrs.at("d") : "";
+                std::string perr;
+                if (d.empty()) {
+                    Warn("<path> 没有 d 属性（空路径不生成节点）");
+                } else if (!ParsePathData(d, 0.1f, svgPathShape, &perr)) {
+                    Warn("<path> 的 d 解析失败：" + perr);
+                }
+            } else {
+                const float ecx = parseLen(e.attrs.count("cx") ? e.attrs.at("cx") : "", 0);
+                const float ecy = parseLen(e.attrs.count("cy") ? e.attrs.at("cy") : "", 0);
+                const float erx = parseLen(e.attrs.count("rx") ? e.attrs.at("rx") : "", 0);
+                const float ery = parseLen(e.attrs.count("ry") ? e.attrs.at("ry") : "", 0);
+                if (erx <= 0.0f || ery <= 0.0f) Warn("<ellipse> 的 rx/ry 必须大于 0（跳过）");
+                else AppendEllipse(svgPathShape, ecx, ecy, erx, ery, 0.1f);
+            }
+            if (svgPathShape.truncated)
+                Warn("<path> 细分点数超过上限已截断：简化路径或拆成多段");
+            if (!svgPathShape.Empty()) {
+                // fill / stroke：属性优先（与其它 SVG 属性同一口径），none = 不画
+                const std::string fl = pick(e.attrs, style, "fill", "fill", "");
+                const std::string st = pick(e.attrs, style, "stroke", "stroke", "");
+                const std::string swt = pick(e.attrs, style, "stroke-width", "stroke-width", "");
+                pathFill = !(lowerStr(fl) == "none");
+                if (pathFill) pathFillColor = fl.empty() ? 0xFF000000u : parseColor(fl); // SVG 默认黑填充
+                pathStroke = !st.empty() && lowerStr(st) != "none";
+                if (pathStroke) {
+                    pathStrokeColor = parseColor(st);
+                    pathStrokeW = parseLen(swt, 1.0f);
+                    if (pathStrokeW < 0.0f) pathStrokeW = 0.0f;
+                    if (pathStrokeW <= 0.0f) pathStroke = false;
+                }
+                pathEvenOdd = lowerStr(pick(e.attrs, style, "fill-rule", "fill-rule", "")) == "evenodd";
+                // 半透明折进 alpha（与 static opacity 同一做法，不做离屏合成）
+                auto fade = [&](uint32_t c, const char* key) {
+                    auto oit = style.find(key);
+                    if (oit == style.end()) return c;
+                    float op = parseLen(oit->second, 1.0f, key);
+                    op = op < 0.0f ? 0.0f : (op > 1.0f ? 1.0f : op);
+                    const uint32_t a = (uint32_t)(((c >> 24) & 0xFFu) * op + 0.5f);
+                    return (a << 24) | (c & 0x00FFFFFFu);
+                };
+                pathFillColor = fade(pathFillColor, "fill-opacity");
+                pathStrokeColor = fade(pathStrokeColor, "stroke-opacity");
+                if (pathStroke) {   // 描边外扩后才是节点盒
+                    const float e2 = pathStrokeW * 0.5f;
+                    svgPathShape.minX -= e2; svgPathShape.minY -= e2;
+                    svgPathShape.maxX += e2; svgPathShape.maxY += e2;
+                }
+                if (svgPathShape.Width() <= 0.0f || svgPathShape.Height() <= 0.0f) {
+                    Warn("<path> 的包围盒为零（跳过：只有水平/垂直直线时请改用 <line>）");
+                } else {
+                    hasSvgPath = true;   // 包围盒在 <line>/<circle> 那段统一落进 sx/sy/sw/sh
+                }
+            }
+        }
+
         // 局部（父级相对）定位值；x/y/w/h 支持 %（相对父容器内容盒）
         float lx = 0, ly = 0, lh = defaultHeight(e.tag, type);
         bool hasX = false, hasY = false, hasW = false;
@@ -4357,6 +4465,12 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             sx = std::to_string(cx - svgR); sy = std::to_string(cy - svgR);
             sw = std::to_string(2 * svgR); sh = std::to_string(2 * svgR);
 
+        } else if (hasSvgPath) {
+            // <path>/<ellipse>：几何包围盒（含描边外扩）当作节点盒
+            sx = std::to_string(svgPathShape.minX);
+            sy = std::to_string(svgPathShape.minY);
+            sw = std::to_string(svgPathShape.Width());
+            sh = std::to_string(svgPathShape.Height());
         }
 
         // <br>：换行占位——块式布局下每个元素已独占一行，br 只占零高度
@@ -4804,6 +4918,31 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 
         nodes.push_back(n);
 
+        // v15 路径段：把折线存进来（节点盒已经是几何包围盒，见上面的 <path> 分支）
+        if (hasSvgPath) {
+            PendingPath pp;
+            pp.head.nodeId = n.id;
+            pp.head.flags = (pathFill ? PATH_FILL : 0) |
+                            (pathStroke ? PATH_STROKE : 0) |
+                            (pathEvenOdd ? PATH_EVENODD : 0);
+            pp.head.fillColor = pathFillColor;
+            pp.head.strokeColor = pathStrokeColor;
+            pp.head.designW = svgPathShape.Width();
+            pp.head.designH = svgPathShape.Height();
+            pp.head.strokeW = (uint8_t)std::min(255.0f, pathStrokeW);
+            pp.head.join = BINUI_JOIN_ROUND;
+            pp.head.cap = BINUI_CAP_BUTT;
+            PathNormData nd;
+            if (NormalizeShape(svgPathShape, nd)) {
+                pp.head.pointCount = (uint16_t)std::min<size_t>(65535, nd.pts.size() / 2);
+                pp.head.contourCount = (uint16_t)std::min<size_t>(65535, nd.contourFirst.size());
+                pp.pts = std::move(nd.pts);
+                pp.first = std::move(nd.contourFirst);
+                pp.closed = std::move(nd.contourClosed);
+                pendingPaths.push_back(std::move(pp));
+            }
+        }
+
         // v8 名称表：HTML id 属性 -> 节点名（运行时 findNodeByName 查找）
         if (e.attrs.count("id") && !e.attrs.at("id").empty())
             nodeNames.push_back({ n.id, getOrAddString(e.attrs.at("id")) });
@@ -5133,6 +5272,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         AppendComponentSection(buf, refs);
     }
     AppendPaintSection(buf, paintNodes);
+    AppendPathSection(buf, pendingPaths);
     AppendNameSection(buf, nodeNames, offsets);
 
     // ---- 6. 二进制组件：编译期离线合并 ----
@@ -5334,6 +5474,7 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     AppendImageSection(buf, {});
     AppendComponentSection(buf, {});
     AppendPaintSection(buf, {});
+    AppendPathSection(buf, {});      // v15：默认布局没有 SVG，段恒定写出保证解析链确定
 
     return buf;
 }

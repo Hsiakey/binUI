@@ -2659,7 +2659,7 @@ static void TestStroke() {
     DevicePath dev = ToDevice(sq);
     int lines = 0, dots = 0;
     const int segs = PaintPathStroke(dev.view(), 2.0f, false,
-        [&](float, float, float, float) { lines++; },
+        [&](float, float, float, float, float) { lines++; },
         [&](float, float, float, float, float) { dots++; });
     CHECK(segs == 4 && lines == 4, "描边：闭合路径段数 = 点数");
     CHECK(dots == 4, "描边：四个直角各补一个圆点");
@@ -2669,10 +2669,78 @@ static void TestStroke() {
     DevicePath odev = ToDevice(open);
     lines = dots = 0;
     const int osegs = PaintPathStroke(odev.view(), 2.0f, false,
-        [&](float, float, float, float) { lines++; },
+        [&](float, float, float, float, float) { lines++; },
         [&](float, float, float, float, float) { dots++; });
     CHECK(osegs == 2 && lines == 2, "描边：开放路径段数 = 点数-1");
     CHECK(dots == 1, "描边：只在真实转角补点");
+}
+
+// 编译 → 加载 → 路径段往返：<path>/<ellipse> 必须编成 BINUI_PATH 节点，
+// 节点盒 = 几何包围盒，路径段里的折线能被渲染器取到（这是 B 阶段"端到端通"的证据）。
+static void TestCompileAndLoad() {
+    const char* html =
+        "<app_window width=\"220\" height=\"120\">\n"
+        "<html width=\"220\" height=\"120\" bg=\"#000000\">\n<body>\n"
+        "<svg width=\"220\" height=\"120\">\n"
+        "  <path d=\"M0 0 H100 V100 H0 Z M30 30 H70 V70 H30 Z\" fill=\"#FF3B30\" fill-rule=\"evenodd\"/>\n"
+        "  <ellipse cx=\"170\" cy=\"60\" rx=\"30\" ry=\"20\" fill=\"#34C759\"/>\n"
+        "  <path d=\"M20 0 L60 0 L40 30 Z\" fill=\"none\" stroke=\"#0A84FF\" stroke-width=\"4\"/>\n"
+        "</svg>\n</body></html></app_window>\n";
+    auto res = binui::CompileBinUIEx(html);
+    CHECK(!res.layout.empty(), "编译：产出布局");
+    for (const auto& w : res.warnings) std::printf("  [svgpath][warn] %s\n", w.c_str());
+    CHECK(res.warnings.empty(), "编译：<path>/<ellipse> 不再报警告");
+
+    BinUIRenderer r;
+    CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "加载：布局可解析（v15）");
+
+    std::vector<uint16_t> pathIds;
+    for (const auto& n : r.getNodes())
+        if (n.type == BINUI_PATH) pathIds.push_back(n.id);
+    CHECK(pathIds.size() == 3, "加载：三个图形都是 BINUI_PATH 节点");
+    if (pathIds.size() == 3) {
+        const BinUIRenderer::NodeInfo* donut = nullptr;
+        const BinUIRenderer::NodeInfo* ell = nullptr;
+        const BinUIRenderer::NodeInfo* tri = nullptr;
+        for (const auto& n : r.getNodes()) {
+            if (n.id == pathIds[0]) donut = &n;
+            if (n.id == pathIds[1]) ell = &n;
+            if (n.id == pathIds[2]) tri = &n;
+        }
+        if (donut) {
+            std::printf("  [svgpath] donut 盒 = (%.1f,%.1f %.1fx%.1f)\n",
+                        (double)donut->x, (double)donut->y,
+                        (double)donut->width, (double)donut->height);
+            CHECK_NEAR(donut->x, 0, 1.0f, "包围盒：环的左侧");
+            CHECK_NEAR(donut->width, 100, 1.0f, "包围盒：环的宽度");
+            CHECK_NEAR(donut->height, 100, 1.0f, "包围盒：环的高度");
+        }
+        if (ell) {
+            CHECK_NEAR(ell->width, 60, 1.0f, "包围盒：椭圆宽 = 2rx");
+            CHECK_NEAR(ell->height, 40, 1.0f, "包围盒：椭圆高 = 2ry");
+        }
+        if (tri) {
+            // fill=none + stroke-width 4：盒要外扩 2px
+            CHECK_NEAR(tri->height, 34, 1.5f, "包围盒：描边外扩（高 + strokeW）");
+        }
+        const auto* rec = r.pathOf(pathIds[0]);
+        CHECK(rec != nullptr, "路径段：环能取到记录");
+        if (rec) {
+            CHECK(rec->head.contourCount == 2, "路径段：两条子路径（外框 + 洞）");
+            CHECK((rec->head.flags & PATH_FILL) != 0, "路径段：填充位");
+            CHECK((rec->head.flags & PATH_EVENODD) != 0, "路径段：evenodd 位");
+            CHECK(rec->pts.size() == (size_t)rec->head.pointCount * 2, "路径段：点在表内");
+            CHECK(!rec->count.empty() && rec->count[0] >= 4, "路径段：子路径点数派生正确");
+            // 归一化：所有点都在 0..65535
+            bool inRange = true;
+            for (uint16_t v : rec->pts) if (v > kPathNormMax) inRange = false;
+            CHECK(inRange, "路径段：归一化坐标在 0..65535");
+        }
+        const auto* trec = r.pathOf(pathIds[2]);
+        CHECK(trec && (trec->head.flags & PATH_STROKE) && !(trec->head.flags & PATH_FILL),
+              "路径段：fill=none 的三角只有描边位");
+        CHECK(trec && trec->head.strokeW == 4, "路径段：stroke-width 落库");
+    }
 }
 
 static int run() {
@@ -2680,6 +2748,7 @@ static int run() {
     TestParse();
     TestFill();
     TestStroke();
+    TestCompileAndLoad();
     std::printf("[suite_svgpath] %s\n", g_fail ? "FAILED" : "全部通过");
     return g_fail;
 }

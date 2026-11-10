@@ -17,6 +17,14 @@ namespace {
 // ============================================================
 // 布局文档：把二进制拆成可合并的结构，再按 v12 段序重新写出
 // ============================================================
+// 路径段（v15）的一条子记录：定长头 + 三条变长表
+struct DocPath {
+    BinUIPathEntry head{};
+    std::vector<uint32_t> first;
+    std::vector<uint8_t>  closed;
+    std::vector<uint16_t> pts;
+};
+
 struct Doc {
     uint32_t magic = BINUI_MAGIC;
     std::vector<BinUINode> nodes;
@@ -38,6 +46,7 @@ struct Doc {
     std::vector<std::string> images;
     std::vector<ComponentRef> comps;
     std::vector<BinUIPaintNode> paints;   // v13 扩展绘制段
+    std::vector<DocPath> paths;           // v15 路径段
     std::vector<std::pair<uint16_t, std::string>> names;
 };
 
@@ -351,6 +360,53 @@ bool ParseDoc(const void* data, size_t size, Doc& d) {
         if (!ok) r.rewind(mark);
     }
 
+    // ---- 路径段（v15）：uint32 bytes + uint32 count + 每条 {头 + 子路径表 + 点} ----
+    {
+        const uint8_t* mark = r.cur();
+        uint32_t bytes = 0;
+        bool ok = false;
+        if (r.u32(bytes)) {
+            if (bytes == 0) {
+                ok = true;
+            } else {
+                const uint8_t* pp = nullptr;
+                if (r.blob(bytes, pp)) {
+                    Reader p(pp, pp + bytes);
+                    uint32_t pc = 0;
+                    if (p.u32(pc)) {
+                        bool good = true;
+                        for (uint32_t i = 0; i < pc && good; i++) {
+                            const uint8_t* hp = nullptr;
+                            const uint8_t* hpEnd = nullptr;
+                            if (!p.blob(sizeof(BinUIPathEntry), hp)) { good = false; break; }
+                            hpEnd = hp + sizeof(BinUIPathEntry);
+                            (void)hpEnd;
+                            DocPath dp;
+                            std::memcpy(&dp.head, hp, sizeof(BinUIPathEntry));
+                            const size_t cbytes = (size_t)dp.head.contourCount * sizeof(uint32_t);
+                            const uint8_t* cp = nullptr;
+                            if (!p.blob(cbytes, cp)) { good = false; break; }
+                            dp.first.resize(dp.head.contourCount);
+                            if (cbytes) std::memcpy(dp.first.data(), cp, cbytes);
+                            const uint8_t* cp2 = nullptr;
+                            if (!p.blob(dp.head.contourCount, cp2)) { good = false; break; }
+                            dp.closed.assign(cp2, cp2 + dp.head.contourCount);
+                            const size_t pbytes = (size_t)dp.head.pointCount * 2 * sizeof(uint16_t);
+                            const uint8_t* pp2 = nullptr;
+                            if (!p.blob(pbytes, pp2)) { good = false; break; }
+                            dp.pts.resize((size_t)dp.head.pointCount * 2);
+                            if (pbytes) std::memcpy(dp.pts.data(), pp2, pbytes);
+                            d.paths.push_back(std::move(dp));
+                        }
+                        ok = good && p.left() == 0;
+                    }
+                }
+                if (!ok) { d.paths.clear(); r.rewind(mark); }
+            }
+        }
+        if (!ok) r.rewind(mark);
+    }
+
     // ---- 名称段（v8，缺失 = 无命名节点） ----
     {
         uint32_t bytes = 0;
@@ -486,6 +542,18 @@ std::vector<uint8_t> EmitDoc(Doc& d) {
         std::vector<uint8_t> p;
         PutU32(p, static_cast<uint32_t>(d.paints.size()));
         if (!d.paints.empty()) PutRaw(p, d.paints.data(), d.paints.size() * sizeof(BinUIPaintNode));
+        PutSection(b, p);
+    }
+    // 路径段（v15，恒定写出；空段 = 只有计数 0，与编译器一致）
+    {
+        std::vector<uint8_t> p;
+        PutU32(p, static_cast<uint32_t>(d.paths.size()));
+        for (const DocPath& dp : d.paths) {
+            PutRaw(p, &dp.head, sizeof(dp.head));
+            if (!dp.first.empty())  PutRaw(p, dp.first.data(),  dp.first.size() * sizeof(uint32_t));
+            if (!dp.closed.empty()) PutRaw(p, dp.closed.data(), dp.closed.size());
+            if (!dp.pts.empty())    PutRaw(p, dp.pts.data(),    dp.pts.size() * sizeof(uint16_t));
+        }
         PutSection(b, p);
     }
     // 名称段（非空才写）
@@ -717,6 +785,15 @@ bool MergeLayout(std::vector<uint8_t>& host, const void* comp, size_t compSize,
         BinUIPaintNode p2 = p;
         p2.nodeId = idMap[it->second];
         h.paints.push_back(p2);
+    }
+
+    // ---- 路径段（v15）：组件里的 SVG 路径折线跟着 nodeId 重映射搬过来 ----
+    for (const DocPath& dp : c.paths) {
+        auto it = compIdx.find(dp.head.nodeId);
+        if (it == compIdx.end() || it->second == 0) continue;
+        DocPath d2 = dp;
+        d2.head.nodeId = idMap[it->second];
+        h.paths.push_back(std::move(d2));
     }
 
     // ---- 组件引用段（组件内再外挂组件时递归） ----

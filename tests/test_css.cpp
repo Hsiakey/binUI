@@ -1784,7 +1784,7 @@ int run() {
         auto res = CompileBinUIEx(html);
         BinUIRenderer r;
         TEST("v14: 布局可解析", ParseInto(r, res.layout));
-        TEST("v14: 版本号 14", BINUI_VERSION == 14);
+        TEST("v14: 版本号 >= 14", BINUI_VERSION >= 14);
 
         auto byId = [&](const char* name) -> uint16_t { return r.findNodeByName(name); };
         auto nodeOf = [&](uint16_t id) -> const BinUIRenderer::NodeInfo* {

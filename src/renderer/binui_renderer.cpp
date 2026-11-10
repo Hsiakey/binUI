@@ -588,8 +588,56 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
     for (const auto& pn : paints_)
         if (pn.textFlags & TEXT_CHECKED) checkedNodes_.insert(pn.nodeId);
 
+    // ---- 路径段（v15）：uint32 pathBytes + uint32 pathCount + 每条子记录 ----
+    // 段序（v15）：窗口 / 动画 / 视频 / 状态样式 / 资源 / 组件引用 / 扩展绘制 / 路径 / 名称
+    paths_.clear();
+    pathIdx_.clear();
+    if (const uint8_t* pp = sectionAt(7)) {
+        uint32_t pb = 0;
+        memcpy(&pb, pp, sizeof(pb));
+        const size_t avail = size - static_cast<size_t>(pp - data);
+        if (pb >= sizeof(uint32_t) && avail >= sizeof(uint32_t) + pb) {
+            const uint8_t* q = pp + sizeof(uint32_t);
+            const uint8_t* qend = q + pb;
+            uint32_t pc = 0;
+            memcpy(&pc, q, sizeof(pc));
+            q += sizeof(pc);
+            for (uint32_t i = 0; i < pc && q + sizeof(BinUIPathEntry) <= qend; i++) {
+                BinUIPathEntry h;
+                memcpy(&h, q, sizeof(h));
+                q += sizeof(h);
+                const size_t need = static_cast<size_t>(h.contourCount) * (sizeof(uint32_t) + 1) +
+                                    static_cast<size_t>(h.pointCount) * 2 * sizeof(uint16_t);
+                if (q + need > qend) break;   // 数据损坏：后面条目的边界也不可信
+                if (!nodeIndexById_.count(h.nodeId)) { q += need; continue; }  // 悬空条目防御
+                PathRecord rec;
+                rec.head = h;
+                rec.first.resize(h.contourCount);
+                if (h.contourCount)
+                    memcpy(rec.first.data(), q, static_cast<size_t>(h.contourCount) * sizeof(uint32_t));
+                q += static_cast<size_t>(h.contourCount) * sizeof(uint32_t);
+                rec.closed.resize(h.contourCount);
+                if (h.contourCount) memcpy(rec.closed.data(), q, h.contourCount);
+                q += h.contourCount;
+                rec.pts.resize(static_cast<size_t>(h.pointCount) * 2);
+                if (h.pointCount)
+                    memcpy(rec.pts.data(), q,
+                           static_cast<size_t>(h.pointCount) * 2 * sizeof(uint16_t));
+                q += static_cast<size_t>(h.pointCount) * 2 * sizeof(uint16_t);
+                // 派生表：绘制要用"每条子路径的点数"（段里只存起点，省 4 字节/条）
+                rec.count.resize(h.contourCount);
+                for (uint32_t c = 0; c < h.contourCount; c++) {
+                    const uint32_t next = (c + 1u < h.contourCount) ? rec.first[c + 1] : h.pointCount;
+                    rec.count[c] = next > rec.first[c] ? next - rec.first[c] : 0;
+                }
+                pathIdx_[h.nodeId] = paths_.size();
+                paths_.push_back(std::move(rec));
+            }
+        }
+    }
+
     nameToId_.clear();
-    if (const uint8_t* np = sectionAt(7)) {
+    if (const uint8_t* np = sectionAt(8)) {
         uint32_t nbytes = 0;
         memcpy(&nbytes, np, sizeof(uint32_t));
         if (nbytes > 0 && size - static_cast<size_t>(np - data) >= sizeof(uint32_t) + nbytes) {
@@ -2920,7 +2968,10 @@ void BinUIRenderer::clippingAncestors(uint16_t nodeId, std::vector<uint16_t>& ou
         if (pit == nodeIndexById_.end()) break;
         cur = pit->second;
         const auto& par = nodes_[cur];
-        if (par.flags & BINUI_SCROLLABLE) out.push_back(par.id);
+        // 裁剪祖先：滚动/裁剪容器（overflow）与 <svg> 容器。
+        // <svg> 的默认 overflow 就是 hidden（浏览器语义），而 v14 及以前三端都没实现，
+        // 子图形会画到容器外面 —— 这里补上，路径溢出才能被容器边界收住。
+        if ((par.flags & BINUI_SCROLLABLE) || par.type == BINUI_SVG) out.push_back(par.id);
     }
 }
 
