@@ -4640,6 +4640,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         bool pathFill = true, pathEvenOdd = false, pathStroke = false;
         uint32_t pathFillColor = 0xFF000000u, pathStrokeColor = 0xFF000000u;
         float pathStrokeW = 0.0f;
+        uint8_t pathCap = BINUI_CAP_BUTT;   // stroke-linecap
         // <path>/<ellipse>：永远是路径。
         // <circle>/<rect>：只有在**带描边**时才编成路径 —— 轻量映射（LIST + radius）
         // 只能表达一个颜色，fill 与 stroke 并存走不通；没有描边时继续走轻量映射，
@@ -4729,6 +4730,23 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                             pathStroke = false;
                         }
                     }
+                }
+                // stroke-linecap：只有 round 有实现（两端补圆点），square 按 butt 画并告警。
+                // 连接方式目前固定圆角（转角 > 15° 补圆点），miter/bevel 未实现。
+                if (pathStroke) {
+                    std::string lc = style.count("stroke-linecap") ? style.at("stroke-linecap") : "";
+                    if (lc.empty() && e.attrs.count("stroke-linecap"))
+                        lc = e.attrs.at("stroke-linecap");
+                    lc = lowerStr(lc);
+                    if (lc == "round") pathCap = BINUI_CAP_ROUND;
+                    else if (lc == "square")
+                        Warn("stroke-linecap=\"square\" 未实现，按 butt 画（需要方头请把路径两端各延长半个线宽）");
+                    std::string lj = style.count("stroke-linejoin") ? style.at("stroke-linejoin") : "";
+                    if (lj.empty() && e.attrs.count("stroke-linejoin"))
+                        lj = e.attrs.at("stroke-linejoin");
+                    lj = lowerStr(lj);
+                    if (lj == "miter" || lj == "miter-clip" || lj == "bevel")
+                        Warn("stroke-linejoin=\"" + lj + "\" 未实现，按圆角连接画（尖角图标会更圆）");
                 }
                 if (pathStroke) {   // 描边外扩后才是节点盒
                     const float e2 = pathStrokeW * 0.5f;
@@ -5355,7 +5373,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             pp.head.designH = svgPathShape.Height();
             pp.head.strokeW = (uint8_t)std::min(255.0f, pathStrokeW);
             pp.head.join = BINUI_JOIN_ROUND;
-            pp.head.cap = BINUI_CAP_BUTT;
+            pp.head.cap = pathCap;
             PathNormData nd;
             if (NormalizeShape(svgPathShape, nd)) {
                 pp.head.pointCount = (uint16_t)std::min<size_t>(65535, nd.pts.size() / 2);

@@ -6,6 +6,14 @@
 
 ## [Unreleased]
 
+### 新增 — SVG P2-4：`stroke-linecap="round"`
+
+- 开放子路径的两端可以补圆点了（复用 `PaintPathStroke` 已有的 `roundCap` 参数，
+  格式里 `BinUIPathEntry.cap` 这个字节一直在，只是编译器没填）。
+- `stroke-linecap="square"` 未实现：按 butt 画并明确告警（要方头把路径两端各延长半个线宽）。
+- `stroke-linejoin="miter"/"bevel"` 未实现：按圆角连接画并告警（尖角图标会比标准 SVG 略圆）。
+  以前这两个属性在"已消费属性"表里，写了就是**静默无效** —— 现在至少说出来。
+
 ### 新增 — SVG P2-3：`<text>` 与 `<image>`
 
 - `<text x y font-size fill>` 编成普通 `LABEL`：坐标走 viewBox/transform，`fill` 当文字色，
