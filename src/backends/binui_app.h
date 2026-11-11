@@ -69,6 +69,11 @@ struct FramePerf {
     double sumPrep = 0, sumDib = 0;    // presentViaGdi：MSAA 解析 / DIB 重建
     double sumUpdate = 0;              // update_（动画/热重载轮询）耗时
     double sumCtx = 0;                 // 上下文切换（可能被驱动阻塞）耗时
+    // 帧间隔（相邻两帧"出帧时刻"之差）：avg/max 之外还要看**掉拍**——
+    // 平均帧率够但个别间隔翻倍，肉眼就是"微卡"。掉拍 = 间隔超过 1.5 个预算。
+    double lastFrameMs = 0;
+    double maxInterval = 0;
+    long long missed = 0;
     double winStart = 0;               // 本统计窗口的起始时刻（算 fps）
     int    frames  = 0;
     long long drawn = 0;               // 累计真正绘制的帧数（不随窗口重置）
@@ -95,7 +100,7 @@ inline void PerfFlush() {
     const double span = NowMs() - p.winStart;
     std::fprintf(stderr,
                  "[perf] %3d frames  %.1f fps  total avg=%.2f max=%.2f | 重排 avg=%.2f max=%.2f |"
-                 " update avg=%.2f | 绘制 avg=%.2f | 呈现 avg=%.2f max=%.2f (含上下文切换 %.2f; 解析 %.2f DIB %.2f 读回 %.2f 贴屏 %.2f)\n",
+                 " update avg=%.2f | 绘制 avg=%.2f | 呈现 avg=%.2f max=%.2f (含上下文切换 %.2f; 解析 %.2f DIB %.2f 读回 %.2f 贴屏 %.2f) | 间隔 max=%.2f 掉拍=%lld\n",
                  p.frames, span > 0 ? p.frames * 1000.0 / span : 0.0,
                  p.sumTotal / p.frames, p.maxTotal,
                  p.sumResize / p.frames, p.maxResize,
@@ -104,9 +109,12 @@ inline void PerfFlush() {
                  p.sumPresent / p.frames, p.maxPresent,
                  p.sumCtx / p.frames,
                  p.sumPrep / p.frames, p.sumDib / p.frames,
-                 p.sumRead / p.frames, p.sumBlit / p.frames);
+                 p.sumRead / p.frames, p.sumBlit / p.frames,
+                 p.maxInterval, p.missed);
     p.sumResize = p.sumDraw = p.sumPresent = p.sumTotal = 0;
     p.maxTotal = p.maxPresent = p.maxResize = 0;
+    p.maxInterval = 0;
+    p.missed = 0;
     p.sumRead = p.sumBlit = p.sumPrep = p.sumDib = p.sumUpdate = p.sumCtx = 0;
     p.frames = 0;
     p.winStart = NowMs();
@@ -388,6 +396,11 @@ private:
     std::chrono::steady_clock::time_point nextFrameTime_{};
     std::chrono::microseconds frameBudget_{16667};   // 1000000 / 刷新率（默认 60Hz）
     void requestFrameNow() { nextFrameTime_ = std::chrono::steady_clock::time_point{}; }
+    // 节拍由 present() 的垂直同步阻塞决定（vsync 交换链），此时不再自己掐帧
+    bool pacedByPresent() const;
+    // 睡到指定时刻（保留消息可唤醒；用高精度定时器，见实现里的注释）
+    void waitForFrame(std::chrono::steady_clock::time_point t);
+    void* frameTimer_ = nullptr;   // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 的定时器句柄
     bool dirty_ = true;
     int dirtyL_ = 0, dirtyT_ = 0, dirtyR_ = 0, dirtyB_ = 0;
     int pendingW_ = 0, pendingH_ = 0; // 挂起的窗口尺寸（WM_SIZE 只记录，帧内应用一次）
@@ -585,11 +598,10 @@ inline void BinUIAppT<Gfx>::startResize(int hit) {
                 if (dt > dragFrameMax) dragFrameMax = dt;
             }
         } else {
-            // 等到下一帧点或新输入（睡眠，不空转）
-            const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(nextFrameTime_ - now);
-            MsgWaitForMultipleObjectsEx(0, nullptr,
-                                        static_cast<DWORD>(std::max<long long>(1, wait.count())),
-                                        QS_ALLINPUT, 0x0004 /* MWMO_INPUTAVAILABLE */);
+            // 等到下一帧点或新输入（睡眠，不空转）。
+            // 这里也走 waitForFrame：毫秒级的 MsgWait 超时会被系统计时器精度（15.6ms）
+            // 兑现，拖拽期同样会出现"一帧跨两个刷新"的卡顿。
+            waitForFrame(nextFrameTime_);
         }
     }
     // 松手：应用最终尺寸并以 GDI 呈现清晰帧（surface 可能仍未稳定，不 SwapBuffers）
@@ -1223,9 +1235,16 @@ inline bool BinUIAppT<Gfx>::open() {
     {
         const int hz = DisplayRefreshHzFor(hwnd);
         frameBudget_ = std::chrono::microseconds(1000000 / hz);
-        if (Perf().on)
+        if (Perf().on) {
             std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
                          hz, frameBudget_.count() / 1000.0);
+            // 节拍来自谁：present 声明自己能阻塞到垂直同步时，帧相位由显示器兜底；
+            // 否则完全靠外壳的合成节拍（依赖高精度定时器，见 waitForFrame）。
+            // 注意这只说明后端的"声明"，实际阻塞与否由驱动/合成器决定（窗口模式下
+            // 有的驱动让 SwapBuffers 立刻返回），所以两种情况下外壳都保留 nextFrameTime_ 闸门。
+            std::fprintf(stderr, "[perf] 节拍: 合成预算 %.2fms（高精度定时器）；present 可阻塞垂直同步=%s\n",
+                         frameBudget_.count() / 1000.0, pacedByPresent() ? "是" : "否");
+        }
     }
     nextFrameTime_ = std::chrono::steady_clock::now();
     running_ = true;
@@ -1278,9 +1297,16 @@ inline bool BinUIAppT<Gfx>::openChild(void* parent, int x, int y, int width, int
     {
         const int hz = DisplayRefreshHzFor(hwnd);
         frameBudget_ = std::chrono::microseconds(1000000 / hz);
-        if (Perf().on)
+        if (Perf().on) {
             std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
                          hz, frameBudget_.count() / 1000.0);
+            // 节拍来自谁：present 声明自己能阻塞到垂直同步时，帧相位由显示器兜底；
+            // 否则完全靠外壳的合成节拍（依赖高精度定时器，见 waitForFrame）。
+            // 注意这只说明后端的"声明"，实际阻塞与否由驱动/合成器决定（窗口模式下
+            // 有的驱动让 SwapBuffers 立刻返回），所以两种情况下外壳都保留 nextFrameTime_ 闸门。
+            std::fprintf(stderr, "[perf] 节拍: 合成预算 %.2fms（高精度定时器）；present 可阻塞垂直同步=%s\n",
+                         frameBudget_.count() / 1000.0, pacedByPresent() ? "是" : "否");
+        }
     }
     nextFrameTime_ = std::chrono::steady_clock::now();
     running_ = true;
@@ -1319,11 +1345,59 @@ inline void BinUIAppT<Gfx>::renderFrame() {
     const double u0 = Perf().on ? NowMs() : 0.0;
     if (update_) update_(dt);
     if (Perf().on) Perf().sumUpdate += NowMs() - u0;
-    // 帧节流：动画每一拍都要推进（dt 按真实时间算，跳帧不会让动画变慢），
-    // 但"出帧"（重排/绘制/呈现）只在到点时候做。
+    // 帧节拍（v0.11.6）：**固定网格 + 精确等待**。
+    //   旧写法两个毛病叠在一起，120Hz 屏上直接变 ~64fps 并且微抖：
+    //   ①`nextFrameTime_ = now + budget` 把每帧自身耗时也算进周期，逐帧累积漂移；
+    //   ②`MsgWaitForMultipleObjectsEx(timeoutMs)` 的毫秒超时按**系统计时器精度**兑现，
+    //     默认 15.6ms —— 想睡 8.33ms 实际睡 15.6ms，一帧跨过两个刷新；
+    //   ③ 再加个"+1ms"保险，越垫越晚。
+    // 现在：网格用 `+=`（落后太多才重新对齐），等待用高精度可等待定时器（精度 ~0.5ms，
+    // 见 waitForFrame），并且**保留 nextFrameTime_ 闸门**——present 会阻塞到垂直同步时，
+    // 闸门正好挡住"刚提交完下一轮又立刻重画"。
     if (now < nextFrameTime_) return;
     renderOnce();
-    nextFrameTime_ = std::chrono::steady_clock::now() + frameBudget_;
+    nextFrameTime_ += frameBudget_;
+    const auto after = std::chrono::steady_clock::now();
+    if (nextFrameTime_ < after - frameBudget_ * 2) nextFrameTime_ = after + frameBudget_;
+}
+
+// 这一帧是否由 present() 的垂直同步阻塞来决定节拍（只用于启动时打一行诊断）
+template <class Gfx>
+inline bool BinUIAppT<Gfx>::pacedByPresent() const {
+    return gfx_.presentPacesFrames() && !gdiPresent_ && !fullscreenPresent_;
+}
+
+// 睡到 t（同时保持消息可唤醒）。毫秒级的 MsgWait 超时会被系统计时器精度
+// （默认 15.6ms）兑现，128Hz/120Hz 这种亚 10ms 的节拍完全没法用 —— 所以优先用
+// CREATE_WAITABLE_TIMER_HIGH_RESOLUTION（Win10 1803+，精度 ~0.5ms，且不像
+// timeBeginPeriod 那样改全局电源策略）。拿不到就退回毫秒等待（老行为）。
+template <class Gfx>
+inline void BinUIAppT<Gfx>::waitForFrame(std::chrono::steady_clock::time_point t) {
+    using namespace std::chrono;
+    const auto now = steady_clock::now();
+    const auto remain = t - now;
+    if (remain <= microseconds(0)) return;
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+    if (!frameTimer_) {
+        frameTimer_ = CreateWaitableTimerExW(nullptr, nullptr,
+                                             CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                             TIMER_ALL_ACCESS);
+    }
+    HANDLE h = static_cast<HANDLE>(frameTimer_);
+    if (h) {
+        LARGE_INTEGER due;
+        // 负值 = 相对时间，单位 100ns
+        due.QuadPart = -static_cast<LONGLONG>(duration_cast<nanoseconds>(remain).count() / 100);
+        if (SetWaitableTimer(h, &due, 0, nullptr, nullptr, FALSE)) {
+            MsgWaitForMultipleObjectsEx(1, &h, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+            return;
+        }
+    }
+    const int ms = static_cast<int>(duration_cast<milliseconds>(remain).count()) + 1;
+    MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(ms), QS_ALLINPUT,
+                                MWMO_INPUTAVAILABLE);
 }
 
 template <class Gfx>
@@ -1367,24 +1441,26 @@ inline int BinUIAppT<Gfx>::pump(int timeoutMs) {
 #ifndef MWMO_INPUTAVAILABLE
 #define MWMO_INPUTAVAILABLE 0x0004
 #endif
-    int waitMs = 0;
+    // 等待：有挂起 resize 就立刻（尺寸要跟手），有脏区就等到下一帧点，
+    // 都没有就阻塞到输入或超时。等的时候是**睡眠**（不烧 CPU）。
+    // v0.11.6：等"到下一帧点"这件事必须精确到亚毫秒 —— 120Hz 的预算只有 8.33ms，
+    // 而 MsgWait 的毫秒超时按系统计时器精度兑现（默认 15.6ms），一睡就跨两个刷新。
+    MSG msg = {};
     if (pendingW_ > 0 && pendingH_ > 0) {
-        waitMs = 0;                       // 尺寸变化：这一拍就出帧
+        // 尺寸变化：这一拍就出帧，不等
     } else if (dirty_) {
+        // 等到（或超过）下一帧点：present 会阻塞到垂直同步时它会先返回，
+        // 闸门是 nextFrameTime_，这里只负责别提前空转。
         const auto now = std::chrono::steady_clock::now();
-        waitMs = nextFrameTime_ > now
-                     ? static_cast<int>(std::chrono::duration_cast<std::chrono::milliseconds>(
-                                            nextFrameTime_ - now).count()) + 1
-                     : 0;
-    } else {
-        waitMs = timeoutMs;               // 完全空闲：睡到有输入
-    }
-    if (waitMs > 0) {
-        MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(waitMs),
+        waitForFrame(nextFrameTime_ > now ? nextFrameTime_ : now);
+    } else if (timeoutMs > 0) {
+        // 完全空闲：睡到有输入或超时。这里**故意不用**高精度定时器 —— 空闲时"多久醒"
+        // 无所谓（OS 会合并到 15.6ms 计时器节拍），改用高精度反而把 64 次/秒的唤醒
+        // 变成 1000 次/秒（实测静态页空闲 CPU 从 1% 涨到 10%）。
+        MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(timeoutMs),
                                     QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     }
 
-    MSG msg = {};
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_QUIT) { running_ = false; break; }
         TranslateMessage(&msg);
@@ -1426,6 +1502,10 @@ inline void BinUIAppT<Gfx>::close() {
         ShowWindow(win, SW_HIDE);    // 隐藏后销毁不会再产生一次真实绘制
     }
     gfx_.shutdown();   // 拆 GL（含 ReleaseDC，必须在窗口销毁前）；shutdown 幂等
+    if (frameTimer_) {
+        CloseHandle(static_cast<HANDLE>(frameTimer_));
+        frameTimer_ = nullptr;
+    }
     if (win) {
         DestroyWindow(win);
         hwnd_ = nullptr;
@@ -1569,6 +1649,19 @@ inline void BinUIAppT<Gfx>::renderOnce() {
             if (perf.frames == 0) perf.winStart = t0;
             ++perf.frames;
             ++perf.drawn;
+            // 帧间隔（出帧时刻之差）：掉拍 = 超过 1.5 个预算 —— 平均 fps 达标但偶发翻倍
+            // 的间隔，肉眼就是微卡，avg/max 帧耗看不出来这一项。
+            if (perf.lastFrameMs > 0) {
+                const double iv = t0 - perf.lastFrameMs;
+                if (iv > perf.maxInterval) perf.maxInterval = iv;
+                if (iv > frameBudget_.count() / 1000.0 * 1.5) ++perf.missed;
+                // 单次 >100ms 的间隔单独打一行（带时间偏移）：排查"卡一下"时最需要的就是
+                // "什么时候卡的、卡了多久"，而不是平均帧率。
+                if (iv > 100.0)
+                    std::fprintf(stderr, "[perf] 帧间隔异常 %.1f ms @ %.2f s\n", iv,
+                                 (t0 - perf.winStart) / 1000.0);
+            }
+            perf.lastFrameMs = t0;
             const double rs = t1 - t0;
             perf.sumResize += rs;
             if (rs > perf.maxResize) perf.maxResize = rs;

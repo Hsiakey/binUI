@@ -980,12 +980,20 @@ void BinUID3D::beginFrame(const void* clipRect) {
     // 脏区底色由 drawNodesD3D 的根节点背景填充（按 clipRect 范围）提供。
 }
 
+// Present(vsync ? 1 : 0) 走 flip-model 交换链时 SyncInterval=1 会阻塞到垂直同步；
+// 读回 + GDI 贴屏那几条路径（透明窗 / 强制读回 / 铺满显示器 / 远程会话）不阻塞。
+bool BinUID3D::presentPacesFrames() const {
+    return impl_->ready && impl_->vsync && !impl_->transparent && !impl_->forceGdi &&
+           !impl_->coversMonitor && !RemoteSession();
+}
+
 void BinUID3D::present() {
     if (!impl_->ready) return;
     impl_->flushAll(); // 画到离屏帧缓冲
-    if (std::getenv("BINUI_D3D_TRACE"))
+    static const bool trace = std::getenv("BINUI_D3D_TRACE") != nullptr;
+    if (trace)
         std::fprintf(stderr, "[d3d] present: verts=%zu batches=%zu transparent=%d forceGdi=%d covers=%d\n",
-                     impl_->verts.size(), impl_->batches.size(), (int)impl_->transparent,
+                     impl_->vcount, impl_->batches.size(), (int)impl_->transparent,
                      (int)impl_->forceGdi, (int)impl_->coversMonitor);
 
     // 读回呈现的三条触发条件与 GL/Vulkan 后端同一套理由：

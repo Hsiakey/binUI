@@ -40,6 +40,9 @@ public:
     void setTransparent(bool t) override;
     void beginFrame(const void* clipRect) override;
     void present() override;
+    // 走交换链 + FIFO（vsync）时，vkAcquireNextImageKHR 会把调用线程阻塞到下一个垂直同步
+    // → 让 present 当节拍器，外壳不再自己掐帧（帧相位天然对齐刷新，消除"打拍子"微抖）。
+    bool presentPacesFrames() const override;
 
     void fillRect(float x, float y, float w, float h, uint32_t color) override;
     void fillRounded(float x, float y, float w, float h, float radius,

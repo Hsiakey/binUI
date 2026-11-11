@@ -2217,6 +2217,14 @@ void BinUIVK::beginFrame(const void* clipRect) {
     d.switchBatch(&d.white);
 }
 
+// present() 会不会自己阻塞到垂直同步：走交换链 + FIFO 才算。其余路径（读回 + GDI 贴屏、
+// 透明窗、强制读回）都不阻塞，外壳必须自己按刷新率节流。
+bool BinUIVK::presentPacesFrames() const {
+    const Impl& d = *impl_;
+    return d.ready && d.vsync && d.useSwapchain && !d.transparent && !d.forceGdi &&
+           !RemoteSession();
+}
+
 void BinUIVK::present() {
     Impl& d = *impl_;
     if (!d.ready || !d.recording) return;

@@ -39,6 +39,8 @@ public:
     void setTransparent(bool t) override;
     void beginFrame(const void* clipRect) override;
     void present() override;
+    // 走 flip-model 交换链且 SyncInterval = 1 时 Present 阻塞到垂直同步 → 让 present 当节拍器。
+    bool presentPacesFrames() const override;
 
     void fillRect(float x, float y, float w, float h, uint32_t color) override;
     void fillRounded(float x, float y, float w, float h, float radius,

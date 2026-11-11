@@ -37,6 +37,13 @@ public:
     virtual void beginFrame(const void* clipRect) = 0;
     virtual void present() = 0;
 
+    // present() 自己会不会把调用线程**阻塞到下一个垂直同步**（vsync 开着且真走交换链）。
+    // 返回 true 时应用外壳**不再自己掐帧**——让 acquire/present 当节拍器，帧相位因此
+    // 天然对齐刷新，不会和显示器"打拍子"（合成节拍与真实刷新差个零点几毫秒，几帧就错开
+    // 一格，表现为肉眼可见的微抖/微卡）。走读回 + GDI 贴屏、透明窗、远程会话这些不阻塞
+    // 的路径必须返回 false，由外壳按刷新率节流。
+    virtual bool presentPacesFrames() const { return false; }
+
     // ---- 原语（颜色 0xAARRGGBB）----
     virtual void fillRect(float x, float y, float w, float h, uint32_t color) = 0;
     virtual void fillRounded(float x, float y, float w, float h, float radius,

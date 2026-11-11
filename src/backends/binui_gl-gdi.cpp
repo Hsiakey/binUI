@@ -947,6 +947,13 @@ void BinUIGLGdi::present() {
     SwapBuffers(impl_->hdc);
 }
 
+// present() 会不会自己阻塞到垂直同步：只有"真走 SwapBuffers 且 swap interval = 1"才算。
+// 透明窗口走 UpdateLayeredWindow（不阻塞）、没拿到 wglSwapIntervalEXT 时也不阻塞 ——
+// 这两种情况必须返回 false，否则外壳不掐帧就会满速空转。
+bool BinUIGLGdi::presentPacesFrames() const {
+    return impl_->ready && impl_->vsync && !impl_->transparent && wglSwapIntervalEXT != nullptr;
+}
+
 void BinUIGLGdi::presentViaGdi() {
     if (!impl_->ready) return;
     const bool perfOn = Perf().on;

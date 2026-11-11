@@ -5,6 +5,46 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.11.6] - 2026-11-11
+
+帧节拍修正：动画在 120Hz 屏上"感觉只有 60fps / 有微抖"。无 API 破坏（只新增一个
+带默认实现的后端查询），无像素变化。
+
+### 修复 — 拿毫秒级 `MsgWait` 当帧节拍器（GL 64fps / D3D11 64fps / VK 105fps 的真因）
+
+`binui_app.h` 的帧节流是"算到下一帧差几毫秒就睡那么久"，而
+`MsgWaitForMultipleObjectsEx` 的毫秒超时按**系统计时器精度（默认 15.6ms）**兑现：
+想睡 8.33ms 实际睡 15.6ms，一帧跨两个刷新 → 120Hz 屏上只有 64fps。再叠上
+`nextFrameTime_ = now + budget`（把每帧耗时也算进周期，累积漂移）和一个 `+1ms` 保险。
+
+- **固定网格**：`nextFrameTime_ += frameBudget_`，落后超过 2 个预算才重新对齐。
+- **高精度等待** `waitForFrame()`：`CreateWaitableTimerExW(CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)`
+  + `MsgWaitForMultipleObjectsEx` 一起等消息（精度 ~0.5ms，不改全局电源策略）；
+  拖拽 resize 循环同用。
+- **空闲分支保持毫秒粗等待**：静态页 `pump(1)` 的空闲唤醒若改高精度会从 64 次/秒变成
+  1000 次/秒（实测空闲 CPU 1% → 10%），所以只给"帧点"用精确等待。
+- 新增 `IBinUIGfx::presentPacesFrames()`（默认 false，GL/VK/D3D11 各自 override）：
+  说明该后端在 vsync 交换链上可能阻塞到垂直同步；外壳据此打一行启动诊断，
+  两种情况下都保留 `nextFrameTime_` 闸门。
+- `BINUI_PERF` 增加帧间隔统计：`间隔 max=`、`掉拍=`（>1.5 预算的次数），单次 >100ms
+  的间隔单独打一行。
+
+| 后端（`animshow`，120Hz，16s 取稳态 600 帧窗口） | 改前 | 改后 |
+|---|---|---|
+| GL | 62.9 fps | **120.1 fps**（呈现 avg 0.90 → 6.77ms，确实在等 vsync），掉拍 0~1/600 |
+| D3D11 | 64.0 fps | **120.1 fps**，掉拍 0~1/600 |
+| Vulkan | 105~106 fps | **119~120 fps**，掉拍 1~3/600 |
+
+帧间隔：GL 15.6ms/帧 → `max=9.5~11.4ms`（预算 8.33ms）；VK `max=27ms` → `9.3~17.6ms`。
+
+### 验收
+
+0 warning；四套测试全绿；`pixels` 10/10 零差异；`pixels-vk` 14/14（不同像素 0）；
+`pixels-d3d11` 全过；`vk-window` / `vk-stress` 全过；`demos-vk` / `demos-d3d11` 各 8 个；
+`check_examples` 11/11。静态页空闲 CPU 与 0.11.5 持平（0.81s → 0.77s / 8s）。
+详见 `docs/vulkan_design.md` §7.7。
+
+
 ## [0.11.5] - 2026-11-11
 
 CPU 侧绘制（第二轮）：**每节点状态查询合并成一次** + **顶点写入路径**。无 API / 布局改动，

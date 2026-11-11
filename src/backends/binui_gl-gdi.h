@@ -44,6 +44,9 @@ public:
     void beginFrame(const void* clipRect);
     // 提交场景（按批次/裁剪/纹理顺序绘制）并呈现（VSync 时阻塞）
     void present();
+    // present() 在 vsync 开着的普通窗口路径上会阻塞到下一个垂直同步（SwapBuffers +
+    // wglSwapIntervalEXT(1)），所以外壳可以让它当节拍器、自己不再掐帧。
+    bool presentPacesFrames() const;
     // 提交场景但不 SwapBuffers：读回离屏像素 → StretchDIBits 到窗口 DC。
     // 用于 resize 拖拽期间——NVIDIA 驱动在"窗口 resize + SwapBuffers"下会崩
     //（nvoglv64 DrvPresentBuffers），走 GDI 呈现绕开驱动 present 路径。

@@ -1066,6 +1066,73 @@ GL 的 `beginFrame` 也**不再** `verts.clear()`（否则每帧把 2 MB 析构�
 `singlewindow` 那类"节点少、每节点 19 个四边形"的页面，每节点 1.3 µs 里有 0.5 µs 是
 `fillRounded/strokeRounded` 的九宫格发射（各 9 个四边形），其余尚未定位到更细的归因。
 
+---
+
+## 7.7 帧节拍：为什么动画"感觉只有 60fps"（2026-11-11，v0.11.6）
+
+### 7.7.1 现象与读数
+
+用户反馈 `animshow`（动画实验室）有明显微抖/微卡，"像低刷新率"。实测（120Hz 屏，
+`BINUI_PERF=1` 各跑 16s，取稳态 600 帧窗口）：
+
+| 后端 | 改前 fps | 呈现 avg | 说明 |
+|---|---|---|---|
+| GL（默认 demo） | **62.9** | 0.90 ms | 从没等到过 vsync —— 节拍被睡眠拖死 |
+| D3D11 | **64.0** | 0.24 ms | 同上 |
+| Vulkan | **105~106** | 0.14 ms | 与刷新不对齐，间隔最大 27 ms |
+
+### 7.7.2 根因：拿毫秒级的 `MsgWaitForMultipleObjectsEx` 当帧节拍器
+
+`binui_app.h` 的帧节流是"算到下一帧还差几毫秒，就 `MsgWait` 睡那么久"：
+
+```
+waitMs = truncate(nextFrameTime_ - now) + 1;      // ① +1ms 保险
+MsgWaitForMultipleObjectsEx(0, nullptr, waitMs, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+nextFrameTime_ = steady_clock::now() + frameBudget_;   // ② 相对节拍，逐帧累积漂移
+```
+
+两个坑叠一起：
+
+1. **`MsgWait` 的毫秒超时按系统计时器精度兑现，默认 15.6ms**（进程没调
+   `timeBeginPeriod`）。想睡 8.33ms 实际睡 15.6ms → 一帧跨两个刷新 → **64fps**。
+   GL/D3D11 的 `呈现 avg` 只有 0.9ms 就是证据：帧根本没走到 vsync 就被节拍器放出来了。
+2. `now + budget` 把每帧自身耗时也塞进周期，加上 `+1ms` 保险，逐帧累积漂移；
+   Vulkan 后端因为带 2 槽 + 提交前等待，勉强跑到 105fps，但相位和刷新错开 → 微抖。
+
+### 7.7.3 改动
+
+- **固定网格**：`nextFrameTime_ += frameBudget_`（落后超过 2 个预算才重新对齐，防止
+  雪崩追帧），去掉 `+1ms`。
+- **高精度等待** `waitForFrame(t)`：`CreateWaitableTimerExW(CREATE_WAITABLE_TIMER_HIGH_RESOLUTION)`
+  + `MsgWaitForMultipleObjectsEx(1, &timer, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE)`
+  —— 精度 ~0.5ms，且不像 `timeBeginPeriod` 那样改全局电源策略；拿不到就退回毫秒等待。
+  拖拽 resize 循环也用同一个等待函数。
+- **空闲分支保持粗等待**：`pump(1)` 的空闲路径继续用毫秒 `MsgWait` —— 换成高精度会把
+  静态页的唤醒从 64 次/秒变成 1000 次/秒（实测空闲 CPU 1% → 10%），得不偿失。
+- 接口新增 `IBinUIGfx::presentPacesFrames()`（默认 false）：说明该后端在 vsync 交换链上
+  **可能**阻塞到垂直同步（GL：`wglSwapIntervalEXT` 可用且非透明；VK：交换链 + FIFO；
+  D3D11：flip-model + `SyncInterval=1`）。外壳用它打一行启动诊断，两种情况下都保留
+  `nextFrameTime_` 闸门（驱动在窗口模式下可能让 `SwapBuffers` 立刻返回）。
+- `BINUI_PERF` 增加**帧间隔**统计：`间隔 max=` 与 `掉拍=`（间隔 > 1.5 预算的次数），
+  外加单次 >100ms 的间隔单独打一行（带时间偏移）。
+
+### 7.7.4 实测（同一个 16s 协议，cmd 重定向 stderr）
+
+| 后端 | 改前 | 改后 |
+|---|---|---|
+| GL | 62.9 fps | **120.1 fps**（呈现 avg 6.77ms = 确实在等 vsync），掉拍 0~1/600 |
+| D3D11 | 64.0 fps | **120.1 fps**，掉拍 0~1/600 |
+| Vulkan | 105~106 fps | **119~120 fps**，掉拍 1~3/600 |
+
+帧间隔：GL 从"每帧 15.6ms"变成 `max=9.5~11.4ms`（预算 8.33ms），Vulkan 从 `max=27ms`
+变成 `max=9.3~17.6ms`。动画在三种后端上都对齐到了显示器刷新。
+
+**一个测量陷阱**：用 PowerShell 的 `Start-Process -RedirectStandardError` 抓 stderr 时，
+每个 600 帧窗口会稳定出现一次 **~370ms** 的"帧间隔异常"，正好落在打日志那一帧上 ——
+是 PowerShell 的重定向在管道上卡住写入，不是应用卡顿。换成 `cmd /c ... 2> file` 后
+掉拍直接归零。以后看这条数先排除测量方式。
+
+
 
 ---
 
