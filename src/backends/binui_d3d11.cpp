@@ -165,8 +165,9 @@ struct Atlas {
 struct RoundTex {
     ID3D11Texture2D* tex = nullptr;
     ID3D11ShaderResourceView* srv = nullptr;
-    int t = 0;         // 模板边长（4r）
+    int t = 0;         // 模板边长（RoundTemplateSize(r)）
     int corner = 0;    // 角区边长（2r+1）
+    uint64_t lastUse = 0;   // LRU 时钟（缓存上限 48 张）
 };
 
 // ---------- emoji 簇检测 ----------
@@ -285,6 +286,11 @@ struct BinUID3D::Impl {
     ID3D11Texture2D* offTex = nullptr;
     ID3D11RenderTargetView* offRtv = nullptr;
     ID3D11ShaderResourceView* offSrv = nullptr;
+    // 4× MSAA 绘制目标（持久累积帧）+ 它的 RTV；msSamples==1 时 msTarget 指向 offRtv
+    ID3D11Texture2D* msTex = nullptr;
+    ID3D11RenderTargetView* msRtv = nullptr;
+    ID3D11RenderTargetView* msTarget = nullptr;
+    int msSamples = 1;
 
     // 场景
     std::vector<D3DVertex> verts;
@@ -341,6 +347,7 @@ struct BinUID3D::Impl {
     std::unordered_map<uint32_t, ColorAtlas*> colorAtlases;        // 按字号
     // 圆角模板（按 radius；负 key = 描边）
     std::unordered_map<int, RoundTex> rounds;
+    uint64_t roundClock = 0;   // 圆角模板缓存 LRU 时钟
 
     // 图片纹理缓存（按 imageIndex）
     std::unordered_map<uint16_t, ID3D11ShaderResourceView*> images;
@@ -828,19 +835,29 @@ struct BinUID3D::Impl {
         int r = std::max(1, radius);
         int key = stroke ? -r : r;
         auto it = rounds.find(key);
-        if (it != rounds.end()) return it->second;
+        if (it != rounds.end()) {
+            it->second.lastUse = ++roundClock;
+            return it->second;
+        }
 
-        int t = std::max(8, r * 4);
-        ensureRasterDC(t, t);
+        // 模板尺寸与覆盖率算法**必须**和 GL / Vulkan 一致（RoundTemplateSize 在
+        // binui_paint.h 里）：三端共用 BuildRoundedNineSlice 拼九宫格，模板边长差 1px、
+        // 或形状在内缩过的盒子里铺（旧代码 half = (t-2)/2）都会让圆角边缘差一圈像素。
+        int t = RoundTemplateSize(r);
+        if (!ensureRasterDC(t, t)) {
+            std::fprintf(stderr, "[d3d11] roundFor: 光栅化缓冲分配失败 (%dx%d)\n", t, t);
+            return emptyRound_;
+        }
         memset(rasterBits, 0, static_cast<size_t>(t) * t * 4);
 
         // 解析式逐像素覆盖率（1px 抗锯齿边缘），替代 GDI RoundRect（无 AA，转角锯齿明显）。
-        // 模板几何与 GDI 一致：圆角矩形外框 [1, t-1]，角半轴 r；填充 = 内部，描边 = 2px 带。
+        // 形状铺满整个模板 [0,t]：圆弧包围盒正好是 [0,r]，角片边长与弧长严格对应，
+        // 半径到短边一半时四角才能无缝拼成圆/胶囊。
         {
             uint32_t* px = static_cast<uint32_t*>(rasterBits);
-            const float half = (t - 2.0f) / 2.0f;
-            const float inset = half - static_cast<float>(r); // 直线段起始距中心
-            const float c0 = static_cast<float>(t) / 2.0f;
+            const float half = static_cast<float>(t) / 2.0f;      // 形状半边长
+            const float inset = half - static_cast<float>(r);     // 直边段起点距中心
+            const float c0 = half;                                // 模板中心
             for (int i = 0; i < t; i++) {
                 for (int j = 0; j < t; j++) {
                     float fx = fabsf(j + 0.5f - c0) - inset;
@@ -864,6 +881,7 @@ struct BinUID3D::Impl {
         RoundTex rt;
         rt.t = t;
         rt.corner = r * 2 + 1;
+        rt.lastUse = ++roundClock;
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = td.Height = static_cast<UINT>(t);
         td.MipLevels = 1;
@@ -879,8 +897,20 @@ struct BinUID3D::Impl {
             rt.tex = nullptr;
             rt.srv = nullptr;
         }
+        // 缓存上限（半径种类一多会一路涨显存）：超了按 LRU 淘汰，与 GL 后端同一策略
+        if (rounds.size() >= 48) {
+            auto victim = rounds.begin();
+            for (auto k = rounds.begin(); k != rounds.end(); ++k)
+                if (k->second.lastUse < victim->second.lastUse) victim = k;
+            if (victim->second.tex) victim->second.tex->Release();
+            if (victim->second.srv) victim->second.srv->Release();
+            rounds.erase(victim);
+        }
         return rounds.emplace(key, rt).first->second;
     }
+
+    // roundFor 失败时的空返回（调用方据此退回 fillRect）
+    RoundTex emptyRound_;
 
     bool uploadImage(uint16_t index, const uint8_t* data, size_t size, uint32_t generation) {
         auto it = images.find(index);
@@ -955,10 +985,16 @@ struct BinUID3D::Impl {
     }
 
     // 持久离屏帧缓冲（大小 = 窗口客户区）
+    // 持久离屏帧缓冲：绘制目标是 4× MSAA 纹理（脏矩形只重绘局部，内容跨帧保留），
+    // present / 读回前解析（Resolve）到单采样 offTex —— 与 GL 后端的
+    // msFbo → offTex、Vulkan 后端的 msaa → resolve 是同一条路线，所以三端边缘 AA 同源。
     bool createOffscreen() {
         if (offSrv) { offSrv->Release(); offSrv = nullptr; }
         if (offRtv) { offRtv->Release(); offRtv = nullptr; }
         if (offTex) { offTex->Release(); offTex = nullptr; }
+        if (msRtv) { msRtv->Release(); msRtv = nullptr; }
+        if (msTex) { msTex->Release(); msTex = nullptr; }
+
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = static_cast<UINT>(winW);
         td.Height = static_cast<UINT>(winH);
@@ -976,14 +1012,38 @@ struct BinUID3D::Impl {
             if (offSrv) { offSrv->Release(); offSrv = nullptr; }
             return false;
         }
+
+        // 多采样绘制目标。驱动不支持 4× 时退回单采样（msTex 指向 offTex 的兄弟：直接复用 offTex）
+        D3D11_TEXTURE2D_DESC md = td;
+        md.BindFlags = D3D11_BIND_RENDER_TARGET;
+        md.SampleDesc.Count = 4;
+        md.SampleDesc.Quality = 0;
+        if (FAILED(device->CreateTexture2D(&md, nullptr, &msTex)) ||
+            FAILED(device->CreateRenderTargetView(msTex, nullptr, &msRtv))) {
+            std::fprintf(stderr, "[d3d11] 4x MSAA 离屏创建失败，退回单采样\n");
+            if (msRtv) { msRtv->Release(); msRtv = nullptr; }
+            if (msTex) { msTex->Release(); msTex = nullptr; }
+            msSamples = 1;
+            msTarget = offRtv;
+            if (offRtv) offRtv->AddRef();
+        } else {
+            msSamples = 4;
+            msTarget = msRtv;
+        }
         if (transparent) {
             float tr[4] = { 0, 0, 0, 0 };
-            ctx->ClearRenderTargetView(offRtv, tr);
+            ctx->ClearRenderTargetView(msTarget, tr);
         } else {
             float white[4] = { 1, 1, 1, 1 };
-            ctx->ClearRenderTargetView(offRtv, white);
+            ctx->ClearRenderTargetView(msTarget, white);
         }
         return true;
+    }
+
+    // 把 MSAA 目标解析到单采样 offTex（present / 读回前的最后一步）
+    void resolveOffscreen() {
+        if (msSamples > 1 && msTex && offTex)
+            ctx->ResolveSubresource(offTex, 0, msTex, 0, DXGI_FORMAT_B8G8R8A8_UNORM);
     }
 
     // ---------- 场景 ----------
@@ -1083,6 +1143,7 @@ struct BinUID3D::Impl {
             layeredH = h;
         }
         if (!stagingTex || !layeredDib || !layeredBits) return false;
+        resolveOffscreen();
         ctx->CopyResource(stagingTex, offTex);
         D3D11_MAPPED_SUBRESOURCE map = {};
         if (FAILED(ctx->Map(stagingTex, 0, D3D11_MAP_READ, 0, &map))) return false;
@@ -1159,6 +1220,10 @@ struct BinUID3D::Impl {
         images.clear();
         if (whiteSrv) { whiteSrv->Release(); whiteSrv = nullptr; }
         if (offSrv) { offSrv->Release(); offSrv = nullptr; }
+        if (msTarget && msTarget != offRtv) { msTarget->Release(); msTarget = nullptr; }
+        else if (msTarget) { msTarget->Release(); msTarget = nullptr; }
+        if (msRtv) { msRtv->Release(); msRtv = nullptr; }
+        if (msTex) { msTex->Release(); msTex = nullptr; }
         if (offRtv) { offRtv->Release(); offRtv = nullptr; }
         if (offTex) { offTex->Release(); offTex = nullptr; }
         if (stagingTex) { stagingTex->Release(); stagingTex = nullptr; }
@@ -1261,7 +1326,7 @@ void BinUID3D::beginFrame(const void* clipRect) {
     impl_->scissor[3] = impl_->winH;
 
     // 绘制目标 = 持久离屏帧缓冲
-    impl_->ctx->OMSetRenderTargets(1, &impl_->offRtv, nullptr);
+    impl_->ctx->OMSetRenderTargets(1, &impl_->msTarget, nullptr);
 
     // 不在此整帧 ClearRenderTargetView：该 API 不受 scissor 限制，会清空整个离屏，
     // 局部重绘时把脏区以外的持久像素抹白/抹透明（悬停后其余元素消失的根因）。
@@ -1284,7 +1349,8 @@ void BinUID3D::present() {
         return;
     }
 
-    // 整帧 blit：离屏 → 交换链 backbuffer
+    // 整帧 blit：MSAA 解析到 offTex，再贴到交换链 backbuffer
+    impl_->resolveOffscreen();
     impl_->ctx->OMSetRenderTargets(1, &impl_->rtv, nullptr);
     D3D11_RECT full = { 0, 0, impl_->winW, impl_->winH };
     impl_->ctx->RSSetScissorRects(1, &full);

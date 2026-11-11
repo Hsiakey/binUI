@@ -823,27 +823,40 @@ D3D11 的交换链必须绑窗口，没有"无窗口离屏"这条腿，所以 `t
 
 ### 7.4.4 与 GL 的逐像素比对（`make pixels-d3d11`，14 用例）
 
-| 用例 | 不同像素 | 说明 |
+**P7a 之后**（D3D11 自己的圆角模板 + 单采样离屏）：
+
+| 用例 | 不同像素 |
+|---|---|
+| `probe` / `radius-matrix` / `texturedemo` | **0** |
+| `svggrad` / `svgfinish` / `svgjoin` / `display-none2` | 8 → 0 / 3 / 57 / 168 |
+| `svgaa` / `svgpath` / `svgstroke` | 272 / 284 / 305 |
+| `fontshow` / `svgdemo` / `features` | 336 / 116 / 2492 |
+| `circle` | 1200 (**2.041%**) |
+
+**P7b 之后**（换成共享圆角模板 + 4× MSAA 离屏）：
+
+| 用例 | 不同像素 | 变化 |
 |---|---|---|
-| `probe` / `radius-matrix` / `texturedemo` | **0** | 纯几何 / 图片，逐位相同 |
-| `svgfinish` / `svggrad` / `svgjoin` | 3 / 8 / 57 | 圆角边缘 |
-| `svgdemo` / `display-none2` / `fontshow` | 116 / 168 / 336 | 文本 + 圆角 |
-| `svgaa` / `svgpath` / `svgstroke` | 272 / 284 / 305 | 圆角 + 文本 |
-| `features` | 2492 (0.297%) | 整页 |
-| `circle` | 1200 (**2.041%**，最大的一处) | 圆 |
-| 脏矩形重绘 vs 全量重绘（阈值 0） | **0** | 持久离屏 + 脏矩形是对的 |
-| 强制读回 + GDI 贴屏 vs 交换链（阈值 0） | **0** | 同一张 offTex，两条呈现路线一致 |
+| `probe` / `radius-matrix` / `texturedemo` | **0** | — |
+| `display-none2` / `svggrad` / `svgfinish` | **0** | 168/8/3 → 0（圆角模板对上了） |
+| `svgjoin` / `svgpath` | 4 / 25 | 57/284 → 4/25 |
+| `fontshow` / `features` / `svgdemo` | 8 / 132 / 104 | 336/2492/116 → 8/132/104 |
+| `svgstroke` / `svgaa` / `circle` | 247 / 272 / 1200 | 基本不变 |
+| 脏矩形重绘 vs 全量重绘（阈值 0） | **0** | 持久 MSAA 累积帧没被破坏 |
+| 强制读回 + GDI 贴屏 vs 交换链（阈值 0） | **0** | 同一张 offTex |
 
-两处差异的根因都在"D3D11 还没换成共享实现"（**P7b 待办**）：
+两处改动各自的贡献是**可分离**的：
 
-1. **圆角模板**：D3D11 自己的 `roundFor` 用 `t = max(8, 4r)` 加自己的覆盖率算法；GL/Vulkan
-   用 `binui_paint.h` 的 `RoundTemplateSize` / `BuildRoundedNineSlice`。所以 `circle` 差 2%、
-   所有带圆角的卡片差 0.03~0.3% —— 是**转角边缘一个采样点**的量级，不是布局/颜色错误
-   （`probe`/`radius-matrix`/`texturedemo` 零差异就是证据）。
-2. **文本**：D3D11 仍走 `binui_font_renderer` + 自带图集，与 `binui_glyph_atlas.h` 不是同一份字节。
+1. **圆角模板换成共享的**（`RoundTemplateSize` + 铺满 `[0,t]` 的覆盖率公式，不再 `max(8,4r)`
+   且不再内缩 1px）→ `display-none2` 168→0、`svggrad` 8→0、`features` 2492→132。
+   根因很明确：模板边长差 1~2r px、形状又在缩小过的盒子里铺，九宫格的角片就对不上弧长。
+2. **离屏改成 4× MSAA + ResolveSubresource**（与 GL 的 `msFbo→offTex`、Vulkan 的
+   `msaa→resolve` 同一条路线）→ `svgpath` 92→25、`svgjoin` 16→4、`svgfinish` 3→0。
 
-因此 `make pixels-d3d11` 目前的判据是 **3%**（`PIXEL_D3D_TOL`），比 `pixels-vk` 的 1.5% 宽；
-P7b 把上面两样也换成共享实现后收紧到 1.5% → 0。
+剩下的差异（`circle` 2.04%、`svgaa` 0.25%、`svgstroke` 0.23%）全部在**曲线的边缘一圈**
+（diff 图上就是圆的一圈红绿描边）—— 是两套 API 的 4× MSAA **采样位置**不同导致的覆盖率
+量化差，与 VK↔GL 在斜边上"一个采样点"的差同理。所以 `make pixels-d3d11` 的判据暂定
+**3%**（`PIXEL_D3D_TOL`），比 `pixels-vk` 的 1.5% 宽；除 `circle` 外全部用例都在 0.25% 以内。
 
 ### 7.4.5 验收（v0.11.0）
 
@@ -859,10 +872,11 @@ P7b 把上面两样也换成共享实现后收紧到 1.5% → 0。
 
 ### 7.4.6 仍未做的
 
-- **P7b**：D3D11 的圆角模板 + 文本/图片换成 `binui_paint.h` / `binui_glyph_atlas.h` /
-  `binui_win_image.h`（三端几何与文本逐位相同，`pixels-d3d11` 收紧到 1.5% → 0）；
-- D3D11 没有 4× MSAA（离屏是单采样）—— 圆角/线条靠模板与解析式覆盖率抗锯齿，SVG 斜边
-  与 GL/Vulkan 的 4× MSAA 不同源；
+- **文本/图片仍是 D3D11 自己的实现**（`binui_font_renderer` + 自带图集、自己的解码调用）。
+  像素上现在的差距已经很小（`fontshow` 8 px、整页 `features` 132 px），剩下的主要是曲线边缘；
+  换成 `binui_glyph_atlas.h` / `binui_win_image.h` 的价值在**删掉 ~700 行重复**与"三端文本
+  同一份字节"，不是像素；
+- 曲线边缘与 GL 的 4× MSAA 采样位置差异（见 §7.4.4，量级 0.02~0.25%，`circle` 2.04%）；
 - 跨显示器 DPI / RDP / 验证层 0 error：条件不具备（见 §6.1.3）。
 
 ---
