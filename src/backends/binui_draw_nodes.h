@@ -222,8 +222,12 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     for (const auto& node : nodes) {
         if (node.flags & BINUI_SCROLLABLE) {
             if (const auto* s = renderer.scrollState(node.id)) scrolls[node.id] = *s;
-            if (renderer.contentHeight(node.id) > node.height + 0.5f) gutterR[node.id] = sbW;
-            if (renderer.contentWidth(node.id) > node.width + 0.5f) gutterB[node.id] = sbW;
+            // gutter 只为"真的会画滚动条"的容器预留（overflow:auto/scroll）；
+            // overflow:hidden 的只裁剪容器不出滚动条，留 gutter 等于白裁掉一条内容
+            if (renderer.isUserScrollable(node.id)) {
+                if (renderer.contentHeight(node.id) > node.height + 0.5f) gutterR[node.id] = sbW;
+                if (renderer.contentWidth(node.id) > node.width + 0.5f) gutterB[node.id] = sbW;
+            }
         }
     }
 
@@ -878,6 +882,9 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                                static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
     for (const auto& node : nodes) {
         if (!(node.flags & BINUI_SCROLLABLE) || !(node.flags & BINUI_VISIBLE)) continue;
+        // overflow:hidden = "只裁剪"容器：可以编程滚动（scrollTo），但不出滚动条、
+        // 不响应滚轮。用户滚不动的东西就别给它画一条让人以为能拖的滑块。
+        if (!renderer.isUserScrollable(node.id)) continue;
         float ch = renderer.contentHeight(node.id);
         float cw = renderer.contentWidth(node.id);
         auto sit = scrolls.find(node.id);

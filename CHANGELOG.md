@@ -5,6 +5,32 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.12.7] - 2026-11-12
+
+`overflow:hidden` 的容器现在真的"不出滚动条但能编程滚动"，也不再白留 gutter。
+
+### 修复 — 只裁剪容器不该画滚动条、不该留 gutter
+
+`overflow:hidden` 编译成 `BINUI_SCROLLABLE`（所以 `scrollTo` 能滚、子节点会跟着偏移），
+但遍历里两处只判了 SCROLLABLE，把"只裁剪"容器当成普通滚动容器处理了：
+
+| 位置 | 症状 |
+|---|---|
+| 滚动条绘制 | 给 `overflow:hidden` 的容器也画了轨道 + 滑块 —— 用户**拖不动**（`isUserScrollable` 为假），却在视觉上暗示可以拖 |
+| gutter 预留 | 右侧/底部白扣掉 `sbW`（默认 8px）—— 内容被裁掉一条，而滚动条根本不存在 |
+
+两处都改成先问 `renderer.isUserScrollable(node.id)`（= SCROLLABLE 且非 clip-only）。
+这也是 CSS 的语义：`overflow:hidden` 永远不显示滚动条。
+
+appshow 的页带视口正是这种容器：`scrollTo` 驱动切页、无滚动条、滚轮不生效，
+右侧内容也不再被那条假 gutter 裁掉。
+
+### 验收
+
+0 warning；四套测试全绿；`pixels` 10/10；`pixels-vk` 16/16；`pixels-d3d11` 全过；
+`vk-window` 全过；`check_examples` 15 个文件 0 问题；半滚动静态帧确认右侧已无滚动条痕迹。
+
+
 ## [0.12.6] - 2026-11-12
 
 `appshow` 的切页改成**竖页带滚动**（浏览器里点锚点跳页那样），中间隔几页都能看到它们从眼前过去。

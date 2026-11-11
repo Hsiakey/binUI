@@ -35,6 +35,8 @@
 4. **页带要放在 `overflow:hidden` 的视口里**（0.12.6）。
    四页排成 `top = i*页高` 的竖带，视口高度 = 一页高、`overflow:hidden`（只裁剪、
    不出滚动条、不响应滚轮），切页就是 `scrollTo(0, i*页高)`。
+   `overflow:hidden` 的语义（0.12.7 起彻底成立）：**可编程滚动、不出滚动条、不响应滚轮**、
+   也不预留 gutter；要"能拖能滚"就写 `overflow:auto`。
    ⚠ 这类容器在**名称表里可能没有名字**（`findNodeByName("viewport")` 返回 0），
    宿主定位它要靠"第 1 页的 `parentId`"，别指望 id 名。
    ⚠ 旧思路"给子树每个节点设同一个 translateY"只在视觉上成立，命中测试不认——已废弃。
