@@ -1,0 +1,208 @@
+<!DOCTYPE html>
+<app_window width="1280" height="800" bg="#F4F7FC" title="binUI 应用壳" window_resize="disable" ui_scale="proportional">
+<html width="1280" height="800" bg="#F4F7FC">
+<head>
+    <meta charset="UTF-8">
+    <title>binUI 应用壳 · 多页面多组件</title>
+    <style>
+        body { font-family: Segoe UI; font-size: 13px; color: #1F2A37; }
+
+        /* ---- 壳：侧栏 + 内容区 ---- */
+        .side { background:#FFFFFF; border-right:1px solid #E6EDF7; }
+        .brand { font-size:15; font-weight:700; color:#1F2A37; }
+        .side-cap { font-size:11; color:#94A3B8; }
+        .ind { background:#3E8BFF; border-radius:2; }
+
+        /* ---- 页面容器：白面板，四页叠在同一位置，靠宿主切可见性 ---- */
+        .page { background:#FFFFFF; border:1px solid #E6EDF7; border-radius:16; }
+        .h1 { font-size:19; font-weight:700; color:#1F2A37; }
+        .h2 { font-size:12; color:#94A3B8; }
+        .body { font-size:12; color:#66768C; }
+        .kv { font-size:12; color:#66768C; }
+        .kv-v { font-size:12; font-weight:700; color:#1F2A37; }
+        .rule { background:#E6EDF7; }
+
+        /* ---- 数据行：入场时宿主按 45ms 间隔逐行淡入 ---- */
+        .row { background:#FFFFFF; border:1px solid #E6EDF7; border-radius:10; }
+        .row:hover { background:#F8FAFD; }
+        .row-n { font-size:13; color:#1F2A37; }
+        .row-v { font-size:13; font-weight:700; color:#1F2A37; }
+        .row-d { font-size:11; color:#2FBF9A; }
+
+        /* ---- 按钮 ---- */
+        .btn-p { background:#3E8BFF; color:#FFFFFF; border-radius:9; font-size:12;
+                 transition: background-color 0.18s ease; }
+        .btn-p:hover  { background:#5DA0FF; }
+        .btn-p:active { background:#2F79E8; }
+        .btn-s { background:#EEF3FA; color:#3E8BFF; border-radius:9; font-size:12;
+                 transition: background-color 0.18s ease; }
+        .btn-s:hover  { background:#E1EBFA; }
+        .btn-d { background:#FFE9EC; color:#E24C55; border-radius:9; font-size:12;
+                 transition: background-color 0.18s ease; }
+        .btn-d:hover  { background:#FFD6DB; }
+
+        /* ---- 弹窗遮罩 / 提示条 ---- */
+        .veil  { background:rgba(31,42,55,0.35); }
+        .toast { background:#1F2A37; border-radius:10; }
+        .toast-t { font-size:12; color:#FFFFFF; }
+
+        /* ---- 设置开关 ---- */
+        .trk  { background:#DCE5F2; border-radius:14; }
+        .knb  { background:#FFFFFF; border-radius:11; }
+        .set-l { font-size:13; color:#1F2A37; }
+        .set-d { font-size:11; color:#94A3B8; }
+
+        .swatch { background:#3E8BFF; border-radius:14; transition: background-color 0.3s ease; }
+    </style>
+</head>
+<body>
+    <use src="../../components/titlebar.bum.html" x="0" y="0" w="1280" h="44" icon="◈" iconw="22"
+         title="binUI 应用壳演示" sub="多页面 · 多级组件 · 页面切换编排 · 弹窗相位 · 被动查询"/>
+
+    <!-- ============ 侧栏 ============ -->
+    <div class="side" style="position:absolute; left:0; top:44; width:190; height:756"></div>
+    <span class="brand" style="position:absolute; left:18; top:62; width:150; height:20">控制台</span>
+    <span class="side-cap" style="position:absolute; left:18; top:84; width:150; height:14">4 个页面 · 组件化</span>
+
+    <use src="appshow-navitem.bum.html" x="8" y="112" icon="◎" label="概览" nid="nav-0"/>
+    <use src="appshow-navitem.bum.html" x="8" y="156" icon="≡" label="数据" nid="nav-1"/>
+    <use src="appshow-navitem.bum.html" x="8" y="200" icon="◫" label="组件" nid="nav-2"/>
+    <use src="appshow-navitem.bum.html" x="8" y="244" icon="⚙" label="设置" nid="nav-3"/>
+
+    <div id="ind-0" class="ind" style="position:absolute; left:10; top:118; width:3; height:28"></div>
+    <div id="ind-1" class="ind" style="position:absolute; left:10; top:162; width:3; height:28"></div>
+    <div id="ind-2" class="ind" style="position:absolute; left:10; top:206; width:3; height:28"></div>
+    <div id="ind-3" class="ind" style="position:absolute; left:10; top:250; width:3; height:28"></div>
+
+    <div style="position:absolute; left:16; top:700; width:160; height:1; background:#E6EDF7"></div>
+    <span class="side-cap" style="position:absolute; left:18; top:714; width:158; height:60">1-4 切页 · D 弹窗 ·<br>ESC 关闭 · 数字键/鼠标</span>
+
+    <!-- ============ 页面：概览 ============ -->
+    <div id="page-0" class="page" style="position:absolute; left:206; top:60; width:1058; height:676">
+        <span class="h1" style="position:absolute; left:24; top:20; width:200; height:26">概览</span>
+        <span class="h2" style="position:absolute; left:24; top:48; width:600; height:16">四张卡片都是组件（appshow-card），每个卡片内部有自己的呼吸动画</span>
+        <use src="appshow-card.bum.html" x="24"  y="80" title="在线连接" value="1,284" unit="路 / 峰值 2,910" trend="+12%" tone="blue"/>
+        <use src="appshow-card.bum.html" x="286" y="80" title="平均延迟" value="18" unit="毫秒 / P99 41ms" trend="-6%" tone="mint"/>
+        <use src="appshow-card.bum.html" x="548" y="80" title="吞吐" value="93.4" unit="MB/s / 上限 120" trend="+3%" tone="amber"/>
+        <use src="appshow-card.bum.html" x="810" y="80" title="错误率" value="0.02" unit="% / 近 24h" trend="-1%" tone="coral"/>
+
+        <div class="row" style="position:absolute; left:24; top:214; width:1010; height:132"></div>
+        <span class="kv" style="position:absolute; left:44; top:232; width:200; height:16">这个页面演示什么</span>
+        <span class="body" style="position:absolute; left:44; top:256; width:960; height:18">· 组件级微动画：卡片里的圆点在组件自己的 @keyframes 里呼吸，和页面切换无关</span>
+        <span class="body" style="position:absolute; left:44; top:278; width:960; height:18">· 页面级编排：整页淡入淡出由宿主逐帧设值（binUI 没有"整棵子树一起淡"的属性）</span>
+        <span class="body" style="position:absolute; left:44; top:300; width:960; height:18">· 多级：壳 → 页面 → 卡片 → 圆点，四层，每层只负责自己那层的事</span>
+
+        <button id="btn-open" class="btn-p" style="position:absolute; left:24; top:368; width:120; height:32">打开弹窗</button>
+        <button id="btn-toast" class="btn-s" style="position:absolute; left:156; top:368; width:120; height:32">弹个提示</button>
+        <span class="h2" style="position:absolute; left:292; top:376; width:600; height:16">弹窗 = 遮罩 + 面板两层，面板比遮罩晚 40ms 进场</span>
+    </div>
+
+    <!-- ============ 页面：数据 ============ -->
+    <div id="page-1" class="page" style="position:absolute; left:206; top:60; width:1058; height:676">
+        <span class="h1" style="position:absolute; left:24; top:20; width:200; height:26">数据</span>
+        <span class="h2" style="position:absolute; left:24; top:48; width:700; height:16">六行按 45ms 间隔逐行淡入 —— 交错是宿主排的时间片，不是 CSS</span>
+
+        <div id="row-0" class="row" style="position:absolute; left:24; top:80;  width:1010; height:46">
+            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">华东 / 上海一区</span>
+            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">12,930 次</span>
+            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">+8.2%</span>
+        </div>
+        <div id="row-1" class="row" style="position:absolute; left:24; top:134; width:1010; height:46">
+            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">华北 / 北京二区</span>
+            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">9,412 次</span>
+            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">+3.1%</span>
+        </div>
+        <div id="row-2" class="row" style="position:absolute; left:24; top:188; width:1010; height:46">
+            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">华南 / 广州一区</span>
+            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">7,206 次</span>
+            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">-1.4%</span>
+        </div>
+        <div id="row-3" class="row" style="position:absolute; left:24; top:242; width:1010; height:46">
+            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">西南 / 成都一区</span>
+            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">5,881 次</span>
+            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">+0.6%</span>
+        </div>
+        <div id="row-4" class="row" style="position:absolute; left:24; top:296; width:1010; height:46">
+            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">海外 / 新加坡</span>
+            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">3,014 次</span>
+            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">+2.8%</span>
+        </div>
+        <div id="row-5" class="row" style="position:absolute; left:24; top:350; width:1010; height:46">
+            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">海外 / 法兰克福</span>
+            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">1,772 次</span>
+            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">-0.9%</span>
+        </div>
+
+        <button id="btn-query" class="btn-p"  style="position:absolute; left:24;  top:420; width:150; height:32">查询悬停节点</button>
+        <button id="btn-replay" class="btn-s" style="position:absolute; left:186; top:420; width:150; height:32">重播列表入场</button>
+    </div>
+
+    <!-- ============ 页面：组件 ============ -->
+    <div id="page-2" class="page" style="position:absolute; left:206; top:60; width:1058; height:676">
+        <span class="h1" style="position:absolute; left:24; top:20; width:200; height:26">组件</span>
+        <span class="h2" style="position:absolute; left:24; top:48; width:700; height:16">这页全是仓库里的公共组件（badge / 按钮），组件自带 hover 过渡</span>
+
+        <span class="kv" style="position:absolute; left:24; top:84; width:200; height:16">badge 四种配色</span>
+        <use src="../../components/badge.bum.html" x="24"  y="106" w="76" text="蓝色" kind="blue"/>
+        <use src="../../components/badge.bum.html" x="112" y="106" w="76" text="薄荷" kind="mint"/>
+        <use src="../../components/badge.bum.html" x="200" y="106" w="76" text="琥珀" kind="amber"/>
+        <use src="../../components/badge.bum.html" x="288" y="106" w="76" text="红"   kind="red"/>
+
+        <span class="kv" style="position:absolute; left:24; top:152; width:200; height:16">按钮三种语气</span>
+        <button class="btn-p" style="position:absolute; left:24;  top:176; width:120; height:34">主操作</button>
+        <button class="btn-s" style="position:absolute; left:156; top:176; width:120; height:34">次操作</button>
+        <button class="btn-d" style="position:absolute; left:288; top:176; width:120; height:34">危险操作</button>
+
+        <span class="kv" style="position:absolute; left:24; top:236; width:300; height:16">运行时改色（setStyleColor + transition）</span>
+        <div id="swatch" class="swatch" style="position:absolute; left:24; top:262; width:70; height:70"></div>
+        <button id="btn-color" class="btn-s" style="position:absolute; left:110; top:262; width:120; height:32">换一个颜色</button>
+        <span class="h2" style="position:absolute; left:110; top:302; width:300; height:16">宿主只改目标色，插值由引擎完成</span>
+    </div>
+
+    <!-- ============ 页面：设置 ============ -->
+    <div id="page-3" class="page" style="position:absolute; left:206; top:60; width:1058; height:676">
+        <span class="h1" style="position:absolute; left:24; top:20; width:200; height:26">设置</span>
+        <span class="h2" style="position:absolute; left:24; top:48; width:700; height:16">开关的状态迁移写在宿主：引擎只提供 setVisible / setStyleColor</span>
+
+        <span class="set-l" style="position:absolute; left:24; top:92;  width:300; height:18">自动刷新</span>
+        <span class="set-d" style="position:absolute; left:24; top:110; width:300; height:16">每 5 秒拉一次数据</span>
+        <div id="tr-0" class="trk" style="position:absolute; left:900; top:98; width:56; height:28"></div>
+        <div id="kf-0" class="knb" style="position:absolute; left:904; top:101; width:22; height:22"></div>
+        <div id="kn-0" class="knb" style="position:absolute; left:930; top:101; width:22; height:22"></div>
+
+        <span class="set-l" style="position:absolute; left:24; top:148; width:300; height:18">桌面通知</span>
+        <span class="set-d" style="position:absolute; left:24; top:166; width:300; height:16">异常时弹出系统提醒</span>
+        <div id="tr-1" class="trk" style="position:absolute; left:900; top:154; width:56; height:28"></div>
+        <div id="kf-1" class="knb" style="position:absolute; left:904; top:157; width:22; height:22"></div>
+        <div id="kn-1" class="knb" style="position:absolute; left:930; top:157; width:22; height:22"></div>
+
+        <span class="set-l" style="position:absolute; left:24; top:204; width:300; height:18">高分屏渲染</span>
+        <span class="set-d" style="position:absolute; left:24; top:222; width:300; height:16">按设备像素比放大画布</span>
+        <div id="tr-2" class="trk" style="position:absolute; left:900; top:210; width:56; height:28"></div>
+        <div id="kf-2" class="knb" style="position:absolute; left:904; top:213; width:22; height:22"></div>
+        <div id="kn-2" class="knb" style="position:absolute; left:930; top:213; width:22; height:22"></div>
+
+        <span class="set-l" style="position:absolute; left:24; top:260; width:300; height:18">诊断日志</span>
+        <span class="set-d" style="position:absolute; left:24; top:278; width:300; height:16">控制台输出帧率与命中信息</span>
+        <div id="tr-3" class="trk" style="position:absolute; left:900; top:266; width:56; height:28"></div>
+        <div id="kf-3" class="knb" style="position:absolute; left:904; top:269; width:22; height:22"></div>
+        <div id="kn-3" class="knb" style="position:absolute; left:930; top:269; width:22; height:22"></div>
+
+        <div class="rule" style="position:absolute; left:24; top:330; width:1010; height:1"></div>
+        <button id="btn-danger" class="btn-d" style="position:absolute; left:24; top:352; width:150; height:34">清空全部数据</button>
+        <span class="h2" style="position:absolute; left:190; top:360; width:600; height:16">会弹一个需要确认的弹窗（同样的组件，不同文案）</span>
+    </div>
+
+    <!-- ============ 状态栏：被动查询的读数 ============ -->
+    <span id="status" class="h2" style="position:absolute; left:206; top:748; width:1058; height:18">就绪</span>
+
+    <!-- ============ 遮罩 + 弹窗 + 提示条 ============ -->
+    <div id="veil" class="veil" style="position:absolute; left:0; top:0; width:1280; height:800"></div>
+    <use src="appshow-dialog.bum.html" x="440" y="230" w="400" h="300"/>
+
+    <div id="toast" class="toast" style="position:absolute; left:930; top:690; width:330; height:38">
+        <span id="toast-txt" class="toast-t" style="position:absolute; left:16; top:11; width:300; height:18">已保存</span>
+    </div>
+</body>
+</html>
+</app_window>

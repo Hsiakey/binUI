@@ -1,0 +1,26 @@
+<!--
+  appshow-dialog.bum.html —— 弹窗（组件 + 运行时 API 的结合）
+  参数：x / y / w / h / idt / idb / idc / idok（标题/正文/取消/确定 的节点名）
+  正文由宿主 setText 改（被动查询结果、确认文案都走这里），所以组件本身不带业务。
+  弹窗的进出场动画**不写在这里**：进场是"容器的事"，由宿主对这台组件的根节点做 tween。
+-->
+<style>
+    .as-dlg      { background:#FFFFFF; border:1px solid #E6EDF7; border-radius:16; }
+    .as-dlg-t    { font-size:15; font-weight:700; color:#1F2A37; }
+    .as-dlg-b    { font-size:12; color:#66768C; }
+    .as-dlg-ok   { background:#3E8BFF; color:#FFFFFF; border-radius:9; font-size:12; }
+    .as-dlg-ok:hover   { background:#5DA0FF; }
+    .as-dlg-ok:active  { background:#2F79E8; }
+    .as-dlg-no   { background:#EEF3FA; color:#3E8BFF; border-radius:9; font-size:12; }
+    .as-dlg-no:hover   { background:#E1EBFA; }
+</style>
+<div id="{{nid=dlg-root}}" class="as-dlg" style="position:absolute; left:{{x=0}}; top:{{y=0}}; width:{{w=400}}; height:{{h=300}}">
+    <span id="{{idt=dlg-title}}" class="as-dlg-t" style="position:absolute; left:22; top:20; width:280; height:20">弹窗标题</span>
+    <div style="position:absolute; left:22; top:52; width:356; height:1; background:#E6EDF7"></div>
+    <span id="{{idb=dlg-body}}" class="as-dlg-b" style="position:absolute; left:22; top:72; width:356; height:120">正文</span>
+    <div style="position:absolute; left:22; top:250; width:356; height:1; background:#E6EDF7"></div>
+    <button id="{{idc=dlg-cancel}}" class="as-dlg-no"
+            style="position:absolute; left:196; top:262; width:84; height:28">取消</button>
+    <button id="{{idok=dlg-ok}}" class="as-dlg-ok"
+            style="position:absolute; left:292; top:262; width:84; height:28">确定</button>
+</div>

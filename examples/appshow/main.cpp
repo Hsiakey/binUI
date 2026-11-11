@@ -1,0 +1,580 @@
+// appshow/main.cpp - binUI 应用壳演示（多页面 · 多级组件 · 编排在宿主）
+//
+// 这个例子要回答的是"多个页面/组件一起动时怎么配合"，所以它刻意只用了**当前已有**的 API：
+//   · 组件内的微动画     → 组件自己的 @keyframes（appshow-card 里那个呼吸圆点）
+//   · 页面/弹窗的进出场   → 宿主逐帧 setStyleFloat(OPACITY) 推一条 tween
+//   · 先后与交错         → 宿主维护时间片（delay/dur），不用 CSS 的长 delay 假装编排
+//   · 两态切换           → hover/press 走 CSS transition（引擎自动插值）
+//
+// 为什么不直接给页面容器写 animation：binUI 的 opacity/scale 是**节点自身**的属性，
+// 不向后代继承，也没有"整棵子树一起淡"的通道；所以整页淡入淡出必须由宿主对子树里的
+// 每个节点设值。这是当前状态的真实成本，写在注释里而不是藏起来。
+#include <algorithm>
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <functional>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+#include "binui_compiler.h"
+#include "binui_paths.h"
+#include "binui_renderer.h"
+#include "backends/binui_ui.h"   // 编译期选后端：默认 GL，-DBINUI_GPU_VK 走 Vulkan
+#include <windows.h>
+
+using namespace binui;
+
+namespace {
+
+constexpr int kPages = 4;
+constexpr int kRows = 6;
+constexpr int kSwitch = 4;
+
+const char* TypeName(uint8_t t) {
+    switch (t) {
+        case BINUI_ROOT:   return "root";
+        case BINUI_LABEL:  return "label";
+        case BINUI_IMAGE:  return "image";
+        case BINUI_BUTTON: return "button";
+        case BINUI_INPUT:  return "input";
+        case BINUI_LIST:   return "list";
+        case BINUI_LINE:   return "line";
+        case BINUI_SVG:    return "svg";
+        case BINUI_CANVAS: return "canvas";
+        case BINUI_VIDEO:  return "video";
+        case BINUI_PATH:   return "path";
+        default:           return "?";
+    }
+}
+
+float EaseOut(float t) {
+    if (t <= 0.0f) return 0.0f;
+    if (t >= 1.0f) return 1.0f;
+    return 1.0f - (1.0f - t) * (1.0f - t);
+}
+
+// 一条淡入淡出通道：把一组节点从 from 插到 to。start/dur 是宿主的编排时间片。
+struct Fade {
+    std::vector<uint16_t> ids;
+    float from = 1.0f, to = 1.0f;
+    double start = 0.0, dur = 0.2;
+    bool eased = true;
+    bool hold = false;   // true = start 之前也把 from 写下去（交错时"占住 0"用）
+    std::function<void()> onDone;
+    bool done = false;
+};
+
+struct Shell {
+    Shell(BinUIRenderer& renderer, UiApp& ui) : r(renderer), app(ui) {}
+
+    BinUIRenderer& r;
+    UiApp& app;
+
+    double now = 0.0;          // 宿主时钟（秒）
+    int curPage = 0;
+    bool modalOpen = false;
+    bool confirmMode = false;
+    bool sw[kSwitch] = {true, false, true, false};
+    int colorIdx = 0;
+    uint32_t palette[5] = {0xFF3E8BFF, 0xFF2FBF9A, 0xFFF2B544, 0xFFFF8A65, 0xFF38BDF8};
+
+    std::vector<Fade> fades;
+    std::unordered_map<uint16_t, uint16_t> parentOf;
+    std::vector<std::vector<uint16_t>> pageSub;
+    std::vector<uint16_t> dlgSub, toastSub;
+    std::vector<uint16_t> navIds, indIds, rowIds, trIds, kfIds, knIds;
+
+    // ---- 名字 → id（id 属性来自 HTML，运行时被动查询也用它）----
+    uint16_t nid(const char* name) { return r.findNodeByName(name); }
+
+    void mapTree() {
+        parentOf.clear();
+        for (const auto& n : r.getNodes()) parentOf[n.id] = n.parentId;
+    }
+    std::vector<uint16_t> subtree(uint16_t root) {
+        std::unordered_map<uint16_t, std::vector<uint16_t>> kids;
+        for (const auto& n : r.getNodes())
+            if (n.id != root && n.parentId != 0xFFFF) kids[n.parentId].push_back(n.id);
+        std::vector<uint16_t> out{root};
+        for (size_t i = 0; i < out.size(); i++) {
+            auto it = kids.find(out[i]);
+            if (it == kids.end()) continue;
+            for (uint16_t c : it->second) out.push_back(c);
+        }
+        return out;
+    }
+    // 点到了子节点（文字/图标）时，沿父链找到"真正被点的那一件"
+    uint16_t resolve(uint16_t id, const std::vector<uint16_t>& targets) {
+        for (int guard = 0; id != 0xFFFF && guard < 64; guard++) {
+            if (std::find(targets.begin(), targets.end(), id) != targets.end()) return id;
+            auto it = parentOf.find(id);
+            if (it == parentOf.end()) break;
+            id = it->second;
+        }
+        return 0xFFFF;
+    }
+
+    void touch(uint16_t id) {
+        float bx, by, bw, bh;
+        if (r.invalidRect(id, bx, by, bw, bh, 4.0f))
+            app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
+    }
+    void touchAll(const std::vector<uint16_t>& ids) {
+        for (uint16_t id : ids) touch(id);
+    }
+    void setAlpha(const std::vector<uint16_t>& ids, float a) {
+        for (uint16_t id : ids) r.setStyleFloat(id, ANIM_OPACITY, a);
+    }
+
+    void fade(std::vector<uint16_t> ids, float from, float to, double delay, double dur,
+              std::function<void()> done = nullptr) {
+        Fade f;
+        f.ids = std::move(ids);
+        f.from = from;
+        f.to = to;
+        f.start = now + delay;
+        f.dur = dur;
+        f.onDone = std::move(done);
+        // 起点先立刻落到位：tween 只负责 start 之后的插值
+        if (delay <= 0.0) setAlpha(f.ids, from);
+        fades.push_back(std::move(f));
+    }
+
+    void tickFades() {
+        for (auto& f : fades) {
+            if (f.done) continue;
+            if (now < f.start) {                 // 还没轮到：hold 住起点值
+                if (f.hold) { setAlpha(f.ids, f.from); touchAll(f.ids); }
+                continue;
+            }
+            const double k = f.dur <= 0.0 ? 1.0 : std::min(1.0, (now - f.start) / f.dur);
+            const float e = f.eased ? EaseOut((float)k) : (float)k;
+            setAlpha(f.ids, f.from + (f.to - f.from) * e);
+            touchAll(f.ids);
+            if (k >= 1.0) {
+                f.done = true;
+                if (f.onDone) f.onDone();
+            }
+        }
+        fades.erase(std::remove_if(fades.begin(), fades.end(),
+                                   [](const Fade& f) { return f.done; }),
+                    fades.end());
+    }
+
+    void setStatus(const std::string& s) {
+        uint16_t id = nid("status");
+        if (!id) return;
+        r.setText(id, s);
+        touch(id);
+    }
+
+    // ---- 设置开关 ----
+    void applySwitch(int i) {
+        const bool on = sw[i];
+        if (trIds[i]) r.setStyleColor(trIds[i], ANIM_BG_COLOR, on ? 0xFF3E8BFF : 0xFFDCE5F2);
+        if (kfIds[i]) r.setVisible(kfIds[i], !on);
+        if (knIds[i]) r.setVisible(knIds[i], on);
+        for (uint16_t id : {trIds[i], kfIds[i], knIds[i]}) if (id) touch(id);
+    }
+
+    void replayRows(double extraDelay) {
+        for (int i = 0; i < kRows; i++) {
+            if (!rowIds[i]) continue;
+            fade({rowIds[i]}, 0.0f, 1.0f, extraDelay + i * 0.045, 0.20);
+            fades.back().hold = true;        // 轮到自己之前保持在 0，别被整页淡入提前点亮
+            setAlpha({rowIds[i]}, 0.0f);
+        }
+    }
+
+    // ---- 页面编排：旧页淡出 → 新页（延迟 60ms 起）淡入；数据页多一层行交错 ----
+    void goPage(int next) {
+        if (next < 0 || next >= kPages || next == curPage) return;
+        const int prev = curPage;
+        curPage = next;
+
+        for (int i = 0; i < kPages; i++) {
+            if (indIds[i]) {
+                r.setVisible(indIds[i], i == next);
+                touch(indIds[i]);
+            }
+            if (navIds[i]) {
+                r.setStyleColor(navIds[i], ANIM_BG_COLOR, i == next ? 0xFFE8F1FF : 0xFFFFFFFF);
+                touch(navIds[i]);
+            }
+        }
+
+        // 新页先置 0（页面里没有声明 transition，所以这一步是瞬时的）
+        setAlpha(pageSub[next], 0.0f);
+        r.setVisible(pageIds[next], true);
+        touchAll(pageSub[next]);
+
+        fade(pageSub[prev], 1.0f, 0.0f, 0.0, 0.16, [this, prev]() {
+            r.setVisible(pageIds[prev], false);
+            touchAll(pageSub[prev]);
+        });
+        fade(pageSub[next], 0.0f, 1.0f, 0.06, 0.22);
+        if (next == 1) replayRows(0.16);   // 数据页：行在整页淡入之后再逐行进场（各自 hold 住 0）
+
+        setStatus("页 " + std::to_string(next + 1) + "/" + std::to_string(kPages) +
+                  " · 编排：旧页淡出 160ms → 新页延 60ms 淡入 220ms" +
+                  (next == 1 ? " · 6 行按 45ms 交错" : ""));
+    }
+
+    std::vector<uint16_t> pageIds = std::vector<uint16_t>(kPages, 0);
+
+    void openDialog(const std::string& title, const std::string& body, bool confirm) {
+        if (modalOpen) return;
+        modalOpen = true;
+        confirmMode = confirm;
+        if (uint16_t t = nid("dlg-title")) r.setText(t, title);
+        if (uint16_t b = nid("dlg-body")) r.setText(b, body);
+        if (uint16_t ok = nid("dlg-ok")) r.setText(ok, confirm ? "确认清空" : "确定");
+
+        setAlpha(dlgSub, 0.0f);
+        setAlpha({nid("veil")}, 0.0f);
+        r.setVisible(nid("veil"), true);
+        r.setVisible(nid("dlg-root"), true);
+        touchAll(dlgSub);
+        touch(nid("veil"));
+        // 遮罩先起，面板晚 40ms —— 这就是"两个组件的相位差"，只有一个时间轴
+        fade({nid("veil")}, 0.0f, 1.0f, 0.0, 0.16);
+        fade(dlgSub, 0.0f, 1.0f, 0.04, 0.18);
+        setStatus("弹窗：遮罩 0ms / 面板 +40ms（同一时间轴上的相位差）");
+    }
+
+    void closeDialog() {
+        if (!modalOpen) return;
+        modalOpen = false;
+        fade(dlgSub, 1.0f, 0.0f, 0.0, 0.14, [this]() { r.setVisible(nid("dlg-root"), false); });
+        fade({nid("veil")}, 1.0f, 0.0f, 0.04, 0.16, [this]() {
+            r.setVisible(nid("veil"), false);
+            touch(nid("veil"));
+        });
+        setStatus("弹窗关闭：面板先走，遮罩晚 40ms 收");
+    }
+
+    void toast(const std::string& text) {
+        if (uint16_t t = nid("toast-txt")) r.setText(t, text);
+        setAlpha(toastSub, 0.0f);
+        r.setVisible(nid("toast"), true);
+        touchAll(toastSub);
+        fade(toastSub, 0.0f, 1.0f, 0.0, 0.15);
+        fade(toastSub, 1.0f, 0.0f, 1.7, 0.25, [this]() { r.setVisible(nid("toast"), false); });
+    }
+
+    // ---- 被动查询：命中测试 + 节点信息，不依赖任何事件 ----
+    std::string describe(uint16_t id) {
+        for (const auto& n : r.getNodes()) {
+            if (n.id != id) continue;
+            char buf[256];
+            std::snprintf(buf, sizeof(buf), "节点 #%u（%s）\n矩形 x=%.0f y=%.0f w=%.0f h=%.0f\n父节点 #%u",
+                          (unsigned)n.id, TypeName(n.type), (double)n.x, (double)n.y,
+                          (double)n.width, (double)n.height, (unsigned)n.parentId);
+            std::string s = buf;
+            if (!n.text.empty()) s += "\n文本 \"" + n.text + "\"";
+            return s;
+        }
+        return "（节点不存在）";
+    }
+    std::string hoverProbe() {
+        const int h = r.hoveredNode();
+        if (h < 0) return "悬停：无";
+        for (const auto& n : r.getNodes())
+            if (n.id == (uint16_t)h) {
+                std::string s = "悬停 #" + std::to_string(h) + " " + TypeName(n.type);
+                if (!n.text.empty()) s += " 「" + n.text + "」";
+                return s;
+            }
+        return "悬停：?";
+    }
+};
+
+}  // namespace
+
+int main(int argc, char* argv[]) {
+    binui::ex::LaunchArgs args = binui::ex::ParseArgs(argc, argv);
+    if (args.help) {
+        std::printf("用法: appshow [--ui <main.html>]\n");
+        return 0;
+    }
+
+    BinUIRenderer renderer;
+    const std::string uiPath = binui::ex::ResolveUI(args, "appshow", "main.html");
+    CompileResult res;
+    if (!uiPath.empty()) res = CompileBinUIFileEx(uiPath);
+    if (res.layout.empty()) {
+        std::fprintf(stderr, "[appshow] 未找到 UI 文件（用 --ui <path> 指定）\n");
+        res.layout = GenerateDefaultBinUI();
+    }
+    if (!renderer.loadLayout(res.layout.data(), res.layout.size())) {
+        std::fprintf(stderr, "[appshow] 布局加载失败\n");
+        return 1;
+    }
+
+    const auto& wd = renderer.windowDesc();
+    const auto& nodes0 = renderer.getNodes();
+    const int width  = wd.present ? (int)wd.width  : (nodes0.empty() ? 1280 : (int)nodes0[0].width);
+    const int height = wd.present ? (int)wd.height : (nodes0.empty() ? 800  : (int)nodes0[0].height);
+
+    UiApp app(width, height);
+    app.setWindowOptions(wd.present ? wd.resizable() : true, wd.present ? wd.aspect : 0,
+                         wd.present && wd.transparent(), wd.title.c_str());
+
+    Shell sh{renderer, app};
+    sh.mapTree();
+
+    // ---- 收集节点 id：多级结构在这里被"拍平"成几组，宿主只按组操作 ----
+    for (int i = 0; i < kPages; i++) {
+        sh.pageIds[i] = sh.nid((std::string("page-") + std::to_string(i)).c_str());
+        sh.pageSub.push_back(sh.subtree(sh.pageIds[i]));
+        sh.navIds.push_back(sh.nid((std::string("nav-") + std::to_string(i)).c_str()));
+        sh.indIds.push_back(sh.nid((std::string("ind-") + std::to_string(i)).c_str()));
+    }
+    for (int i = 0; i < kRows; i++)
+        sh.rowIds.push_back(sh.nid((std::string("row-") + std::to_string(i)).c_str()));
+    for (int i = 0; i < kSwitch; i++) {
+        sh.trIds.push_back(sh.nid((std::string("tr-") + std::to_string(i)).c_str()));
+        sh.kfIds.push_back(sh.nid((std::string("kf-") + std::to_string(i)).c_str()));
+        sh.knIds.push_back(sh.nid((std::string("kn-") + std::to_string(i)).c_str()));
+    }
+    sh.dlgSub = sh.subtree(sh.nid("dlg-root"));
+    sh.toastSub = sh.subtree(sh.nid("toast"));
+
+    // 初始状态：只留第 1 页；遮罩/弹窗/提示条全隐藏
+    for (int i = 0; i < kPages; i++) {
+        if (sh.pageIds[i]) renderer.setVisible(sh.pageIds[i], i == 0);
+        if (sh.indIds[i]) renderer.setVisible(sh.indIds[i], i == 0);
+        if (sh.navIds[i])
+            renderer.setStyleColor(sh.navIds[i], ANIM_BG_COLOR, i == 0 ? 0xFFE8F1FF : 0xFFFFFFFF);
+        if (i >= 1 && sh.pageIds[i]) renderer.setVisible(sh.pageIds[i], false);
+    }
+    for (uint16_t id : {sh.nid("dlg-root"), sh.nid("veil"), sh.nid("toast")})
+        if (id) renderer.setVisible(id, false);
+    for (int i = 0; i < kSwitch; i++) sh.applySwitch(i);
+
+    // 点这些"叶子"要冒泡到真正的目标：把各组 id 拼成一张表
+    std::vector<uint16_t> targets;
+    for (auto v : sh.pageSub) targets.insert(targets.end(), v.begin(), v.end());
+    for (int i = 0; i < kSwitch; i++) {
+        if (sh.trIds[i]) targets.push_back(sh.trIds[i]);
+        if (sh.kfIds[i]) targets.push_back(sh.kfIds[i]);
+        if (sh.knIds[i]) targets.push_back(sh.knIds[i]);
+    }
+
+    auto patch = [&](uint16_t id) -> const BinUIRenderer::NodeInfo* {
+        for (const auto& n : renderer.getNodes())
+            if (n.id == id) return &n;
+        return nullptr;
+    };
+
+    app.setDrawFn([&](IBinUIGfx& gfx, const void* clip) { drawUi(gfx, renderer, clip); });
+
+    app.setMoveFn([&](float x, float y) {
+        const int old = renderer.hoveredNode();
+        renderer.setHover(x, y);
+        const int cur = renderer.hoveredNode();
+        auto touchNode = [&](int id) {
+            if (id < 0) return;
+            float bx, by, bw, bh;
+            if (renderer.invalidRect((uint16_t)id, bx, by, bw, bh, 4.0f))
+                app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
+        };
+        if (old != cur) { touchNode(old); touchNode(cur); }
+        if (cur != old) sh.setStatus(sh.hoverProbe());   // 被动查询：没有任何"悬停事件"，直接查
+    });
+
+    app.setPressFn([&](float x, float y) {
+        if (isTitlebarDrag(renderer, x, y)) { app.beginWindowDrag(); return; }
+        renderer.press(x, y);
+        const int n = renderer.hitTest(x, y);
+        if (n >= 0) {
+            float bx, by, bw, bh;
+            if (renderer.invalidRect((uint16_t)n, bx, by, bw, bh, 4.0f))
+                app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
+        }
+    });
+
+    app.setReleaseFn([&](float x, float y) {
+        const int pressed = renderer.pressedNode();
+        const int hit = renderer.release(x, y);
+        if (pressed >= 0) {
+            float bx, by, bw, bh;
+            if (renderer.invalidRect((uint16_t)pressed, bx, by, bw, bh, 4.0f))
+                app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
+        }
+        if (hit < 0) return;
+
+        const uint16_t id = sh.resolve((uint16_t)hit, targets);
+        if (!id) return;
+        const auto* n = patch(id);
+        if (!n) return;
+
+        // 弹窗开着的时候，只有弹窗里的按钮和遮罩能吃点击
+        const bool inDialog = std::find(sh.dlgSub.begin(), sh.dlgSub.end(), id) != sh.dlgSub.end();
+        const bool isVeil = (id == sh.nid("veil"));
+        if (sh.modalOpen && !inDialog && !isVeil) return;
+
+        const uint16_t idOk  = sh.nid("dlg-ok");
+        const uint16_t idNo  = sh.nid("dlg-cancel");
+
+        // 导航
+        for (int i = 0; i < kPages; i++)
+            if (id == sh.navIds[i]) { sh.goPage(i); return; }
+        // 开关
+        for (int i = 0; i < kSwitch; i++)
+            if (id == sh.trIds[i] || id == sh.kfIds[i] || id == sh.knIds[i]) {
+                sh.sw[i] = !sh.sw[i];
+                sh.applySwitch(i);
+                sh.setStatus(std::string("开关 ") + std::to_string(i + 1) + " → " +
+                             (sh.sw[i] ? "开" : "关") + "（状态存在宿主，引擎只给 setVisible）");
+                return;
+            }
+        // 弹窗按钮
+        if (isVeil || id == idNo) { sh.closeDialog(); return; }
+        if (id == idOk) {
+            const bool wasConfirm = sh.confirmMode;
+            sh.closeDialog();
+            sh.toast(wasConfirm ? "已清空（假的）" : "已确认");
+            if (wasConfirm) sh.setStatus("危险操作已被确认：宿主在同一时间轴上接着排提示条");
+            return;
+        }
+        // 页面里的按钮
+        if (id == sh.nid("btn-open")) {
+            sh.openDialog("多级组件弹窗",
+                          "壳 → 遮罩 → 弹窗组件 → 标题/正文/按钮，四层。\n"
+                          "进出场不写在组件里：面板的淡入由宿主编排，\n"
+                          "比遮罩晚 40ms —— 同一时间轴上的相位差。",
+                          false);
+            return;
+        }
+        if (id == sh.nid("btn-toast")) { sh.toast("已保存 · 用时 0.3 秒"); return; }
+        if (id == sh.nid("btn-query")) {
+            const int h = renderer.hoveredNode();
+            sh.openDialog("被动查询结果",
+                          h >= 0 ? sh.describe((uint16_t)h)
+                                 : "当前没有悬停节点。\n把鼠标移到任意控件上再点按钮。",
+                          false);
+            return;
+        }
+        if (id == sh.nid("btn-replay")) {
+            sh.replayRows(0.0);
+            sh.setStatus("行交错重播：0/45/90/135/180/225ms 六档 delay");
+            return;
+        }
+        if (id == sh.nid("btn-color")) {
+            sh.colorIdx = (sh.colorIdx + 1) % 5;
+            if (uint16_t sw = sh.nid("swatch")) {
+                renderer.setStyleColor(sw, ANIM_BG_COLOR, sh.palette[sh.colorIdx]);
+                sh.touch(sw);
+            }
+            sh.setStatus("色块换色：宿主只改目标色，0.3s 插值由引擎的 transition 完成");
+            return;
+        }
+        if (id == sh.nid("btn-danger")) {
+            sh.openDialog("确认清空",
+                          "这会删除全部本地数据，且不可恢复。\n"
+                          "（演示用：同一个弹窗组件，换文案 + 换按钮文字）",
+                          true);
+            return;
+        }
+        if (id == sh.nid("win-min"))   { app.minimize(); return; }
+        if (id == sh.nid("win-max"))   { app.maximize(); return; }
+        if (id == sh.nid("win-close")) { app.requestExit(); return; }
+
+        sh.setStatus("点了 #" + std::to_string(id) + " " + TypeName(n->type));
+    });
+
+    app.setLeaveFn([&]() {
+        const int h = renderer.hoveredNode();
+        renderer.clearHover();
+        if (h >= 0) {
+            float bx, by, bw, bh;
+            if (renderer.invalidRect((uint16_t)h, bx, by, bw, bh, 4.0f))
+                app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
+        }
+    });
+
+    app.setKeyFn([&](int vk) {
+        if (vk >= '1' && vk <= '4') { sh.goPage(vk - '1'); return; }
+        if (vk == 'D') {
+            if (!sh.modalOpen) sh.openDialog("快捷键弹窗", "D 打开 / ESC 关闭。", false);
+            return;
+        }
+        if (vk == VK_ESCAPE) {
+            if (sh.modalOpen) sh.closeDialog();
+            else app.requestExit();
+            return;
+        }
+        uint32_t mods = 0;
+        if (::GetKeyState(VK_SHIFT)   & 0x8000) mods |= BinUIRenderer::KEYMOD_SHIFT;
+        if (::GetKeyState(VK_CONTROL) & 0x8000) mods |= BinUIRenderer::KEYMOD_CTRL;
+        const auto kr = renderer.handleKey(vk, mods);
+        for (uint16_t id : kr.changed) sh.touch(id);
+    });
+
+    app.setImeActiveFn([&] { return renderer.isEditing(); });
+    app.setFocusFn([&](bool focused) {
+        if (!focused) {
+            renderer.cancelPress();
+            renderer.clearHover();
+            renderer.blur();
+            renderer.hideFocusRing();
+            app.invalidateAll();
+        }
+    });
+    app.setWheelFn([&](float x, float y, float dy) {
+        const int id = renderer.scrollAt(x, y, dy);
+        if (id >= 0) sh.touch((uint16_t)id);
+    });
+
+    int winW = width, winH = height;
+    app.setResizeFn([&](int w, int h) { winW = w; winH = h; renderer.setSize(w, h); });
+
+    // 自检模式（BINUI_APPSHOW_AUTO=1）：按脚本把页面/弹窗/交错过一遍，把每步的
+    // 实际不透明度打出来 —— 没有窗口抓图也能验证"宿主编排"真的在动。
+    const bool autoDemo = std::getenv("BINUI_APPSHOW_AUTO") != nullptr;
+    double demoT = 0.0;
+    int demoStep = 0;
+    auto demoOp = [&](uint16_t id) { return (double)renderer.drawOpacity(id); };
+    auto demoReport = [&](const char* tag) {
+        std::printf("[demo] %-10s t=%.2f page0=%.2f page1=%.2f page2=%.2f veil=%.2f rows=",
+                    tag, demoT, demoOp(sh.pageIds[0]), demoOp(sh.pageIds[1]),
+                    demoOp(sh.pageIds[2]), demoOp(sh.nid("veil")));
+        for (int i = 0; i < kRows; i++) std::printf("%.2f ", demoOp(sh.rowIds[i]));
+        std::printf("\n");
+    };
+
+    app.setUpdateFn([&](float dt) {
+        sh.now += dt;
+        if (autoDemo) {
+            demoT += dt;
+            if (demoStep == 0 && demoT > 0.30) { demoStep = 1; sh.goPage(1); demoReport("->page1"); }
+            else if (demoStep == 1 && demoT > 0.40) { demoStep = 2; demoReport("fade"); }
+            else if (demoStep == 2 && demoT > 0.62) { demoStep = 3; demoReport("mid"); }
+            else if (demoStep == 3 && demoT > 1.10) { demoStep = 4; sh.goPage(2); demoReport("->page2"); }
+            else if (demoStep == 4 && demoT > 1.90) { demoStep = 5; sh.openDialog("自检弹窗", "验证遮罩与面板的相位差。", false); demoReport("dialog"); }
+            else if (demoStep == 5 && demoT > 2.10) { demoStep = 6; demoReport("dlg-in"); }
+            else if (demoStep == 6 && demoT > 2.60) { demoStep = 7; sh.closeDialog(); demoReport("dlg-out"); }
+            else if (demoStep == 7 && demoT > 3.00) { demoStep = 8; sh.goPage(0); demoReport("->page0"); }
+            else if (demoStep == 8 && demoT > 3.40) { demoStep = 9; demoReport("final"); }
+            else if (demoStep == 9 && demoT > 3.60) { demoStep = 10; app.requestExit(); }
+        }
+        // 引擎自己的动画时钟（组件内的 @keyframes）走 stepAnimations；
+        // 宿主的编排时钟就是上面这个 sh.now，两者互不干扰。
+        for (uint16_t id : renderer.stepAnimations()) sh.touch(id);
+        sh.tickFades();
+        (void)winW; (void)winH;
+    });
+
+    renderer.setEventCallback([&](const Event& ev) {
+        if (ev.type == EventType::CLICK)
+            std::printf("[appshow] click node=%u (%.1f, %.1f)\n", (unsigned)ev.nodeId,
+                        (double)ev.click.x, (double)ev.click.y);
+    });
+
+    std::printf("[appshow] binUI 应用壳演示：4 页 / %d 节点 / 组件 %d 个\n",
+                (int)renderer.getNodes().size(), 12);
+    return app.run();
+}
