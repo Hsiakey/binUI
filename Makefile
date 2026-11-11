@@ -217,13 +217,14 @@ $(DEMO_DIR)/animshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/an
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/animshow/main.html $(DEMO_DIR)/animshow/main.html
 
-$(DEMO_DIR)/appshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/appshow/main.o $(LIB_A) $(EXA_DIR)/appshow/main.html $(EXA_DIR)/appshow/appshow-navitem.bum.html $(EXA_DIR)/appshow/appshow-card.bum.html $(EXA_DIR)/appshow/appshow-dialog.bum.html
+$(DEMO_DIR)/appshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/appshow/main.o $(LIB_A) $(EXA_DIR)/appshow/main.html $(EXA_DIR)/appshow/appshow-navitem.bum.html $(EXA_DIR)/appshow/appshow-card.bum.html $(EXA_DIR)/appshow/appshow-dialog.bum.html $(EXA_DIR)/appshow/appshow-bubble.bum.html
 	@mkdir -p $(DEMO_DIR)/appshow
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/appshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/appshow/main.html $(DEMO_DIR)/appshow/main.html
 	cp -f $(EXA_DIR)/appshow/appshow-navitem.bum.html $(DEMO_DIR)/appshow/appshow-navitem.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-card.bum.html $(DEMO_DIR)/appshow/appshow-card.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-dialog.bum.html $(DEMO_DIR)/appshow/appshow-dialog.bum.html
+	cp -f $(EXA_DIR)/appshow/appshow-bubble.bum.html $(DEMO_DIR)/appshow/appshow-bubble.bum.html
 
 $(DEMO_DIR)/fontshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A) $(EXA_DIR)/fontshow/main.html
 	@mkdir -p $(DEMO_DIR)/fontshow
@@ -511,7 +512,10 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # 专门覆盖"几何是小数时"的路径（亚像素坐标 + 小数圆角半径 + 圆角模板重采样）。
 # 这条用例就是 VK 圆角模板从 NEAREST 改 LINEAR 的判据：改之前 252x156 区域有差异，
 # 改之后不同像素 0（最大通道差 1）。只进跨后端比对，不建 GDI 基准图。
-ANIM_CASES := anim-midphase affine-corners
+# roundtex-lru（v0.12.8）：一页里 >48 种圆角半径，专门压"圆角模板 LRU 淘汰"——
+# 淘汰时如果当场删纹理，本帧已经录进批次的四边形还在引用它，跨后端比对会看到某几块
+# 圆角被画成整块纯色。这条用例只进跨后端比对（GL vs VK / D3D11），不建 GDI 基准图。
+ANIM_CASES := anim-midphase affine-corners roundtex-lru
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 

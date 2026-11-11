@@ -477,6 +477,25 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
 
             // ---- v13 扩展绘制：底色/边框的统一入口（几何来自 binui_paint.h） ----
             // GL/D3D11 有 alpha 混合，条带直接画即可，不需要像 GDI 那样自己先混合底色
+            // 透明度对**渐变底色与边框**同样生效（v0.12.8）：
+            // 以前只有单色底、文字、图片被 opacity 缩放，渐变底和边框直接拿编译期的
+            // 颜色画 —— 于是宿主淡入淡出一块渐变卡片/描边圆环时，底和边纹丝不动。
+            // 这里在进条带构建前把 alpha 折进去；不透明时 ptScaled == *pt，逐位等价。
+            BinUIPaintNode ptScaled;
+            const BinUIPaintNode* ptGrad = pt;
+            const BinUIPaintNode* ptBord = pt;
+            if (pt && opacity < 1.0f) {
+                bool need = hasGrad || hasBorder;
+                if (need) {
+                    ptScaled = *pt;
+                    ptScaled.gradFrom = GfxScaleAlpha(pt->gradFrom, opacity);
+                    ptScaled.gradTo = GfxScaleAlpha(pt->gradTo, opacity);
+                    for (int e = 0; e < 4; e++)
+                        ptScaled.borderColor[e] = GfxScaleAlpha(pt->borderColor[e], opacity);
+                    ptGrad = &ptScaled;
+                    ptBord = &ptScaled;
+                }
+            }
             auto fillNodeBg = [&](uint32_t color, float radius) {
                 if (affine) {
                     // 仿射路径：整块底一次性交给后端（渐变条带在旋转下会被撕开，
@@ -485,7 +504,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                     return;
                 }
                 binui::PaintBand bands[binui::kMaxPaintBands];
-                const int bn = binui::BuildFillBands(pt, static_cast<float>(x), static_cast<float>(y),
+                const int bn = binui::BuildFillBands(ptGrad, static_cast<float>(x), static_cast<float>(y),
                                                      static_cast<float>(nw), static_cast<float>(nh),
                                                      radius, color, bands);
                 for (int k = 0; k < bn; k++) {
@@ -505,7 +524,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                     uint8_t maxW = 1;
                     for (int e = 0; e < 4; e++) maxW = std::max(maxW, pt->borderW[e]);
                     gfx.fillRoundedXf(lw, lh, lr, true, static_cast<float>(maxW),
-                                      pt->borderColor[0], xf);
+                                      ptBord->borderColor[0], xf);
                     return;
                 }
                 // 等宽 1px 边框 + 圆角：走九宫格圆环（有解析式 AA），不用逐行矩形拼。
@@ -513,19 +532,19 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 // 圆角看起来比直边"更粗更亮"，和旁边 AA 过的填充不搭。
                 const uint8_t* bw = pt->borderW;
                 const bool uniform1px = bw[0] == 1 && bw[1] == 1 && bw[2] == 1 && bw[3] == 1 &&
-                                        pt->borderColor[0] == pt->borderColor[1] &&
-                                        pt->borderColor[0] == pt->borderColor[2] &&
-                                        pt->borderColor[0] == pt->borderColor[3];
+                                        ptBord->borderColor[0] == ptBord->borderColor[1] &&
+                                        ptBord->borderColor[0] == ptBord->borderColor[2] &&
+                                        ptBord->borderColor[0] == ptBord->borderColor[3];
                 if (uniform1px && effRadius > 0.5f) {
                     // 圆角走九宫格圆环（解析式 AA）：弧线是渐变而不是 1px 一格的台阶，
                     // 直边段模板覆盖率已修成满值，颜色和作者给的一致。
                     gfx.strokeRounded(static_cast<float>(x), static_cast<float>(y),
                                       static_cast<float>(nw), static_cast<float>(nh),
-                                      static_cast<float>(effRadius), 1.0f, pt->borderColor[0]);
+                                      static_cast<float>(effRadius), 1.0f, ptBord->borderColor[0]);
                     return;
                 }
                 binui::PaintBand bb[binui::kMaxBorderBands];
-                const int bn = binui::BuildBorderBands(pt, static_cast<float>(x), static_cast<float>(y),
+                const int bn = binui::BuildBorderBands(ptBord, static_cast<float>(x), static_cast<float>(y),
                                                        static_cast<float>(nw), static_cast<float>(nh),
                                                        static_cast<float>(effRadius), bb);
                 for (int k = 0; k < bn; k++)

@@ -55,12 +55,16 @@
         .set-l { font-size:13; color:#1F2A37; }
         .set-d { font-size:11; color:#94A3B8; }
 
-        .swatch { background:#3E8BFF; border-radius:14; transition: background-color 0.3s ease; }
+        /* ---- 泡泡池：深色水槽（泡泡是半透明的，浅底会看不出颜色） ---- */
+        .pool { background:linear-gradient(180deg, #0B1424, #17263F); border:1px solid #22314A;
+                border-radius:16; }
+        .pool-cap { font-size:11; color:#5F7EA8; }
+        .pool-num { font-size:11; color:#8FB6E8; }
     </style>
 </head>
 <body>
     <use src="../../components/titlebar.bum.html" x="0" y="0" w="1280" h="44" icon="◈" iconw="22"
-         title="binUI 应用壳演示" sub="多页面 · 多级组件 · 页面切换编排 · 弹窗相位 · 被动查询"/>
+         title="binUI 应用壳演示" sub="多页面 · 多级组件 · 页切换编排 · 弹窗相位 · 泡泡池"/>
 
     <!-- ============ 侧栏 ============ -->
     <div class="side" style="position:absolute; left:0; top:44; width:190; height:756"></div>
@@ -143,26 +147,43 @@
         <button id="btn-replay" class="btn-s" style="position:absolute; left:186; top:420; width:150; height:32">重播列表入场</button>
     </div>
 
-    <!-- ============ 页面：组件 ============ -->
+    <!-- ============ 页面：组件 · 泡泡测试 ============ -->
+    <!-- 每颗泡泡 = appshow-bubble 组件（8 个图层）。颜色/大小在 <use> 上传，位置由宿主每帧算：
+         上浮、横漂、呼吸、色相漂移、戳破重生。池子是可裁剪容器（overflow:hidden），
+         泡泡飘到池外自动被裁掉，不需要宿主自己算可见性。 -->
     <div id="page-2" class="page" style="position:absolute; left:0; top:1352; width:1058; height:676">
-        <span class="h1" style="position:absolute; left:24; top:20; width:200; height:26">组件</span>
-        <span class="h2" style="position:absolute; left:24; top:48; width:700; height:16">这页全是仓库里的公共组件（badge / 按钮），组件自带 hover 过渡</span>
+        <span class="h1" style="position:absolute; left:24; top:20; width:240; height:26">组件 · 泡泡测试</span>
+        <span class="h2" style="position:absolute; left:24; top:48; width:900; height:16">每颗泡泡都是组件 appshow-bubble（8 个图层）；漂移/呼吸/色相/戳破重生全由宿主逐帧设值</span>
 
-        <span class="kv" style="position:absolute; left:24; top:84; width:200; height:16">badge 四种配色</span>
-        <use src="../../components/badge.bum.html" x="24"  y="106" w="76" text="蓝色" kind="blue"/>
-        <use src="../../components/badge.bum.html" x="112" y="106" w="76" text="薄荷" kind="mint"/>
-        <use src="../../components/badge.bum.html" x="200" y="106" w="76" text="琥珀" kind="amber"/>
-        <use src="../../components/badge.bum.html" x="288" y="106" w="76" text="红"   kind="red"/>
+        <div id="pool" class="pool" style="position:absolute; left:24; top:84; width:1010; height:498; overflow:hidden">
 
-        <span class="kv" style="position:absolute; left:24; top:152; width:200; height:16">按钮三种语气</span>
-        <button class="btn-p" style="position:absolute; left:24;  top:176; width:120; height:34">主操作</button>
-        <button class="btn-s" style="position:absolute; left:156; top:176; width:120; height:34">次操作</button>
-        <button class="btn-d" style="position:absolute; left:288; top:176; width:120; height:34">危险操作</button>
+            <use src="appshow-bubble.bum.html" bid="b0"  x="50"  y="60"  d="150" c1="rgba(110,225,255,0.28)" c2="rgba(150,110,255,0.14)" rim="rgba(225,245,255,0.62)" iris1="rgba(130,255,235,0.50)" iris2="rgba(255,170,235,0.38)"/>
+            <use src="appshow-bubble.bum.html" bid="b1"  x="240" y="40"  d="110" c1="rgba(120,255,210,0.28)" c2="rgba(90,150,255,0.14)" rim="rgba(230,255,250,0.60)" iris1="rgba(255,190,255,0.48)" iris2="rgba(255,235,150,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b2"  x="380" y="70"  d="86"  c1="rgba(255,150,205,0.28)" c2="rgba(255,190,90,0.14)" rim="rgba(255,240,250,0.60)" iris1="rgba(150,255,220,0.48)" iris2="rgba(150,200,255,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b3"  x="490" y="30"  d="132" c1="rgba(175,130,255,0.28)" c2="rgba(90,220,255,0.14)" rim="rgba(240,235,255,0.60)" iris1="rgba(255,240,150,0.48)" iris2="rgba(140,255,190,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b4"  x="660" y="50"  d="96"  c1="rgba(190,255,120,0.28)" c2="rgba(255,110,190,0.14)" rim="rgba(245,255,235,0.60)" iris1="rgba(140,200,255,0.48)" iris2="rgba(255,200,140,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b5"  x="790" y="30"  d="120" c1="rgba(130,190,255,0.28)" c2="rgba(120,100,255,0.14)" rim="rgba(235,245,255,0.62)" iris1="rgba(255,190,140,0.48)" iris2="rgba(150,255,200,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b6"  x="940" y="60"  d="64"  c1="rgba(255,205,100,0.28)" c2="rgba(255,110,150,0.14)" rim="rgba(255,250,235,0.62)" iris1="rgba(140,230,255,0.48)" iris2="rgba(255,160,220,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b7"  x="30"  y="240" d="64"  c1="rgba(110,255,220,0.28)" c2="rgba(190,255,120,0.14)" rim="rgba(235,255,250,0.60)" iris1="rgba(255,160,220,0.48)" iris2="rgba(150,190,255,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b8"  x="120" y="300" d="100" c1="rgba(130,190,255,0.28)" c2="rgba(255,150,205,0.14)" rim="rgba(235,245,255,0.60)" iris1="rgba(200,255,160,0.48)" iris2="rgba(255,220,150,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b9"  x="250" y="200" d="72"  c1="rgba(255,130,130,0.28)" c2="rgba(130,190,255,0.14)" rim="rgba(255,240,235,0.58)" iris1="rgba(140,255,200,0.48)" iris2="rgba(255,170,235,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b10" x="350" y="320" d="140" c1="rgba(185,150,255,0.28)" c2="rgba(100,235,215,0.14)" rim="rgba(245,240,255,0.62)" iris1="rgba(255,230,150,0.48)" iris2="rgba(150,255,200,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b11" x="530" y="230" d="80"  c1="rgba(110,220,255,0.28)" c2="rgba(255,130,190,0.14)" rim="rgba(230,250,255,0.60)" iris1="rgba(255,255,180,0.48)" iris2="rgba(160,255,220,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b12" x="640" y="330" d="104" c1="rgba(120,255,210,0.28)" c2="rgba(150,110,255,0.14)" rim="rgba(230,255,250,0.60)" iris1="rgba(255,190,220,0.48)" iris2="rgba(150,220,255,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b13" x="780" y="210" d="68"  c1="rgba(255,170,120,0.28)" c2="rgba(120,220,255,0.14)" rim="rgba(255,245,235,0.60)" iris1="rgba(140,255,220,0.48)" iris2="rgba(255,200,150,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b14" x="870" y="340" d="132" c1="rgba(140,200,255,0.28)" c2="rgba(255,120,200,0.14)" rim="rgba(235,250,255,0.60)" iris1="rgba(255,240,160,0.48)" iris2="rgba(160,255,190,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b15" x="30"  y="390" d="90"  c1="rgba(190,255,120,0.28)" c2="rgba(110,225,255,0.14)" rim="rgba(245,255,235,0.60)" iris1="rgba(255,180,230,0.48)" iris2="rgba(140,210,255,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b16" x="180" y="420" d="60"  c1="rgba(255,150,205,0.28)" c2="rgba(120,255,210,0.14)" rim="rgba(255,240,250,0.60)" iris1="rgba(150,220,255,0.48)" iris2="rgba(255,240,150,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b17" x="450" y="375" d="110" c1="rgba(90,220,255,0.28)" c2="rgba(175,130,255,0.14)" rim="rgba(240,250,255,0.60)" iris1="rgba(255,200,150,0.48)" iris2="rgba(150,255,200,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b18" x="700" y="410" d="74"  c1="rgba(255,190,90,0.28)" c2="rgba(150,110,255,0.14)" rim="rgba(255,250,240,0.60)" iris1="rgba(150,255,230,0.48)" iris2="rgba(255,180,220,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b19" x="860" y="400" d="96"  c1="rgba(120,220,255,0.28)" c2="rgba(255,130,190,0.14)" rim="rgba(230,250,255,0.60)" iris1="rgba(255,230,170,0.48)" iris2="rgba(150,255,210,0.36)"/>
+        </div>
 
-        <span class="kv" style="position:absolute; left:24; top:236; width:300; height:16">运行时改色（setStyleColor + transition）</span>
-        <div id="swatch" class="swatch" style="position:absolute; left:24; top:262; width:70; height:70"></div>
-        <button id="btn-color" class="btn-s" style="position:absolute; left:110; top:262; width:120; height:32">换一个颜色</button>
-        <span class="h2" style="position:absolute; left:110; top:302; width:300; height:16">宿主只改目标色，插值由引擎完成</span>
+        <button id="btn-gust"  class="btn-p" style="position:absolute; left:24;  top:600; width:130; height:32">吹一口气</button>
+        <button id="btn-pause" class="btn-s" style="position:absolute; left:166; top:600; width:110; height:32">暂停漂浮</button>
+        <button id="btn-reset" class="btn-s" style="position:absolute; left:288; top:600; width:110; height:32">重排池子</button>
+        <span id="bub-read" class="h2" style="position:absolute; left:414; top:608; width:600; height:18">泡泡 20 · 已戳破 0</span>
+        <span class="h2" style="position:absolute; left:24; top:644; width:1000; height:18">泡泡按浮力上浮、飘到池顶沉底重生；点一下戳破。漂移/呼吸/色相全在宿主，组件只管长什么样。</span>
     </div>
 
     <!-- ============ 页面：设置 ============ -->

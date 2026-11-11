@@ -24,6 +24,7 @@
 #include <dwmapi.h>
 #include <imm.h>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <vector>
@@ -288,7 +289,10 @@ struct BinUIGLGdi::Impl {
     std::vector<GLVertex> verts;
     size_t vcount = 0;                 // 本帧已写顶点数
     std::vector<Batch> batches;
-    Batch* curBatch = nullptr;
+    // 记住的是**下标**不是指针：batches 是 vector，push_back 扩容会让 &back() 悬空，
+    // 之后 beginBatch 里的比较读的是已释放内存、count++ 写的是野指针 —— 表现为
+    // "某一块区域被涂成一块纯色方块"，且只在元素数跨过扩容阈值时出现（见 appshow 泡泡池）。
+    size_t curBatch = static_cast<size_t>(-1);
     int scissor[4] = { 0, 0, 0, 0 };
     int scissorDepth = 0;
     GLuint curTex = 0;
@@ -299,6 +303,7 @@ struct BinUIGLGdi::Impl {
     GlyphAtlas atlas;
 
     std::unordered_map<int, RoundTex> rounds;
+    std::vector<GLuint> pendingTexDelete;   // 帧内淘汰的圆角模板：flushAll 之后才真删
     RoundTex emptyRound_;   // roundFor 失败时的空返回（调用方据此退回 fillRect）
     uint64_t roundClock_ = 0;   // 圆角模板缓存 LRU 时钟
 
@@ -592,7 +597,12 @@ struct BinUIGLGdi::Impl {
             auto victim = rounds.begin();
             for (auto k = rounds.begin(); k != rounds.end(); ++k)
                 if (k->second.lastUse < victim->second.lastUse) victim = k;
-            if (victim->second.tex) glDeleteTextures(1, &victim->second.tex);
+            // 不能当场 glDeleteTextures：本帧**已经录进批次**的四边形还引用着这个纹理名
+            // （圆角九宫格每片都记着 tex）。帧内删除 + 新模板复用了同一个 GL 名字，会让
+            // 先前那些片采样到别人的内容 —— 实测表现是"某颗圆角盒子/圆环被整块涂成一个
+            // 纯色圆"，且只在半径种类数跨过 48 时出现（appshow 泡泡池一页 >48 种半径）。
+            // 统一拖到 flushAll 之后删。
+            if (victim->second.tex) pendingTexDelete.push_back(victim->second.tex);
             rounds.erase(victim);
         }
         return rounds.emplace(key, rt).first->second;
@@ -676,10 +686,10 @@ struct BinUIGLGdi::Impl {
     }
 
     void beginBatch() {
-        if (curBatch &&
-            curBatch->sx == scissor[0] && curBatch->sy == scissor[1] &&
-            curBatch->sw == scissor[2] - scissor[0] && curBatch->sh == scissor[3] - scissor[1] &&
-            curBatch->tex == curTex)
+        if (curBatch != static_cast<size_t>(-1) &&
+            batches[curBatch].sx == scissor[0] && batches[curBatch].sy == scissor[1] &&
+            batches[curBatch].sw == scissor[2] - scissor[0] &&
+            batches[curBatch].sh == scissor[3] - scissor[1] && batches[curBatch].tex == curTex)
             return;
         Batch b;
         b.first = static_cast<uint32_t>(vcount);
@@ -690,7 +700,7 @@ struct BinUIGLGdi::Impl {
         b.sh = scissor[3] - scissor[1];
         b.tex = curTex;
         batches.push_back(b);
-        curBatch = &batches.back();
+        curBatch = batches.size() - 1;
     }
 
     void emitQuad(float x0, float y0, float x1, float y1,
@@ -707,7 +717,7 @@ struct BinUIGLGdi::Impl {
         o[4] = o[1];
         o[5] = GLVertex{ x1, y1, sw, u1, v1 };
         vcount += 6;
-        curBatch->count++;
+        batches[curBatch].count++;
     }
 
     // 任意四边形 + 每角 UV（旋转/斜切用）。p = 4 个角 ×2：0=左上 1=右上 2=左下 3=右下，
@@ -724,7 +734,7 @@ struct BinUIGLGdi::Impl {
         o[4] = o[1];
         o[5] = GLVertex{ p[6], p[7], sw, uv[6], uv[7] };
         vcount += 6;
-        curBatch->count++;
+        batches[curBatch].count++;
     }
 
     // 任意旋转四边形（三角形带，白纹理；UV 无意义）
@@ -741,7 +751,7 @@ struct BinUIGLGdi::Impl {
         o[4] = GLVertex{ x3, y3, sw, 0, 1 };
         o[5] = o[0];
         vcount += 6;
-        curBatch->count++;
+        batches[curBatch].count++;
     }
 
     void flushAll() {
@@ -758,6 +768,9 @@ struct BinUIGLGdi::Impl {
             glBindTexture(GL_TEXTURE_2D, b.tex);
             glDrawArrays(GL_TRIANGLES, static_cast<GLint>(b.first), static_cast<GLsizei>(b.count * 6));
         }
+        // 本帧真正用完了，淘汰的模板现在可以删（见 roundFor 里的淘汰注释）
+        for (GLuint t : pendingTexDelete) glDeleteTextures(1, &t);
+        pendingTexDelete.clear();
     }
 
     void shutdown() {
@@ -770,6 +783,8 @@ struct BinUIGLGdi::Impl {
             ctx = nullptr;
         }
         if (hdc) { ReleaseDC(hwnd, hdc); hdc = nullptr; }
+        for (GLuint t : pendingTexDelete) glDeleteTextures(1, &t);
+        pendingTexDelete.clear();
         for (auto& kv : rounds)
             if (kv.second.tex) glDeleteTextures(1, &kv.second.tex);
         rounds.clear();
@@ -851,7 +866,7 @@ void BinUIGLGdi::beginFrame(const void* clipRect) {
     // 2 MB 全部析构再由 vertRoom 重新 resize 一遍（白白 memset 一次）。
     impl_->vcount = 0;
     impl_->batches.clear();
-    impl_->curBatch = nullptr;
+    impl_->curBatch = static_cast<size_t>(-1);
     impl_->scissorDepth = 0;
     impl_->curTex = impl_->whiteTex;
     impl_->scissor[0] = 0;

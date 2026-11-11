@@ -31,6 +31,7 @@ namespace {
 
 constexpr int kPages = 4;
 constexpr int kRows = 6;
+constexpr int kBubbles = 20;
 constexpr int kSwitch = 4;
 constexpr double kPageH = 676.0;     // 一页的高度 = 视口高度（竖页带每格正好一屏）
 // 滚动时长按"跨了几页"算：跨得越多滚得越久，跟浏览器平滑滚动一样
@@ -58,6 +59,45 @@ float EaseOut(float t) {
     if (t >= 1.0f) return 1.0f;
     return 1.0f - (1.0f - t) * (1.0f - t);
 }
+
+// HSV → 0xAARRGGBB：泡泡里那两团反光每帧换色，直接算色相环比在 HTML 里写死一堆颜色省事
+uint32_t HsvArgb(float h, float s, float v, uint8_t a) {
+    h = std::fmod(h, 360.0f);
+    if (h < 0.0f) h += 360.0f;
+    const float c = v * s;
+    const float hp = h / 60.0f;
+    const float x = c * (1.0f - std::fabs(std::fmod(hp, 2.0f) - 1.0f));
+    float rr = 0.0f, gg = 0.0f, bb = 0.0f;
+    switch (static_cast<int>(hp) % 6) {
+        case 0: rr = c; gg = x; break;
+        case 1: rr = x; gg = c; break;
+        case 2: gg = c; bb = x; break;
+        case 3: gg = x; bb = c; break;
+        case 4: rr = x; bb = c; break;
+        default: rr = c; bb = x; break;
+    }
+    const float m = v - c;
+    auto ch = [&](float f) {
+        const int i = static_cast<int>(std::lround((f + m) * 255.0f));
+        return static_cast<uint32_t>(i < 0 ? 0 : (i > 255 ? 255 : i));
+    };
+    return (static_cast<uint32_t>(a) << 24) | (ch(rr) << 16) | (ch(gg) << 8) | ch(bb);
+}
+
+// 一颗泡泡的宿主侧状态：漂移速度 / 相位 / 色相 / 爆开进度。
+// 组件（appshow-bubble）只画外观；"它会怎么飘"全在这里 —— 每颗的参数都不一样。
+struct Bubble {
+    uint16_t root = 0, film = 0, ring1 = 0, ring2 = 0, hi = 0, dot = 0, c1 = 0, c2 = 0;
+    float baseX = 0.0f, baseY = 0.0f, d = 0.0f;   // 布局位置与直径（宿主只做相对平移/缩放）
+    float x = 0.0f, y = 0.0f;                    // 当前左上角（窗口坐标）
+    float px = 0.0f, py = 0.0f;                  // 上一帧（脏矩形取新旧并集）
+    float vx = 0.0f, vy = 0.0f;                  // px/s（vy < 0 = 上浮）
+    float phase = 0.0f, breath = 0.03f, hz = 0.3f;
+    float op = 0.9f;
+    float hue = 0.0f, hueSpd = 12.0f;            // 色相漂移（度/秒）
+    float popT = -1.0f;                          // <0 = 活着；>=0 = 戳破后经过的时间
+    float popDur = 0.24f;
+};
 
 // 一条 tween：把一组节点的某个通道（opacity / translateY）从 from 插到 to。
 // start/dur 是宿主的编排时间片；hold = start 之前也把 from 写下去（交错时"占住 0"）。
@@ -89,8 +129,6 @@ struct Shell {
     bool modalOpen = false;
     bool confirmMode = false;
     bool sw[kSwitch] = {true, false, true, false};
-    int colorIdx = 0;
-    uint32_t palette[5] = {0xFF3E8BFF, 0xFF2FBF9A, 0xFFF2B544, 0xFFFF8A65, 0xFF38BDF8};
 
     std::vector<Fade> fades;
     std::unordered_map<uint16_t, uint16_t> parentOf;
@@ -98,6 +136,17 @@ struct Shell {
     std::vector<uint16_t> dlgSub, toastSub;
     std::vector<uint16_t> navIds, indIds, rowIds, trIds, kfIds, knIds;
     std::vector<uint16_t> pageIds = std::vector<uint16_t>(kPages, 0);
+
+    // ---- 泡泡池（第 3 页）：状态全在宿主，组件只负责外观 ----
+    std::vector<Bubble> bubs;
+    uint16_t idPool = 0, idBtnPause = 0, idBubRead = 0;
+    float poolL = 0.0f, poolT = 0.0f, poolR = 0.0f, poolB = 0.0f;   // 池内容盒（窗口坐标）
+    bool bubblesPaused = false;
+    int popped = 0;
+    int lastPop = -1;      // 最近被戳破的泡泡下标（自检报告用）
+    uint32_t rng = 0x2545F491u;
+    double readT = 0.0;
+    float frameMs = 16.0f;
 
     uint16_t nid(const char* name) { return r.findNodeByName(name); }
 
@@ -203,6 +252,196 @@ struct Shell {
                  ANIM_OPACITY, /*hold=*/true);
             setValue({rowIds[i]}, ANIM_OPACITY, 0.0f);
         }
+    }
+
+    // ---- 泡泡池 ----
+    // 宿主自己算命中：泡泡是被 translate/scale 挪走的，引擎的命中用的是**布局**矩形
+    // （drawState 里的偏移不参与 hitTest），所以不能指望 renderer.hitTest。这里按圆心+半径算，
+    // 后用"后画的在上面"的顺序取最上面那颗 —— 和绘制顺序一致。
+    float rnd() {
+        rng = rng * 1664525u + 1013904223u;
+        return static_cast<float>((rng >> 8) & 0xFFFFFFu) / 16777215.0f;
+    }
+    float rndRange(float a, float b) { return a + (b - a) * rnd(); }
+
+    void collectBubbles() {
+        idBtnPause = nid("btn-pause");
+        idBubRead = nid("bub-read");
+        bubs.clear();
+        for (int i = 0; i < kBubbles; i++) {
+            const std::string p = "b" + std::to_string(i);
+            Bubble b;
+            b.root = nid(p.c_str());
+            if (!b.root) continue;
+            b.film = nid((p + "-film").c_str());
+            b.ring1 = nid((p + "-ring1").c_str());
+            b.ring2 = nid((p + "-ring2").c_str());
+            b.hi = nid((p + "-hi").c_str());
+            b.dot = nid((p + "-dot").c_str());
+            b.c1 = nid((p + "-c1").c_str());
+            b.c2 = nid((p + "-c2").c_str());
+            for (const auto& n : r.getNodes()) {
+                if (n.id != b.root) continue;
+                b.baseX = n.x; b.baseY = n.y; b.d = n.width;
+                b.x = b.px = n.x;
+                b.y = b.py = n.y;
+                break;
+            }
+            if (b.d <= 0.0f) continue;
+            b.vx = rndRange(-9.0f, 9.0f);
+            b.vy = -rndRange(10.0f, 30.0f);
+            b.phase = rndRange(0.0f, 6.2831853f);
+            b.breath = rndRange(0.018f, 0.045f);
+            b.hz = rndRange(0.16f, 0.40f);
+            b.op = rndRange(0.74f, 1.0f);
+            b.hue = rndRange(0.0f, 360.0f);
+            b.hueSpd = rndRange(8.0f, 24.0f) * (rnd() < 0.5f ? -1.0f : 1.0f);
+            bubs.push_back(b);
+        }
+        if (bubs.empty()) return;
+        auto pit = parentOf.find(bubs[0].root);
+        if (pit == parentOf.end()) return;
+        idPool = pit->second;
+        for (const auto& n : r.getNodes()) {
+            if (n.id != idPool) continue;
+            poolL = n.x; poolT = n.y;
+            poolR = n.x + n.width; poolB = n.y + n.height;
+            break;
+        }
+    }
+
+    void touchBubble(const Bubble& b) {
+        const float pad = 26.0f;
+        float l = std::min(b.px, b.x) - pad, t = std::min(b.py, b.y) - pad;
+        float rr = std::max(b.px, b.x) + b.d + pad, bb = std::max(b.py, b.y) + b.d + pad;
+        l = std::max(l, poolL); t = std::max(t, poolT);
+        rr = std::min(rr, poolR); bb = std::min(bb, poolB);
+        if (rr <= l || bb <= t) return;
+        app.invalidateRect((int)l, (int)t, (int)(rr - l), (int)(bb - t));
+    }
+
+    // 一颗泡泡的所有图层都吃同一组 (dx, dy, scale, opacity)：图层各自是独立节点，
+    // translate/scale 不向后代继承，所以必须逐层设值（这就是 binUI 当前的成本）。
+    void applyBubble(Bubble& b, float t) {
+        const float k = b.popT >= 0.0f ? std::min(1.0f, b.popT / b.popDur) : 0.0f;
+        float s = 1.0f + b.breath * std::sin(t * b.hz * 6.2831853f + b.phase);
+        float op = b.op * (0.94f + 0.06f * std::sin(t * 1.9f + b.phase * 1.7f));
+        if (b.popT >= 0.0f) {
+            s += 0.65f * EaseOut(k);      // 爆开：先胀再淡出
+            op *= (1.0f - k);
+        }
+        const float dx = b.x - b.baseX, dy = b.y - b.baseY;
+        auto set = [&](uint16_t id, float o) {
+            if (!id) return;
+            r.setStyleFloat(id, ANIM_TRANSLATE_X, dx);
+            r.setStyleFloat(id, ANIM_TRANSLATE_Y, dy);
+            r.setStyleFloat(id, ANIM_SCALE, s);
+            r.setStyleFloat(id, ANIM_OPACITY, o);
+        };
+        set(b.film, op);
+        set(b.ring1, op * 0.95f);
+        set(b.ring2, op * 0.90f);
+        set(b.hi, op * 0.95f);
+        set(b.dot, op * 0.90f);
+        set(b.c1, op * 0.95f);
+        set(b.c2, op * 0.95f);
+        // 两团反光的颜色在色相环上跑：同一颗泡泡里一冷一暖，整池子看起来才"五彩斑斓"
+        if (b.c1) r.setStyleColor(b.c1, ANIM_BG_COLOR, HsvArgb(b.hue, 0.78f, 1.0f, 0x3A));
+        if (b.c2) r.setStyleColor(b.c2, ANIM_BG_COLOR, HsvArgb(b.hue + 140.0f, 0.72f, 1.0f, 0x30));
+        touchBubble(b);
+    }
+
+    void respawn(Bubble& b) {
+        b.x = rndRange(poolL + 8.0f, std::max(poolL + 9.0f, poolR - b.d - 8.0f));
+        b.y = poolB + rndRange(6.0f, 120.0f);     // 从池底外面进场
+        b.px = b.x; b.py = b.y;
+        b.vx = rndRange(-9.0f, 9.0f);
+        b.vy = -rndRange(10.0f, 30.0f);
+        b.phase = rndRange(0.0f, 6.2831853f);
+        b.hz = rndRange(0.16f, 0.40f);
+        b.breath = rndRange(0.018f, 0.045f);
+        b.hue = rndRange(0.0f, 360.0f);
+        b.popT = -1.0f;
+    }
+
+    void updateBubbles(double dt) {
+        if (bubs.empty()) return;
+        const float t = static_cast<float>(now);
+        for (auto& b : bubs) {
+            b.px = b.x; b.py = b.y;
+            if (b.popT >= 0.0f) {
+                // 爆开是"已经发生的事"，暂停也让它演完 —— 否则暂停时戳破的泡泡会僵在
+                // popT=0、永远不重生
+                b.popT += static_cast<float>(dt);
+                if (b.popT >= b.popDur) respawn(b);
+                applyBubble(b, t);
+                continue;
+            }
+            if (bubblesPaused) continue;   // 暂停：不推进漂移 / 呼吸 / 色相
+            b.hue += b.hueSpd * static_cast<float>(dt);
+            b.y += b.vy * static_cast<float>(dt);
+            b.x += (b.vx + std::sin(t * 0.8f + b.phase) * 16.0f) * static_cast<float>(dt);
+            // 池子左右是硬墙：蹭到就反弹（上浮方向不变）
+            if (b.x < poolL) { b.x = poolL; b.vx = std::fabs(b.vx); }
+            if (b.x + b.d > poolR) { b.x = poolR - b.d; b.vx = -std::fabs(b.vx); }
+            if (b.y + b.d < poolT - 6.0f) respawn(b);   // 整颗飘出顶 → 沉底重生
+            applyBubble(b, t);
+        }
+    }
+
+    bool tryPopBubble(float x, float y) {
+        if (x < poolL || x > poolR || y < poolT || y > poolB) return false;
+        for (size_t i = bubs.size(); i-- > 0;) {
+            Bubble& b = bubs[i];
+            if (b.popT >= 0.0f) continue;
+            const float r = b.d * 0.5f;
+            const float dx = x - (b.x + r), dy = y - (b.y + r);
+            if (dx * dx + dy * dy > r * r) continue;
+            b.popT = 0.0f;
+            ++popped;
+            lastPop = static_cast<int>(i);
+            setStatus("戳破一颗泡泡：命中是宿主按圆心算的（引擎命中用布局矩形，跟随不了动画位移）");
+            applyBubble(b, static_cast<float>(now));
+            return true;
+        }
+        return false;
+    }
+
+    void gustBubbles() {
+        for (auto& b : bubs) {
+            if (b.popT >= 0.0f) continue;
+            b.vy -= rndRange(28.0f, 66.0f);
+            b.vx += rndRange(-42.0f, 42.0f);
+        }
+    }
+
+    void resetBubbles() {
+        const float span = std::max(1.0f, (poolR - poolL) - 16.0f);
+        const float step = span / static_cast<float>(std::max<size_t>(1, bubs.size()));
+        for (size_t i = 0; i < bubs.size(); i++) {
+            Bubble& b = bubs[i];
+            b.x = poolL + 8.0f + step * static_cast<float>(i) + rndRange(-10.0f, 10.0f);
+            b.y = poolT + 8.0f + rndRange(0.0f, (poolB - poolT) * 0.55f);
+            b.px = b.x; b.py = b.y;
+            b.vx = rndRange(-9.0f, 9.0f);
+            b.vy = -rndRange(10.0f, 30.0f);
+            b.phase = rndRange(0.0f, 6.2831853f);
+            b.popT = -1.0f;
+            applyBubble(b, static_cast<float>(now));
+        }
+    }
+
+    void updateBubbleReadout(double dt, bool force) {
+        readT += dt;
+        if (!force && readT < 0.25) return;
+        readT = 0.0;
+        if (!idBubRead) return;
+        char buf[160];
+        std::snprintf(buf, sizeof(buf), "泡泡 %d 颗 · 已戳破 %d · %s · %.1f ms/帧",
+                      (int)bubs.size(), popped, bubblesPaused ? "暂停" : "漂浮中",
+                      (double)frameMs);
+        r.setText(idBubRead, buf);
+        touch(idBubRead);
     }
 
     // ---- 页面编排：竖页带滚动（像浏览器里点锚点跳页）----
@@ -374,6 +613,13 @@ int main(int argc, char* argv[]) {
     }
     sh.dlgSub = sh.subtree(sh.nid("dlg-root"));
     sh.toastSub = sh.subtree(sh.nid("toast"));
+    sh.collectBubbles();   // 泡泡池：每颗泡泡的 8 个图层 + 池子矩形
+    if (!sh.bubs.empty())
+        std::printf("[appshow] 泡泡池：%d 颗 · 池子 (%.0f,%.0f %.0fx%.0f)\n",
+                    (int)sh.bubs.size(), (double)sh.poolL, (double)sh.poolT,
+                    (double)(sh.poolR - sh.poolL), (double)(sh.poolB - sh.poolT));
+    else
+        std::fprintf(stderr, "[appshow] 警告：没找到泡泡节点（b0..b%d）\n", kBubbles - 1);
 
     // id 缺失会静默变成"点了没反应"，这里一次性喊出来（组件忘了写 id="{{nid=}}` 的坑）
     {
@@ -459,8 +705,10 @@ int main(int argc, char* argv[]) {
         if (cur != old) sh.setStatus(sh.hoverProbe());   // 被动查询：没有"悬停事件"，直接查
     });
 
-    app.setPressFn([&](float x, float y) {
+    std::function<void(float, float)> onPress = [&](float x, float y) {
         if (isTitlebarDrag(renderer, x, y)) { app.beginWindowDrag(); return; }
+        // 泡泡池：先自己判一次（泡泡被动画挪走了，引擎命中用的是布局矩形）
+        if (sh.curPage == 2 && sh.tryPopBubble(x, y)) return;
         renderer.press(x, y);
         const int n = renderer.hitTest(x, y);
         if (n >= 0) {
@@ -468,7 +716,8 @@ int main(int argc, char* argv[]) {
             if (renderer.invalidRect((uint16_t)n, bx, by, bw, bh, 4.0f))
                 app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
         }
-    });
+    };
+    app.setPressFn([&](float x, float y) { onPress(x, y); });
 
     std::function<void(float, float)> onRelease = [&](float x, float y) {
         const int pressed = renderer.pressedNode();
@@ -545,13 +794,27 @@ int main(int argc, char* argv[]) {
             sh.setStatus("行交错重播：0/45/90/135/180/225ms 六档 delay");
             return;
         }
-        if (id == sh.nid("btn-color")) {
-            sh.colorIdx = (sh.colorIdx + 1) % 5;
-            if (uint16_t sw = sh.nid("swatch")) {
-                renderer.setStyleColor(sw, ANIM_BG_COLOR, sh.palette[sh.colorIdx]);
-                sh.touch(sw);
+        if (id == sh.nid("btn-gust")) {
+            sh.gustBubbles();
+            sh.setStatus("吹一口气：每颗泡泡的浮速 +28~66 px/s、横向随机加速（宿主直接改速度）");
+            return;
+        }
+        if (id == sh.nid("btn-pause")) {
+            sh.bubblesPaused = !sh.bubblesPaused;
+            if (sh.idBtnPause) {
+                renderer.setText(sh.idBtnPause, sh.bubblesPaused ? "继续漂浮" : "暂停漂浮");
+                sh.touch(sh.idBtnPause);
             }
-            sh.setStatus("色块换色：宿主只改目标色，0.3s 插值由引擎的 transition 完成");
+            sh.setStatus(sh.bubblesPaused ? "泡泡池已暂停：宿主只是不再推进自己的时钟"
+                                          : "泡泡池继续：位置/色相从暂停处接着走，没有跳变");
+            sh.updateBubbleReadout(0.0, true);
+            return;
+        }
+        if (id == sh.nid("btn-reset")) {
+            sh.resetBubbles();
+            sh.popped = 0;
+            sh.setStatus("重排池子：宿主按池宽均分重新撒了一遍（组件一个都不改）");
+            sh.updateBubbleReadout(0.0, true);
             return;
         }
         if (id == sh.nid("btn-danger")) {
@@ -626,6 +889,25 @@ int main(int argc, char* argv[]) {
                     tag, demoT, sy, shown + 1, (double)renderer.drawOpacity(idVeil));
         for (int i = 0; i < kRows; i++) std::printf("%.2f ", (double)renderer.drawOpacity(sh.rowIds[i]));
         std::printf("\n");
+        if (!sh.bubs.empty()) {
+            // 泡泡是宿主逐帧设值的：读回 drawState（= 遍历真正用来画的那份状态）才作数
+            const Bubble& a = sh.bubs[0];
+            const Bubble& c = sh.bubs[1];
+            std::printf("[demo] %-11s 泡泡 0 位置=(%.0f,%.0f) 速度=(%.0f,%.0f) scale=%.2f op=%.2f | "
+                        "泡泡 1 scale=%.2f op=%.2f | 已戳破 %d\n",
+                        "", (double)a.x, (double)a.y, (double)a.vx, (double)a.vy,
+                        (double)renderer.drawScale(a.film), (double)renderer.drawOpacity(a.film),
+                        (double)renderer.drawScale(c.film), (double)renderer.drawOpacity(c.film),
+                        sh.popped);
+            std::printf("[demo] %-11s 帧 %.1f ms（20 颗 × 7 层 × 4 个通道的设值）\n", "",
+                        (double)sh.frameMs);
+            if (sh.lastPop >= 0 && sh.lastPop < (int)sh.bubs.size()) {
+                const Bubble& p = sh.bubs[sh.lastPop];
+                std::printf("[demo] %-11s 被戳破的 #%d：位置=(%.0f,%.0f) popT=%.2f scale=%.2f op=%.2f\n",
+                            "", sh.lastPop, (double)p.x, (double)p.y, (double)p.popT,
+                            (double)renderer.drawScale(p.film), (double)renderer.drawOpacity(p.film));
+            }
+        }
     };
 
     app.setUpdateFn([&](float dt) {
@@ -634,9 +916,11 @@ int main(int argc, char* argv[]) {
             demoT += dt;
             // 全部走"按坐标点"的真实路径（press → release → 命中 → 冒泡 → 分发）
             auto autoClick = [&](float x, float y) {
-                // 和真实鼠标一样：先 move（更新悬停），再 press，再 release
+                // 和真实鼠标一样：先 move（更新悬停），再 press（走应用层的 press 回调），
+                // 再 release。press 必须走 onPress —— 泡泡的命中在应用层，直接 renderer.press
+                // 会绕过它，戳不破。
                 renderer.setHover(x, y);
-                renderer.press(x, y);
+                onPress(x, y);
                 onRelease(x, y);
             };
             struct Step { double at; int kind; float x, y; const char* tag; };
@@ -653,11 +937,25 @@ int main(int argc, char* argv[]) {
                 {2.90, 1,    0.0f,    0.0f, "dlg-out"},
                 {3.10, 0,   50.0f,  139.0f, "nav-0"},      // 回到第 1 项
                 {3.50, 1,    0.0f,    0.0f, "final"},
+                {3.70, 0,   50.0f,  227.0f, "nav-2"},      // 第 3 项 → 组件/泡泡页
+                {4.20, 1,    0.0f,    0.0f, "bub-in"},
+                {4.40, 2,    0.0f,    0.0f, "bub-pop"},    // 点一颗泡泡（坐标由宿主现算）
+                {4.52, 1,    0.0f,    0.0f, "bub-pop-mid"},
+                {5.10, 1,    0.0f,    0.0f, "bub-respawn"},
             };
             const int n = (int)(sizeof(steps) / sizeof(steps[0]));
             if (demoStep < n && demoT > steps[demoStep].at) {
                 const Step& s = steps[demoStep];
                 if (s.kind == 0) autoClick(s.x, s.y);
+                if (s.kind == 2) {
+                    // 点当前最上面那颗活着的泡泡：位置/直径都是宿主状态里的实时值
+                    for (size_t bi = sh.bubs.size(); bi-- > 0;) {
+                        const Bubble& b = sh.bubs[bi];
+                        if (b.popT >= 0.0f) continue;
+                        autoClick(b.x + b.d * 0.5f, b.y + b.d * 0.5f);
+                        break;
+                    }
+                }
                 pendingReport = s.tag;
                 demoStep++;
             } else if (demoStep >= n && demoT > steps[n - 1].at + 0.30) {
@@ -667,7 +965,16 @@ int main(int argc, char* argv[]) {
 
         }        // 引擎自己的动画时钟（组件内的 @keyframes）走 stepAnimations；
         // 宿主的编排时钟是上面的 sh.now，两者互不干扰。
+        sh.frameMs = sh.frameMs * 0.9f + dt * 1000.0f * 0.1f;
         sh.stepScroll();
+        // 只在这一页、且页带没在滚的时候推进泡泡：
+        //   · 不在这一页 → 省 ~600 次 setStyleFloat/帧
+        //   · 正在滚 → 宿主算的脏矩形是"滚定后"的窗口坐标，滚动中会错位（引擎按滚动偏移
+        //     自己挪子节点），所以滚动那 200ms 让泡泡先别动
+        if (sh.curPage == 2 && !sh.scrolling) {
+            sh.updateBubbles(dt);
+            sh.updateBubbleReadout(dt, false);
+        }
         for (uint16_t id : renderer.stepAnimations()) sh.touch(id);
         sh.tickFades();
         // 报告放在动画步进之后：animResult_ 这时才反映本帧的设值（否则读到上一帧的值）

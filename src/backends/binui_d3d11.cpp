@@ -143,7 +143,8 @@ struct BinUID3D::Impl {
     std::vector<D3DVertex> verts;      // 预分配到 kMaxVerts 的本帧顶点缓冲
     size_t vcount = 0;                 // 本帧已写顶点数
     std::vector<Batch> batches;
-    Batch* curBatch = nullptr;
+    // 同 GL：batches 是 vector，存下标而不是指针（push_back 扩容后 &back() 会悬空）
+    size_t curBatch = static_cast<size_t>(-1);
     int scissor[4] = { 0, 0, 0, 0 };
     int scissorDepth = 0;
     uint8_t curLinear = 0;
@@ -152,6 +153,7 @@ struct BinUID3D::Impl {
 
     // 圆角模板（按 radius；负 key = 描边）
     std::unordered_map<int, RoundTex> rounds;
+    std::vector<RoundTex> pendingRoundRelease;   // 帧内淘汰的圆角模板：flushAll 之后才 Release
     uint64_t roundClock = 0;   // 圆角模板缓存 LRU 时钟
 
     // 图片纹理缓存（按 imageIndex）
@@ -485,8 +487,9 @@ struct BinUID3D::Impl {
             auto victim = rounds.begin();
             for (auto k = rounds.begin(); k != rounds.end(); ++k)
                 if (k->second.lastUse < victim->second.lastUse) victim = k;
-            if (victim->second.tex) victim->second.tex->Release();
-            if (victim->second.srv) victim->second.srv->Release();
+            // 与 GL 同一坑：本帧已录进批次的四边形还指着这个 SRV/纹理，帧内 Release
+            // 会把对象真删掉，批次就悬空。挪到 flushAll 之后再释放。
+            pendingRoundRelease.push_back(victim->second);
             rounds.erase(victim);
         }
         return rounds.emplace(key, rt).first->second;
@@ -640,10 +643,10 @@ struct BinUID3D::Impl {
     }
 
     void beginBatch() {
-        if (curBatch &&
-            curBatch->sx == scissor[0] && curBatch->sy == scissor[1] &&
-            curBatch->sw == scissor[2] - scissor[0] && curBatch->sh == scissor[3] - scissor[1] &&
-            curBatch->linear == curLinear && curBatch->srv == curSrv)
+        if (curBatch != static_cast<size_t>(-1) &&
+            batches[curBatch].sx == scissor[0] && batches[curBatch].sy == scissor[1] &&
+            batches[curBatch].sw == scissor[2] - scissor[0] && batches[curBatch].sh == scissor[3] - scissor[1] &&
+            batches[curBatch].linear == curLinear && batches[curBatch].srv == curSrv)
             return;
         Batch b;
         b.first = static_cast<uint32_t>(vcount); // 起始顶点索引
@@ -655,7 +658,7 @@ struct BinUID3D::Impl {
         b.linear = curLinear;
         b.srv = curSrv;
         batches.push_back(b);
-        curBatch = &batches.back();
+        curBatch = batches.size() - 1;
     }
 
     void emitQuad(float x0, float y0, float x1, float y1,
@@ -672,7 +675,7 @@ struct BinUID3D::Impl {
         o[4] = o[1];
         o[5] = D3DVertex{ x1, y1, sw, u1, v1 };
         vcount += 6;
-        curBatch->count++;
+        batches[curBatch].count++;
     }
 
     // 任意四边形 + 每角 UV（旋转/斜切用），角顺序 0=左上 1=右上 2=左下 3=右下
@@ -688,7 +691,7 @@ struct BinUID3D::Impl {
         o[4] = o[1];
         o[5] = D3DVertex{ p[6], p[7], sw, uv[6], uv[7] };
         vcount += 6;
-        curBatch->count++;
+        batches[curBatch].count++;
     }
 
     void emitQuadRot(float x0, float y0, float x1, float y1,
@@ -704,7 +707,7 @@ struct BinUID3D::Impl {
         o[4] = D3DVertex{ x3, y3, sw, 0, 1 };
         o[5] = o[0];
         vcount += 6;
-        curBatch->count++;
+        batches[curBatch].count++;
     }
 
     void flushAll() {
@@ -723,6 +726,12 @@ struct BinUID3D::Impl {
             ctx->PSSetSamplers(0, 1, b.linear ? &samLinear : &samPoint);
             ctx->Draw(b.count * 6, b.first);
         }
+        // 本帧绘制完毕，淘汰的模板现在才 Release（见 roundFor 里的淘汰注释）
+        for (auto& rt : pendingRoundRelease) {
+            if (rt.tex) rt.tex->Release();
+            if (rt.srv) rt.srv->Release();
+        }
+        pendingRoundRelease.clear();
     }
 
     // 读回 present：离屏 → staging → CPU 内存 → GDI 贴屏。
@@ -979,7 +988,7 @@ void BinUID3D::beginFrame(const void* clipRect) {
     // 只复位计数：缓冲已预分配到 kMaxVerts，clear() 每帧会把 2 MB 析构再扩容一遍
     impl_->vcount = 0;
     impl_->batches.clear();
-    impl_->curBatch = nullptr;
+    impl_->curBatch = static_cast<size_t>(-1);
     impl_->scissorDepth = 0;
     impl_->curLinear = 0;
     impl_->curSrv = impl_->whiteSrv;

@@ -119,19 +119,29 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
     }
     if (edges[ne - 1] < span - 0.01f) edges[ne++] = span;   // 防御：切点没走到末尾
 
+    // v0.12.8：**半透明**渐变不能用"每条多 0.5px"去补缝。
+    // 条带是 alpha 混合的：同一条像素行被相邻两条各盖一次 = 混合两次，于是
+    // 每两条之间浮出一条横纹。深色底上（泡泡池的薄膜）能一眼看出横向条纹。
+    // 半透明时把切点吸到整像素、条带首尾相接不重叠；不透明的老路径逐像素不变
+    // （`pixels` 金标就是靠这条保证的）。
+    const bool translucent = ((p->gradFrom >> 24) & 0xFFu) != 0xFFu ||
+                             ((p->gradTo >> 24) & 0xFFu) != 0xFFu;
+
     int count = 0;
     for (int i = 0; i + 1 < ne && count < cap; i++) {
         const float a = edges[i], b2 = edges[i + 1];
         if (b2 <= a + 0.001f) continue;
         const float t = (a + b2) * 0.5f / span;
-        PaintBand& bd = out[count++];
+        PaintBand bd;
         bd.color = PaintLerpArgb(p->gradFrom, p->gradTo, t);
         bd.round = false;
         bd.radius = 0;
         if (horizontal) {
-            bd.x = x + a;
+            float e0 = x + a, e1 = x + b2;
+            if (translucent) { e0 = std::round(e0); e1 = std::round(e1); }
+            bd.x = e0;
             bd.y = y;
-            bd.w = (b2 - a) + 0.5f;    // 轻微重叠：取整后不露缝
+            bd.w = translucent ? (e1 - e0) : (b2 - a) + 0.5f;   // 不透明：轻微重叠，取整后不露缝
             bd.h = h;
             if (r > 0.5f) {
                 const float dl = PaintRoundInset(std::min(a, r), r);
@@ -142,10 +152,12 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
                 if (bd.h <= 0.0f) bd.h = 0.5f;
             }
         } else {
+            float e0 = y + a, e1 = y + b2;
+            if (translucent) { e0 = std::round(e0); e1 = std::round(e1); }
             bd.x = x;
-            bd.y = y + a;
+            bd.y = e0;
             bd.w = w;
-            bd.h = (b2 - a) + 0.5f;
+            bd.h = translucent ? (e1 - e0) : (b2 - a) + 0.5f;
             if (r > 0.5f) {
                 const float dt = PaintRoundInset(std::min(a, r), r);
                 const float db = PaintRoundInset(std::min(span - b2, r), r);
@@ -155,6 +167,8 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
                 if (bd.w <= 0.0f) bd.w = 0.5f;
             }
         }
+        if (bd.w <= 0.0f || bd.h <= 0.0f) continue;   // 吸整像素后可能整段落在同一行
+        out[count++] = bd;
     }
     return count;
 }
