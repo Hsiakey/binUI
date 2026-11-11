@@ -72,7 +72,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `bindings/` | 语言绑定：`python/`（ctypes）、`go/`（cgo）、`rust/`（手写 extern "C"） |
 | `examples/features` | **功能**：伪类/扩展绘制/HTML 语义/组件化三形态/数据驱动 setText |
 | `examples/animshow` | **动画**：缓动 / 方向 / 时长 / fill / infinite / **缩放·形变·旋转**（含环绕+自转+变色、锯齿波+形变的压力测试节）/ 悬停过渡 / 运行时 API |
-| `examples/appshow` | **应用壳**：竖页带滚动切页（能看清中间页）/ 行交错（45ms）/ 弹窗相位（遮罩 0ms · 面板 +40ms）/ 提示条 / 开关状态迁移 / 被动查询读数 / **泡泡池**（20 颗 × 8 图层的微组件，漂移·呼吸·换色·戳破重生全在宿主；`BINUI_APPSHOW_AUTO=1` 自检，见 `docs/ui_orchestration.md`） |
+| `examples/appshow` | **应用壳**：竖页带滚动切页（能看清中间页）/ 行交错（45ms）/ 弹窗相位（遮罩 0ms · 面板 +40ms）/ 提示条 / 开关状态迁移 / 被动查询读数 / **半透明重叠**（20 块 × 5 图层的微组件，漂移·呼吸·换色·戳破重生全在宿主；「叠在一起」直接看 alpha 合成；`BINUI_APPSHOW_AUTO=1` 自检，见 `docs/ui_orchestration.md`） |
 | `examples/fontshow` | **字体与输入法**：字号阶梯 / 字重 400–800 / 斜体 / 行高 / 文字装饰 / 中英混排与符号 + IME 组字·候选框跟随光标·选词上屏（`BINUI_IME_LOG=1` 出消息日志） |
 | `examples/buttonshow` | **按钮样式**：语义色 / 尺寸 / 圆角 / 纯色·渐变·描边·幽灵底 / :hover·`:active`·`:checked`·disabled 状态 / 图标·文本·块级形态 |
 | `examples/flexshow` | **自适应布局**：百分比 / `flex:1` / `min·max-width` / `width:content` / `flex:1`+`overflow:auto` —— 整份 UI 无绝对定位，拖窗口边框实时重排（唯一可缩放窗口的示例） |

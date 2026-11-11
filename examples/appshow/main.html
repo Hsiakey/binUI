@@ -55,16 +55,17 @@
         .set-l { font-size:13; color:#1F2A37; }
         .set-d { font-size:11; color:#94A3B8; }
 
-        /* ---- 泡泡池：深色水槽（泡泡是半透明的，浅底会看不出颜色） ---- */
+        /* ---- 半透明组件池：深色底（浅底上看不出 alpha 的合成差异） ---- */
         .pool { background:linear-gradient(180deg, #0B1424, #17263F); border:1px solid #22314A;
                 border-radius:16; }
-        .pool-cap { font-size:11; color:#5F7EA8; }
-        .pool-num { font-size:11; color:#8FB6E8; }
+        /* 组件里的文字：半透明组件的标题/副标题（也吃节点透明度，重叠时会被"透"过去） */
+        .blob-t { font-size:13; font-weight:700; color:rgba(255,255,255,0.92); }
+        .blob-s { font-size:11; color:rgba(255,255,255,0.62); }
     </style>
 </head>
 <body>
     <use src="../../components/titlebar.bum.html" x="0" y="0" w="1280" h="44" icon="◈" iconw="22"
-         title="binUI 应用壳演示" sub="多页面 · 多级组件 · 页切换编排 · 弹窗相位 · 泡泡池"/>
+         title="binUI 应用壳演示" sub="多页面 · 多级组件 · 页切换编排 · 弹窗相位 · 半透明重叠"/>
 
     <!-- ============ 侧栏 ============ -->
     <div class="side" style="position:absolute; left:0; top:44; width:190; height:756"></div>
@@ -147,43 +148,44 @@
         <button id="btn-replay" class="btn-s" style="position:absolute; left:186; top:420; width:150; height:32">重播列表入场</button>
     </div>
 
-    <!-- ============ 页面：组件 · 泡泡测试 ============ -->
-    <!-- 每颗泡泡 = appshow-bubble 组件（8 个图层）。颜色/大小在 <use> 上传，位置由宿主每帧算：
-         上浮、横漂、呼吸、色相漂移、戳破重生。池子是可裁剪容器（overflow:hidden），
-         泡泡飘到池外自动被裁掉，不需要宿主自己算可见性。 -->
+    <!-- ============ 页面：组件 · 半透明重叠 ============ -->
+    <!-- 20 块半透明组件在同一个池子里飘。要看的不是"像不像泡泡"，是**重叠**：
+         两块 alpha 0.3 的色块叠在一起时，后面的透过来 70%，交叠区颜色由普通 alpha
+         合成算出来（不是加色）；叠的顺序 = 文档顺序（后声明的压在先声明的上面）。
+         位置/速度/呼吸/色相全在宿主，组件只负责"长什么样"。 -->
     <div id="page-2" class="page" style="position:absolute; left:0; top:1352; width:1058; height:676">
-        <span class="h1" style="position:absolute; left:24; top:20; width:240; height:26">组件 · 泡泡测试</span>
-        <span class="h2" style="position:absolute; left:24; top:48; width:900; height:16">每颗泡泡都是组件 appshow-bubble（8 个图层）；漂移/呼吸/色相/戳破重生全由宿主逐帧设值</span>
+        <span class="h1" style="position:absolute; left:24; top:20; width:280; height:26">组件 · 半透明重叠</span>
+        <span class="h2" style="position:absolute; left:24; top:48; width:960; height:16">20 块半透明组件在飘：重叠处是普通 alpha 合成（不是加色），绘制顺序 = 文档顺序</span>
 
         <div id="pool" class="pool" style="position:absolute; left:24; top:84; width:1010; height:498; overflow:hidden">
-
-            <use src="appshow-bubble.bum.html" bid="b0"  x="50"  y="60"  d="150" c1="rgba(110,225,255,0.28)" c2="rgba(150,110,255,0.14)" rim="rgba(225,245,255,0.62)" iris1="rgba(130,255,235,0.50)" iris2="rgba(255,170,235,0.38)"/>
-            <use src="appshow-bubble.bum.html" bid="b1"  x="240" y="40"  d="110" c1="rgba(120,255,210,0.28)" c2="rgba(90,150,255,0.14)" rim="rgba(230,255,250,0.60)" iris1="rgba(255,190,255,0.48)" iris2="rgba(255,235,150,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b2"  x="380" y="70"  d="86"  c1="rgba(255,150,205,0.28)" c2="rgba(255,190,90,0.14)" rim="rgba(255,240,250,0.60)" iris1="rgba(150,255,220,0.48)" iris2="rgba(150,200,255,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b3"  x="490" y="30"  d="132" c1="rgba(175,130,255,0.28)" c2="rgba(90,220,255,0.14)" rim="rgba(240,235,255,0.60)" iris1="rgba(255,240,150,0.48)" iris2="rgba(140,255,190,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b4"  x="660" y="50"  d="96"  c1="rgba(190,255,120,0.28)" c2="rgba(255,110,190,0.14)" rim="rgba(245,255,235,0.60)" iris1="rgba(140,200,255,0.48)" iris2="rgba(255,200,140,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b5"  x="790" y="30"  d="120" c1="rgba(130,190,255,0.28)" c2="rgba(120,100,255,0.14)" rim="rgba(235,245,255,0.62)" iris1="rgba(255,190,140,0.48)" iris2="rgba(150,255,200,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b6"  x="940" y="60"  d="64"  c1="rgba(255,205,100,0.28)" c2="rgba(255,110,150,0.14)" rim="rgba(255,250,235,0.62)" iris1="rgba(140,230,255,0.48)" iris2="rgba(255,160,220,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b7"  x="30"  y="240" d="64"  c1="rgba(110,255,220,0.28)" c2="rgba(190,255,120,0.14)" rim="rgba(235,255,250,0.60)" iris1="rgba(255,160,220,0.48)" iris2="rgba(150,190,255,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b8"  x="120" y="300" d="100" c1="rgba(130,190,255,0.28)" c2="rgba(255,150,205,0.14)" rim="rgba(235,245,255,0.60)" iris1="rgba(200,255,160,0.48)" iris2="rgba(255,220,150,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b9"  x="250" y="200" d="72"  c1="rgba(255,130,130,0.28)" c2="rgba(130,190,255,0.14)" rim="rgba(255,240,235,0.58)" iris1="rgba(140,255,200,0.48)" iris2="rgba(255,170,235,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b10" x="350" y="320" d="140" c1="rgba(185,150,255,0.28)" c2="rgba(100,235,215,0.14)" rim="rgba(245,240,255,0.62)" iris1="rgba(255,230,150,0.48)" iris2="rgba(150,255,200,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b11" x="530" y="230" d="80"  c1="rgba(110,220,255,0.28)" c2="rgba(255,130,190,0.14)" rim="rgba(230,250,255,0.60)" iris1="rgba(255,255,180,0.48)" iris2="rgba(160,255,220,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b12" x="640" y="330" d="104" c1="rgba(120,255,210,0.28)" c2="rgba(150,110,255,0.14)" rim="rgba(230,255,250,0.60)" iris1="rgba(255,190,220,0.48)" iris2="rgba(150,220,255,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b13" x="780" y="210" d="68"  c1="rgba(255,170,120,0.28)" c2="rgba(120,220,255,0.14)" rim="rgba(255,245,235,0.60)" iris1="rgba(140,255,220,0.48)" iris2="rgba(255,200,150,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b14" x="870" y="340" d="132" c1="rgba(140,200,255,0.28)" c2="rgba(255,120,200,0.14)" rim="rgba(235,250,255,0.60)" iris1="rgba(255,240,160,0.48)" iris2="rgba(160,255,190,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b15" x="30"  y="390" d="90"  c1="rgba(190,255,120,0.28)" c2="rgba(110,225,255,0.14)" rim="rgba(245,255,235,0.60)" iris1="rgba(255,180,230,0.48)" iris2="rgba(140,210,255,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b16" x="180" y="420" d="60"  c1="rgba(255,150,205,0.28)" c2="rgba(120,255,210,0.14)" rim="rgba(255,240,250,0.60)" iris1="rgba(150,220,255,0.48)" iris2="rgba(255,240,150,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b17" x="450" y="375" d="110" c1="rgba(90,220,255,0.28)" c2="rgba(175,130,255,0.14)" rim="rgba(240,250,255,0.60)" iris1="rgba(255,200,150,0.48)" iris2="rgba(150,255,200,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b18" x="700" y="410" d="74"  c1="rgba(255,190,90,0.28)" c2="rgba(150,110,255,0.14)" rim="rgba(255,250,240,0.60)" iris1="rgba(150,255,230,0.48)" iris2="rgba(255,180,220,0.36)"/>
-            <use src="appshow-bubble.bum.html" bid="b19" x="860" y="400" d="96"  c1="rgba(120,220,255,0.28)" c2="rgba(255,130,190,0.14)" rim="rgba(230,250,255,0.60)" iris1="rgba(255,230,170,0.48)" iris2="rgba(150,255,210,0.36)"/>
+            <use src="appshow-bubble.bum.html" bid="b0"  x="40"  y="50"  w="190" h="120" r="30" t="块 01" s="190×120" c1="rgba(90,210,255,0.30)"  c2="rgba(60,120,255,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(120,255,240,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b1"  x="170" y="90"  w="150" h="96"  r="24" t="块 02" s="150×96"  c1="rgba(255,110,200,0.30)" c2="rgba(150,90,255,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(255,180,120,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b2"  x="380" y="30"  w="120" h="160" r="28" t="块 03" s="120×160" c1="rgba(255,190,90,0.30)"  c2="rgba(255,120,60,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(140,200,255,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b3"  x="450" y="60"  w="210" h="90"  r="22" t="块 04" s="210×90"  c1="rgba(160,255,120,0.30)" c2="rgba(60,220,180,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(255,150,220,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b4"  x="700" y="40"  w="100" h="100" r="50" t="块 05" s="100×100" c1="rgba(255,120,150,0.30)" c2="rgba(190,90,255,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(120,220,255,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b5"  x="760" y="80"  w="170" h="140" r="34" t="块 06" s="170×140" c1="rgba(120,190,255,0.30)" c2="rgba(90,100,255,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(255,230,140,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b6"  x="40"  y="210" w="130" h="80"  r="20" t="块 07" s="130×80"  c1="rgba(90,240,220,0.30)"  c2="rgba(70,170,255,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(255,150,190,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b7"  x="120" y="250" w="230" h="70"  r="18" t="块 08" s="230×70"  c1="rgba(170,120,255,0.30)" c2="rgba(255,110,190,0.22)" rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(140,255,220,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b8"  x="390" y="200" w="150" h="150" r="40" t="块 09" s="150×150" c1="rgba(90,210,255,0.30)"  c2="rgba(255,120,200,0.22)" rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(255,200,120,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b9"  x="500" y="240" w="110" h="120" r="26" t="块 10" s="110×120" c1="rgba(255,190,90,0.30)"  c2="rgba(150,90,255,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(120,240,255,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b10" x="680" y="230" w="180" h="110" r="28" t="块 11" s="180×110" c1="rgba(160,255,120,0.30)" c2="rgba(60,120,255,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(255,140,200,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b11" x="820" y="260" w="90"  h="90"  r="45" t="块 12" s="90×90"   c1="rgba(255,120,150,0.30)" c2="rgba(60,220,180,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(150,200,255,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b12" x="30"  y="350" w="200" h="120" r="30" t="块 13" s="200×120" c1="rgba(120,190,255,0.30)" c2="rgba(255,110,190,0.22)" rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(255,230,140,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b13" x="180" y="390" w="140" h="90"  r="22" t="块 14" s="140×90"  c1="rgba(90,240,220,0.30)"  c2="rgba(190,90,255,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(255,160,190,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b14" x="360" y="360" w="160" h="120" r="30" t="块 15" s="160×120" c1="rgba(170,120,255,0.30)" c2="rgba(70,170,255,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(140,255,220,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b15" x="470" y="390" w="120" h="70"  r="18" t="块 16" s="120×70"  c1="rgba(255,190,90,0.30)"  c2="rgba(255,120,150,0.22)" rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(120,220,255,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b16" x="640" y="350" w="210" h="130" r="32" t="块 17" s="210×130" c1="rgba(90,210,255,0.30)"  c2="rgba(160,255,120,0.22)" rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(255,180,120,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b17" x="840" y="340" w="100" h="140" r="26" t="块 18" s="100×140" c1="rgba(255,110,200,0.30)" c2="rgba(120,190,255,0.22)" rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(150,255,200,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b18" x="560" y="120" w="180" h="90"  r="24" t="块 19" s="180×90"  c1="rgba(255,190,90,0.30)"  c2="rgba(150,90,255,0.22)"  rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(120,240,255,0.55)"/>
+            <use src="appshow-bubble.bum.html" bid="b19" x="300" y="300" w="130" h="130" r="38" t="块 20" s="130×130" c1="rgba(160,255,120,0.30)" c2="rgba(255,120,150,0.22)" rim="rgba(255,255,255,0.36)" iris="rgba(255,255,255,0.20)" glow="rgba(200,160,255,0.55)"/>
         </div>
 
-        <button id="btn-gust"  class="btn-p" style="position:absolute; left:24;  top:600; width:130; height:32">吹一口气</button>
-        <button id="btn-pause" class="btn-s" style="position:absolute; left:166; top:600; width:110; height:32">暂停漂浮</button>
-        <button id="btn-reset" class="btn-s" style="position:absolute; left:288; top:600; width:110; height:32">重排池子</button>
-        <span id="bub-read" class="h2" style="position:absolute; left:414; top:608; width:600; height:18">泡泡 20 · 已戳破 0</span>
-        <span class="h2" style="position:absolute; left:24; top:644; width:1000; height:18">泡泡按浮力上浮、飘到池顶沉底重生；点一下戳破。漂移/呼吸/色相全在宿主，组件只管长什么样。</span>
+        <button id="btn-gust"   class="btn-p" style="position:absolute; left:24;  top:600; width:120; height:32">吹一口气</button>
+        <button id="btn-clump"  class="btn-s" style="position:absolute; left:156; top:600; width:120; height:32">叠在一起</button>
+        <button id="btn-pause"  class="btn-s" style="position:absolute; left:288; top:600; width:110; height:32">暂停漂浮</button>
+        <button id="btn-reset"  class="btn-s" style="position:absolute; left:410; top:600; width:110; height:32">重排池子</button>
+        <span id="bub-read" class="h2" style="position:absolute; left:536; top:608; width:500; height:18">块 20 · 已戳破 0</span>
+        <span class="h2" style="position:absolute; left:24; top:648; width:1000; height:18">半透明 = 底色的 alpha；重叠处后面的透过来，颜色按普通 alpha 合成，不是"越叠越亮"。</span>
     </div>
 
     <!-- ============ 页面：设置 ============ -->

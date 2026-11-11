@@ -1,57 +1,46 @@
 <!--
-  appshow-bubble.bum.html —— 一颗泡泡（泡泡池里最小的可复用单位）
+  appshow-bubble.bum.html —— 池子里的一块半透明组件（这块演示的"最小单位"）
 
   参数：
-    bid  节点名前缀（宿主靠它把 8 个图层找齐：<bid> / -film / -ring1 / -ring2 / -hi / -dot / -c1 / -c2）
+    bid  节点名前缀（宿主靠它找齐图层：<bid> / -body / -ring / -t / -s / -tint）
     x y  左上角（池内坐标）
-    d    直径（所有内层都是百分比，改 d 就整颗变大变小）
-    c1 c2   薄膜渐变（上 → 下）。两色**不同色相**，中间那段是插值出来的虹彩
-    rim     外圈 1px 边光（最亮的一圈）
-    iris1 iris2  紧贴边光的内侧两道细环（离边 1.5% / 3.5%）：膜厚产生的彩色边
-    glow1 glow2  反光斑（下/上各一，宿主每帧改色 → 整池子的颜色在漂）
+    w h  尺寸（每块都不一样，宿主按它算碰撞/重生）
+    r    圆角
+    c1 c2  半透明渐变（上 → 下）。**颜色里带 alpha**，重叠处才看得见合成
+    rim  1px 边光（描边比填充实，重叠时轮廓还能看清）
+    iris 内圈细框（让"组件"有内容层次，不是一块纯色）
+    tint 底部色条（宿主每帧改色 → 池子里的颜色一直在漂）
+    t s  标题 / 副标题（副标题写尺寸，方便对照"大小不一"）
 
-  画法为什么是"边亮、中间空"：深色底上的皂膜，视觉信息几乎全在边缘一圈
-  （薄膜厚度渐变 → 干涉色），中间是透过去的背景。所以本体只给很淡的染色
-  （alpha 0.20 → 0.10），靠 1px 边光 + 两道虹彩环把轮廓"立"起来。
+  为什么用半透明纯色块而不是"泡泡"：
+  这块要看的不是"像不像泡泡"，是**两个半透明组件叠在一起时颜色怎么合**——
+  alpha 0.3 的两块叠起来不是"更亮"，而是"后面的透过来 70%"。
+  所以本体只保留一层带 alpha 的渐变 + 一圈描边，别的装饰越少越好。
 
-  为什么不写自己的 @keyframes：漂移/呼吸/色相**全部由宿主逐帧设值**
-  （每颗泡泡的周期和相位都不同，写进全局 keyframes 会串味，见 docs/ui_orchestration.md）。
+  不写自己的 @keyframes：漂移/呼吸/色相/戳破全由宿主逐帧设值
+  （每块的周期和相位都不同，写进全局 keyframes 会串味，见 docs/ui_orchestration.md）。
 -->
-<div id="{{bid=b0}}" style="position:absolute; left:{{x=0}}; top:{{y=0}}; width:{{d=96}}; height:{{d=96}}">
+<div id="{{bid=b0}}" style="position:absolute; left:{{x=0}}; top:{{y=0}}; width:{{w=160}}; height:{{h=110}}">
 
-    <!-- 1) 薄膜本体：双色渐变（上 → 下）+ 1px 边光。圆角写 999 = 圆 -->
-    <div id="{{bid=b0}}-film"
-         style="position:absolute; left:0; top:0; width:100%; height:100%; border-radius:999;
-                background:linear-gradient(180deg, {{c1=rgba(120,215,255,0.20)}}, {{c2=rgba(140,120,255,0.10)}});
-                border:1px solid {{rim=rgba(225,245,255,0.64)}}"></div>
+    <!-- 1) 本体：半透明双色渐变 + 1px 边光 -->
+    <div id="{{bid=b0}}-body"
+         style="position:absolute; left:0; top:0; width:100%; height:100%; border-radius:{{r=26}};
+                background:linear-gradient(180deg, {{c1=rgba(120,215,255,0.30)}}, {{c2=rgba(150,110,255,0.22)}});
+                border:1px solid {{rim=rgba(255,255,255,0.36)}}"></div>
 
-    <!-- 2) 虹彩环 1：离边 1.5%，贴着边光 -->
-    <div id="{{bid=b0}}-ring1"
-         style="position:absolute; left:1.5%; top:1.5%; width:97%; height:97%; border-radius:999;
-                border:1px solid {{iris1=rgba(140,255,235,0.50)}}"></div>
+    <!-- 2) 内圈细框：让组件看起来"有内容"，重叠时也能分出层次 -->
+    <div id="{{bid=b0}}-ring"
+         style="position:absolute; left:7%; top:8%; width:86%; height:84%; border-radius:{{r2=20}};
+                border:1px solid {{iris=rgba(255,255,255,0.20)}}"></div>
 
-    <!-- 3) 虹彩环 2：离边 3.5%，另一色相（两道环错开 = 膜的两层反射） -->
-    <div id="{{bid=b0}}-ring2"
-         style="position:absolute; left:3.5%; top:3.5%; width:93%; height:93%; border-radius:999;
-                border:1px solid {{iris2=rgba(255,170,235,0.38)}}"></div>
+    <!-- 3) 标题 / 副标题：文字也会跟着半透明一起被"透"过去 -->
+    <span id="{{bid=b0}}-t" class="blob-t"
+          style="position:absolute; left:12%; top:13%; width:76%; height:26%">{{t=组件}}</span>
+    <span id="{{bid=b0}}-s" class="blob-s"
+          style="position:absolute; left:12%; top:42%; width:76%; height:22%">{{s=尺寸}}</span>
 
-    <!-- 4) 主高光：胶囊形，白色渐变到透明（没有模糊通道，用渐变假装柔边） -->
-    <div id="{{bid=b0}}-hi"
-         style="position:absolute; left:21%; top:12%; width:25%; height:15%; border-radius:999;
-                background:linear-gradient(180deg, rgba(255,255,255,0.92), rgba(255,255,255,0.0))"></div>
-
-    <!-- 5) 反光点：高光下方那颗更小的实心白点 -->
-    <div id="{{bid=b0}}-dot"
-         style="position:absolute; left:28%; top:30%; width:5.5%; height:5.5%; border-radius:999;
-                background:#FFFFFF"></div>
-
-    <!-- 6) 底部反光：贴着下缘的一条弧光（宿主每帧 setStyleColor → 池子里的颜色在漂） -->
-    <div id="{{bid=b0}}-c1"
-         style="position:absolute; left:12%; top:76%; width:76%; height:9%; border-radius:999;
-                background:{{glow1=rgba(125,255,232,0.14)}}"></div>
-
-    <!-- 7) 侧上反光：和底部反光反相位，两个色斑叠出"五彩斑斓" -->
-    <div id="{{bid=b0}}-c2"
-         style="position:absolute; left:44%; top:24%; width:38%; height:8%; border-radius:999;
-                background:{{glow2=rgba(255,150,230,0.12)}}"></div>
+    <!-- 4) 底部色条：宿主每帧 setStyleColor，颜色在池子里漂 -->
+    <div id="{{bid=b0}}-tint"
+         style="position:absolute; left:12%; top:74%; width:56%; height:9%; border-radius:999;
+                background:{{glow=rgba(125,255,232,0.55)}}"></div>
 </div>
