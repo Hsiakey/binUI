@@ -302,11 +302,12 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             }
         } profScope(prof ? &pr : nullptr, static_cast<int>(node.type));
 
-        int x = static_cast<int>(node.x) - static_cast<int>(offX[i]);
-        int y = static_cast<int>(node.y) - static_cast<int>(offY[i]);
-        int nw = static_cast<int>(node.width);
-        int nh = static_cast<int>(node.height);
-
+        // 几何基准（v0.11.7）：**有动画时保留亚像素**，静态节点仍走原来的整型截断。
+        // 为什么必须分开：以前这里是 `int x = (int)node.x - (int)offX; ... x += (int)dx;`，
+        // 动画平移/缩放全被截断到整像素。`animshow` 的 `bob` 是 16px/1.6s ≈ 0.08px/帧，
+        // 截断后就是"每 12 帧跳 1px"；`slideX` 200px/1.4s 也会有 1~2px 的台阶 ——
+        // 这就是"像阶梯、不丝滑"的直接原因（帧率再高也没用，精度先被扔掉了）。
+        // 静态路径保持整型截断是为了像素门禁：一像素都不许变。
         // BINUI_LINE：x,y = 起点；width,height = 终点；radius = 线宽
         if (node.type == BINUI_LINE) {
             float x1 = node.x - offX[i], y1 = node.y - offY[i];
@@ -362,13 +363,28 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         float scale = st.scale;
         float animRadius = st.radius;
         if (opacity < 1.0f) dc = GfxScaleAlpha(dc, opacity);
-        if (scale != 1.0f) {
-            float cx = x + nw / 2.0f, cy = y + nh / 2.0f;
-            nw = (int)(nw * scale); nh = (int)(nh * scale);
-            x = (int)(cx - nw / 2.0f); y = (int)(cy - nh / 2.0f);
+        // 几何：有平移/缩放时用浮点（亚像素），否则沿用整型截断（像素中性）
+        const bool animGeo = (dx != 0.0f || dy != 0.0f || scale != 1.0f);
+        float x, y, nw, nh;
+        if (animGeo) {
+            nw = static_cast<float>(node.width) * scale;
+            nh = static_cast<float>(node.height) * scale;
+            // 绕矩形中心缩放，再叠加平移（与旧整型算法的顺序一致，只是不截断）
+            const float cx = node.x - offX[i] + static_cast<float>(node.width) * 0.5f + dx;
+            const float cy = node.y - offY[i] + static_cast<float>(node.height) * 0.5f + dy;
+            x = cx - nw * 0.5f;
+            y = cy - nh * 0.5f;
+        } else {
+            x = static_cast<float>(static_cast<int>(node.x) - static_cast<int>(offX[i]));
+            y = static_cast<float>(static_cast<int>(node.y) - static_cast<int>(offY[i]));
+            nw = static_cast<float>(static_cast<int>(node.width));
+            nh = static_cast<float>(static_cast<int>(node.height));
         }
-        x += (int)dx; y += (int)dy;
         int effRadius = animRadius >= 0 ? (int)animRadius : (int)node.radius;
+        // 缩放动画要连圆角一起缩放（CSS 的 transform: scale 就是这么做的）：
+        // 半径不跟着变的话，40px 盒子 1.45× 放大后圆角看起来"变方"了。
+        if (animGeo && scale != 1.0f)
+            effRadius = static_cast<int>(std::lround(effRadius * scale));
 
         if (x + nw <= clipL || x >= clipR || y + nh <= clipT || y >= clipB) continue;
         if (hasVp[i] && (x + nw <= vpL[i] || x >= vpR[i] ||
@@ -377,13 +393,23 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         // 裁剪链：自身 + 祖先 + 本次重绘范围（scissor 求交）。
         // 关键：持久离屏上节点重绘若不做脏矩形裁剪，会把整个节点矩形重涂，
         // 覆盖掉脏区以外（未重绘）的子元素/兄弟元素 → 悬停时内部元素消失。
-        if (dbgClip) {
-            std::fprintf(stderr, "[clip] node=%u type=%u own=(%d,%d %dx%d) dx=%.1f dy=%.1f\n",
-                         (unsigned)node.id, (unsigned)node.type, x, y, nw, nh,
-                         (double)dx, (double)dy);
+        // 节点自身的裁剪矩形：亚像素几何要外扩到"覆盖到的像素格"。
+        // 后端把浮点 scissor 截断（GL/D3D11 是 (int)，VK 是 floor/ceil），x=549.2 宽 22
+        // 的盒子右边界在 571.2，被截成 571 就吃掉 0.2px —— 边界随动画每帧变，肉眼又是台阶。
+        // 静态路径原样传（像素中性）。
+        float cl = x, ct = y, cw = nw, ch = nh;
+        if (animGeo) {
+            const float fx0 = std::floor(x), fy0 = std::floor(y);
+            cl = fx0; ct = fy0;
+            cw = std::ceil(x + nw) - fx0;
+            ch = std::ceil(y + nh) - fy0;
         }
-        int savedDepth = gfx.pushClip(static_cast<float>(x), static_cast<float>(y),
-                                      static_cast<float>(nw), static_cast<float>(nh));
+        if (dbgClip) {
+            std::fprintf(stderr, "[clip] node=%u type=%u own=(%.1f,%.1f %.1fx%.1f) dx=%.1f dy=%.1f\n",
+                         (unsigned)node.id, (unsigned)node.type, (double)x, (double)y,
+                         (double)nw, (double)nh, (double)dx, (double)dy);
+        }
+        int savedDepth = gfx.pushClip(cl, ct, cw, ch);
         gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
                      static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
         bool draw = true;
