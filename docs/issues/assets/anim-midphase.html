@@ -1,11 +1,28 @@
 <!DOCTYPE html>
-<html><head><style>
-body { background:#FFFFFF; }
-@keyframes sc { from { transform: scale(0.77); } to { transform: scale(1.45); } }
-</style></head>
+<html>
+<head>
+<style>
+    body { background: #FFFFFF; }
+    /* 小数几何回归用例（v20）：渲染**第一帧**就同时落在
+       · 小数缩放（0.77）
+       · 旋转（37°，走仿射路径 + 仿射圆环边框）
+       · 非等比形变（scale(1.4, 0.68)）
+       静态页面全是整数坐标/整数半径，覆盖不到这三条；VK 圆角模板采样、仿射原语
+       这类"只在几何不是轴对齐整数时才现形"的问题，就靠这条用例兜住。 */
+    @keyframes fracScale { from { transform: scale(0.77); } to { transform: scale(0.77); } }
+    @keyframes rot37     { from { transform: rotate(37deg); } to { transform: rotate(37deg); } }
+    @keyframes rotBorder { from { transform: rotate(-21deg) scale(1.05); }
+                           to   { transform: rotate(-21deg) scale(1.05); } }
+    @keyframes skewLike  { from { transform: scale(1.4, 0.68); } to { transform: scale(1.4, 0.68); } }
+    @keyframes spinCombo { from { transform: rotate(12deg) scale(1.2, 0.8); }
+                           to   { transform: rotate(12deg) scale(1.2, 0.8); } }
+</style>
+</head>
 <body>
-<div style="position:absolute; left:20; top:20; width:80; height:80; background:#3E8BFF; border-radius:12px; animation: sc 4s linear 0s infinite alternate"></div>
-<div style="position:absolute; left:130; top:20; width:60; height:60; background:#2FBF9A; border-radius:30px; animation: sc 4s linear 0s infinite alternate"></div>
-<div style="position:absolute; left:220; top:20; width:70; height:70; background:#F2B544; border-radius:16px; animation: sc 4s linear 0s infinite alternate"></div>
-<div style="position:absolute; left:20; top:130; width:120; height:60; background:#FF8A65; border-radius:20px; animation: sc 4s linear 0s infinite alternate"></div>
-</body></html>
+    <div animation="fracScale 4s linear 0s infinite" style="position:absolute; left:20; top:20; width:80; height:80; background:#3E8BFF; border-radius:12px"></div>
+    <div animation="rot37 4s linear 0s infinite" style="position:absolute; left:130; top:20; width:80; height:60; background:#2FBF9A; border-radius:14px"></div>
+    <div animation="rotBorder 4s linear 0s infinite" style="position:absolute; left:250; top:20; width:90; height:66; background:#F2B544; border-radius:16px; border:1px solid #1F2A37"></div>
+    <div animation="skewLike 4s linear 0s infinite" style="position:absolute; left:20; top:140; width:90; height:60; background:#FF8A65; border-radius:20px"></div>
+    <div animation="spinCombo 4s linear 0s infinite" style="position:absolute; left:150; top:140; width:70; height:70; background:#38BDF8; border-radius:35px"></div>
+</body>
+</html>

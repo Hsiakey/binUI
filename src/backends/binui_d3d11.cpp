@@ -675,6 +675,22 @@ struct BinUID3D::Impl {
         curBatch->count++;
     }
 
+    // 任意四边形 + 每角 UV（旋转/斜切用），角顺序 0=左上 1=右上 2=左下 3=右下
+    void emitQuadUV(const float* p, const float* uv, uint32_t color) {
+        D3DVertex* o = vertRoom(6);
+        if (!o) return;
+        beginBatch();
+        const uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
+        o[0] = D3DVertex{ p[0], p[1], sw, uv[0], uv[1] };
+        o[1] = D3DVertex{ p[2], p[3], sw, uv[2], uv[3] };
+        o[2] = D3DVertex{ p[4], p[5], sw, uv[4], uv[5] };
+        o[3] = o[2];
+        o[4] = o[1];
+        o[5] = D3DVertex{ p[6], p[7], sw, uv[6], uv[7] };
+        vcount += 6;
+        curBatch->count++;
+    }
+
     void emitQuadRot(float x0, float y0, float x1, float y1,
                      float x2, float y2, float x3, float y3, uint32_t color) {
         D3DVertex* o = vertRoom(6);
@@ -1083,6 +1099,68 @@ void BinUID3D::fillRounded(float x, float y, float w, float h, float radius, uin
     quad(x, y + c, c, h - 2 * c, 0, strip0, cu, strip1);
     quad(x + w - c, y + c, c, h - 2 * c, 1 - cu, strip0, 1, strip1);
     quad(x + c, y + c, w - 2 * c, h - 2 * c, strip0, strip0, strip1, strip1);
+    impl_->curLinear = 0;
+    impl_->curSrv = impl_->whiteSrv;
+}
+
+// 仿射圆角矩形（v20）：局部九宫格每片按 xf 变换后发射。几何与 fillRounded/strokeRounded
+// 同源（同一套模板 + 同样的九格划分），所以"不旋转时"逐像素一致。
+void BinUID3D::fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
+                             uint32_t color, const float xf[6]) {
+    if (!impl_->ready || w <= 0 || h <= 0) return;
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    const int layers = stroke ? std::max(1, static_cast<int>(std::lround(std::max(1.0f, thickness))))
+                              : 1;
+    auto xform = [&](float lx, float ly, float* out) {
+        out[0] = xf[0] * lx + xf[1] * ly + xf[2];
+        out[1] = xf[3] * lx + xf[4] * ly + xf[5];
+    };
+    Premult(color);
+    impl_->curLinear = 1;
+    int emitted = 0;
+    for (int k = 0; k < layers; k++) {
+        const float lx = static_cast<float>(k), ly = static_cast<float>(k);
+        const float lw = w - 2.0f * k, lh = h - 2.0f * k;
+        if (lw <= 1.0f || lh <= 1.0f) break;
+        const float rk = rf - static_cast<float>(k);
+        if (rk <= 0.0f) break;
+        const int rri = std::max(1, static_cast<int>(std::lround(rk)));
+        RoundTex& rt = impl_->roundFor(rri, stroke);
+        if (!rt.srv) break;
+        const float t = static_cast<float>(rt.t);
+        const float cu = rk / t;
+        const float strip0 = 0.5f;
+        const float strip1 = 0.5f + 1.0f / t;
+        const float c = rk;
+        impl_->curSrv = rt.srv;
+        auto quad = [&](float lqx, float lqy, float lqw, float lqh,
+                        float u0, float v0, float u1, float v1) {
+            if (lqw <= 0.0f || lqh <= 0.0f) return;
+            const float corners[8] = { lqx, lqy, lqx + lqw, lqy,
+                                       lqx, lqy + lqh, lqx + lqw, lqy + lqh };
+            const float uv[8] = { u0, v0, u1, v0, u0, v1, u1, v1 };
+            float sp[8];
+            for (int v = 0; v < 4; v++) xform(corners[v * 2], corners[v * 2 + 1], sp + v * 2);
+            impl_->emitQuadUV(sp, uv, color);
+            emitted++;
+        };
+        quad(lx, ly, c, c, 0, 0, cu, cu);
+        quad(lx + lw - c, ly, c, c, 1 - cu, 0, 1, cu);
+        quad(lx, ly + lh - c, c, c, 0, 1 - cu, cu, 1);
+        quad(lx + lw - c, ly + lh - c, c, c, 1 - cu, 1 - cu, 1, 1);
+        quad(lx + c, ly, lw - 2 * c, c, strip0, 0, strip1, cu);
+        quad(lx + c, ly + lh - c, lw - 2 * c, c, strip0, 1 - cu, strip1, 1);
+        quad(lx, ly + c, c, lh - 2 * c, 0, strip0, cu, strip1);
+        quad(lx + lw - c, ly + c, c, lh - 2 * c, 1 - cu, strip0, 1, strip1);
+        quad(lx + c, ly + c, lw - 2 * c, lh - 2 * c, strip0, strip0, strip1, strip1);
+    }
+    if (emitted == 0) {
+        const float corners[8] = { 0, 0, w, 0, 0, h, w, h };
+        const float uv[8] = { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
+        float sp[8];
+        for (int v = 0; v < 4; v++) xform(corners[v * 2], corners[v * 2 + 1], sp + v * 2);
+        impl_->emitQuadUV(sp, uv, color);
+    }
     impl_->curLinear = 0;
     impl_->curSrv = impl_->whiteSrv;
 }

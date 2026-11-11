@@ -1384,6 +1384,79 @@ NEAREST 会把弧线量化成 texel 台阶 —— 每帧台阶位置变一次，
 "渲染时就是小数"的用例。以后凡是动到"几何/采样"的改动，都该先问一句：
 **有没有一个用例覆盖小数几何？**
 
+---
+
+## 7.12 动画的仿射能力：旋转 + 非均匀缩放（2026-11-11，v0.12.0）
+
+### 7.12.1 为什么要加
+
+`animshow` 要做"环绕轴心 + 自转 + 形变 + 变色"的强度演示，而当时的动画系统只能表达
+`translate / scale(等比) / opacity / border-radius / background-color`：
+**没有旋转、没有非等比缩放**，HTML 元素也**不支持静态 `transform`**（编译器直接告警
+"请直接改坐标"）。所以这不是"demo 写法不够"，而是能力缺口。
+
+### 7.12.2 格式（v20，`BINUI_VERSION` 19 → 20）
+
+- 新增属性位：`ANIM_SCALE_X` / `ANIM_SCALE_Y` / `ANIM_ROTATE`；
+- `BinUIKeyFrame` 加 `scaleX / scaleY / rotateDeg`（28 → **40 字节**），
+  `static_assert` 同步改；
+- 写法约定：`scale(s)` 仍是等比（走老的 `ANIM_SCALE`），`scale(sx, sy)` 是非等比，
+  `rotate(deg)` 是角度（度数，顺时针为正；`rad` 不做换算 —— 与"只认数值"的约定一致）。
+
+编译器侧顺手修了一个真 bug：`AnimFnNum(s, fn, arg)` 的 `arg` 是**"第几次出现这个函数"**
+而不是"第几个参数"，所以 `translate(12px, 0)` 的第二个值永远取不到（会去找第二个
+`translate(`）。新增 `AnimFnArgs()` 按参数列表解析（跳过 px/deg 单位），
+`translate(tx,ty)` / `scale(sx,sy)` / `rotate(a)` 都走它。
+
+### 7.12.3 渲染：一条仿射路径 + 一个新原语
+
+- `AnimResult` / `DrawState` 增加 `kx/ky/rot`（等比缩放会折叠成 `kx=ky=scale`）；
+  `DrawState::needsAffine()` = 旋转 ≠ 0 或 kx ≠ ky。
+- 共享遍历 `binui_draw_nodes.h`：仿射节点用
+  `[a c e; b d f]`（绕矩形中心：先缩放、再旋转、最后平移）把**局部坐标**映射到屏幕，
+  并且用它算 AABB 做剔除/裁剪（`floor/ceil` 外扩）；**只有底和边框**走仿射，
+  文字/图片/路径不参与（字形要对齐像素，旋转只会糊）—— 这在接口注释里写死了。
+- 新原语 `IBinUIGfx::fillRoundedXf(w, h, radius, stroke, thickness, color, xf)`：
+  把九宫格每片按 `xf` 变换后发射。三个后端各自加了一个
+  `emitQuadUV(p[8], uv[8], color)`（任意四角 + 每角 UV），九宫格几何与
+  `fillRounded/strokeRounded` 同源，所以"不旋转时"逐像素一致。
+
+非仿射路径（静态节点、只平移/等比缩放的节点）**一行没动**：像素门禁的读数全部保持原值。
+
+### 7.12.4 验证
+
+`docs/issues/assets/anim-midphase.html` 扩成五条用例，全部用
+`from { transform: … } to { transform: … }`（同一个值）让**第一帧就落在目标状态**：
+
+| 元素 | 覆盖 |
+|---|---|
+| 80×80 r=12，`scale(0.77)` | 小数等比缩放 |
+| 80×60 r=14，`rotate(37deg)` | 旋转 + 圆角九宫格 |
+| 90×66 r=16 + 1px 边框，`rotate(-21deg) scale(1.05)` | 旋转 + **仿射圆环边框** |
+| 90×60 r=20，`scale(1.4, 0.68)` | 非等比形变 |
+| 70×70 r=35（圆），`rotate(12deg) scale(1.2, 0.8)` | 旋转 + 形变的圆 |
+
+跨后端：`vk_shot` vs `gl_shot` 不同像素 **0**（最大通道差 56，都在斜边 4× MSAA 的
+采样归属上，通道阈值 128 内），`d3d11_shot` vs `gl_shot` 不同像素 **0**。这条用例已进
+`pixels-vk`（阈值 0 + 通道阈值 128）与 `pixels-d3d11`。
+
+### 7.12.5 `animshow` 重新编排
+
+- 缩放类动画**集中到一个 640 宽的「缩放 · 形变」版块**：5 个 `scalePulse`（五种缓动）+
+  脉冲 scale + 呼吸 opacity×scale + **形变 `scale(1.28, 0.72)`** + **圆角 border-radius**；
+  左上「缓动曲线」版块改用 `translateY` 演示（不再和缩放版块重复）。
+- 新增 640 宽的**「压力测试」版块**：
+  1. **环绕轴心 + 自转 360° + 变色**：同一条 `@keyframes` 里 `translate` 四分之一圈打点、
+     `rotate` 0→360、`background-color` 三色循环（三者在同一个实例上同时插值）；
+  2. **锯齿波 × 形变 × 变色**：`translateX` 0↔150 的直折线（linear + alternate = 三角波）
+     叠加 `scale(0.75,1.25)` ↔ `scale(1.30,0.75)`；
+  3. **多属性同帧**：位移 + 旋转 + 形变 + 圆角 + 透明度五条属性一条关键帧。
+- 画布 1000×680 → **1000×900**（多一行），`check_examples` 11 个示例仍 0 问题。
+
+已知限制（都写在接口/注释里）：文字与图片不参与旋转仿射；不等宽边框在旋转下按最宽边画；
+渐变底在仿射路径下退回单色。
+
+
 
 
 

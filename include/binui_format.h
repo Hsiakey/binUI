@@ -17,7 +17,7 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v17: 渐变描边（stroke="url(#id)"）+ stroke-linecap="square"，多一条可选渐变记录
 // v18: 径向渐变的焦点 fx/fy（BinUIPathGradient 92 -> 100 字节）
 // v19: 路径边缘抗锯齿开关（shape-rendering=auto/optimizeQuality → PATH_AA）
-constexpr uint32_t BINUI_VERSION    = 19;
+constexpr uint32_t BINUI_VERSION    = 20;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -187,6 +187,13 @@ enum BinUIAnimProp : uint16_t {
     ANIM_SCALE     = 1 << 2, // 缩放（1 = 原尺寸）
     ANIM_BG_COLOR  = 1 << 3, // 背景/文本颜色（节点 color，AARRGGBB）
     ANIM_RADIUS    = 1 << 4, // 圆角半径（像素）
+    // v20：非均匀缩放与旋转。三者合起来组成绘制期的 2D 仿射
+    // （绕矩形中心：先缩放、再旋转、最后平移），用来做"形变 + 自转"。
+    // 只有 kx/kx 或 rot 生效的节点才走仿射绘制路径（见 binui_draw_nodes.h），
+    // 静态节点与"只平移/等比缩放"的节点仍走原来的亚像素路径 —— 像素中性。
+    ANIM_SCALE_X   = 1 << 5, // 横向缩放（1 = 原宽）
+    ANIM_SCALE_Y   = 1 << 6, // 纵向缩放（1 = 原高）
+    ANIM_ROTATE    = 1 << 7, // 旋转角度（度，顺时针为正）
 };
 
 enum BinUIEasing : uint8_t {
@@ -221,6 +228,11 @@ struct BinUIKeyFrame {
     float    scale;     // ANIM_SCALE
     float    radius;    // ANIM_RADIUS
     uint32_t bgColor;   // ANIM_BG_COLOR（AARRGGBB）
+    // v20：transform 的另外两维（非均匀缩放 + 旋转）。scaleX/Y 与 scale 是**两种写法**：
+    // `scale(s)` 写等比（mask=ANIM_SCALE），`scale(sx, sy)` 写非等比（mask=ANIM_SCALE_X|_Y）。
+    float    scaleX;    // ANIM_SCALE_X
+    float    scaleY;    // ANIM_SCALE_Y
+    float    rotateDeg; // ANIM_ROTATE（度）
 };
 
 struct BinUIAnimDef {
@@ -247,7 +259,7 @@ struct BinUITransition {
     float    e0x, e0y, e1x, e1y;
 };
 #pragma pack(pop)
-static_assert(sizeof(BinUIKeyFrame) == 28, "BinUIKeyFrame must be 28 bytes");
+static_assert(sizeof(BinUIKeyFrame) == 40, "BinUIKeyFrame must be 40 bytes");
 static_assert(sizeof(BinUIAnimDef) == 36, "BinUIAnimDef must be 36 bytes");
 static_assert(sizeof(BinUITransition) == 32, "BinUITransition must be 32 bytes");
 

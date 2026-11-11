@@ -71,7 +71,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `include/binui_c.h` | **C ABI**：定长 POD + 不透明句柄 + 轮询事件，给 Python/Go/Rust 等宿主语言的唯一入口（实现在 `src/binui_c.cpp`） |
 | `bindings/` | 语言绑定：`python/`（ctypes）、`go/`（cgo）、`rust/`（手写 extern "C"） |
 | `examples/features` | **功能**：伪类/扩展绘制/HTML 语义/组件化三形态/数据驱动 setText |
-| `examples/animshow` | **动画**：缓动 / 方向 / 时长 / fill / infinite / 悬停过渡 / 运行时 API |
+| `examples/animshow` | **动画**：缓动 / 方向 / 时长 / fill / infinite / **缩放·形变·旋转**（含环绕+自转+变色、锯齿波+形变的压力测试节）/ 悬停过渡 / 运行时 API |
 | `examples/fontshow` | **字体与输入法**：字号阶梯 / 字重 400–800 / 斜体 / 行高 / 文字装饰 / 中英混排与符号 + IME 组字·候选框跟随光标·选词上屏（`BINUI_IME_LOG=1` 出消息日志） |
 | `examples/buttonshow` | **按钮样式**：语义色 / 尺寸 / 圆角 / 纯色·渐变·描边·幽灵底 / :hover·`:active`·`:checked`·disabled 状态 / 图标·文本·块级形态 |
 | `examples/flexshow` | **自适应布局**：百分比 / `flex:1` / `min·max-width` / `width:content` / `flex:1`+`overflow:auto` —— 整份 UI 无绝对定位，拖窗口边框实时重排（唯一可缩放窗口的示例） |
@@ -120,7 +120,7 @@ CMake 会直接 `add_subdirectory` 编译为静态库（MSVC/MinGW 均可）；M
 后端契约是同一份 `IBinUIGfx`（`src/backends/binui_gfx.h`），节点树遍历（`binui_draw_nodes.h`）、
 字形图集与排版（`binui_glyph_atlas.h`）、无边框窗口外壳（`binui_app.h`，模板化在具体后端上）
 都是**多后端共用的一份代码** —— 所以 GL 与 Vulkan 在像素回归里对轴对齐几何逐位相同
-（`make pixels-vk`，14 个用例）。D3D11 自 0.11.0 起也走同一份遍历与外壳（它此前是一个
+（`make pixels-vk`，15 个用例，含"小数几何/旋转"回归用例）。D3D11 自 0.11.0 起也走同一份遍历与外壳（它此前是一个
 **不在构建里**的独立实现，自带一份遍历/图集/窗口外壳），`make demos-d3d11` 出
 `examples/*_d3d11.exe`；三端窗口截屏逐像素比对见 `docs/vulkan_design.md` §7.4。右键：
 
@@ -182,7 +182,7 @@ cmake --build build -j
 
 # 运行示例（8 组各一个，OpenGL 3.3 无边框窗口；产物统一在 bin/examples/）
 build/bin/examples/features.exe      # 功能：伪类 / 扩展绘制 / HTML 语义 / 组件化三形态 / 数据驱动
-build/bin/examples/animshow.exe      # 动画：缓动 / 方向 / 时长 / fill / infinite / 悬停过渡 / 运行时 API
+build/bin/examples/animshow.exe      # 动画：缓动 / 方向 / 时长 / fill / infinite / 缩放·形变·旋转 / 悬停过渡 / 运行时 API
 build/bin/examples/fontshow.exe      # 字体与输入法：字号 / 字重 / 行高 / 装饰 / 混排 + IME 组字与上屏
 build/bin/examples/buttonshow.exe    # 按钮样式：语义色 / 尺寸 / 圆角 / 底色 / 状态 / 形态（纯 CSS）
 build/bin/examples/flexshow.exe      # 自适应布局：百分比 / flex:1 / min-max / 内容宽（拖边框看实时重排）

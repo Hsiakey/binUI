@@ -48,6 +48,15 @@ public:
     virtual void fillRect(float x, float y, float w, float h, uint32_t color) = 0;
     virtual void fillRounded(float x, float y, float w, float h, float radius,
                              uint32_t color) = 0;
+    // ---- 仿射圆角矩形（v20：旋转 / 非等比缩放 / 斜切）----
+    // xf 是 2×3 行主序仿射 [a c e; b d f]：把**局部坐标** (lx, ly)（矩形左上角为原点，
+    // 范围 [0,w]×[0,h]）映射到屏幕 X = a*lx + c*ly + e, Y = b*lx + d*ly + f。
+    // radius <= 0 时就是一整个四边形；> 0 时把圆角模板的九宫格每片按 xf 变换后发射。
+    // stroke=true 走 1px 圆环模板、thickness 像素多层同心（与 strokeRounded 同语义）。
+    // 约定：文字/图片/路径**不参与**仿射（字形与贴图要按像素对齐，旋转会糊），
+    // 调用方负责只把"底/边框"交给它。
+    virtual void fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
+                              uint32_t color, const float xf[6]) = 0;
     virtual void fillLine(float x0, float y0, float x1, float y1, float width,
                           uint32_t color) = 0;
     virtual void strokeRounded(float x, float y, float w, float h, float radius,

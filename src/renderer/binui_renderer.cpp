@@ -2671,7 +2671,16 @@ void BinUIRenderer::ApplyKeyFrameProps(const BinUIKeyFrame& kf, uint16_t mask, A
     if (mask & ANIM_SCALE)     { o.scaleSet = true; o.scale = kf.scale; }
     if (mask & ANIM_BG_COLOR)  { o.colorSet = true; o.color = kf.bgColor; }
     if (mask & ANIM_RADIUS)    { o.radiusSet = true; o.radius = kf.radius; }
-    if (mask & (ANIM_OPACITY|ANIM_TRANSLATE|ANIM_SCALE|ANIM_BG_COLOR|ANIM_RADIUS)) o.active = true;
+    // v20：非等比缩放把等比 scale 覆盖掉（scale(sx,sy) 与 scale(s) 是两种写法）
+    if (mask & (ANIM_SCALE_X | ANIM_SCALE_Y)) {
+        o.kSet = true;
+        o.kx = (mask & ANIM_SCALE_X) ? kf.scaleX : kf.scaleY;
+        o.ky = (mask & ANIM_SCALE_Y) ? kf.scaleY : kf.scaleX;
+    }
+    if (mask & ANIM_ROTATE)    { o.rotSet = true; o.rot = kf.rotateDeg; }
+    if (mask & (ANIM_OPACITY|ANIM_TRANSLATE|ANIM_SCALE|ANIM_BG_COLOR|ANIM_RADIUS|
+                ANIM_SCALE_X|ANIM_SCALE_Y|ANIM_ROTATE))
+        o.active = true;
 }
 
 // 在关键帧序列上按进度 e（0..1）插值；每个属性只在携带该属性的关键帧间插值，
@@ -2712,6 +2721,15 @@ void BinUIRenderer::InterpKeyFrames(const BinUIKeyFrame* kfs, size_t n, uint16_t
         o.radiusSet = true;
         o.radius = floatAt(ANIM_RADIUS, [](const BinUIKeyFrame& k) { return k.radius; }, -1.0f);
     }
+    if (mask & (ANIM_SCALE_X | ANIM_SCALE_Y)) {
+        o.kSet = true;
+        o.kx = floatAt(ANIM_SCALE_X, [](const BinUIKeyFrame& k) { return k.scaleX; }, 1.0f);
+        o.ky = floatAt(ANIM_SCALE_Y, [](const BinUIKeyFrame& k) { return k.scaleY; }, 1.0f);
+    }
+    if (mask & ANIM_ROTATE) {
+        o.rotSet = true;
+        o.rot = floatAt(ANIM_ROTATE, [](const BinUIKeyFrame& k) { return k.rotateDeg; }, 0.0f);
+    }
     if (mask & ANIM_BG_COLOR) {
         const BinUIKeyFrame* prev = nullptr;
         const BinUIKeyFrame* next = nullptr;
@@ -2730,7 +2748,9 @@ void BinUIRenderer::InterpKeyFrames(const BinUIKeyFrame* kfs, size_t n, uint16_t
             }
         }
     }
-    if (mask & (ANIM_OPACITY|ANIM_TRANSLATE|ANIM_SCALE|ANIM_BG_COLOR|ANIM_RADIUS)) o.active = true;
+    if (mask & (ANIM_OPACITY|ANIM_TRANSLATE|ANIM_SCALE|ANIM_BG_COLOR|ANIM_RADIUS|
+                ANIM_SCALE_X|ANIM_SCALE_Y|ANIM_ROTATE))
+        o.active = true;
 }
 
 // 求动画 def 在 now 时刻对可视属性的贡献（含迭代/方向/fill；start = 绝对起始时刻，已含 delay）
@@ -2894,7 +2914,9 @@ bool BinUIRenderer::AnimResultEqual(const AnimResult& a, const AnimResult& b) {
            a.offSet == b.offSet && a.offX == b.offX && a.offY == b.offY &&
            a.scaleSet == b.scaleSet && a.scale == b.scale &&
            a.colorSet == b.colorSet && a.color == b.color &&
-           a.radiusSet == b.radiusSet && a.radius == b.radius;
+           a.radiusSet == b.radiusSet && a.radius == b.radius &&
+           a.kSet == b.kSet && a.kx == b.kx && a.ky == b.ky &&
+           a.rotSet == b.rotSet && a.rot == b.rot;
 }
 
 void BinUIRenderer::computeAnimResult(uint16_t nodeId) {
@@ -2915,6 +2937,8 @@ void BinUIRenderer::computeAnimResult(uint16_t nodeId) {
         if (overlay.scaleSet)  { res.scaleSet = true; res.scale = overlay.scale; }
         if (overlay.colorSet)  { res.colorSet = true; res.color = overlay.color; }
         if (overlay.radiusSet) { res.radiusSet = true; res.radius = overlay.radius; }
+        if (overlay.kSet)      { res.kSet = true; res.kx = overlay.kx; res.ky = overlay.ky; }
+        if (overlay.rotSet)    { res.rotSet = true; res.rot = overlay.rot; }
         if (overlay.active) res.active = true;
     }
 
@@ -3143,6 +3167,10 @@ BinUIRenderer::DrawState BinUIRenderer::drawState(uint16_t nodeId) const {
         auto f = rt->floatTargets.find(ANIM_RADIUS);
         if (f != rt->floatTargets.end()) st.radius = f->second;
     }
+    // v20：非等比缩放 / 旋转（目前只来自关键帧动画；过渡通道没有这两个属性）
+    if (r && r->kSet) { st.scaleX = r->kx; st.scaleY = r->ky; }
+    else if (st.scale != 1.0f) { st.scaleX = st.scale; st.scaleY = st.scale; }
+    if (r && r->rotSet) st.rotateDeg = r->rot;
     return st;
 }
 
@@ -3236,6 +3264,23 @@ bool BinUIRenderer::invalidRect(uint16_t nodeId, float& x, float& y, float& w, f
         t = std::min(t, cy - hh);
         r = std::max(r, cx + hw);
         b = std::max(b, cy + hh);
+    }
+    // v20：非等比缩放 / 旋转会把节点扫过外接圆 —— 脏矩形直接按外接圆（含缩放）算，
+    // 简单且一定够用（旋转任意角度都在圆内）。
+    {
+        const DrawState st = drawState(nodeId);
+        if (st.needsAffine() || st.scaleX != 1.0f || st.scaleY != 1.0f) {
+            const float cx = n.x + n.width * 0.5f + st.offX;
+            const float cy = n.y + n.height * 0.5f + st.offY;
+            const float kx = st.scaleX != 0.0f ? std::fabs(st.scaleX) : 1.0f;
+            const float ky = st.scaleY != 0.0f ? std::fabs(st.scaleY) : 1.0f;
+            const float rad = 0.5f * std::sqrt(n.width * kx * n.width * kx +
+                                               n.height * ky * n.height * ky);
+            l = std::min(l, cx - rad);
+            t = std::min(t, cy - rad);
+            r = std::max(r, cx + rad);
+            b = std::max(b, cy + rad);
+        }
     }
     // 平移动画可能来回，两个方向都覆盖（否则回弹时会留下拖影）
     const float dx = drawOffsetX(nodeId), dy = drawOffsetY(nodeId);

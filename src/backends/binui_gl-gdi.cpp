@@ -710,6 +710,23 @@ struct BinUIGLGdi::Impl {
         curBatch->count++;
     }
 
+    // 任意四边形 + 每角 UV（旋转/斜切用）。p = 4 个角 ×2：0=左上 1=右上 2=左下 3=右下，
+    // uv 同序 —— 与 emitQuad 的三角形划分（0,1,2 / 2,1,3）一致，保证绕序不变。
+    void emitQuadUV(const float* p, const float* uv, uint32_t color) {
+        GLVertex* o = vertRoom(6);
+        if (!o) return;
+        beginBatch();
+        const uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
+        o[0] = GLVertex{ p[0], p[1], sw, uv[0], uv[1] };
+        o[1] = GLVertex{ p[2], p[3], sw, uv[2], uv[3] };
+        o[2] = GLVertex{ p[4], p[5], sw, uv[4], uv[5] };
+        o[3] = o[2];
+        o[4] = o[1];
+        o[5] = GLVertex{ p[6], p[7], sw, uv[6], uv[7] };
+        vcount += 6;
+        curBatch->count++;
+    }
+
     // 任意旋转四边形（三角形带，白纹理；UV 无意义）
     void emitQuadRot(float x0, float y0, float x1, float y1,
                      float x2, float y2, float x3, float y3, uint32_t color) {
@@ -1050,6 +1067,59 @@ void BinUIGLGdi::fillLine(float x0, float y0, float x1, float y1, float width, u
     Premult(color);
     impl_->emitQuadRot(x0 + px, y0 + py, x1 + px, y1 + py,
                        x1 - px, y1 - py, x0 - px, y0 - py, color);
+}
+
+// 仿射圆角矩形（v20）：把局部坐标系里的九宫格每片按 xf 变换后发射。
+// 与 fillRounded / strokeRounded 用**同一套**模板与九宫格几何，所以"不旋的时候"
+// 与轴对齐版本逐像素一致（静态路径根本没走这里，这里只服务旋转/非等比缩放）。
+void BinUIGLGdi::fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
+                               uint32_t color, const float xf[6]) {
+    if (!impl_->ready || w <= 0 || h <= 0) return;
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    const int layers = stroke ? std::max(1, static_cast<int>(std::lround(std::max(1.0f, thickness))))
+                              : 1;
+    // 圆环模板是"1px 环"，多层同心 = 每层往里缩 1px、半径减 1（与 strokeRounded 一致）
+    Premult(color);
+    int emitted = 0;
+    for (int k = 0; k < layers; k++) {
+        const float lx = static_cast<float>(k), ly = static_cast<float>(k);
+        const float lw = w - 2.0f * k, lh = h - 2.0f * k;
+        if (lw <= 1.0f || lh <= 1.0f) break;
+        const float rk = rf - static_cast<float>(k);
+        if (rk <= 0.0f) break;
+        const int rri = std::max(1, static_cast<int>(std::lround(rk)));
+        RoundTex& rt = impl_->roundFor(rri, stroke);
+        if (!rt.tex) break;
+        PaintQuad q[9];
+        const int n = BuildRoundedNineSlice(lx, ly, lw, lh, rk, rt.t, q, 9);
+        impl_->curTex = rt.tex;
+        for (int i = 0; i < n; i++) {
+            const PaintQuad& c = q[i];
+            const float p[8] = { c.x, c.y, c.x + c.w, c.y, c.x, c.y + c.h, c.x + c.w, c.y + c.h };
+            const float uv[8] = { c.u0, c.v0, c.u1, c.v0, c.u0, c.v1, c.u1, c.v1 };
+            float sp[8];
+            for (int v = 0; v < 4; v++) {
+                const float lxp = p[v * 2], lyp = p[v * 2 + 1];
+                sp[v * 2]     = xf[0] * lxp + xf[1] * lyp + xf[2];
+                sp[v * 2 + 1] = xf[3] * lxp + xf[4] * lyp + xf[5];
+            }
+            impl_->emitQuadUV(sp, uv, color);
+            emitted++;
+        }
+    }
+    impl_->curTex = impl_->whiteTex;
+    if (emitted == 0) {
+        // 模板不可用：至少把变换后的外框画出来，别让节点凭空消失
+        const float p[8] = { 0, 0, w, 0, 0, h, w, h };
+        const float uv[8] = { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
+        float sp[8];
+        for (int v = 0; v < 4; v++) {
+            const float lxp = p[v * 2], lyp = p[v * 2 + 1];
+            sp[v * 2]     = xf[0] * lxp + xf[1] * lyp + xf[2];
+            sp[v * 2 + 1] = xf[3] * lxp + xf[4] * lyp + xf[5];
+        }
+        impl_->emitQuadUV(sp, uv, color);
+    }
 }
 
 void BinUIGLGdi::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {

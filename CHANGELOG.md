@@ -5,6 +5,55 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.12.0] - 2026-11-11
+
+动画系统补上**旋转 + 非均匀缩放**（仿射绘制），`animshow` 重新编排并新增"压力测试"版块。
+**格式号 `BINUI_VERSION` 19 → 20**（关键帧结构变长，旧的 `.bui` 需重编）。
+
+### 新增 — `rotate()` / `scale(sx, sy)` 可动画，绘制走仿射
+
+之前的动画只能表达 `translate / scale(等比) / opacity / border-radius / background-color`，
+HTML 元素也不支持静态 `transform`。这次补齐：
+
+- 属性位 `ANIM_SCALE_X` / `ANIM_SCALE_Y` / `ANIM_ROTATE`；`BinUIKeyFrame` 加
+  `scaleX/scaleY/rotateDeg`（28 → 40 字节）。
+- 写法：`scale(s)` 等比（老语义）、`scale(sx, sy)` 非等比、`rotate(deg)` 度数（顺时针正）。
+- 顺带修掉编译器一个真 bug：`AnimFnNum(s, fn, arg)` 的 `arg` 是"第几次出现这个函数"，
+  取 `translate(12px, 0)` 的第二个值永远拿到 0。新增 `AnimFnArgs()` 按参数表解析。
+- 渲染：`DrawState` 暴露 `kx/ky/rot`，`needsAffine()` = 旋转≠0 或 kx≠ky；共享遍历用
+  `[a c e; b d f]`（绕中心：缩放→旋转→平移）把局部坐标映射到屏幕，并用它算 AABB
+  做剔除/裁剪。**只有底与边框走仿射**，文字/图片/路径不参与（字形要像素对齐）。
+- 新原语 `IBinUIGfx::fillRoundedXf(...)`：九宫格每片按仿射变换后发射；三个后端各加
+  一个 `emitQuadUV()`（任意四角 + 每角 UV）。九宫格几何与轴对齐版本同源，所以
+  不旋转时逐像素一致 —— 非仿射路径**一行没动**。
+
+### 新增 — 小数几何/旋转的跨后端回归用例
+
+`anim-midphase.html` 扩成五条：小数等比缩放、37° 旋转圆角矩形、-21° 旋转 + 1px 仿射边框、
+`scale(1.4, 0.68)` 形变、旋转 12° + 形变的圆。全部用同一个 from/to 保证**首帧就是目标状态**。
+
+- `vk_shot` vs `gl_shot`：不同像素 **0**（最大通道差 56，斜边 4× MSAA 采样归属差异）；
+- `d3d11_shot` vs `gl_shot`：不同像素 **0**；
+- 已进 `pixels-vk`（阈值 0 + 通道阈值 128）与 `pixels-d3d11`。
+
+### 改进 — `animshow` 重新编排（1000×680 → 1000×900）
+
+- 缩放类动画集中到 640 宽的「**缩放 · 形变**」版块：5 个 `scalePulse`（五种缓动）+ 脉冲
+  + 呼吸（opacity×scale）+ 形变 `scale(1.28, 0.72)` + 圆角形变；「缓动曲线」版块改用
+  `translateY` 演示，不再重复缩放。
+- 新增 640 宽的「**压力测试**」版块：
+  1. 环绕轴心 + 自转 360° + 变色（同一条 keyframes 里 translate/rotate/background-color）；
+  2. 锯齿波（`translateX` linear+alternate）× 非等比形变 × 变色；
+  3. 位移 × 旋转 × 形变 × 圆角 × 透明度 五属性同帧。
+
+### 验收
+
+0 warning；四套测试全绿；`pixels` 10/10 零差异；`pixels-vk` 15/15（动画用例不同像素 0）；
+`pixels-d3d11` 全过（含动画用例）；`vk-window` / `vk-stress` 全过；`demos-vk` /
+`demos-d3d11` 各 8 个；`check_examples` 11/11（animshow 23949 字节）。详见
+`docs/vulkan_design.md` §7.12。
+
+
 ## [0.11.10] - 2026-11-11
 
 只剩 Vulkan 的"放大/缩小抖、平移不抖"：**圆角模板纹理在 VK 上是 NEAREST 采样**。

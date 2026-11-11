@@ -365,8 +365,39 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         if (opacity < 1.0f) dc = GfxScaleAlpha(dc, opacity);
         // 几何：有平移/缩放时用浮点（亚像素），否则沿用整型截断（像素中性）
         const bool animGeo = (dx != 0.0f || dy != 0.0f || scale != 1.0f);
-        float x, y, nw, nh;
-        if (animGeo) {
+        // v20：旋转 / 非等比缩放走**仿射**路径（旋转的矩形不是轴对齐的，画不了九宫格直块）。
+        // 仿射只作用在"底/边框"上：文字与图片不参与（字形要对齐像素，旋转只会糊）。
+        const bool affine = st.needsAffine();
+        float x, y, nw, nh;                 // 轴对齐几何（仿射时 = 变换后的 AABB）
+        float xf[6] = {1, 0, 0, 0, 1, 0};   // 局部 → 屏幕：[a c e; b d f]
+        float lw = 0.0f, lh = 0.0f, lr = 0.0f;   // 仿射路径下的局部尺寸/圆角
+        const float effRadius0 = animRadius >= 0 ? animRadius : static_cast<float>(node.radius);
+        if (affine) {
+            lw = static_cast<float>(node.width);
+            lh = static_cast<float>(node.height);
+            lr = effRadius0;   // 圆角跟着矩阵一起拉伸 = CSS 的语义，不再单独乘缩放
+            const float bx = static_cast<float>(static_cast<int>(node.x) - static_cast<int>(offX[i]));
+            const float by = static_cast<float>(static_cast<int>(node.y) - static_cast<int>(offY[i]));
+            const float cx = bx + lw * 0.5f + dx;
+            const float cy = by + lh * 0.5f + dy;
+            const float rad = st.rotateDeg * 3.14159265358979323846f / 180.0f;
+            const float cs = std::cos(rad), sn = std::sin(rad);
+            const float kx = st.scaleX, ky = st.scaleY;
+            const float a = cs * kx, b = sn * kx, c = -sn * ky, d = cs * ky;
+            xf[0] = a; xf[1] = c; xf[2] = cx - (a * lw * 0.5f + c * lh * 0.5f);
+            xf[3] = b; xf[4] = d; xf[5] = cy - (b * lw * 0.5f + d * lh * 0.5f);
+            // 变换后四角的 AABB（给剔除、裁剪、文字定位用）
+            float mnx = 1e30f, mny = 1e30f, mxx = -1e30f, mxy = -1e30f;
+            const float lx[4] = {0.0f, lw, 0.0f, lw};
+            const float ly[4] = {0.0f, 0.0f, lh, lh};
+            for (int v = 0; v < 4; v++) {
+                const float sx = xf[0] * lx[v] + xf[1] * ly[v] + xf[2];
+                const float sy = xf[3] * lx[v] + xf[4] * ly[v] + xf[5];
+                mnx = std::min(mnx, sx); mxx = std::max(mxx, sx);
+                mny = std::min(mny, sy); mxy = std::max(mxy, sy);
+            }
+            x = mnx; y = mny; nw = mxx - mnx; nh = mxy - mny;
+        } else if (animGeo) {
             nw = static_cast<float>(node.width) * scale;
             nh = static_cast<float>(node.height) * scale;
             // 绕矩形中心缩放，再叠加平移（与旧整型算法的顺序一致，只是不截断）
@@ -385,8 +416,8 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         // 而且圆/胶囊（radius = 短边一半）在缩放时如果半径取整，2r 与 w 会周期性错开
         // 1px，九宫格中间那几块在 0/1/2px 之间跳，圆看起来"一胀一缩"（VK/D3D11 上最明显）。
         // 后端的角片模板仍按最近的整数半径取（模板是位图，只能按整数建）。
-        float effRadius = animRadius >= 0 ? animRadius : static_cast<float>(node.radius);
-        if (animGeo && scale != 1.0f) effRadius *= scale;
+        float effRadius = effRadius0;
+        if (!affine && animGeo && scale != 1.0f) effRadius *= scale;
 
         if (x + nw <= clipL || x >= clipR || y + nh <= clipT || y >= clipB) continue;
         if (hasVp[i] && (x + nw <= vpL[i] || x >= vpR[i] ||
@@ -400,16 +431,20 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         // 的盒子右边界在 571.2，被截成 571 就吃掉 0.2px —— 边界随动画每帧变，肉眼又是台阶。
         // 静态路径原样传（像素中性）。
         float cl = x, ct = y, cw = nw, ch = nh;
-        if (animGeo) {
+        if (animGeo || affine) {
             const float fx0 = std::floor(x), fy0 = std::floor(y);
             cl = fx0; ct = fy0;
             cw = std::ceil(x + nw) - fx0;
             ch = std::ceil(y + nh) - fy0;
         }
         if (dbgClip) {
-            std::fprintf(stderr, "[clip] node=%u type=%u own=(%.1f,%.1f %.1fx%.1f) dx=%.1f dy=%.1f r=%.1f\n",
+            std::fprintf(stderr,
+                         "[clip] node=%u type=%u own=(%.1f,%.1f %.1fx%.1f) dx=%.1f dy=%.1f"
+                         " r=%.1f k=%.2fx%.2f rot=%.1f aff=%d\n",
                          (unsigned)node.id, (unsigned)node.type, (double)x, (double)y,
-                         (double)nw, (double)nh, (double)dx, (double)dy, (double)effRadius);
+                         (double)nw, (double)nh, (double)dx, (double)dy, (double)effRadius,
+                         (double)st.scaleX, (double)st.scaleY, (double)st.rotateDeg,
+                         affine ? 1 : 0);
         }
         int savedDepth = gfx.pushClip(cl, ct, cw, ch);
         gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
@@ -439,6 +474,12 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             // ---- v13 扩展绘制：底色/边框的统一入口（几何来自 binui_paint.h） ----
             // GL/D3D11 有 alpha 混合，条带直接画即可，不需要像 GDI 那样自己先混合底色
             auto fillNodeBg = [&](uint32_t color, float radius) {
+                if (affine) {
+                    // 仿射路径：整块底一次性交给后端（渐变条带在旋转下会被撕开，
+                    // 这里退回单色底；文字/图片本来就不参与仿射）
+                    gfx.fillRoundedXf(lw, lh, lr, false, 0.0f, color, xf);
+                    return;
+                }
                 binui::PaintBand bands[binui::kMaxPaintBands];
                 const int bn = binui::BuildFillBands(pt, static_cast<float>(x), static_cast<float>(y),
                                                      static_cast<float>(nw), static_cast<float>(nh),
@@ -454,6 +495,15 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             };
             auto drawNodeBorder = [&]() {
                 if (!hasBorder) return;
+                if (affine) {
+                    // 旋转/形变下的边框：走仿射圆环（四边等宽单色；不等宽的边框在旋转下
+                    // 需要四条独立仿射带，暂不支持，这里按最宽的那条画）
+                    uint8_t maxW = 1;
+                    for (int e = 0; e < 4; e++) maxW = std::max(maxW, pt->borderW[e]);
+                    gfx.fillRoundedXf(lw, lh, lr, true, static_cast<float>(maxW),
+                                      pt->borderColor[0], xf);
+                    return;
+                }
                 // 等宽 1px 边框 + 圆角：走九宫格圆环（有解析式 AA），不用逐行矩形拼。
                 // 逐行拼的条带在 45° 处每行 1.4~2px 宽、且只有亚像素混色没有 AA，
                 // 圆角看起来比直边"更粗更亮"，和旁边 AA 过的填充不搭。

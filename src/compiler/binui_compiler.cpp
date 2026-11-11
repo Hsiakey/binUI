@@ -636,13 +636,16 @@ static uint8_t AnimEasing(const std::string& s, float pts[4]) {
 // 属性名 -> 动画属性位掩码（transition 的 propMask / 提取 all）
 static uint16_t AnimProps(const std::string& s) {
     std::string lo = AnimLower(s);
-    if (AnimTrim(lo) == "all") return ANIM_OPACITY|ANIM_TRANSLATE|ANIM_SCALE|ANIM_BG_COLOR|ANIM_RADIUS;
+    if (AnimTrim(lo) == "all") return ANIM_OPACITY|ANIM_TRANSLATE|ANIM_SCALE|ANIM_BG_COLOR|ANIM_RADIUS|ANIM_SCALE_X|ANIM_SCALE_Y|ANIM_ROTATE;
     uint16_t m = 0;
     auto has = [&](const char* k) { return lo.find(k) != std::string::npos; };
     if (has("opacity")) m |= ANIM_OPACITY;
-    if (has("transform")) m |= ANIM_TRANSLATE | ANIM_SCALE;
+    // transform 可能只写了一维：平移 / 等比缩放 / 非等比缩放 / 旋转各自的 mask 由
+    // AnimApplyKeyProp 按实际出现的函数再收窄（这里先给全，避免漏属性）
+    if (has("transform")) m |= ANIM_TRANSLATE | ANIM_SCALE | ANIM_SCALE_X | ANIM_SCALE_Y | ANIM_ROTATE;
     if (has("translate")) m |= ANIM_TRANSLATE;
     if (has("scale")) m |= ANIM_SCALE;
+    if (has("rotate")) m |= ANIM_ROTATE;
     if (has("background-color") || has("background") || has("color")) m |= ANIM_BG_COLOR;
     if (has("border-radius") || has("radius")) m |= ANIM_RADIUS;
     return m;
@@ -665,6 +668,31 @@ static float AnimFnNum(const std::string& s, const std::string& fn, size_t arg =
     if (num.empty() || num == "-") return 0;
     try { return std::stof(num); } catch (...) { return 0; }
 }
+
+// 取 transform 里 `fn(...)` 的**参数列表**（逗号分隔的数值，单位如 px/deg 会被跳过）。
+// 为什么单独写一个：AnimFnNum 的 arg 是"第几次出现这个函数"，不是"第几个参数"，
+// 用它取 translate(72px, 0) 的第二个值会去找第二个 "translate(" → 永远拿到 0。
+static std::vector<float> AnimFnArgs(const std::string& s, const std::string& fn) {
+    std::vector<float> out;
+    size_t p = s.find(fn + "(");
+    if (p == std::string::npos) return out;
+    p += fn.size() + 1;
+    while (p < s.size() && s[p] != ')') {
+        while (p < s.size() && (s[p] == ' ' || s[p] == '\t' || s[p] == ',')) p++;
+        std::string num;
+        while (p < s.size() &&
+               (std::isdigit(static_cast<unsigned char>(s[p])) || s[p] == '.' ||
+                s[p] == '-' || s[p] == '+')) {
+            num += s[p];
+            p++;
+        }
+        if (!num.empty() && num != "-" && num != "+") {
+            try { out.push_back(std::stof(num)); } catch (...) {}
+        }
+        while (p < s.size() && s[p] != ',' && s[p] != ')') p++;   // 跳过单位
+    }
+    return out;
+}
 // 关键帧声明应用到关键帧结构
 static void AnimApplyKeyProp(BinUIKeyFrame& kf, const std::string& propRaw, const std::string& valRaw) {
     std::string p = AnimLower(AnimTrim(propRaw));
@@ -675,16 +703,38 @@ static void AnimApplyKeyProp(BinUIKeyFrame& kf, const std::string& propRaw, cons
         kf.propMask |= ANIM_OPACITY;
     } else if (p == "transform") {
         if (v.find("translate") != std::string::npos) {
-            float tx = AnimFnNum(v, "translateX");
-            float ty = AnimFnNum(v, "translateY");
-            if (v.find("translate(") != std::string::npos) { tx = AnimFnNum(v, "translate", 0); ty = AnimFnNum(v, "translate", 1); }
+            float tx = 0, ty = 0;
+            const std::vector<float> ta = AnimFnArgs(v, "translate");
+            if (!ta.empty()) {                       // translate(tx, ty)
+                tx = ta[0];
+                ty = ta.size() > 1 ? ta[1] : 0.0f;
+            } else {                                 // translateX / translateY
+                tx = AnimFnNum(v, "translateX");
+                ty = AnimFnNum(v, "translateY");
+            }
             kf.tx = tx; kf.ty = ty;
             kf.propMask |= ANIM_TRANSLATE;
         }
         if (v.find("scale") != std::string::npos) {
-            float s = AnimFnNum(v, "scale");
-            kf.scale = (s == 0) ? 1.0f : s;
-            kf.propMask |= ANIM_SCALE;
+            // v20：`scale(sx, sy)` 写的是**非等比**，走 SCALE_X/SCALE_Y；
+            // 单参数 `scale(s)` 仍走等比的 ANIM_SCALE（老语义不变）。
+            const std::vector<float> sa = AnimFnArgs(v, "scale");
+            if (sa.size() >= 2) {
+                kf.scaleX = (sa[0] == 0) ? 1.0f : sa[0];
+                kf.scaleY = (sa[1] == 0) ? 1.0f : sa[1];
+                kf.propMask |= ANIM_SCALE_X | ANIM_SCALE_Y;
+            } else {
+                const float s = sa.empty() ? 0.0f : sa[0];
+                kf.scale = (s == 0) ? 1.0f : s;
+                kf.propMask |= ANIM_SCALE;
+            }
+        }
+        if (v.find("rotate") != std::string::npos) {
+            // 只认数字（deg 可写可不写）；rad 也按数字读，不做单位换算 ——
+            // 与其余属性"只认数值"的约定一致
+            const std::vector<float> ra = AnimFnArgs(v, "rotate");
+            kf.rotateDeg = ra.empty() ? 0.0f : ra[0];
+            kf.propMask |= ANIM_ROTATE;
         }
     } else if (p == "background-color" || p == "background" || p == "color") {
         uint32_t c = AnimColor(v);
@@ -891,7 +941,7 @@ static void AnimParseTransitions(const std::string& v, uint16_t nodeId,
                 }
                 props |= AnimProps(tk);
             }
-            t.propMask = props ? props : (ANIM_OPACITY|ANIM_TRANSLATE|ANIM_SCALE|ANIM_BG_COLOR|ANIM_RADIUS);
+            t.propMask = props ? props : (ANIM_OPACITY|ANIM_TRANSLATE|ANIM_SCALE|ANIM_BG_COLOR|ANIM_RADIUS|ANIM_SCALE_X|ANIM_SCALE_Y|ANIM_ROTATE);
             out.push_back(t);
         }
         if (comma == std::string::npos) break;

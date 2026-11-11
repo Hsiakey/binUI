@@ -55,6 +55,9 @@ public:
     // ---------- 立即模式绘制原语（颜色 0xAARRGGBB） ----------
     void fillRect(float x, float y, float w, float h, uint32_t color);
     void fillRounded(float x, float y, float w, float h, float radius, uint32_t color);
+    // 仿射圆角矩形（旋转 / 非等比缩放）：xf = [a c e; b d f]，见 binui_gfx.h
+    void fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
+                       uint32_t color, const float xf[6]);
     // 线段（端点 x0,y0 -> x1,y1，宽度像素，实心旋转四边形）
     void fillLine(float x0, float y0, float x1, float y1, float width, uint32_t color);
     void strokeRounded(float x, float y, float w, float h, float radius,

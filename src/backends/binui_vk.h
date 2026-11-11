@@ -47,6 +47,9 @@ public:
     void fillRect(float x, float y, float w, float h, uint32_t color) override;
     void fillRounded(float x, float y, float w, float h, float radius,
                      uint32_t color) override;
+    // 仿射圆角矩形（旋转 / 非等比缩放）：xf = [a c e; b d f]，见 binui_gfx.h
+    void fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
+                       uint32_t color, const float xf[6]) override;
     void fillLine(float x0, float y0, float x1, float y1, float width,
                   uint32_t color) override;
     void strokeRounded(float x, float y, float w, float h, float radius,

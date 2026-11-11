@@ -1897,6 +1897,21 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         cur.count += 2;
     }
 
+    // 任意四边形 + 每角 UV（旋转/斜切用），角顺序 0=左上 1=右上 2=左下 3=右下。
+    void emitQuadUV(const float* p, const float* uv, uint32_t color, Tex* tex) {
+        VkVertex* o = vertRoom(6);
+        if (!o) return;
+        switchBatch(tex);
+        o[0] = VkVertex{p[0], p[1], color, uv[0], uv[1]};
+        o[1] = VkVertex{p[2], p[3], color, uv[2], uv[3]};
+        o[2] = VkVertex{p[4], p[5], color, uv[4], uv[5]};
+        o[3] = o[2];
+        o[4] = o[1];
+        o[5] = VkVertex{p[6], p[7], color, uv[6], uv[7]};
+        vcount += 6;
+        cur.count += 2;
+    }
+
     void flush() {
         // 每帧一次也要提成 static：UCRT 的 getenv 要遍历环境表，~0.5 µs/次，
         // 和本文件 fillRect 里同一个坑（§7.3）。
@@ -2276,6 +2291,51 @@ void BinUIVK::beginFrame(const void* clipRect) {
     d.batches.clear();
     d.cur = Impl::Batch{};
     d.switchBatch(&d.white);
+}
+
+// 仿射圆角矩形（v20）：局部九宫格每片按 xf 变换后发射（模板/几何与轴对齐版本同源）
+void BinUIVK::fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
+                            uint32_t color, const float xf[6]) {
+    Impl& d = *impl_;
+    if (!d.ready || w <= 0 || h <= 0) return;
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    const int layers = stroke ? std::max(1, static_cast<int>(std::lround(std::max(1.0f, thickness))))
+                              : 1;
+    auto xform = [&](float lx, float ly, float* out) {
+        out[0] = xf[0] * lx + xf[1] * ly + xf[2];
+        out[1] = xf[3] * lx + xf[4] * ly + xf[5];
+    };
+    Premult(color);
+    int emitted = 0;
+    for (int k = 0; k < layers; k++) {
+        const float lx = static_cast<float>(k), ly = static_cast<float>(k);
+        const float lw = w - 2.0f * k, lh = h - 2.0f * k;
+        if (lw <= 1.0f || lh <= 1.0f) break;
+        const float rk = rf - static_cast<float>(k);
+        if (rk <= 0.0f) break;
+        const int rri = std::max(1, static_cast<int>(std::lround(rk)));
+        Impl::RoundTex& rt = d.roundFor(rri, stroke);
+        if (!rt.tex.image) break;
+        PaintQuad q[9];
+        const int n = BuildRoundedNineSlice(lx, ly, lw, lh, rk, rt.t, q, 9);
+        for (int i = 0; i < n; i++) {
+            const PaintQuad& c = q[i];
+            const float corners[8] = { c.x, c.y, c.x + c.w, c.y,
+                                       c.x, c.y + c.h, c.x + c.w, c.y + c.h };
+            const float uv[8] = { c.u0, c.v0, c.u1, c.v0, c.u0, c.v1, c.u1, c.v1 };
+            float sp[8];
+            for (int v = 0; v < 4; v++) xform(corners[v * 2], corners[v * 2 + 1], sp + v * 2);
+            d.emitQuadUV(sp, uv, color, &rt.tex);
+            emitted++;
+        }
+    }
+    if (emitted == 0) {
+        const float corners[8] = { 0, 0, w, 0, 0, h, w, h };
+        const float uv[8] = { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
+        float sp[8];
+        for (int v = 0; v < 4; v++) xform(corners[v * 2], corners[v * 2 + 1], sp + v * 2);
+        d.emitQuadUV(sp, uv, color, &d.white);
+    }
 }
 
 // present() 会不会自己阻塞到垂直同步：走交换链 + FIFO 才算。其余路径（读回 + GDI 贴屏、

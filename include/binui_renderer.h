@@ -460,8 +460,17 @@ public:
         float    offX      = 0.0f, offY = 0.0f;
         float    scale     = 1.0f;
         float    radius    = -1.0f;   // -1 = 无动画（用节点自身的圆角）
+        // v20：绘制期仿射的两维。scaleX/Y 在"只写了等比 scale"时等于 scale，
+        // 旋转是**度**、顺时针为正；三者都为默认值时节点走原来的轴对齐路径。
+        float    scaleX    = 1.0f;
+        float    scaleY    = 1.0f;
+        float    rotateDeg = 0.0f;
         bool     disabled  = false;
         const BinUIPaintNode* paint = nullptr;   // 扩展绘制段（文字色/边框/渐变…）
+        // 是否需要走仿射绘制（非等比缩放或旋转；等比缩放+平移仍走亚像素轴对齐路径）
+        bool needsAffine() const {
+            return rotateDeg != 0.0f || scaleX != scaleY;
+        }
     };
     DrawState drawState(uint16_t nodeId) const;
 
@@ -623,6 +632,9 @@ private:
         bool   scaleSet = false; float scale = 1.0f;
         bool   colorSet = false; uint32_t color = 0;
         bool   radiusSet = false; float radius = -1;
+        // v20：非等比缩放 + 旋转（写法见 BinUIKeyFrame 的注释）
+        bool   kSet = false;     float kx = 1.0f, ky = 1.0f;
+        bool   rotSet = false;   float rot = 0.0f;
     };
     std::unordered_map<uint16_t, AnimResult> animResult_;
     // 动画扫过的极值（缩放/平移）。当前值不足以描述"刚从放大缩回来"的那一帧：
