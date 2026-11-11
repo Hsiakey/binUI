@@ -32,8 +32,9 @@ namespace {
 constexpr int kPages = 4;
 constexpr int kRows = 6;
 constexpr int kSwitch = 4;
-constexpr double kPageH = 676.0;     // 内容视口高度 = 一"格"页面的高度
-constexpr double kPush = 0.28;       // 整块推走/顶进来的时长（两页同时，硬连在一起）
+constexpr double kPageH = 676.0;     // 一页的高度 = 视口高度（竖页带每格正好一屏）
+// 滚动时长按"跨了几页"算：跨得越多滚得越久，跟浏览器平滑滚动一样
+inline double ScrollDur(int steps) { return std::min(0.55, 0.16 + 0.085 * std::abs(steps)); }
 
 const char* TypeName(uint8_t t) {
     switch (t) {
@@ -80,8 +81,11 @@ struct Shell {
 
     double now = 0.0;          // 宿主时钟（秒）
     int curPage = 0;
-    bool busy = false;         // 切页进行中：屏蔽重复点击
-    double busyUntil = 0.0;
+    uint16_t idViewport = 0;   // 竖页带所在的滚动视口
+    double scrollPos = 0.0;    // 当前滚动偏移（像素，向下为正）
+    float  pageH = (float)kPageH;   // 一页高度（= 视口高度），自检打印用
+    double scrollFrom = 0.0, scrollTo = 0.0, scrollT0 = 0.0, scrollDur = 0.0;
+    bool scrolling = false;
     bool modalOpen = false;
     bool confirmMode = false;
     bool sw[kSwitch] = {true, false, true, false};
@@ -201,17 +205,13 @@ struct Shell {
         }
     }
 
-    // ---- 页面编排：整块推（新页在后面顶上来 / 旧页被推走），方向跟着导航顺序 ----
-    // "推上去"：从上层页面切到下层（next > prev），旧页往上走、新页从下面顶进来。
-    // "顶下来"：反过来。两页同一条时间轴、同样时长 —— 它们是一节胶片，不能各走各的。
+    // ---- 页面编排：竖页带滚动（像浏览器里点锚点跳页）----
+    // 四页在视口里是一条 4×676 的竖向页带，切页 = 把视口滚到第 N 页的偏移。
+    // 跨几页就滚多久，中间那几页会在滚的过程中从眼前过去。
     void goPage(int next) {
         if (next < 0 || next >= kPages || next == curPage) return;
-        if (busy && now < busyUntil) return;
         const int prev = curPage;
-        const int dir = (next > prev) ? 1 : -1;   // +1 推上去，-1 顶下来
         curPage = next;
-        busy = true;
-        busyUntil = now + kPush + 0.06;
 
         for (int i = 0; i < kPages; i++) {
             if (indIds[i]) {
@@ -224,28 +224,34 @@ struct Shell {
             }
         }
 
-        // 新页先摆到视口外（dir*H），旧页在 0：两页正好首尾相接
-        setValue(pageSub[next], ANIM_TRANSLATE_Y, (float)(dir * kPageH));
-        setValue(pageSub[next], ANIM_OPACITY, 1.0f);
-        r.setVisible(pageIds[next], true);
-        touchAll(pageSub[next]);
+        // 可打断：滚到一半再点一次，就从当前位置接着滚（浏览器行为）
+        scrollFrom = scrollPos;
+        scrollTo = next * kPageH;
+        scrollT0 = now;
+        scrollDur = ScrollDur(next - prev);
+        scrolling = true;
 
-        // 同一条时长、同一条缓动：旧页 0 → -dir*H，新页 dir*H → 0
-        fade(pageSub[prev], 0.0f, (float)(-dir * kPageH), 0.0, kPush, [this, prev]() {
-            r.setVisible(pageIds[prev], false);
-            setValue(pageSub[prev], ANIM_TRANSLATE_Y, 0.0f);   // 归位，下次直接可用
-            touchAll(pageSub[prev]);
-        }, ANIM_TRANSLATE_Y, /*hold=*/false, /*inOut=*/true);
-        fade(pageSub[next], (float)(dir * kPageH), 0.0f, 0.0, kPush, nullptr,
-             ANIM_TRANSLATE_Y, false, true);
-
-        // 数据页的行交错放在推完之后，否则会跟整页位移打架
-        if (next == 1) replayRows(kPush + 0.04);
-
+        if (next == 1) replayRows(ScrollDur(next - prev) + 0.02);   // 到了再让 6 行逐个进场
         setStatus("页 " + std::to_string(next + 1) + "/" + std::to_string(kPages) +
-                  (dir > 0 ? " · 推上去：旧页上移 676px，新页从下方顶上来 280ms"
-                           : " · 顶下来：旧页下移 676px，新页从上方顶进来 280ms") +
-                  (next == 1 ? "（随后 6 行按 45ms 交错）" : ""));
+                  " · 竖向页带滚动 " + std::to_string((int)std::lround(scrollDur * 1000)) +
+                  "ms（跨 " + std::to_string(std::abs(next - prev)) + " 页）");
+    }
+
+    // 每帧推进滚动：只改引擎的滚动偏移，命中测试/裁剪/脏矩形都由引擎自己算
+    void stepScroll() {
+        if (!scrolling || !idViewport) return;
+        const double k = scrollDur <= 0.0 ? 1.0
+                       : std::min(1.0, (now - scrollT0) / scrollDur);
+        const float e = 1.0f - (1.0f - (float)k) * (1.0f - (float)k);   // ease-out
+        scrollPos = scrollFrom + (scrollTo - scrollFrom) * e;
+        r.scrollTo(idViewport, 0.0f, (float)scrollPos);
+        float bx, by, bw, bh;
+        if (r.invalidRect(idViewport, bx, by, bw, bh, 2.0f))
+            app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
+        if (k >= 1.0) {
+            scrolling = false;
+            scrollPos = scrollTo;
+        }
     }
     void openDialog(const std::string& title, const std::string& body, bool confirm) {
         if (modalOpen) return;
@@ -391,18 +397,28 @@ int main(int argc, char* argv[]) {
 
     const uint16_t idVeil = sh.nid("veil");
     const uint16_t idDlgRoot = sh.nid("dlg-root");
-
-    // 初始状态：只留第 1 页；遮罩/弹窗/提示条全隐藏
+    // 初始状态：页带里四页都在（靠视口裁剪），视口滚到第 1 页；遮罩/弹窗/提示条隐藏
+    // 视口 id 用 "page-0 的父节点" 定位：比依赖 id 名字稳（overflow:hidden 的容器在
+    // 名称表里不一定有名字，见下面的告警）
+    for (const auto& n : renderer.getNodes())
+        if (n.id == sh.pageIds[0]) { sh.idViewport = n.parentId; break; }
+    if (!sh.idViewport) sh.idViewport = sh.nid("viewport");
     for (int i = 0; i < kPages; i++) {
-        if (sh.pageIds[i]) renderer.setVisible(sh.pageIds[i], i == 0);
+        if (sh.pageIds[i]) renderer.setVisible(sh.pageIds[i], true);
         if (sh.indIds[i]) renderer.setVisible(sh.indIds[i], i == 0);
         if (sh.navIds[i])
             renderer.setStyleColor(sh.navIds[i], ANIM_BG_COLOR, i == 0 ? 0xFFE8F1FF : 0xFFFFFFFF);
     }
+    if (sh.idViewport) renderer.scrollTo(sh.idViewport, 0.0f, 0.0f);
+    if (!sh.idViewport || !renderer.isScrollable(sh.idViewport))
+        std::fprintf(stderr, "[appshow] 警告：页带视口不可滚动（idViewport=%u），切页不会滚\n",
+                     (unsigned)sh.idViewport);
+    else
+        std::printf("[appshow] 页带视口 #%u，内容高 %.0f（视口高 %.0f）\n",
+                    (unsigned)sh.idViewport, (double)renderer.contentHeight(sh.idViewport),
+                    (double)sh.pageH);
     for (uint16_t id : {idDlgRoot, idVeil, sh.nid("toast")})
         if (id) renderer.setVisible(id, false);
-    // 隐藏的东西 opacity 也压到 0：否则 drawOpacity 报 1，第一次滑入会先"闪一下满不透明"
-    for (int i = 1; i < kPages; i++) sh.setValue(sh.pageSub[i], ANIM_OPACITY, 0.0f);
     sh.setValue({idVeil}, ANIM_OPACITY, 0.0f);
     sh.setValue(sh.dlgSub, ANIM_OPACITY, 0.0f);
     sh.setValue(sh.toastSub, ANIM_OPACITY, 0.0f);
@@ -602,17 +618,12 @@ int main(int argc, char* argv[]) {
     int demoStep = 0;
     const char* pendingReport = nullptr;
     auto demoReport = [&](const char* tag) {
-        std::printf("[demo] %-10s t=%.2f dy=[%+.0f %+.0f %+.0f %+.0f] vis=%d%d%d%d veil=%.2f rows=",
-                    tag, demoT,
-                    (double)renderer.drawState(sh.pageIds[0]).offY,
-                    (double)renderer.drawState(sh.pageIds[1]).offY,
-                    (double)renderer.drawState(sh.pageIds[2]).offY,
-                    (double)renderer.drawState(sh.pageIds[3]).offY,
-                    (int)renderer.isNodeVisible(sh.pageIds[0]),
-                    (int)renderer.isNodeVisible(sh.pageIds[1]),
-                    (int)renderer.isNodeVisible(sh.pageIds[2]),
-                    (int)renderer.isNodeVisible(sh.pageIds[3]),
-                    (double)renderer.drawOpacity(idVeil));
+        // 滚动偏移直接问引擎（scrollState 是遍历/命中用的同一份状态）
+        double sy = 0.0;
+        if (const auto* ss = renderer.scrollState(sh.idViewport)) sy = ss->y;
+        const int shown = (int)std::lround(sy / kPageH);
+        std::printf("[demo] %-11s t=%.2f 滚动=%.0f（看第%d页）veil=%.2f rows=",
+                    tag, demoT, sy, shown + 1, (double)renderer.drawOpacity(idVeil));
         for (int i = 0; i < kRows; i++) std::printf("%.2f ", (double)renderer.drawOpacity(sh.rowIds[i]));
         std::printf("\n");
     };
@@ -656,6 +667,7 @@ int main(int argc, char* argv[]) {
 
         }        // 引擎自己的动画时钟（组件内的 @keyframes）走 stepAnimations；
         // 宿主的编排时钟是上面的 sh.now，两者互不干扰。
+        sh.stepScroll();
         for (uint16_t id : renderer.stepAnimations()) sh.touch(id);
         sh.tickFades();
         // 报告放在动画步进之后：animResult_ 这时才反映本帧的设值（否则读到上一帧的值）
