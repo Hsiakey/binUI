@@ -629,6 +629,9 @@ private:
         bool   active = false;
         bool   opSet = false;    float opacity = 1.0f;
         bool   offSet = false;   float offX = 0, offY = 0;
+        // 单轴平移（ANIM_TRANSLATE_X / _Y）：与 offSet 互不覆盖
+        bool   offXSet = false;
+        bool   offYSet = false;
         bool   scaleSet = false; float scale = 1.0f;
         bool   colorSet = false; uint32_t color = 0;
         bool   radiusSet = false; float radius = -1;

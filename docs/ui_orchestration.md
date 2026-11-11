@@ -32,7 +32,13 @@
 3. **一个节点只有一条 `animation`。**
    想让一个元素同时滑动 + 淡入 + 旋转，必须合并成**同一条 `@keyframes`**，让各属性在
    各自的关键帧上插值（`animshow` 的 `combo`/`compound` 就是这么写的）。
-4. **`@keyframes` 是全局命名空间。**
+4. **`press` / `release` 的命中口径必须一致**（0.12.3 修）。
+   `press` 用 `hitTestEx(allowStyled=true)`（"声明了状态样式的普通元素"也算可点），
+   而 `release` 早先用的是严格 `hitTest`（只认 `BINUI_INTERACTIVE`）——
+   于是"只写了 `:hover` 的普通 div"按下去有视觉反馈、松手却永远不产生 CLICK，
+   点击被**静默吞掉**。现在两处同口径，且 `allowStyled` 接受任意一种状态样式
+   （只写 `:hover` 也算）。
+5. **`@keyframes` 是全局命名空间。**
    `<use src>` 是编译期内联到同一个文档、`kfGroups` 按名字全局匹配且**先到先用**，
    两个组件都定义 `@keyframes fade` 会静默串味。约定：`@keyframes <组件名>-<用途>`。
 
@@ -49,9 +55,10 @@
 `appshow` 里所有"配合"都是同一条时间轴上的**相位差**：
 
 ```
-切页：  旧页 opacity 1→0  [0ms ────────── 160ms]  → 隐藏
-        新页 opacity 0→1        [60ms ─────────────── 280ms]
-        数据页 6 行            [160+i*45ms ───────── +200ms]   ← 交错
+切页（上下切入切出）：
+        旧页 translateY 0→-22 + opacity 1→0   [0ms ─────── 160ms] → 隐藏
+        新页 translateY +26→0 + opacity 0→1          [60ms ───────── 280ms]
+        数据页 6 行                                  [160+i*45ms ─── +200ms]  ← 交错
 
 弹窗：  遮罩 opacity 0→1  [0ms ─── 160ms]
         面板（整棵子树）   [40ms ───── 220ms]                  ← 面板晚 40ms
@@ -104,8 +111,8 @@ BINUI_APPSHOW_AUTO=1 build-mingw/bin/examples/appshow.exe
 3. **一个节点多条 animation**（逗号列表）：把"滑入 + 淡入 + 缩放"拆开调。
 4. **交错原语**：编译期 `--i` 变量或运行时 `setStagger(base, step)`，
    省掉"每行一条 tween"的样板。
-5. 顺带：`setStyleFloat` 的 `ANIM_TRANSLATE` 目前把 x/y 设成同一个值，
-   想要"只上下 8px"就做不到——要么拆成两个通道，要么加 `ANIM_TRANSLATE_X/Y`。
+5. ~~`setStyleFloat` 的 `ANIM_TRANSLATE` 只能让 x==y~~ → 0.12.3 已加 `ANIM_TRANSLATE_X/Y`
+   两个独立通道（过渡与运行时驱动都支持），"只上下滑 26px"现在成立。
 
 ## 8. 约定（建议写进团队规范）
 

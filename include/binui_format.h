@@ -194,6 +194,10 @@ enum BinUIAnimProp : uint16_t {
     ANIM_SCALE_X   = 1 << 5, // 横向缩放（1 = 原宽）
     ANIM_SCALE_Y   = 1 << 6, // 纵向缩放（1 = 原高）
     ANIM_ROTATE    = 1 << 7, // 旋转角度（度，顺时针为正）
+    // 单轴平移（过渡 / 运行时驱动用）。ANIM_TRANSLATE 只能同时改 x 和 y，
+    // 想"只上下滑 24px"就必须有独立的轴通道。
+    ANIM_TRANSLATE_X = 1 << 8,
+    ANIM_TRANSLATE_Y = 1 << 9,
 };
 
 enum BinUIEasing : uint8_t {

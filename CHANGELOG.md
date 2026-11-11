@@ -5,6 +5,55 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.12.3] - 2026-11-12
+
+修两个"点了没反应"的真 bug，给页面切换换成上下切入切出。
+
+### 修复 — `press` / `release` 命中口径不一致，`:hover` 元素永远点不动
+
+`press()` 用 `hitTestEx(allowStyled=true)`（"声明了状态样式的普通元素"也算可点目标），
+`release()` 却用严格的 `hitTest()`（只认 `BINUI_INTERACTIVE`）。于是**只写了 `:hover`
+的普通 div**：按下去有视觉反馈，松手时 `release` 拿不到同一个节点 → 直接返回 -1 →
+CLICK 被静默吞掉。appshow 的侧栏导航项和弹窗按钮全是这种写法，表现就是
+"页面切不了、弹窗关不掉"。
+
+- `release()` 改用与 `press()` 相同的口径（`hitTestEx(x,y,true,ACTIVE)`）；
+- `hitTestEx` 的 `allowStyled` 分支放宽成"命中任意一种状态样式"（只写 `:hover` 也算），
+  否则 `:hover`-only 的元素在 ACTIVE 查询下仍然落空。
+
+### 新增 — 单轴平移通道 `ANIM_TRANSLATE_X` / `ANIM_TRANSLATE_Y`
+
+`ANIM_TRANSLATE` 只能把 x 和 y 设成同一个值，"只上下滑 26px"做不到。现在有独立轴通道：
+过渡、`setStyleFloat`、`drawOffsetX/Y`、动画极值（脏矩形）都支持；`transition: transform`
+的 prop 掩码同时打开 X/Y，`translateX`/`translateY` 也各自可声明。
+
+### 改进 — `appshow` 页面切换改为上下切入切出
+
+- 旧页 `translateY 0→-22` + 淡出 160ms，滑完才隐藏；
+- 新页先摆到 `+26px + 全透明`，延迟 60ms 后 `+26→0` 上滑 + 淡入 220ms；
+- 弹窗面板也自下抬起 12px（比遮罩晚 40ms），关闭时反向；
+- 修 demo 侧的三处配合问题：点击解析表补全（导航项/选中条/弹窗子树/遮罩/标题栏按钮）、
+  navitem 组件补 `id="{{nid=}}"`、隐藏页的 opacity 初始化压到 0（否则首帧会闪一下满不透明）；
+- 启动时做一次"节点 id 自检"，缺 id 直接告警（组件忘写 id 是这类"点了没反应"的常见来源）；
+- 自检模式改成**按坐标真点**（`setHover → press → release`），覆盖导航冒泡/弹窗按钮/遮罩。
+
+自检实测：
+
+```
+[demo] nav-1     p0=1.00 p1=0.00 dy1=+26.0            ← 点导航文字，冒泡到 nav-1
+[demo] slide-mid p0=0.00 p1=1.00 dy1=+0.0 rows=0.95 0.80 0.55 0.20 0.00 0.00
+[demo] dlg-in    veil=1.00
+[demo] dlg-cancel → [demo] dlg-out veil=0.00          ← 点弹窗"取消"真的能关
+[demo] nav-0 → [demo] final p0=1.00
+```
+
+### 验收
+
+0 warning；四套测试全绿；`pixels` 10/10；`pixels-vk` 16/16；`pixels-d3d11` 全过；
+`check_examples` 15 个文件 0 问题。文档 `docs/ui_orchestration.md` 增补命中口径这条坑
+（§3.4）与新的切页时序（§4）。
+
+
 ## [0.12.2] - 2026-11-12
 
 新增 `examples/appshow`：**多页面 · 多级组件 · 编排在宿主**的完整应用壳，用来回答

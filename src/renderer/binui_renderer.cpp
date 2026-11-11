@@ -1357,7 +1357,17 @@ int BinUIRenderer::hitTestEx(float x, float y, bool allowStyled, uint8_t state) 
         if (!(node.flags & BINUI_VISIBLE)) continue;
         if (node.flags & BINUI_DISABLED) continue;   // v14：禁用节点不接受任何指针/焦点命中
         bool hittable = (node.flags & BINUI_INTERACTIVE) != 0;
-        if (!hittable && allowStyled) hittable = stateStyle(node.id, state) != nullptr;
+        if (!hittable && allowStyled) {
+            // 声明了**任意**状态样式的普通元素也是可点目标：只写了 :hover 的元素
+            // 按下去明明有视觉反馈，却因为"没有 :active 样式"而永远点不动（press 用
+            // ACTIVE 查、release 又用另一个口径查，两处都不命中 → CLICK 被静默吞掉）。
+            if (stateStyle(node.id, state)) {
+                hittable = true;
+            } else {
+                for (uint8_t s = 0; s < 4 && !hittable; s++)
+                    hittable = stateStyle(node.id, static_cast<uint8_t>(1u << s)) != nullptr;
+            }
+        }
         if (!hittable) continue;
 
         // 沿祖先链：不可见子树跳过；滚动容器裁剪视口 + 累加滚动偏移（容器自身不偏移）
@@ -1792,7 +1802,10 @@ int BinUIRenderer::release(float x, float y) {
     pressedId_ = -1;
     refreshNodeStyle(id);
     if (id < 0) return -1;
-    if (hitTest(x, y) != id) return -1;
+    // 口径必须和 press() 一致：press 用 hitTestEx(allowStyled=true, ACTIVE)，
+    // 普通 hitTest 只命中 BINUI_INTERACTIVE —— 两者不一致时，"声明了 :hover/:active
+    // 的普通元素"按下去有反馈、松开却永远不产生 CLICK（点击被静默吞掉）。
+    if (hitTestEx(x, y, true, BINUI_ST_ACTIVE) != id) return -1;
 
     if (VerboseOn())
         std::fprintf(stderr, "[binui] Click on node #%d at (%.0f,%.0f)\n", id, x, y);
@@ -2912,6 +2925,7 @@ void BinUIRenderer::refreshNodeStyle(int id) {
 bool BinUIRenderer::AnimResultEqual(const AnimResult& a, const AnimResult& b) {
     return a.active == b.active && a.opSet == b.opSet && a.opacity == b.opacity &&
            a.offSet == b.offSet && a.offX == b.offX && a.offY == b.offY &&
+           a.offXSet == b.offXSet && a.offYSet == b.offYSet &&
            a.scaleSet == b.scaleSet && a.scale == b.scale &&
            a.colorSet == b.colorSet && a.color == b.color &&
            a.radiusSet == b.radiusSet && a.radius == b.radius &&
@@ -2968,6 +2982,9 @@ void BinUIRenderer::computeAnimResult(uint16_t nodeId) {
             if (tr.prop == ANIM_OPACITY) { res.opSet = true; res.opacity = v; }
             else if (tr.prop == ANIM_SCALE) { res.scaleSet = true; res.scale = v; }
             else if (tr.prop == ANIM_RADIUS) { res.radiusSet = true; res.radius = v; }
+            // 单轴平移：只覆盖自己那根轴，另一根留给 ANIM_TRANSLATE 的兜底
+            else if (tr.prop == ANIM_TRANSLATE_X) { res.offXSet = true; res.offX = v; }
+            else if (tr.prop == ANIM_TRANSLATE_Y) { res.offYSet = true; res.offY = v; }
         }
     }
 
@@ -2978,6 +2995,14 @@ void BinUIRenderer::computeAnimResult(uint16_t nodeId) {
         auto f = rt.floatTargets.find(ANIM_SCALE);
         if (f != rt.floatTargets.end()) { res.scaleSet = true; res.scale = f->second; }
     }
+    if (!res.offXSet) {
+        auto f = rt.floatTargets.find(ANIM_TRANSLATE_X);
+        if (f != rt.floatTargets.end() && !res.offSet) { res.offXSet = true; res.offX = f->second; }
+    }
+    if (!res.offYSet) {
+        auto f = rt.floatTargets.find(ANIM_TRANSLATE_Y);
+        if (f != rt.floatTargets.end() && !res.offSet) { res.offYSet = true; res.offY = f->second; }
+    }
     if (!res.offSet) {
         auto f = rt.floatTargets.find(ANIM_TRANSLATE);
         if (f != rt.floatTargets.end()) { res.offSet = true; res.offX = res.offY = f->second; }
@@ -2985,13 +3010,13 @@ void BinUIRenderer::computeAnimResult(uint16_t nodeId) {
 
     animResult_[nodeId] = res;
     // 记下缩放/平移扫过的极值，供 invalidRect 用（见 AnimExtent 的注释）。
-    if (res.scaleSet || res.offSet) {
+    if (res.scaleSet || res.offSet || res.offXSet || res.offYSet) {
         AnimExtent& e = animExtent_[nodeId];
         if (res.scaleSet) {
             e.smin = std::min(e.smin, res.scale);
             e.smax = std::max(e.smax, res.scale);
         }
-        if (res.offSet) {
+        if (res.offSet || res.offXSet || res.offYSet) {
             e.dxmin = std::min(e.dxmin, res.offX);
             e.dxmax = std::max(e.dxmax, res.offX);
             e.dymin = std::min(e.dymin, res.offY);
@@ -3076,6 +3101,18 @@ void BinUIRenderer::setStyleFloat(uint16_t nodeId, uint16_t prop, float value) {
         float fx = drawOffsetX(nodeId), fy = drawOffsetY(nodeId);
         rt.floatTargets[ANIM_TRANSLATE] = value;
         startTransition(nodeId, prop, now, fx, fy, value, value, 0, 0);
+        return;
+    }
+    if (prop == ANIM_TRANSLATE_X) {
+        const float fx = drawOffsetX(nodeId);
+        rt.floatTargets[ANIM_TRANSLATE_X] = value;
+        startTransition(nodeId, prop, now, fx, 0, value, 0, 0, 0);
+        return;
+    }
+    if (prop == ANIM_TRANSLATE_Y) {
+        const float fy = drawOffsetY(nodeId);
+        rt.floatTargets[ANIM_TRANSLATE_Y] = value;
+        startTransition(nodeId, prop, now, fy, 0, value, 0, 0, 0);
         return;
     }
     float from = (prop == ANIM_OPACITY) ? drawOpacity(nodeId)
@@ -3199,9 +3236,12 @@ float BinUIRenderer::drawOpacity(uint16_t nodeId) const {
 
 float BinUIRenderer::drawOffsetX(uint16_t nodeId) const {
     auto ar = animResult_.find(nodeId);
-    if (ar != animResult_.end() && ar->second.offSet) return ar->second.offX;
+    if (ar != animResult_.end() && (ar->second.offSet || ar->second.offXSet))
+        return ar->second.offX;
     auto it = animState_.find(nodeId);
     if (it != animState_.end()) {
+        auto fx = it->second.floatTargets.find(ANIM_TRANSLATE_X);
+        if (fx != it->second.floatTargets.end()) return fx->second;
         auto f = it->second.floatTargets.find(ANIM_TRANSLATE);
         if (f != it->second.floatTargets.end()) return f->second;
     }
@@ -3210,9 +3250,12 @@ float BinUIRenderer::drawOffsetX(uint16_t nodeId) const {
 
 float BinUIRenderer::drawOffsetY(uint16_t nodeId) const {
     auto ar = animResult_.find(nodeId);
-    if (ar != animResult_.end() && ar->second.offSet) return ar->second.offY;
+    if (ar != animResult_.end() && (ar->second.offSet || ar->second.offYSet))
+        return ar->second.offY;
     auto it = animState_.find(nodeId);
     if (it != animState_.end()) {
+        auto fy = it->second.floatTargets.find(ANIM_TRANSLATE_Y);
+        if (fy != it->second.floatTargets.end()) return fy->second;
         auto f = it->second.floatTargets.find(ANIM_TRANSLATE);
         if (f != it->second.floatTargets.end()) return f->second;
     }

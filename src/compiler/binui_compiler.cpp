@@ -642,8 +642,11 @@ static uint16_t AnimProps(const std::string& s) {
     if (has("opacity")) m |= ANIM_OPACITY;
     // transform 可能只写了一维：平移 / 等比缩放 / 非等比缩放 / 旋转各自的 mask 由
     // AnimApplyKeyProp 按实际出现的函数再收窄（这里先给全，避免漏属性）
-    if (has("transform")) m |= ANIM_TRANSLATE | ANIM_SCALE | ANIM_SCALE_X | ANIM_SCALE_Y | ANIM_ROTATE;
-    if (has("translate")) m |= ANIM_TRANSLATE;
+    if (has("transform")) m |= ANIM_TRANSLATE | ANIM_TRANSLATE_X | ANIM_TRANSLATE_Y |
+                              ANIM_SCALE | ANIM_SCALE_X | ANIM_SCALE_Y | ANIM_ROTATE;
+    if (has("translate")) m |= ANIM_TRANSLATE | ANIM_TRANSLATE_X | ANIM_TRANSLATE_Y;
+    if (has("translatex")) m |= ANIM_TRANSLATE_X;
+    if (has("translatey")) m |= ANIM_TRANSLATE_Y;
     if (has("scale")) m |= ANIM_SCALE;
     if (has("rotate")) m |= ANIM_ROTATE;
     if (has("background-color") || has("background") || has("color")) m |= ANIM_BG_COLOR;
