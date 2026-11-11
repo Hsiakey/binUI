@@ -715,6 +715,9 @@ singlewindow 0.167 ms/帧 = 录制 0.062 + 等 GPU 0.013 + 呈现 0.092
 所以再往上加 GPU 并行度（3 槽、无 fence）不会有任何收益；下一步的性能目标应该是
 **绘制遍历与 SVG 细分本身**（缓存细分结果 / 顶点环上传），这跟 GL 后端是共用收益。
 
+→ 顺着这条线查下去，**真正的元凶不是细分，而是热路径里的 `std::getenv`**，见 §7.3
+（`svgdemo` 录制 1.24 ms → 0.059 ms）。
+
 #### 7.2.6 验收（v0.10.1）
 
 | 项 | 结果 |
@@ -726,6 +729,59 @@ singlewindow 0.167 ms/帧 = 录制 0.062 + 等 GPU 0.013 + 呈现 0.092
 | `make vk-stress` | 两轮 8 阶段全 `[ok]`，shutdown 后后端显存记账 0.0 MB |
 | `make demos-vk` | 8 个 `*_vk.exe` 链接成功，`svgdemo_vk` 跑 5 秒无崩溃 |
 | `check_examples` | 11/11 无问题 |
+
+---
+
+## 7.3 P6b 落地记录：热路径里的 `std::getenv`（2026-11-11，v0.10.2）
+
+### 7.3.1 怎么找到的（一条可复核的证据链）
+
+P6 的 `BINUI_VK_PERF` 拆分说 `svgdemo` 960×560 每帧 1.447 ms 里 **1.244 ms 在录制**、GPU 只等 0.052 ms。
+按"录制 = 遍历 + 路径细分 + 填顶点"的直觉，先怀疑 SVG 细分，于是用临时开关逐项排除
+（开关只在本地量测时加，没有提交）：
+
+| 实验 | 录制耗时 | 结论 |
+|---|---|---|
+| 原状 | 1.183 ms | — |
+| 关掉描边绘制（`PATH_STROKE` 分支短路） | 1.174 ms | **不是描边**（只占 0.009 ms） |
+| 整条路径绘制短路（`PaintPathNode` 直接 return） | 0.120 ms | **就是路径绘制**，占 90% |
+| 把条带缓存的 `cache` 参数传 `nullptr`（等于每帧重算条带） | 1.196 ms | **不是细分**：缓存开关几乎没差别 → 瓶颈在"重放"不在"计算" |
+| 把 `fillRect` 里的 `std::getenv("BINUI_VK_TRACE")` 提成 `static const bool` | 0.138 ms | **命中**：省了 1.04 ms |
+| 再把 `drawNodesBinUI` 里逐节点的 `std::getenv("BINUI_DEBUG_CLIP")` 提成 static | **0.059 ms** | 再省 0.045 ms |
+
+一帧 `svgdemo` 有 **2109 条条带**（`flush: verts=12654` = 2109 个四边形），也就是 `fillRect`
+每帧被调用 2109 次；每次调一次 `getenv`，在 UCRT 里要遍历环境表（≈0.5 µs）→ 约 1.05 ms。
+
+### 7.3.2 改了什么
+
+| 位置 | 改动 |
+|---|---|
+| `src/backends/binui_vk.cpp` `fillRect` | `std::getenv` → 函数内 `static const bool`（只查一次） |
+| `src/backends/binui_draw_nodes.h` `drawNodesBinUI` | `BINUI_DEBUG_CLIP` 提到函数开头查一次，两处打印共用 |
+
+第二处在**共享遍历**里，所以 GL 后端同等受益（GL 的图元函数本身没有 getenv，审计过）。
+
+### 7.3.3 实测（同机同工具，7 次取中位，300 帧，vsync=off）
+
+| 用例 | 0.10.0 | 0.10.1 | **0.10.2** | 对 0.10.0 |
+|---|---|---|---|---|
+| `features` 900×932 | 1375.9 fps | 1722.3 fps | **2657.6 fps** | **+93.2%** |
+| `svgdemo` 960×560 | 618.4 fps | 682.2 fps | **3857.6 fps** | **+523.8%（6.2×）** |
+| `probe` 600×260 | 4711.2 fps | 7277.4 fps | **9087.4 fps** | **+92.9%** |
+| `singlewindow` 1280×720 | 2604.7 fps | 3642.6 fps | **4387.7 fps** | **+68.5%** |
+
+`svgdemo` 的录制耗时 1.183 → **0.059 ms**（20×）—— 它本来就是"路径最多"的页面，所以最能体现差别。
+`BINUI_VK_PERF` 现在的分工：`svgdemo` 0.128 ms/帧 = 录制 0.059 + 等 GPU 0.003 + 呈现 0.066，
+**呈现那一侧反过来成了最大头**（提交 + resolve blit + present）。
+
+### 7.3.4 教训（写进规矩）
+
+- `std::getenv` 是**加锁 + 遍历环境表**的操作，在本机 UCRT 上 ≈0.5 µs/次。任何
+  "每个图元/每个节点查一次"的写法都是自杀：几千次就是毫秒级。
+- 调试开关的正确形态：`static const bool on = std::getenv("X") != nullptr;` —— 进程内只查一次，
+  关掉时是一根可预测的空分支。**不要**在循环或热路径里直接调。
+- 审计结论（本仓库）：其余 `getenv` 都在初始化/一次性路径（`binui_app.h` 的 `BINUI_PERF`、
+  `BINUI_IME_LOG`、`binui_paths.h` 的 `BINUI_UI`、VK 的层/校验/`TRACE` 初始化分支），热路径已清零。
 
 ---
 

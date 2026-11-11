@@ -125,6 +125,11 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     int winW = gfx.width();
     int winH = gfx.height();
 
+    // ★ 环境变量**只查一次**：下面两处调试打印原本在每个节点身上调 std::getenv，
+    // 而 UCRT 的 getenv 每次都要遍历环境表（≈0.5 µs/次）。一个几千节点的页面光这一项
+    // 就要 1 ms+；同样的坑在 Vulkan 后端的 fillRect 里也踩到过（见 binui_vk.cpp）。
+    static const bool dbgClip = std::getenv("BINUI_DEBUG_CLIP") != nullptr;
+
     int clipL = 0, clipT = 0, clipR = winW, clipB = winH;
     if (clipRect) {
         const int* c = static_cast<const int*>(clipRect);
@@ -241,7 +246,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 if (pit == byId.end()) continue;
                 const auto& par = nodes[pit->second];
                 if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
-                if (std::getenv("BINUI_DEBUG_CLIP"))
+                if (dbgClip)
                 std::fprintf(stderr, "        anc node=%u type=%u clip=(%.1f,%.1f %.1fx%.1f)\n",
                              (unsigned)par.id, (unsigned)par.type, (double)par.x,
                              (double)par.y, (double)par.width, (double)par.height);
@@ -282,8 +287,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         // 裁剪链：自身 + 祖先 + 本次重绘范围（scissor 求交）。
         // 关键：持久离屏上节点重绘若不做脏矩形裁剪，会把整个节点矩形重涂，
         // 覆盖掉脏区以外（未重绘）的子元素/兄弟元素 → 悬停时内部元素消失。
-        if (const char* dbg = std::getenv("BINUI_DEBUG_CLIP")) {
-            (void)dbg;
+        if (dbgClip) {
             std::fprintf(stderr, "[clip] node=%u type=%u own=(%d,%d %dx%d) dx=%.1f dy=%.1f\n",
                          (unsigned)node.id, (unsigned)node.type, x, y, nw, nh,
                          (double)dx, (double)dy);

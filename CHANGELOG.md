@@ -5,6 +5,41 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.10.2] - 2026-11-11
+
+性能修复：**热路径里的 `std::getenv`**。无 API / 二进制布局改动（`BINUI_VERSION` 仍 19）。
+
+### 修复 — 每帧几千次的 getenv
+
+- `src/backends/binui_vk.cpp` 的 `fillRect` 里有一句 `if (std::getenv("BINUI_VK_TRACE"))` 只为打印
+  前 4 次调用 —— 但它在**每个图元**上执行。`svgdemo` 一帧 2109 个条带（=2109 次 getenv），
+  UCRT 的 getenv 每次遍历环境表约 0.5 µs，合计 **1.04 ms/帧**。改成函数内 `static const bool`。
+- `src/backends/binui_draw_nodes.h` 的 `drawNodesBinUI` 里，`BINUI_DEBUG_CLIP` 在**每个节点**上查
+  两次。提到函数开头查一次（这一处在共享遍历里，**GL 后端同等受益**）。
+- 结果：`svgdemo` 录制耗时 1.183 → **0.059 ms**，窗口吞吐 682 → **3857.6 fps**。
+
+### 定位过程（可复核）
+
+`BINUI_VK_PERF` 显示 `svgdemo` 每帧 1.447 ms 里 1.244 ms 在 CPU 录制侧。逐项排除：关描边 1.183→1.174
+（不是描边）、整条路径绘制短路 1.183→0.120（就是路径绘制）、把条带缓存传 `nullptr` 1.183→1.196
+（**不是细分**、是"重放"）、把 getenv 提成 static 1.183→0.138 → **真凶确认**。详见
+`docs/vulkan_design.md` §7.3。
+
+### 实测（同机同工具，7 次取中位，300 帧，vsync=off）
+
+| 用例 | 0.10.1 | 0.10.2 | 对 0.10.0 |
+|---|---|---|---|
+| `features` 900×932 | 1722.3 fps | **2657.6 fps** | +93.2% |
+| `svgdemo` 960×560 | 682.2 fps | **3857.6 fps** | +523.8%（6.2×） |
+| `probe` 600×260 | 7277.4 fps | **9087.4 fps** | +92.9% |
+| `singlewindow` 1280×720 | 3642.6 fps | **4387.7 fps** | +68.5% |
+
+### 验收
+
+0 warning；四套测试全绿；`make pixels` 10/10 零差异；`make pixels-vk` 14/14（不同像素 0）；
+`make vk-window` 全过；`make vk-stress` 两轮 8 阶段 0 失败；`check_examples` 11/11。
+
+
 ## [0.10.1] - 2026-11-11
 
 Vulkan 后端性能补丁：**双槽流水线**（帧录制与 GPU 执行重叠）。无 API / 二进制布局改动

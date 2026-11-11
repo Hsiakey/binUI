@@ -1885,9 +1885,9 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     VkApplicationInfo app{};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app.pApplicationName = "binUI";
-    app.applicationVersion = VK_MAKE_VERSION(0, 10, 1);
+    app.applicationVersion = VK_MAKE_VERSION(0, 10, 2);
     app.pEngineName = "binUI";
-    app.engineVersion = VK_MAKE_VERSION(0, 10, 1);
+    app.engineVersion = VK_MAKE_VERSION(0, 10, 2);
     app.apiVersion = VK_API_VERSION_1_0;
     const char* instExt[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     VkInstanceCreateInfo ici{};
@@ -2396,7 +2396,10 @@ const uint8_t* BinUIVK::readbackPixels(int& outW, int& outH) {
 // ---------- 原语 ----------
 void BinUIVK::fillRect(float x, float y, float w, float h, uint32_t color) {
     Impl& d = *impl_;
-    if (std::getenv("BINUI_VK_TRACE")) {
+    // ★ 环境变量只查一次：fillRect 是每帧被调用几千次的热路径，UCRT 的 getenv 每次都要
+    // 走一遍环境表 + 加锁，实测在 2100 条带/帧的页面上能耗掉 0.5 ms（P6 量测时抓到）。
+    static const bool trace = std::getenv("BINUI_VK_TRACE") != nullptr;
+    if (trace) {
         static int n = 0;
         if (n < 4) std::fprintf(stderr, "[vk][trace] fillRect #%d (%.0f,%.0f %.0fx%.0f) color=%08X\n",
                                 n++, (double)x, (double)y, (double)w, (double)h, color);
