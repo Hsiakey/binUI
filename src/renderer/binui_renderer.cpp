@@ -3009,15 +3009,15 @@ std::vector<uint16_t> BinUIRenderer::stepAnimations() {
 
 void BinUIRenderer::clippingAncestors(uint16_t nodeId, std::vector<uint16_t>& out) const {
     out.clear();
-    auto it = nodeIndexById_.find(nodeId);
-    if (it == nodeIndexById_.end()) return;
-    size_t cur = it->second;
+    // 每个节点都要走一次这条链：用 nodeIndexOf（稠密 id 走数组直读）而不是哈希表，
+    // 否则每一步都是一次 unordered_map 探测。
+    size_t cur = nodeIndexOf(nodeId);
+    if (cur == static_cast<size_t>(-1)) return;
     while (true) {
         const auto& n = nodes_[cur];
         if (n.parentId == 0xFFFF) break;
-        auto pit = nodeIndexById_.find(n.parentId);
-        if (pit == nodeIndexById_.end()) break;
-        cur = pit->second;
+        cur = nodeIndexOf(n.parentId);
+        if (cur == static_cast<size_t>(-1)) break;
         const auto& par = nodes_[cur];
         // 裁剪祖先：滚动/裁剪容器（overflow）与 <svg> 容器。
         // <svg> 的默认 overflow 就是 hidden（浏览器语义），而 v14 及以前三端都没实现，
@@ -3071,6 +3071,79 @@ void BinUIRenderer::setStyleColor(uint16_t nodeId, uint16_t prop, uint32_t value
     double now = AnimNow();
     animNow_ = now;
     startTransition(nodeId, prop, now, 0, 0, 0, 0, drawColor(nodeId), value);
+}
+
+// 节点 id → nodes_ 下标。快路径：编译器输出的 id 是 0..N-1 稠密递增（loadLayout 按
+// 布局顺序 push），所以"下标 == id 且该节点的 id 确实是它"一次数组读就能确认。
+// nodeIndexById_ 只在这条快路径失效时（运行期 addNode/removeNode 打乱之后）才查。
+size_t BinUIRenderer::nodeIndexOf(uint16_t nodeId) const {
+    if (static_cast<size_t>(nodeId) < nodes_.size() && nodes_[nodeId].id == nodeId)
+        return nodeId;
+    auto it = nodeIndexById_.find(nodeId);
+    return it == nodeIndexById_.end() ? static_cast<size_t>(-1) : it->second;
+}
+
+// 一次取出该节点这一帧的全部可视属性（见头文件 DrawState 的注释）。
+// 语义与 drawColor/drawOpacity/drawOffset*/drawScale/drawRadius 逐个查询完全等价：
+// 先看动画结果（animResult_），该属性没算出来才回落到样式目标（animState_）。
+BinUIRenderer::DrawState BinUIRenderer::drawState(uint16_t nodeId) const {
+    DrawState st;
+    const size_t idx = nodeIndexOf(nodeId);
+    if (idx == static_cast<size_t>(-1)) return st;   // 悬空 id：保持旧查询的默认值
+
+    const NodeInfo& n = nodes_[idx];
+    st.color = n.color;
+    st.disabled = (n.flags & BINUI_DISABLED) != 0;
+
+    if (!paintIdx_.empty()) {
+        auto pit = paintIdx_.find(nodeId);
+        if (pit != paintIdx_.end()) st.paint = &paints_[pit->second];
+    }
+
+    // 静态页面上这两张表是空的：空表直接跳过，省掉每节点两次必然失败的探测
+    const AnimResult* r = nullptr;
+    if (!animResult_.empty()) {
+        auto ar = animResult_.find(nodeId);
+        if (ar != animResult_.end()) r = &ar->second;
+    }
+    const AnimRuntime* rt = nullptr;
+    if (!animState_.empty()) {
+        auto it = animState_.find(nodeId);
+        if (it != animState_.end()) rt = &it->second;
+    }
+    if (!r && !rt) return st;
+
+    if (r && r->colorSet) {
+        st.color = r->color;
+    } else if (rt) {
+        auto c = rt->colorTargets.find(ANIM_BG_COLOR);
+        if (c != rt->colorTargets.end()) st.color = c->second;
+    }
+    if (r && r->opSet) {
+        st.opacity = r->opacity;
+    } else if (rt) {
+        auto f = rt->floatTargets.find(ANIM_OPACITY);
+        if (f != rt->floatTargets.end()) st.opacity = f->second;
+    }
+    if (r && r->offSet) {
+        st.offX = r->offX; st.offY = r->offY;
+    } else if (rt) {
+        auto f = rt->floatTargets.find(ANIM_TRANSLATE);
+        if (f != rt->floatTargets.end()) { st.offX = f->second; st.offY = f->second; }
+    }
+    if (r && r->scaleSet) {
+        st.scale = r->scale;
+    } else if (rt) {
+        auto f = rt->floatTargets.find(ANIM_SCALE);
+        if (f != rt->floatTargets.end()) st.scale = f->second;
+    }
+    if (r && r->radiusSet) {
+        st.radius = r->radius;
+    } else if (rt) {
+        auto f = rt->floatTargets.find(ANIM_RADIUS);
+        if (f != rt->floatTargets.end()) st.radius = f->second;
+    }
+    return st;
 }
 
 uint32_t BinUIRenderer::drawColor(uint16_t nodeId) const {

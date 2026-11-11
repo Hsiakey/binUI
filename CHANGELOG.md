@@ -5,6 +5,60 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.11.5] - 2026-11-11
+
+CPU 侧绘制（第二轮）：**每节点状态查询合并成一次** + **顶点写入路径**。无 API / 布局改动，
+无像素变化，三个后端共享同一份遍历与同一套写顶点方式。
+
+### 性能 — 遍历：把 8 个查询合成 1 个
+
+`features` 一帧 80 个节点里，每个节点原先要散着调 `drawColor / drawOpacity / drawOffsetX /
+drawOffsetY / drawScale / drawRadius / paintOf / isDisabled`：每个内部都查
+`animResult_ + animState_ + nodeIndexById_`，**没有动画**的节点也要 17 次哈希探测。
+
+- `BinUIRenderer::drawState(id)`：一次取齐颜色 / 透明度 / 平移 / 缩放 / 圆角 / 禁用 /
+  扩展绘制段指针，语义与逐个查询逐条对齐（动画结果优先、样式目标兜底）；两张动画表
+  **空就跳过**（静态页面正是如此）。
+- `nodeIndexOf(id)`：稠密 id 走 `nodes_[id].id == id` 数组直读，哈希表只兜底；
+  `clippingAncestors` 的祖先链同步改用它。
+- 共享遍历里每帧重建的 `unordered_map byId`（80 节点 ≈ 5 µs + 一次 malloc）改成
+  "直读 + 懒建表"：索引段 **0.005 → 0.001 ms/帧**。
+- `PaintLerpArgb` 的 `std::lround` 换成 `(v + 0.5f)` 截断（通道值恒 ≥ 0，逐位等价）。
+
+### 性能 — 三个后端的顶点写入：预分配 + 指针偏移
+
+GL / Vulkan / D3D11 原来都是 `verts.insert(verts.end(), v, v+6)` 或逐顶点 `push_back`，
+每条图元都要做容量检查 + `size` 递增。改成缓冲一次 `resize` 到上限、每帧只复位计数、
+按 `data() + vcount` 写；GL 的 `beginFrame` 也不再 `clear()`（否则每帧把 2 MB
+析构再扩容一遍）。
+
+**试过并否掉的方案**：顶点直接写进映射过的槽缓冲以省掉 `memcpy` —— 映射内存是**写合并**
+的，逐顶点 20 字节赋值吃非对齐 PCIe 写惩罚，`录制` 从 0.070 ms 涨到 **1.00 ms**（15 倍）：
+169 KB 走了 0.93 ms（≈180 MB/s），而整块 `memcpy` 只要 ~10 µs。代码里留了注释，
+别再走一遍。
+
+### 实测（新旧二进制交替跑 15 轮取中位，`vk_window --frames 300`）
+
+| 用例 | 遍历耗时 | 录制耗时（CPU 侧全集） |
+|---|---|---|
+| `features` 900×932（80 节点 / 8472 顶点） | 0.044 → **0.039 ms/帧**（-11.4%） | 0.044 → **0.040**（-9.1%） |
+| `svgdemo` 960×560（64 节点 / 12654 顶点） | 0.041 → **0.038 ms/帧**（-7.3%） | 0.042 → **0.038**（-9.5%） |
+
+同一协议的端到端 fps：`features` 2618.4 → 2634.3（+0.6%）、`svgdemo` 3545.3 → 3609.0
+（+1.8%）。读数能解释为什么只有这点：`BINUI_VK_PERF` 一帧 = 录制 0.054 + **等 GPU 0.376**
++ 呈现 0.115，**CPU 侧已经不是瓶颈**（GPU 4× MSAA 累积 + resolve 才是）。
+
+`BINUI_VK_PERF` 的读数行尾新增 `（顶点 N/帧）`，从此能直接看"这一帧提交了多少几何"。
+
+### 验收
+
+0 warning；四套测试全绿；`make pixels` 10/10 零差异；`make pixels-vk` 14/14（不同像素 0）；
+`make pixels-d3d11` 全过（残差与 0.11.2 记录值逐项一致：`svgaa` 0.249%、`svgstroke` 0.226%、
+`features` 132 像素，均为 4× MSAA 采样位置差异）；`vk-window` / `vk-stress` 全过；
+`demos-vk` / `demos-d3d11` 各 8 个；`check_examples` 11/11。详见
+`docs/vulkan_design.md` §7.6.6~§7.6.10。
+
+
 ## [0.11.4] - 2026-11-11
 
 CPU 侧绘制优化：**字形整形结果缓存**。无 API / 布局改动，无像素变化。

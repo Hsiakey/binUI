@@ -52,10 +52,13 @@ constexpr int kMaxBorderBands = 512;
 inline uint32_t PaintLerpArgb(uint32_t a, uint32_t b, float t) {
     if (t <= 0.0f) return a;
     if (t >= 1.0f) return b;
+    // 用 (v + 0.5f) 截断代替 std::lround：通道值都 ≥ 0，两者结果逐位相同，
+    // 但不用走 libm 的调用约定。渐变底色每帧要给几十个条带 × 4 个通道插值，
+    // 这是一条真的会被跑到的热路径（见 docs/vulkan_design.md §7.6）。
     auto ch = [&](int shift) {
         const float ca = (float)((a >> shift) & 0xFF);
         const float cb = (float)((b >> shift) & 0xFF);
-        return (uint32_t)std::lround(ca + (cb - ca) * t) & 0xFFu;
+        return (uint32_t)(ca + (cb - ca) * t + 0.5f) & 0xFFu;
     };
     return (ch(24) << 24) | (ch(16) << 16) | (ch(8) << 8) | ch(0);
 }

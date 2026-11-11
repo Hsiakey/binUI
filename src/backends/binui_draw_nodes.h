@@ -195,9 +195,24 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     }
 
     const double tIndex0 = prof ? DrawProfNowUs() : 0.0;
+    // 节点 id → 下标。以前每帧先建一张 unordered_map（80 个节点 5 µs，还要 malloc），
+    // 再在每个祖先上查它；其实编译器分配的 id 是 0..N-1 稠密递增、与下标同序，
+    // 一次数组直读 + id 比对就够了。只有运行期增删过节点（顺序被打乱）的页面
+    // 才会真的去建那张表 —— 而且只建一次，不是每帧。
+    const size_t nodeCount = nodes.size();
     std::unordered_map<uint16_t, size_t> byId;
-    byId.reserve(nodes.size());
-    for (size_t i = 0; i < nodes.size(); i++) byId[nodes[i].id] = i;
+    bool byIdBuilt = false;
+    auto indexOf = [&](uint16_t id) -> size_t {
+        const size_t k = static_cast<size_t>(id);
+        if (k < nodeCount && nodes[k].id == id) return k;
+        if (!byIdBuilt) {
+            byId.reserve(nodeCount);
+            for (size_t i = 0; i < nodeCount; i++) byId[nodes[i].id] = i;
+            byIdBuilt = true;
+        }
+        auto it = byId.find(id);
+        return it == byId.end() ? static_cast<size_t>(-1) : it->second;
+    };
 
     std::unordered_map<uint16_t, binui::BinUIRenderer::ScrollState> scrolls;
     // 真的要出滚动条的容器 → 给它留 gutter（右侧 / 底部扣掉滚动条宽度）。
@@ -222,9 +237,8 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     for (size_t i = 0; i < nodes.size(); i++) {
         const auto& node = nodes[i];
         if (node.parentId == 0xFFFF) continue;
-        auto pit = byId.find(node.parentId);
-        if (pit == byId.end()) continue;
-        const size_t pi = pit->second;
+        const size_t pi = indexOf(node.parentId);
+        if (pi == static_cast<size_t>(-1)) continue;
         parentIdx[i] = static_cast<int32_t>(pi);
         if (hidden[pi] || !(nodes[pi].flags & BINUI_VISIBLE)) { hidden[i] = 1; continue; }
         offX[i] = offX[pi];
@@ -297,9 +311,10 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         if (node.type == BINUI_LINE) {
             float x1 = node.x - offX[i], y1 = node.y - offY[i];
             float x2 = node.width - offX[i], y2 = node.height - offY[i];
-            uint32_t dc = renderer.drawColor(node.id);
-            float op = renderer.drawOpacity(node.id);
-            float ddx = renderer.drawOffsetX(node.id), ddy = renderer.drawOffsetY(node.id);
+            const BinUIRenderer::DrawState st = renderer.drawState(node.id);
+            uint32_t dc = st.color;
+            float op = st.opacity;
+            float ddx = st.offX, ddy = st.offY;
             x1 += ddx; y1 += ddy; x2 += ddx; y2 += ddy;
             if (op < 1.0f) dc = GfxScaleAlpha(dc, op);
             float mnx = std::min(x1, x2), mny = std::min(y1, y2);
@@ -316,9 +331,9 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             bool draw = true;
             renderer.clippingAncestors(node.id, clipAncs);
             for (uint16_t ancId : clipAncs) {
-                auto pit = byId.find(ancId);
-                if (pit == byId.end()) continue;
-                const auto& par = nodes[pit->second];
+                const size_t ai = indexOf(ancId);
+                if (ai == static_cast<size_t>(-1)) continue;
+                const auto& par = nodes[ai];
                 if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
                 if (dbgClip)
                 std::fprintf(stderr, "        anc node=%u type=%u clip=(%.1f,%.1f %.1fx%.1f)\n",
@@ -332,19 +347,20 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         }
 
         // v7 动画：颜色（含 hover/按下 tint 与过渡）、透明度、平移、缩放、圆角
-        uint32_t dc = renderer.drawColor(node.id);
+        // v20：一次取齐（以前这里散着 7 次查询 = 每节点 ~17 次哈希探测）
+        const BinUIRenderer::DrawState st = renderer.drawState(node.id);
+        uint32_t dc = st.color;
         // v13 扩展绘制段：文字色 / 边框 / 渐变 / 字重 / 行高 / 文字装饰
-        const BinUIPaintNode* pt = renderer.paintOf(node.id);
+        const BinUIPaintNode* pt = st.paint;
         const bool hasBorder = pt && (pt->flags & PAINT_BORDER);
         const bool hasGrad = pt && (pt->flags & PAINT_GRADIENT);
-        float opacity = renderer.drawOpacity(node.id);
+        float opacity = st.opacity;
         // v14 禁用：整块压到 55%（颜色/文字/图片一起淡，不引入额外合成通道）
-        const bool disabled = renderer.isDisabled(node.id);
-        if (disabled) opacity *= 0.55f;
-        float dx = renderer.drawOffsetX(node.id);
-        float dy = renderer.drawOffsetY(node.id);
-        float scale = renderer.drawScale(node.id);
-        float animRadius = renderer.drawRadius(node.id);
+        if (st.disabled) opacity *= 0.55f;
+        float dx = st.offX;
+        float dy = st.offY;
+        float scale = st.scale;
+        float animRadius = st.radius;
         if (opacity < 1.0f) dc = GfxScaleAlpha(dc, opacity);
         if (scale != 1.0f) {
             float cx = x + nw / 2.0f, cy = y + nh / 2.0f;
@@ -375,9 +391,9 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         // 的祖先才裁子元素。普通 div（含组件自己的根 div）按 CSS 语义不裁。
         renderer.clippingAncestors(node.id, clipAncs);
         for (uint16_t ancId : clipAncs) {
-            auto pit = byId.find(ancId);
-            if (pit == byId.end()) continue;
-            const auto& par = nodes[pit->second];
+            const size_t ai = indexOf(ancId);
+            if (ai == static_cast<size_t>(-1)) continue;
+            const auto& par = nodes[ai];
             if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
             gfx.pushClip(par.x, par.y, par.width, par.height);
         }

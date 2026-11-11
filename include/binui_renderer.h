@@ -446,6 +446,25 @@ public:
     float drawScale(uint16_t nodeId) const;     // 1 = 原尺寸（绕中心缩放）
     float drawRadius(uint16_t nodeId) const;    // 圆角半径（-1 = 无动画，用节点原值）
 
+    // ---- 绘制期批量查询（v20） ----
+    // 上面 6 个函数分开调时，**每个**都要各自查 animResult_ / animState_ / nodeIndexById_，
+    // 一个没有动画的节点就是 17 次哈希探测。遍历里每个节点都这么来一遍，实测 features
+    // 80 个节点 0.054 ms/帧 ≈ 0.68 µs/节点，其中一大半花在"查不到东西"上。
+    // drawState() 把这一帧需要的全部可视属性一次取出：
+    //   1 次 id→下标（稠密 id 走数组直读快路径）+ 两张动画表（空表直接跳过，
+    //   静态页面就是这种）+ 1 次扩展绘制段查询。语义与逐个查询完全一致
+    //   （动画结果优先，样式目标兜底）。
+    struct DrawState {
+        uint32_t color     = 0xFFFFFFFF;
+        float    opacity   = 1.0f;
+        float    offX      = 0.0f, offY = 0.0f;
+        float    scale     = 1.0f;
+        float    radius    = -1.0f;   // -1 = 无动画（用节点自身的圆角）
+        bool     disabled  = false;
+        const BinUIPaintNode* paint = nullptr;   // 扩展绘制段（文字色/边框/渐变…）
+    };
+    DrawState drawState(uint16_t nodeId) const;
+
     // 节点这一帧的失效矩形：布局矩形 ∪ 动画位移/缩放后的包围盒，各边再外扩 pad。
     // 只按布局矩形失效，:hover 放大时"长出来"的那一圈（边框/底色）不会被重绘，
     // 表现为"边框被削掉一半"；缩回时旧位置也会留残影。返回 false = 节点不存在/不可见。
@@ -484,6 +503,10 @@ private:
     bool scrollbarStyleExplicit_ = false;  // true = setScrollbarStyle 指定过，不再自动派生
     std::vector<NodeInfo> nodes_;
     std::unordered_map<uint16_t, size_t> nodeIndexById_;
+    // 节点 id → nodes_ 下标（static_cast<size_t>(-1) = 不存在）。
+    // 绘制热路径用它替代 nodeIndexById_：编译器分配的 id 稠密且与下标同序，
+    // 所以快路径是一次数组直读 + 一次 id 比对（动态增删破坏了顺序才落回哈希表）。
+    size_t nodeIndexOf(uint16_t nodeId) const;
     std::unordered_map<std::string, uint16_t> nameToId_; // v8 名称表：htmlId -> nodeId
     std::vector<uint8_t> layoutBytes_;                   // 当前布局（组件合并的基底）
     std::vector<std::string> imagePaths_;                // v12 资源段：imageIndex -> 路径

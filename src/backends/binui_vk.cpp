@@ -425,6 +425,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     double perfTBegin = 0.0;      // beginFrame 进入时刻
     double perfWaitFrame = 0.0;   // 本帧等 fence 的累计
     double perfRec = 0.0, perfWait = 0.0, perfPres = 0.0;
+    size_t perfVerts = 0;        // 60 帧窗口内的顶点累计（给出"每帧提交了多少几何"）
     long long perfN = 0;
     VkCommandPool cmdPool = VK_NULL_HANDLE;
     bool recording = false;
@@ -520,10 +521,16 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     GlyphAtlas atlas;
     std::vector<Tex*> glyphTexes;   // 图集纹理（shutdown 时统一释放）
 
-    // ---- 顶点 ----
-    // 每槽一块（GPU 上跑的帧和 CPU 正在录的帧不能共用一块：写第 N+1 帧的顶点时
-    // 第 N 帧可能还在读它自己的那块）。100000 顶点 × 20 B × 2 槽 = 4 MB。
-    std::vector<VkVertex> verts;                 // 本帧顶点（提交时拷进 vmap）
+    // v20：顶点先攒在**预分配好的** CPU 缓冲里，提交时整块 memcpy 进映射的槽缓冲。
+    // 实测过"直接写映射内存省掉拷贝"这条路：映射来的内存是写合并（WC）的，
+    // 逐顶点 20 字节赋值吃的是非对齐 PCIe 写惩罚，录制从 0.070 ms 涨到 **1.00 ms**
+    //（`features` 8472 顶点/帧，169 KB 走了 0.93 ms ≈ 180 MB/s）。整块 memcpy
+    // 用的是 rep movs/流式写，同样的数据只要 ~10 µs。所以拷贝留着，去掉的是
+    // std::vector 的逐顶点 push_back（容量检查 + size 递增）：缓冲一次 resize 到位，
+    // 写顶点就是一个指针 + 偏移。
+    std::vector<VkVertex> verts;                 // 本帧顶点（预分配到 kMaxVertices）
+    size_t vcount = 0;                           // 本帧已写顶点数
+    size_t frameVerts = 0;                       // 上一帧最终提交的顶点数（perf 用）
 
     struct Batch {
         uint32_t first = 0;
@@ -645,17 +652,20 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // ============================================================
     // 帧耗时拆分（BINUI_VK_PERF=1）
     // ============================================================
-    void perfFrameAdd(double rec, double wait, double pres) {
+    void perfFrameAdd(double rec, double wait, double pres, size_t nverts) {
         perfRec += rec;
         perfWait += wait;
         perfPres += pres;
+        perfVerts += nverts;
         if (++perfN % 60 != 0) return;
         const double n = 60.0;
         std::fprintf(stderr,
-                     "[vk][perf] %lld 帧: 平均 %.3f ms/帧 = 录制 %.3f + 等 GPU %.3f + 呈现 %.3f\n",
+                     "[vk][perf] %lld 帧: 平均 %.3f ms/帧 = 录制 %.3f + 等 GPU %.3f + 呈现 %.3f"
+                     "（顶点 %zu/帧）\n",
                      perfN, (perfRec + perfWait + perfPres) / n, perfRec / n, perfWait / n,
-                     perfPres / n);
+                     perfPres / n, static_cast<size_t>(perfVerts / 60));
         perfRec = perfWait = perfPres = 0.0;
+        perfVerts = 0;
     }
 
     void perfBeginFrame() {
@@ -667,7 +677,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     void perfEndFrame(double tPresent) {
         if (!perfOn) return;
         const double now = VkNowMs();
-        perfFrameAdd(tPresent - perfTBegin, perfWaitFrame, now - tPresent - perfWaitFrame);
+        perfFrameAdd(tPresent - perfTBegin, perfWaitFrame, now - tPresent - perfWaitFrame,
+                     frameVerts);
     }
 
     // ============================================================
@@ -1787,8 +1798,15 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         void* mapped = nullptr;
         if (g_vk.vkMapMemory(device, s.vmem, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS)
             s.vmap = static_cast<VkVertex*>(mapped);
-        verts.reserve(kMaxVertices);
+        verts.resize(kMaxVertices);
         batches.reserve(kMaxBatches);
+    }
+
+    // 顶点写入口：返回 nullptr = 缓冲已满（这一批图元直接丢弃，
+    // 与旧的"超过 kMaxVertices 就别再 push"语义一致）。
+    VkVertex* vertRoom(size_t n) {
+        if (vcount + n > verts.size()) return nullptr;
+        return verts.data() + vcount;
     }
 
     void switchBatch(Tex* tex) {
@@ -1802,28 +1820,33 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             batches.push_back(cur);
         }
         cur = Batch{};
-        cur.first = static_cast<uint32_t>(verts.size());
+        cur.first = static_cast<uint32_t>(vcount);
         cur.tex = tex;
         cur.sx = clipL; cur.sy = clipT; cur.sw = clipR - clipL; cur.sh = clipB - clipT;
     }
 
     void emitQuad(float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
                   uint32_t color, Tex* tex = nullptr) {
-        if (verts.size() + 6 > kMaxVertices) return;
+        VkVertex* o = vertRoom(6);
+        if (!o) return;
         switchBatch(tex);
-        const VkVertex a{x0, y0, color, u0, v0};
-        const VkVertex b{x1, y0, color, u1, v0};
-        const VkVertex c{x0, y1, color, u0, v1};
-        const VkVertex d{x1, y1, color, u1, v1};
-        verts.push_back(a); verts.push_back(b); verts.push_back(c);
-        verts.push_back(c); verts.push_back(b); verts.push_back(d);
+        o[0] = VkVertex{x0, y0, color, u0, v0};
+        o[1] = VkVertex{x1, y0, color, u1, v0};
+        o[2] = VkVertex{x0, y1, color, u0, v1};
+        o[3] = o[2];
+        o[4] = o[1];
+        o[5] = VkVertex{x1, y1, color, u1, v1};
+        vcount += 6;
         cur.count += 2;
     }
 
     void flush() {
-        if (std::getenv("BINUI_VK_TRACE")) {
+        // 每帧一次也要提成 static：UCRT 的 getenv 要遍历环境表，~0.5 µs/次，
+        // 和本文件 fillRect 里同一个坑（§7.3）。
+        static const bool trace = std::getenv("BINUI_VK_TRACE") != nullptr;
+        if (trace) {
             std::fprintf(stderr, "[vk][trace] flush: verts=%zu batches=%zu cur.count=%u\n",
-                         verts.size(), batches.size(), cur.count);
+                         vcount, batches.size(), cur.count);
         }
         if (batches.empty()) {
             if (cur.count > 0) batches.push_back(cur);
@@ -1832,8 +1855,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             batches.push_back(cur);
             cur = Batch{};
         }
-        if (verts.empty() || !vmap) return;
-        std::memcpy(vmap, verts.data(), verts.size() * sizeof(VkVertex));
+        // 顶点攒在 CPU 缓冲里（见 verts 的注释），这里整块拷进映射的槽缓冲。
+        if (vcount == 0 || !vmap) return;
+        std::memcpy(vmap, verts.data(), vcount * sizeof(VkVertex));
 
         g_vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         VkDeviceSize off = 0;
@@ -1856,7 +1880,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             g_vk.vkCmdDraw(cmd, b.count * 3, 1, b.first, 0);   // count 是三角形数，first 是顶点索引
         }
         batches.clear();
-        verts.clear();
+        frameVerts = vcount;
+        vcount = 0;
     }
 };
 
@@ -2186,7 +2211,7 @@ void BinUIVK::beginFrame(const void* clipRect) {
     g_vk.vkCmdClearAttachments(d.cmd, 1, &ca, 1, &cr);
 
     d.ensureVertBuf(d.slots[d.slotIdx]);
-    d.verts.clear();
+    d.vcount = 0;
     d.batches.clear();
     d.cur = Impl::Batch{};
     d.switchBatch(&d.white);
@@ -2441,13 +2466,15 @@ void BinUIVK::fillLine(float x0, float y0, float x1, float y1, float width, uint
     Premult(c);
     // 旋转四边形：两个三角形，法向偏移半线宽
     d.switchBatch(&d.white);
-    if (d.verts.size() + 6 > kMaxVertices) return;
-    const VkVertex a{x0 + nx, y0 + ny, c, 0.5f, 0.5f};
-    const VkVertex b{x1 + nx, y1 + ny, c, 0.5f, 0.5f};
-    const VkVertex cc{x1 - nx, y1 - ny, c, 0.5f, 0.5f};
-    const VkVertex dd{x0 - nx, y0 - ny, c, 0.5f, 0.5f};
-    d.verts.push_back(a); d.verts.push_back(b); d.verts.push_back(cc);
-    d.verts.push_back(a); d.verts.push_back(cc); d.verts.push_back(dd);
+    VkVertex* o = d.vertRoom(6);
+    if (!o) return;
+    o[0] = VkVertex{x0 + nx, y0 + ny, c, 0.5f, 0.5f};
+    o[1] = VkVertex{x1 + nx, y1 + ny, c, 0.5f, 0.5f};
+    o[2] = VkVertex{x1 - nx, y1 - ny, c, 0.5f, 0.5f};
+    o[3] = o[0];
+    o[4] = o[2];
+    o[5] = VkVertex{x0 - nx, y0 - ny, c, 0.5f, 0.5f};
+    d.vcount += 6;
     d.cur.count += 2;
 }
 

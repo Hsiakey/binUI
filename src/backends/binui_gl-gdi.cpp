@@ -281,7 +281,12 @@ struct BinUIGLGdi::Impl {
     int    msSamples = 4;
 
     // 场景
+    // 顶点缓冲一次 resize 到 kMaxVerts，之后每帧只复位 vcount、按指针偏移写：
+    // std::vector 的 insert/push_back 每条图元都要做容量检查 + size 递增（v20 之前
+    // 就是 insert(verts.end(), v, v+6)），features 一页 8400 个顶点，实测这一段
+    // 占一帧录制时间的 ~1/5。
     std::vector<GLVertex> verts;
+    size_t vcount = 0;                 // 本帧已写顶点数
     std::vector<Batch> batches;
     Batch* curBatch = nullptr;
     int scissor[4] = { 0, 0, 0, 0 };
@@ -662,6 +667,14 @@ struct BinUIGLGdi::Impl {
     }
 
     // ---------- 场景 ----------
+    // 本帧顶点写入口：返回 nullptr = 缓冲满（与旧的 "verts.size()+6 > kMaxVerts 就丢"
+    // 语义一致）。首次调用时把缓冲一次扩容到上限，之后不再变。
+    GLVertex* vertRoom(size_t n) {
+        if (verts.size() < kMaxVerts) verts.resize(kMaxVerts);
+        if (vcount + n > verts.size()) return nullptr;
+        return verts.data() + vcount;
+    }
+
     void beginBatch() {
         if (curBatch &&
             curBatch->sx == scissor[0] && curBatch->sy == scissor[1] &&
@@ -669,7 +682,7 @@ struct BinUIGLGdi::Impl {
             curBatch->tex == curTex)
             return;
         Batch b;
-        b.first = static_cast<uint32_t>(verts.size());
+        b.first = static_cast<uint32_t>(vcount);
         b.count = 0;
         b.sx = scissor[0];
         b.sy = scissor[1];
@@ -682,36 +695,42 @@ struct BinUIGLGdi::Impl {
 
     void emitQuad(float x0, float y0, float x1, float y1,
                   float u0, float v0, float u1, float v1, uint32_t color) {
-        if (verts.size() + 6 > kMaxVerts) return;
+        GLVertex* o = vertRoom(6);
+        if (!o) return;
         beginBatch();
         // 0xAARRGGBB → 0xAABBGGRR：UNSIGNED_BYTE 属性按内存字节序读（byte0=R）
-        uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
-        GLVertex v[6] = {
-            { x0, y0, sw, u0, v0 }, { x1, y0, sw, u1, v0 }, { x0, y1, sw, u0, v1 },
-            { x0, y1, sw, u0, v1 }, { x1, y0, sw, u1, v0 }, { x1, y1, sw, u1, v1 },
-        };
-        verts.insert(verts.end(), v, v + 6);
+        const uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
+        o[0] = GLVertex{ x0, y0, sw, u0, v0 };
+        o[1] = GLVertex{ x1, y0, sw, u1, v0 };
+        o[2] = GLVertex{ x0, y1, sw, u0, v1 };
+        o[3] = o[2];
+        o[4] = o[1];
+        o[5] = GLVertex{ x1, y1, sw, u1, v1 };
+        vcount += 6;
         curBatch->count++;
     }
 
     // 任意旋转四边形（三角形带，白纹理；UV 无意义）
     void emitQuadRot(float x0, float y0, float x1, float y1,
                      float x2, float y2, float x3, float y3, uint32_t color) {
-        if (verts.size() + 6 > kMaxVerts) return;
+        GLVertex* o = vertRoom(6);
+        if (!o) return;
         beginBatch();
-        uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
-        GLVertex v[6] = {
-            { x0, y0, sw, 0, 0 }, { x1, y1, sw, 1, 0 }, { x2, y2, sw, 1, 1 },
-            { x2, y2, sw, 1, 1 }, { x3, y3, sw, 0, 1 }, { x0, y0, sw, 0, 0 },
-        };
-        verts.insert(verts.end(), v, v + 6);
+        const uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
+        o[0] = GLVertex{ x0, y0, sw, 0, 0 };
+        o[1] = GLVertex{ x1, y1, sw, 1, 0 };
+        o[2] = GLVertex{ x2, y2, sw, 1, 1 };
+        o[3] = o[2];
+        o[4] = GLVertex{ x3, y3, sw, 0, 1 };
+        o[5] = o[0];
+        vcount += 6;
         curBatch->count++;
     }
 
     void flushAll() {
-        if (verts.empty() || !vb) return;
+        if (vcount == 0 || !vb) return;
         glBindBufferP(GL_ARRAY_BUFFER, vb);
-        glBufferDataP(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(verts.size() * sizeof(GLVertex)),
+        glBufferDataP(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vcount * sizeof(GLVertex)),
                       verts.data(), GL_DYNAMIC_DRAW);
         for (const auto& b : batches) {
             if (b.count == 0) continue;
@@ -811,7 +830,9 @@ void BinUIGLGdi::resize(int width, int height) {
 void BinUIGLGdi::beginFrame(const void* clipRect) {
     if (!impl_->ready) return;
     if (!impl_->makeCurrent()) return;   // 多实例：逐帧切回自己的上下文
-    impl_->verts.clear();
+    // 只复位计数，不 clear()：缓冲已经预分配到 kMaxVerts，clear() 每次会把
+    // 2 MB 全部析构再由 vertRoom 重新 resize 一遍（白白 memset 一次）。
+    impl_->vcount = 0;
     impl_->batches.clear();
     impl_->curBatch = nullptr;
     impl_->scissorDepth = 0;

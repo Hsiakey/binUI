@@ -140,7 +140,8 @@ struct BinUID3D::Impl {
     int msSamples = 1;
 
     // 场景
-    std::vector<D3DVertex> verts;
+    std::vector<D3DVertex> verts;      // 预分配到 kMaxVerts 的本帧顶点缓冲
+    size_t vcount = 0;                 // 本帧已写顶点数
     std::vector<Batch> batches;
     Batch* curBatch = nullptr;
     int scissor[4] = { 0, 0, 0, 0 };
@@ -629,6 +630,15 @@ struct BinUID3D::Impl {
     }
 
     // ---------- 场景 ----------
+    // 本帧顶点写入口（v20）：缓冲一次扩容到 kMaxVerts，之后每帧只复位 vcount、
+    // 按指针偏移写。以前是 verts.insert(verts.end(), v, v+6)，每条图元都要做容量
+    // 检查 + size 递增，和 GL/Vulkan 后端同一个坑（详见 binui_gl-gdi.cpp 的注释）。
+    D3DVertex* vertRoom(size_t n) {
+        if (verts.size() < kMaxVerts) verts.resize(kMaxVerts);
+        if (vcount + n > verts.size()) return nullptr;
+        return verts.data() + vcount;
+    }
+
     void beginBatch() {
         if (curBatch &&
             curBatch->sx == scissor[0] && curBatch->sy == scissor[1] &&
@@ -636,7 +646,7 @@ struct BinUID3D::Impl {
             curBatch->linear == curLinear && curBatch->srv == curSrv)
             return;
         Batch b;
-        b.first = static_cast<uint32_t>(verts.size()); // 起始顶点索引
+        b.first = static_cast<uint32_t>(vcount); // 起始顶点索引
         b.count = 0;
         b.sx = scissor[0];
         b.sy = scissor[1];
@@ -650,36 +660,42 @@ struct BinUID3D::Impl {
 
     void emitQuad(float x0, float y0, float x1, float y1,
                   float u0, float v0, float u1, float v1, uint32_t color) {
-        if (verts.size() + 6 > kMaxVerts) return; // 缓冲上限，丢弃多余
+        D3DVertex* o = vertRoom(6);
+        if (!o) return; // 缓冲上限，丢弃多余
         beginBatch();
         // 0xAARRGGBB → 0xAABBGGRR：R8G8B8A8_UNORM 按内存字节序读（byte0=R）
-        uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
-        D3DVertex v[6] = {
-            { x0, y0, sw, u0, v0 }, { x1, y0, sw, u1, v0 }, { x0, y1, sw, u0, v1 },
-            { x0, y1, sw, u0, v1 }, { x1, y0, sw, u1, v0 }, { x1, y1, sw, u1, v1 },
-        };
-        verts.insert(verts.end(), v, v + 6);
+        const uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
+        o[0] = D3DVertex{ x0, y0, sw, u0, v0 };
+        o[1] = D3DVertex{ x1, y0, sw, u1, v0 };
+        o[2] = D3DVertex{ x0, y1, sw, u0, v1 };
+        o[3] = o[2];
+        o[4] = o[1];
+        o[5] = D3DVertex{ x1, y1, sw, u1, v1 };
+        vcount += 6;
         curBatch->count++;
     }
 
     void emitQuadRot(float x0, float y0, float x1, float y1,
                      float x2, float y2, float x3, float y3, uint32_t color) {
-        if (verts.size() + 6 > kMaxVerts) return;
+        D3DVertex* o = vertRoom(6);
+        if (!o) return;
         beginBatch();
-        uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
-        D3DVertex v[6] = {
-            { x0, y0, sw, 0, 0 }, { x1, y1, sw, 1, 0 }, { x2, y2, sw, 1, 1 },
-            { x2, y2, sw, 1, 1 }, { x3, y3, sw, 0, 1 }, { x0, y0, sw, 0, 0 },
-        };
-        verts.insert(verts.end(), v, v + 6);
+        const uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
+        o[0] = D3DVertex{ x0, y0, sw, 0, 0 };
+        o[1] = D3DVertex{ x1, y1, sw, 1, 0 };
+        o[2] = D3DVertex{ x2, y2, sw, 1, 1 };
+        o[3] = o[2];
+        o[4] = D3DVertex{ x3, y3, sw, 0, 1 };
+        o[5] = o[0];
+        vcount += 6;
         curBatch->count++;
     }
 
     void flushAll() {
-        if (verts.empty() || !vb) return;
+        if (vcount == 0 || !vb) return;
         D3D11_MAPPED_SUBRESOURCE map = {};
         if (FAILED(ctx->Map(vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
-        memcpy(map.pData, verts.data(), verts.size() * sizeof(D3DVertex));
+        memcpy(map.pData, verts.data(), vcount * sizeof(D3DVertex));
         ctx->Unmap(vb, 0);
 
         for (const auto& b : batches) {
@@ -944,7 +960,8 @@ void BinUID3D::beginFrame(const void* clipRect) {
     // 脏区底色由共享遍历里根节点的背景填充提供（与 GL/Vulkan 同一份 drawNodesBinUI）。
     (void)clipRect;
     if (!impl_->ready) return;
-    impl_->verts.clear();
+    // 只复位计数：缓冲已预分配到 kMaxVerts，clear() 每帧会把 2 MB 析构再扩容一遍
+    impl_->vcount = 0;
     impl_->batches.clear();
     impl_->curBatch = nullptr;
     impl_->scissorDepth = 0;
