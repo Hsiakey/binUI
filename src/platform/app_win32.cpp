@@ -819,8 +819,9 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 lcur = pit->second;
                 const auto& par = nodes[lcur];
                 if (!(par.flags & BINUI_VISIBLE)) { lDraw = false; break; }
-                RECT pr = { (LONG)par.x, (LONG)par.y,
-                            (LONG)(par.x + par.width), (LONG)(par.y + par.height) };
+                const float pox = offX[lcur], poy = offY[lcur];
+                RECT pr = { (LONG)(par.x - pox), (LONG)(par.y - poy),
+                            (LONG)(par.x - pox + par.width), (LONG)(par.y - poy + par.height) };
                 if (IntersectClipRect(hdc, pr.left, pr.top, pr.right, pr.bottom) == NULLREGION) {
                     lDraw = false;
                     break;
@@ -887,7 +888,9 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             if (pit == byId.end()) continue;
             const auto& par = nodes[pit->second];
             if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
-            RECT pr = { (int)par.x, (int)par.y, (int)(par.x + par.width), (int)(par.y + par.height) };
+            RECT pr = { (int)(par.x - offX[pit->second]), (int)(par.y - offY[pit->second]),
+                        (int)(par.x - offX[pit->second] + par.width),
+                        (int)(par.y - offY[pit->second] + par.height) };
             if (IntersectClipRect(hdc, pr.left, pr.top, pr.right, pr.bottom) == NULLREGION) {
                 draw = false;
                 break;

@@ -1370,27 +1370,35 @@ int BinUIRenderer::hitTestEx(float x, float y, bool allowStyled, uint8_t state) 
         }
         if (!hittable) continue;
 
-        // 沿祖先链：不可见子树跳过；滚动容器裁剪视口 + 累加滚动偏移（容器自身不偏移）
-        float ox = 0, oy = 0;
+        // 沿祖先链：不可见子树跳过；滚动容器裁剪视口 + 累加滚动偏移（容器自身不偏移）。
+        // 视口矩形必须按**祖先已滚掉的距离**平移：裁剪容器自己也可能是被滚动的内容
+        // （页面里的 #pool 就排在滚动的页带里）。先自下而上收集祖先链，再由外向内
+        // 累加偏移——拿布局坐标去比屏幕坐标的话，嵌套裁剪容器里的东西永远"在视口外"。
+        size_t chain[64];
+        int cn = 0;
         size_t idx = i;
         bool hidden = false;
-        while (true) {
+        while (cn < 64) {
             const auto& anc = nodes_[idx];
             if (anc.parentId == 0xFFFF) break;
             auto pit = nodeIndexById_.find(anc.parentId);
             if (pit == nodeIndexById_.end()) break;
             idx = pit->second;
-            const auto& par = nodes_[idx];
-            if (!(par.flags & BINUI_VISIBLE)) { hidden = true; break; }
-            if (par.flags & BINUI_SCROLLABLE) {
-                // 视口外内容不可命中
-                if (x < par.x || x > par.x + par.width || y < par.y || y > par.y + par.height) {
-                    hidden = true;
-                    break;
-                }
-                auto sit = scroll_.find(par.id);
-                if (sit != scroll_.end()) { ox += sit->second.x; oy += sit->second.y; }
+            chain[cn++] = idx;
+            if (!(nodes_[idx].flags & BINUI_VISIBLE)) { hidden = true; break; }
+        }
+        float ox = 0, oy = 0;
+        for (int k = cn - 1; k >= 0; k--) {
+            const auto& par = nodes_[chain[k]];
+            if (!(par.flags & BINUI_SCROLLABLE)) continue;
+            // 视口外内容不可命中（视口 = 容器屏幕矩形）
+            if (x < par.x - ox || x > par.x - ox + par.width ||
+                y < par.y - oy || y > par.y - oy + par.height) {
+                hidden = true;
+                break;
             }
+            auto sit = scroll_.find(par.id);
+            if (sit != scroll_.end()) { ox += sit->second.x; oy += sit->second.y; }
         }
         if (hidden) continue;
 

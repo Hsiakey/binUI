@@ -308,12 +308,18 @@ struct Shell {
         }
     }
 
+    // 组件的坐标是**布局**坐标（页带里第 3 页的那一段），屏幕坐标要减掉页带滚动量。
+    // 宿主自己算脏矩形和命中时都必须换算，否则 ut 的不是同一套坐标。
+    float ScreenY(float layoutY) const { return layoutY - static_cast<float>(scrollPos); }
+
     void touchBubble(const Bubble& b) {
         const float pad = 26.0f;
-        float l = std::min(b.px, b.x) - pad, t = std::min(b.py, b.y) - pad;
-        float rr = std::max(b.px, b.x) + b.w + pad, bb = std::max(b.py, b.y) + b.h + pad;
-        l = std::max(l, poolL); t = std::max(t, poolT);
-        rr = std::min(rr, poolR); bb = std::min(bb, poolB);
+        float l = std::min(b.px, b.x) - pad;
+        float t = ScreenY(std::min(b.py, b.y)) - pad;
+        float rr = std::max(b.px, b.x) + b.w + pad;
+        float bb = ScreenY(std::max(b.py, b.y)) + b.h + pad;
+        l = std::max(l, poolL); t = std::max(t, ScreenY(poolT));
+        rr = std::min(rr, poolR); bb = std::min(bb, ScreenY(poolB));
         if (rr <= l || bb <= t) return;
         app.invalidateRect((int)l, (int)t, (int)(rr - l), (int)(bb - t));
     }
@@ -385,11 +391,12 @@ struct Shell {
     }
 
     bool tryPopBubble(float x, float y) {
-        if (x < poolL || x > poolR || y < poolT || y > poolB) return false;
+        const float ly = y + static_cast<float>(scrollPos);   // 屏幕 → 布局
+        if (x < poolL || x > poolR || ly < poolT || ly > poolB) return false;
         for (size_t i = bubs.size(); i-- > 0;) {
             Bubble& b = bubs[i];
             if (b.popT >= 0.0f) continue;
-            if (x < b.x || x > b.x + b.w || y < b.y || y > b.y + b.h) continue;
+            if (x < b.x || x > b.x + b.w || ly < b.y || ly > b.y + b.h) continue;
             b.popT = 0.0f;
             ++popped;
             lastPop = static_cast<int>(i);
@@ -965,7 +972,7 @@ int main(int argc, char* argv[]) {
                     for (size_t bi = sh.bubs.size(); bi-- > 0;) {
                         const Bubble& b = sh.bubs[bi];
                         if (b.popT >= 0.0f) continue;
-                        autoClick(b.x + b.w * 0.5f, b.y + b.h * 0.5f);
+                        autoClick(b.x + b.w * 0.5f, sh.ScreenY(b.y) + b.h * 0.5f);
                         break;
                     }
                 }

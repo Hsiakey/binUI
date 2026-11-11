@@ -251,11 +251,14 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         if (par.flags & BINUI_SCROLLABLE) {
             auto sit = scrolls.find(par.id);
             if (sit != scrolls.end()) { offX[i] += sit->second.x; offY[i] += sit->second.y; }
+            // 视口矩形是"容器在屏幕上的位置"：容器自己可能在被滚动的内容里
+            // （页面里的 #pool 就在滚动的页带里），所以要减掉**它祖先**的滚动偏移。
+            // 以前用布局坐标，嵌套裁剪容器一进滚动视口就把子节点全裁没了。
             hasVp[i] = 1;
-            vpL[i] = static_cast<int32_t>(par.x);
-            vpT[i] = static_cast<int32_t>(par.y);
-            vpR[i] = static_cast<int32_t>(par.x + par.width);
-            vpB[i] = static_cast<int32_t>(par.y + par.height);
+            vpL[i] = static_cast<int32_t>(par.x - offX[pi]);
+            vpT[i] = static_cast<int32_t>(par.y - offY[pi]);
+            vpR[i] = static_cast<int32_t>(par.x - offX[pi] + par.width);
+            vpB[i] = static_cast<int32_t>(par.y - offY[pi] + par.height);
             // 出滚动条时右侧/底部留 gutter：内容裁在滚动条内侧，不再被它压住
             auto gitR = gutterR.find(par.id);
             if (gitR != gutterR.end()) vpR[i] -= gitR->second;
@@ -344,7 +347,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 std::fprintf(stderr, "        anc node=%u type=%u clip=(%.1f,%.1f %.1fx%.1f)\n",
                              (unsigned)par.id, (unsigned)par.type, (double)par.x,
                              (double)par.y, (double)par.width, (double)par.height);
-            gfx.pushClip(par.x, par.y, par.width, par.height);
+            gfx.pushClip(par.x - offX[ai], par.y - offY[ai], par.width, par.height);
             }
             if (draw) gfx.fillLine(x1, y1, x2, y2, (float)node.radius, dc);
             gfx.popClipTo(savedDepth);
@@ -462,7 +465,8 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             if (ai == static_cast<size_t>(-1)) continue;
             const auto& par = nodes[ai];
             if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
-            gfx.pushClip(par.x, par.y, par.width, par.height);
+            // 裁剪矩形 = 容器在屏幕上的矩形（减掉它祖先的滚动偏移）
+            gfx.pushClip(par.x - offX[ai], par.y - offY[ai], par.width, par.height);
         }
 
         if (draw) {
