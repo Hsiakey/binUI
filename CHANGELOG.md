@@ -5,6 +5,47 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.11.9] - 2026-11-11
+
+Vulkan 独占的动画抖动：**present 不等"这一帧真的上屏"**。无像素变化。
+
+### 修复 — VK_KHR_present_wait（GL/D3D11 已丝滑，只剩 VK 抖）
+
+§7.9 之后 GL / D3D11 都稳了，只有 `animshow_vk` 还抖。给 `BINUI_VK_PERF` 加**调用级**
+拆分后才看清：
+
+```
+[vk][perf] 1200 帧: 平均 6.102 ms/帧 = 录制 0.071 + 等 GPU 5.933 + 呈现 0.098
+          （顶点 2931/帧；其中 acquire 0.005 + present 调用 0.024）
+```
+
+`vkQueuePresentKHR` 只花 0.024ms —— FIFO 下它**从不阻塞**，交换链图只在合成分解那一刻
+才被放掉（于是 8ms 落在 `waitSlot` 等 GPU 侧的 blit 上）。结果是 CPU 提前把下一帧排进
+队列，合成器某些周期拿到两帧、某些周期一帧都没有：帧率照样 120，肉眼是抖。
+
+- present 时链一个 `VkPresentIdKHR`（帧号），提交后
+  `vkWaitForPresentKHR(swapchain, 帧号, 100ms)` 阻塞到该帧**被显示**为止 ——
+  与 `SwapBuffers(vsync)` 语义对齐，"一帧一次合成"成为硬约束。
+- 可选扩展：设备创建时探测 `VK_KHR_present_id` + `VK_KHR_present_wait` 并链上对应 feature；
+  任一环节缺失就不启用，退回 v0.11.8 的 "present + DwmFlush"。
+  启动日志会打 `[vk] 交换链 N 图，呈现模式 FIFO(vsync)，present_wait 可用（等真上屏）`。
+- 超时 100ms（最小化/被遮挡时合成器可能长时间不合成）；交换链图数回到 `minImageCount+1`。
+- 外壳侧无需改动：present 现在自己阻塞 ~8.2ms，§7.9 的 `lastPresentMs_` 判定会跳过
+  `DwmFlush`，不会双重等待。
+
+| 后端 | fps | 掉拍 | 一帧一次合成 |
+|---|---|---|---|
+| Vulkan | 120.1 | 0/600 | 是（硬约束） |
+| GL | 120.0 | 0/600 | 是（DwmFlush） |
+| D3D11 | 120.0 | 0/600 | 是（DwmFlush） |
+
+### 验收
+
+0 warning；四套测试全绿；`pixels` 10/10 零差异；`pixels-vk` 14/14（不同像素 0）；
+`pixels-d3d11` 全过；`vk-window` / `vk-stress` 全过；`demos-vk` / `demos-d3d11` 各 8 个；
+`check_examples` 11/11。详见 `docs/vulkan_design.md` §7.10。
+
+
 ## [0.11.8] - 2026-11-11
 
 呈现相位修正：同一套共享遍历下 **GL 看着稳、Vulkan/D3D11 看着抖**。无像素变化

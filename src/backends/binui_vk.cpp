@@ -151,6 +151,10 @@ struct VkApi {
     PFN_vkCreateSemaphore vkCreateSemaphore = nullptr;
     PFN_vkDestroySemaphore vkDestroySemaphore = nullptr;
     PFN_vkEnumerateInstanceLayerProperties vkEnumerateInstanceLayerProperties = nullptr;
+    // VK_KHR_present_wait（可选）：等"这一帧真的被合成器显示了"再返回。
+    // 这是唯一能精确对齐显示器刷新的手段 —— DWM 只在合成那一刻放掉交换链图，
+    // 而 present 本身（FIFO）并不阻塞。拿不到就退回"present + DwmFlush"。
+    PFN_vkWaitForPresentKHR vkWaitForPresentKHR = nullptr;
 #undef BINUI_VK_FN
 
     bool load() {
@@ -267,6 +271,8 @@ struct VkApi {
         BINUI_VK_LOAD(vkCmdClearColorImage)
         BINUI_VK_LOAD(vkFreeDescriptorSets)
 #undef BINUI_VK_LOAD
+        // 可选：present_wait（拿不到就留空，改用 present + DwmFlush）
+        vkWaitForPresentKHR = reinterpret_cast<PFN_vkWaitForPresentKHR>(get("vkWaitForPresentKHR"));
         return true;
     }
 
@@ -425,6 +431,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     double perfTBegin = 0.0;      // beginFrame 进入时刻
     double perfWaitFrame = 0.0;   // 本帧等 fence 的累计
     double perfRec = 0.0, perfWait = 0.0, perfPres = 0.0;
+    double perfAcquire = 0.0;    // 窗口内 vkAcquireNextImageKHR 的累计耗时（判断它是否在等合成器）
+    double perfPresCall = 0.0;   // 窗口内 vkQueuePresentKHR 的累计耗时
+    double perfPresentWait = 0.0; // 窗口内 vkWaitForPresentKHR 的累计耗时
     size_t perfVerts = 0;        // 60 帧窗口内的顶点累计（给出"每帧提交了多少几何"）
     long long perfN = 0;
     VkCommandPool cmdPool = VK_NULL_HANDLE;
@@ -459,6 +468,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     std::vector<VkImageView> swapViews;
     bool windowMode = false;
     bool useSwapchain = false;               // false = 只能读回 + GDI 贴屏
+    uint32_t swapImageCount = 0;             // 交换链图数（诊断用）
+    bool presentWaitAvailable = false;       // VK_KHR_present_wait/-id 可用（等真上屏）
+    uint64_t presentSeq = 0;                 // 已提交的 present id
     bool transparent = false;                // 分层窗口（UpdateLayeredWindow）
     bool forceGdi = false;                   // 拖拽 resize 期由上层置位
     bool coversMonitor = false;              // 客户区铺满整块显示器 → 绕开直翻转
@@ -661,11 +673,15 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         const double n = 60.0;
         std::fprintf(stderr,
                      "[vk][perf] %lld 帧: 平均 %.3f ms/帧 = 录制 %.3f + 等 GPU %.3f + 呈现 %.3f"
-                     "（顶点 %zu/帧）\n",
+                     "（顶点 %zu/帧；其中 acquire %.3f + present 调用 %.3f + 等上屏 %.3f）\n",
                      perfN, (perfRec + perfWait + perfPres) / n, perfRec / n, perfWait / n,
-                     perfPres / n, static_cast<size_t>(perfVerts / 60));
+                     perfPres / n, static_cast<size_t>(perfVerts / 60),
+                     perfAcquire / 60.0, perfPresCall / 60.0, perfPresentWait / 60.0);
         perfRec = perfWait = perfPres = 0.0;
         perfVerts = 0;
+        perfAcquire = 0.0;
+        perfPresCall = 0.0;
+        perfPresentWait = 0.0;
     }
 
     void perfBeginFrame() {
@@ -854,6 +870,21 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         return true;
     }
 
+    // 设备扩展探测：present_wait / present_id 用来"等这一帧真的上屏"。
+    // 只有窗口模式才有意义；离屏路径不涉及交换链。
+    bool hasDeviceExt(const char* name) const {
+        auto enumerate = reinterpret_cast<PFN_vkEnumerateDeviceExtensionProperties>(
+            g_vk.getInstanceProcAddr(instance, "vkEnumerateDeviceExtensionProperties"));
+        if (!enumerate) return false;
+        uint32_t n = 0;
+        if (enumerate(physical, nullptr, &n, nullptr) != VK_SUCCESS) return false;
+        std::vector<VkExtensionProperties> props(n);
+        if (enumerate(physical, nullptr, &n, props.data()) != VK_SUCCESS) return false;
+        for (const auto& p : props)
+            if (std::strcmp(p.extensionName, name) == 0) return true;
+        return false;
+    }
+
     bool createDevice() {
         const float prio = 1.0f;
         VkDeviceQueueCreateInfo qci{};
@@ -861,18 +892,37 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         qci.queueFamilyIndex = queueFamily;
         qci.queueCount = 1;
         qci.pQueuePriorities = &prio;
-        const char* devExt[] = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+        VkPhysicalDevicePresentIdFeaturesKHR presentIdFeat{};
+        presentIdFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_ID_FEATURES_KHR;
+        presentIdFeat.presentId = VK_TRUE;
+        VkPhysicalDevicePresentWaitFeaturesKHR presentWaitFeat{};
+        presentWaitFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
+        presentWaitFeat.presentWait = VK_TRUE;
+
+        std::vector<const char*> exts{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+        const void* dciPNext = nullptr;
+        if (windowMode && hasDeviceExt(VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
+            hasDeviceExt(VK_KHR_PRESENT_WAIT_EXTENSION_NAME)) {
+            exts.push_back(VK_KHR_PRESENT_ID_EXTENSION_NAME);
+            exts.push_back(VK_KHR_PRESENT_WAIT_EXTENSION_NAME);
+            presentIdFeat.pNext = &presentWaitFeat;
+            presentWaitFeat.pNext = nullptr;
+            dciPNext = &presentIdFeat;
+            presentWaitAvailable = true;
+        }
         VkDeviceCreateInfo dci{};
         dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
         dci.queueCreateInfoCount = 1;
         dci.pQueueCreateInfos = &qci;
-        if (windowMode) {
-            dci.enabledExtensionCount = 1;
-            dci.ppEnabledExtensionNames = devExt;
+        dci.pNext = dciPNext;        if (windowMode) {
+            dci.enabledExtensionCount = static_cast<uint32_t>(exts.size());
+            dci.ppEnabledExtensionNames = exts.data();
         }
         VK_CHECK(g_vk.vkCreateDevice(physical, &dci, nullptr, &device), "vkCreateDevice");
         g_vk.vkGetDeviceQueue(device, queueFamily, 0, &queue);
         if (!g_vk.loadDeviceFns(instance)) return false;
+        // 扩展启用但函数取不到 → 当作不可用，别让它变成空指针调用
+        if (presentWaitAvailable && !g_vk.vkWaitForPresentKHR) presentWaitAvailable = false;
         return true;
     }
 
@@ -1085,9 +1135,12 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, ext.height));
         if (ext.width == 0 || ext.height == 0) return false;
 
-        uint32_t imageCount = caps.minImageCount + 1;   // 多要一张，避免等待
+        // 交换链图数：minImageCount+1。真正决定节拍的是下面的 present_wait（等这一帧
+        // 上屏），图数只影响"排队能有多深"；多留一张是为了 acquire 不必去等合成器。
+        uint32_t imageCount = caps.minImageCount + 1;
         if (caps.maxImageCount > 0 && imageCount > caps.maxImageCount)
             imageCount = caps.maxImageCount;
+        swapImageCount = imageCount;
 
         VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
         if (!(caps.supportedCompositeAlpha & alpha)) {
@@ -2020,6 +2073,10 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     std::fprintf(stderr, "[vk] %s就绪 %dx%d（MSAA %dx%s）\n", d.windowMode ? "窗口" : "离屏",
                  width, height, static_cast<int>(d.samples),
                  d.windowMode ? (d.useSwapchain ? "，交换链呈现" : "，读回呈现") : "");
+    if (d.windowMode && d.useSwapchain)
+        std::fprintf(stderr, "[vk] 交换链 %u 图，呈现模式 %s，present_wait %s\n",
+                     d.swapImageCount, d.vsync ? "FIFO(vsync)" : "不等待垂直同步",
+                     d.presentWaitAvailable ? "可用（等真上屏）" : "不可用（退回 DwmFlush）");
     return true;
 }
 
@@ -2268,8 +2325,12 @@ void BinUIVK::present() {
     uint32_t imageIndex = 0;
     VkImage swapImg = VK_NULL_HANDLE;
     if (!gdiPath) {
+        // acquire 到底等多久（BINUI_VK_PERF 里分段打出来）：这是判断"present 自己会不会
+        // 被合成器卡住"的唯一直接证据 —— 它决定了外壳还要不要 DwmFlush。
+        const double ta = d.perfOn ? VkNowMs() : 0.0;
         const VkResult ar = g_vk.vkAcquireNextImageKHR(d.device, d.swapchain, UINT64_MAX,
                                                        slot.semAvail, VK_NULL_HANDLE, &imageIndex);
+        if (d.perfOn) d.perfAcquire += VkNowMs() - ta;
         if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
             d.recreateSwapchain();
             d.submitNoPresent();   // 本帧仍然提交掉，下帧用新交换链
@@ -2397,13 +2458,36 @@ void BinUIVK::present() {
     pi.swapchainCount = 1;
     pi.pSwapchains = &d.swapchain;
     pi.pImageIndices = &imageIndex;
+    // VK_KHR_present_id：给这一帧一个编号，等会儿用来问"它上屏了吗"
+    const uint64_t myPresentId = ++d.presentSeq;
+    VkPresentIdKHR pid{};
+    pid.sType = VK_STRUCTURE_TYPE_PRESENT_ID_KHR;
+    pid.swapchainCount = 1;
+    pid.pPresentIds = &myPresentId;
+    if (d.presentWaitAvailable) pi.pNext = &pid;
+    const double tp = d.perfOn ? VkNowMs() : 0.0;
     const VkResult pr = g_vk.vkQueuePresentKHR(d.queue, &pi);
+    if (d.perfOn) d.perfPresCall += VkNowMs() - tp;
     if (pr == VK_ERROR_OUT_OF_DATE_KHR || pr == VK_SUBOPTIMAL_KHR) {
         d.recreateSwapchain();
     } else if (pr != VK_SUCCESS) {
         std::fprintf(stderr, "[vk] vkQueuePresentKHR 失败: %s (%d)\n", VkResultText(pr), (int)pr);
         if (pr == VK_ERROR_DEVICE_LOST) d.ready = false;
         d.useSwapchain = false;
+    } else if (d.presentWaitAvailable && d.vsync && !d.forceGdi && !d.transparent &&
+               !d.coversMonitor) {
+        // v0.11.9：**等这一帧真的被合成器显示**再返回。
+        // 为什么需要它：FIFO 的 vkQueuePresentKHR 并不阻塞，交换链图只在合成那一刻才被
+        // 放掉。不等的话 CPU 可以提前排好下一帧，合成器在某些周期拿到两帧、某些周期一帧
+        // 都没有 —— 帧率照样 120，肉眼却是"抖"（这正是只有 VK 抖、GL/D3D11 靠 DwmFlush
+        // 对齐后不抖的原因）。present_wait 把"一帧一次合成"变成硬约束。
+        // 超时 100ms：最小化/被遮挡时合成器可能长时间不合成，不能把线程挂死。
+        const double tw = d.perfOn ? VkNowMs() : 0.0;
+        const VkResult wr = g_vk.vkWaitForPresentKHR(d.device, d.swapchain, myPresentId,
+                                                     100ull * 1000ull * 1000ull);
+        if (d.perfOn) d.perfPresentWait += VkNowMs() - tw;
+        if (wr == VK_ERROR_OUT_OF_DATE_KHR || wr == VK_ERROR_SURFACE_LOST_KHR)
+            d.useSwapchain = false;
     }
     d.perfEndFrame(tPresent);
 }

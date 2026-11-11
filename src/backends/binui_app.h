@@ -416,6 +416,11 @@ private:
     void waitForFrame(std::chrono::steady_clock::time_point t);
     void* frameTimer_ = nullptr;   // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 的定时器句柄
     bool dirty_ = true;
+    // 上一拍是否真的画了一帧（renderOnce 里置位）。用来提前判断"这一拍还有活要干"：
+    // 动画的脏区要到 update_ 跑完才出现，而 pump 的等待发生在 update_ 之前。
+    bool lastDrew_ = false;
+    // 上一次 present 花了多少毫秒：>半个预算就说明它自己在等合成，不要再 DwmFlush
+    double lastPresentMs_ = 0.0;
     int dirtyL_ = 0, dirtyT_ = 0, dirtyR_ = 0, dirtyB_ = 0;
     int pendingW_ = 0, pendingH_ = 0; // 挂起的窗口尺寸（WM_SIZE 只记录，帧内应用一次）
     bool trackingLeave_ = false;
@@ -1368,11 +1373,27 @@ inline void BinUIAppT<Gfx>::renderFrame() {
     // 现在：网格用 `+=`（落后太多才重新对齐），等待用高精度可等待定时器（精度 ~0.5ms，
     // 见 waitForFrame），并且**保留 nextFrameTime_ 闸门**——present 会阻塞到垂直同步时，
     // 闸门正好挡住"刚提交完下一轮又立刻重画"。
-    if (now < nextFrameTime_) return;
+    // 帧节拍（v0.11.9）：分两条路 ——
+    //   A. present 自己会等合成（vsync 交换链 + DwmFlush）：**节拍归它**。这里既不设
+    //      闸门也不推网格，否则"合成等待 + 自己的节拍器"会双重等待，两者相位互相漂，
+    //      周期性丢一拍 —— 实测 VK 后端 total avg 7.41ms 却按 8.4ms/帧出帧，就是它。
+    //   B. 呈现不等（读回 + GDI / 透明窗 / 远程会话 / 拖拽）：外壳按刷新率节拍
+    //      （固定网格 + 高精度等待，见下）。
+    const bool paced = pacedByPresent();
+    if (!paced) {
+        if (now < nextFrameTime_) return;
+    } else if (!dirty_ && pendingW_ <= 0) {
+        lastDrew_ = false;      // 这一拍确实没东西要画：交给 pump 去睡
+        return;
+    }
     renderOnce();
-    nextFrameTime_ += frameBudget_;
-    const auto after = std::chrono::steady_clock::now();
-    if (nextFrameTime_ < after - frameBudget_ * 2) nextFrameTime_ = after + frameBudget_;
+    if (paced) {
+        nextFrameTime_ = std::chrono::steady_clock::now();   // 下一拍由 present 决定
+    } else {
+        nextFrameTime_ += frameBudget_;
+        const auto after = std::chrono::steady_clock::now();
+        if (nextFrameTime_ < after - frameBudget_ * 2) nextFrameTime_ = after + frameBudget_;
+    }
 }
 
 // 这一帧是否由 present() 的垂直同步阻塞来决定节拍（只用于启动时打一行诊断）
@@ -1455,25 +1476,32 @@ inline int BinUIAppT<Gfx>::pump(int timeoutMs) {
 #ifndef MWMO_INPUTAVAILABLE
 #define MWMO_INPUTAVAILABLE 0x0004
 #endif
-    // 等待：有挂起 resize 就立刻（尺寸要跟手），有脏区就等到下一帧点，
-    // 都没有就阻塞到输入或超时。等的时候是**睡眠**（不烧 CPU）。
-    // v0.11.6：等"到下一帧点"这件事必须精确到亚毫秒 —— 120Hz 的预算只有 8.33ms，
-    // 而 MsgWait 的毫秒超时按系统计时器精度兑现（默认 15.6ms），一睡就跨两个刷新。
+    // 等待：有挂起 resize 就立刻（尺寸要跟手）；有活要干就按节拍等；都没有就睡到输入。
+    // 等"到下一帧点"必须精确到亚毫秒 —— 120Hz 的预算只有 8.33ms，而 MsgWait 的毫秒
+    // 超时按系统计时器精度兑现（默认 15.6ms），一睡就跨两个刷新（v0.11.6 的坑）。
     MSG msg = {};
+    const bool paced = pacedByPresent();
     if (pendingW_ > 0 && pendingH_ > 0) {
         // 尺寸变化：这一拍就出帧，不等
-    } else if (dirty_) {
-        // 等到（或超过）下一帧点：present 会阻塞到垂直同步时它会先返回，
-        // 闸门是 nextFrameTime_，这里只负责别提前空转。
-        const auto now = std::chrono::steady_clock::now();
-        waitForFrame(nextFrameTime_ > now ? nextFrameTime_ : now);
+    } else if (dirty_ || lastDrew_) {
+        // 有脏区，或者上一拍刚画过（动画通常每拍都会产生脏区，但那要等 update_ 跑完
+        // 才知道 —— 用 lastDrew_ 提前判断，免得在帧点前先睡掉一整拍）。
+        if (!paced) {
+            const auto now = std::chrono::steady_clock::now();
+            waitForFrame(nextFrameTime_ > now ? nextFrameTime_ : now);
+        }
+        // paced：不睡。present 里的 DwmFlush 已经在合成边界上等过了，
+        // 这里再按自己的网格睡一次就是双重等待 → 相位互相漂 → 周期性丢拍。
     } else if (timeoutMs > 0) {
-        // 没有脏区也要按帧点醒来：上一帧画完 dirty_ 就清了，"有没有下一帧"要到
-        // 下一次 renderFrame 里 update_（推进动画）才知道。这里若按 timeoutMs（1ms）试，
-        // 要么退化成 15.6ms 的粗睡（动画掉回 64fps），要么高精度地每秒醒 1000 次。
-        // 直接睡到 nextFrameTime_：这就是 120 次/秒的"帧点"，输入照样能唤醒（QS_ALLINPUT）。
-        const auto now = std::chrono::steady_clock::now();
-        if (nextFrameTime_ > now) waitForFrame(nextFrameTime_);
+        // 完全没活：睡到输入。paced 模式下用毫秒粗睡即可（OS 会合并到 15.6ms 节拍，
+        // 省电优先）；非 paced 模式仍睡到帧点，保证动画不会掉回 64fps。
+        if (paced) {
+            MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(timeoutMs),
+                                        QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        } else {
+            const auto now = std::chrono::steady_clock::now();
+            if (nextFrameTime_ > now) waitForFrame(nextFrameTime_);
+        }
     }
 
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -1648,7 +1676,9 @@ inline void BinUIAppT<Gfx>::renderOnce() {
     const double t0 = perf.on ? NowMs() : 0.0;
     applyPendingResize();
     const double t1 = perf.on ? NowMs() : 0.0;
+    lastDrew_ = false;
     if (dirty_ && gfx_.isReady()) {
+        lastDrew_ = true;
         int rc[4] = { dirtyL_, dirtyT_, dirtyR_, dirtyB_ };
         gfx_.beginFrame(rc);
         if (draw_) draw_(gfx_, rc);
@@ -1658,14 +1688,18 @@ inline void BinUIAppT<Gfx>::renderOnce() {
         // 后者绕开全屏直翻转导致的"画面停住"（见 clientCoversMonitor 注释）。
         if ((gdiPresent_ || fullscreenPresent_) && !transparent_) gfx_.presentViaGdi();
         else {
+            // v0.11.9：present 之后要不要再等一次合成器，**按实测决定**。
+            //   · GL / D3D11 的 SwapBuffers / Present(1) 在 DWM 合成下往往立刻返回
+            //     （实测 0.3ms），帧就会被同一个刷新周期里的两次合成"挤掉一帧" —— 必须 Flush；
+            //   · Vulkan 用 2 图交换链时 acquire 本身就卡在合成边界（实测 8ms+），
+            //     再 Flush 就是**双重等待**（实测 15.4ms = 两个合成周期，直接掉到 64fps）。
+            // 所以判据不是"哪个后端"，而是"present 刚才到底等了多久"。
+            const auto pStart = std::chrono::steady_clock::now();
             gfx_.present();
-            // v0.11.8：**与桌面合成器对齐**。present 只是把帧排进队列，真正的显示节拍
-            // 是 DWM 的合成（每刷新周期一次）。不对齐的话，我们按 8.33±1ms 出帧，
-            // 越过刷新边界的那些帧会被多留一个周期 —— 平均 120fps 但肉眼是"抖"：
-            // VK 后端实测帧间隔 7ms/8ms/9ms 三档混在一起（GL 那边每 15.6ms 一次，
-            // 正好是刷新的整数倍，反而看着"均匀但慢"）。
-            // 只在真走交换链时 Flush：GDI 读回 / 远程会话 / 拖拽那几条路径不该被合成器拖住。
-            if (pacedByPresent()) DwmFlush();
+            lastPresentMs_ = std::chrono::duration<double, std::milli>(
+                                 std::chrono::steady_clock::now() - pStart).count();
+            if (pacedByPresent() && lastPresentMs_ < frameBudget_.count() / 1000.0 * 0.5)
+                DwmFlush();
         }
         dirty_ = false;
         if (perf.on) {

@@ -1284,6 +1284,60 @@ id=65（pulse 圆）  w: 49.7, 48.5, 48, 47.9, 47.8, 47.5, 47.4, 47.2
 
 改前 `2r-w` 会在 -1/0/+1 之间跳。静态半径是整数 → `lround(rf)` 与原值相同，像素门禁不变。
 
+---
+
+## 7.10 Vulkan 独占的"抖"：present 不等上屏（2026-11-11，v0.11.9）
+
+### 7.10.1 现象与排除
+
+§7.9 之后 GL / D3D11 都丝滑了，**只剩 `animshow_vk` 还抖**。共享遍历、几何、
+动画时钟都是同一份，所以只可能是呈现路径。逐步排除：
+
+| 怀疑 | 查法 | 结论 |
+|---|---|---|
+| CPU 侧帧节奏 | `BINUI_PERF` 直方图 | 120fps、8ms 一档，和另两个后端一样 → 不是它 |
+| 双重等待 | `呈现 avg` 8.3ms vs `total avg` | §7.9.4 已修（合成器在等，外壳就别再等） |
+| `DwmFlush` 放错位置 | 关掉 Flush 后 `呈现` 仍 8.26ms | present 自己在等 → 不能加 Flush |
+| 渲染内容 | 同几何、同 scissor 规则 | 不是 |
+
+关键的一步是给 `BINUI_VK_PERF` 加了**拆到调用级**的计时：
+
+```
+[vk][perf] 1200 帧: 平均 6.102 ms/帧 = 录制 0.071 + 等 GPU 5.933 + 呈现 0.098
+          （顶点 2931/帧；其中 acquire 0.005 + present 调用 0.024 + 等上屏 0）
+```
+
+`vkQueuePresentKHR` 只花 **0.024ms** —— 它根本不阻塞。那 8ms 是 `waitSlot` 在等
+**GPU 侧的 blit**（DXGI 在合成那一刻才放掉交换链图，blit 就这样被卡住）。也就是说：
+**CPU 提前把下一帧排进了队列，而合成器在某些刷新周期里拿到两帧、某些周期一帧都没有** ——
+帧率照样 120，肉眼却是抖。
+
+### 7.10.2 修法：`VK_KHR_present_wait`
+
+`vkQueuePresentKHR` 附一个 `VkPresentIdKHR`（帧号），提交后
+`vkWaitForPresentKHR(swapchain, 帧号, 100ms)` —— 阻塞到**这一帧真的被合成器显示**为止。
+这与 `SwapBuffers(vsync)` 的语义对齐，"一帧一次合成"从"希望如此"变成硬约束。
+
+- 可选扩展：设备创建时探测 `VK_KHR_present_id` + `VK_KHR_present_wait` 并链上
+  `VkPhysicalDevicePresentIdFeaturesKHR` / `PresentWaitFeaturesKHR`；任何一环缺失就
+  不启用，退回 v0.11.8 的"present + DwmFlush"路径（`[vk] 交换链 ... present_wait 可用/不可用`
+  启动就能看到）。
+- 超时 100ms：窗口最小化/被遮挡时合成器可能长时间不合成，不能把线程挂死。
+- 交换链图数回到 `minImageCount+1`：节拍由 present_wait 决定，图数只影响排队深度。
+- 外壳侧不用改：`present` 现在自己阻塞 ~8.2ms，`lastPresentMs_` 判定会跳过 `DwmFlush`
+  （§7.9 那个自适应判断正好把这条也罩住了）。
+
+### 7.10.3 实测
+
+| 后端 | fps | 掉拍 | 一帧一次合成？ |
+|---|---|---|---|
+| Vulkan（present_wait） | 120.1 | 0/600 | 是（硬约束） |
+| GL（DwmFlush） | 120.0 | 0/600 | 是 |
+| D3D11（DwmFlush） | 120.0 | 0/600 | 是 |
+
+被测量本身的"帧间隔"在 present_wait 下不再是判据（我们本来就是被显示节拍唤醒的），
+所以看的是"掉拍=0"和肉眼观感。
+
 
 
 
