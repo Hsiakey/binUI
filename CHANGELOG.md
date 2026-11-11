@@ -5,6 +5,47 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.10.1] - 2026-11-11
+
+Vulkan 后端性能补丁：**双槽流水线**（帧录制与 GPU 执行重叠）。无 API / 二进制布局改动
+（`BINUI_VERSION` 仍 19），旧 `.bui`/`.bum` 不用重编。
+
+### 修复 / 性能 — Vulkan：每帧不再同步等自己的 fence
+
+- 改动前每帧都是 `submit → vkWaitForFences(本帧) → present`，把 submit→fence 的往返
+  （75~150 µs）整个压在关键路径上，且下一帧的 CPU 录制无法与 GPU 执行重叠。
+- 现在 `Impl` 里是 **2 个槽**（命令缓冲 / fence / 两个信号量 / 顶点缓冲 / staging 待释放表各一套）：
+  等待点从 `beginFrame` 挪到"提交前等上一帧"，`beginFrame → present` 之间的 CPU 工作
+  （遍历、排版、SVG 路径细分、填顶点）发生在上一帧还在 GPU 上跑的时候。
+- 只做 2 槽的原因：渲染目标（4x MSAA 累积图 + resolve）帧间共享，`loadOp=LOAD` 要求 GPU 上
+  永远只有一帧在跑；再多槽位不增加并行度，只多占内存。
+- 顶点缓冲改为每槽一块（写第 N+1 帧顶点时第 N 帧可能还在读）。
+- 修一个随之暴露的坑：`vkCreateSemaphore`/`vkDestroySemaphore` 属于 WSI 那组函数
+  （`loadSwapchainFns` 之后才非空），离屏模式下建信号量 = 调空指针 → `vk_shot` SIGSEGV。
+  改为信号量与交换链同生共死。
+- `tools/vk_window`：`--out` 不给就不开每帧交换链读回（读回是一次全屏拷贝，会掩盖真实吞吐）；
+  验收用例都带 `--out`，判据不变。
+- 新环境变量 `BINUI_VK_PERF=1`：每 60 帧打印"录制 / 等 GPU / 呈现"三段耗时。
+
+### 实测（同机同工具，7 次取中位，300 帧，vsync=off）
+
+| 用例 | 0.10.0 | 0.10.1 | 提升 |
+|---|---|---|---|
+| `features` 900×932 | 1375.9 fps | 1722.3 fps | +25.2% |
+| `svgdemo` 960×560 | 618.4 fps | 682.2 fps | +10.3% |
+| `probe` 600×260 | 4711.2 fps | 7277.4 fps | +54.5% |
+| `singlewindow` 1280×720 | 2604.7 fps | 3642.6 fps | +39.8% |
+
+`BINUI_VK_PERF` 拆分显示 GPU 几乎全程空闲（`svgdemo` 1.447 ms = 录制 1.244 + 等 GPU 0.052 +
+呈现 0.151），剩余瓶颈在 CPU 录制侧，见 `docs/vulkan_design.md` §7.2.5。
+
+### 验收
+
+0 warning；四套测试全绿；`make pixels-vk` 14/14（14 个用例不同像素 0）；`make vk-window`
+全部通过（含脏矩形 vs 全量重绘逐位相同）；`make vk-stress` 两轮 8 阶段 0 失败、shutdown 后
+后端显存 0.0 MB；`make demos-vk` 8 个；`check_examples` 11/11。
+
+
 ## [0.10.0] - 2026-11-11
 
 本轮主题：**Vulkan 绘制后端（P1~P5 全部落地）**。新后端 = MINOR；`BINUI_VERSION` 仍是 19

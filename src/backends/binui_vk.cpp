@@ -43,6 +43,18 @@
 namespace binui {
 namespace {
 
+// QPC 毫秒（帧耗时拆分用；不做缓存的系统调用之外的开销也很小）
+double VkNowMs() {
+    static LARGE_INTEGER freq = [] {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        return f;
+    }();
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    return static_cast<double>(c.QuadPart) * 1000.0 / static_cast<double>(freq.QuadPart);
+}
+
 // ============================================================
 // 加载 vulkan-1.dll（进程内只需一次）
 // ============================================================
@@ -377,10 +389,44 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     VkPhysicalDeviceMemoryProperties memProps{};
     VkSampleCountFlagBits samples = VK_SAMPLE_COUNT_4_BIT;
 
-    // ---- 命令 ----
-    VkCommandPool cmdPool = VK_NULL_HANDLE;
+    // ---- 命令（P6：双槽流水线）----
+    // 每槽一套"命令缓冲 + fence + acquire/present 信号量 + 顶点缓冲 + staging 待释放表"，
+    // 于是 CPU 录第 N+1 帧时可以不管 GPU 还在跑第 N 帧。
+    //
+    // 为什么不是 3 槽 / 无限制 in-flight：渲染目标（4x MSAA 累积图 + resolve 图）和纹理布局
+    // 是**帧间共享**的，GPU 上永远只允许一帧在跑（累积帧 loadOp=LOAD，两帧并发会互相踩）。
+    // 所以在 vkQueueSubmit 之前必须等上一帧的 fence。双槽刚好够把"录制"和"执行"重叠一步，
+    // 再多的槽只会多占显存、不会多出并行度。见 docs/vulkan_design.md §7.2。
+    static constexpr int kSlots = 2;
+    struct Slot {
+        VkCommandBuffer cmd = VK_NULL_HANDLE;
+        VkFence fence = VK_NULL_HANDLE;
+        VkSemaphore semAvail = VK_NULL_HANDLE;   // 图像可用
+        VkSemaphore semDone = VK_NULL_HANDLE;    // 渲染完成
+        VkBuffer vbuf = VK_NULL_HANDLE;
+        VkDeviceMemory vmem = VK_NULL_HANDLE;
+        VkVertex* vmap = nullptr;
+        std::vector<std::pair<VkBuffer, VkDeviceMemory>> staging;   // 等本槽 fence 后释放
+        bool submitted = false;   // 已提交、fence 还没等（只有一帧会处于这个状态）
+    };
+    Slot slots[kSlots];
+    int slotIdx = 0;      // 当前录制槽
+    int prevSlot = -1;    // 上一帧提交的槽：提交新一帧前必须先等它
+    long long frameNo = 0;
+    // 当前槽的快捷别名：绘制/上传代码只认这三个，beginFrame 里换成新槽
     VkCommandBuffer cmd = VK_NULL_HANDLE;
-    VkFence fence = VK_NULL_HANDLE;
+    VkBuffer vbuf = VK_NULL_HANDLE;
+    VkDeviceMemory vmem = VK_NULL_HANDLE;
+    VkVertex* vmap = nullptr;
+    // ---- 帧耗时拆分（BINUI_VK_PERF=1：每 60 帧一行）----
+    // 判断瓶颈在 CPU 录制还是 GPU 执行：录制 ≫ 等 GPU 说明是 CPU 侧（路径细分/排版），
+    // 等 GPU ≫ 录制说明是填充率/带宽（大窗口 + 4x MSAA / 读回）。
+    bool perfOn = std::getenv("BINUI_VK_PERF") != nullptr;
+    double perfTBegin = 0.0;      // beginFrame 进入时刻
+    double perfWaitFrame = 0.0;   // 本帧等 fence 的累计
+    double perfRec = 0.0, perfWait = 0.0, perfPres = 0.0;
+    long long perfN = 0;
+    VkCommandPool cmdPool = VK_NULL_HANDLE;
     bool recording = false;
 
     // ---- 目标 ----
@@ -410,8 +456,6 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     VkExtent2D swapExtent{};
     std::vector<VkImage> swapImages;
     std::vector<VkImageView> swapViews;
-    VkSemaphore semAvail = VK_NULL_HANDLE;   // 图像可用
-    VkSemaphore semDone = VK_NULL_HANDLE;    // 渲染完成
     bool windowMode = false;
     bool useSwapchain = false;               // false = 只能读回 + GDI 贴屏
     bool transparent = false;                // 分层窗口（UpdateLayeredWindow）
@@ -470,18 +514,15 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         std::vector<uint8_t> data;
     };
     std::vector<PendingUpload> pendingUploads;
-    // 已记录进本帧命令缓冲的 staging（帧末等 fence 后释放）
-    std::vector<std::pair<VkBuffer, VkDeviceMemory>> stagingToFree;
     bool cmdOpen = false;   // 命令缓冲正在录制（帧内，或一次性的初始化提交）
 
     // ---- 文本（排版/图集在共享头里，本类只当纹理宿主）----
     GlyphAtlas atlas;
     std::vector<Tex*> glyphTexes;   // 图集纹理（shutdown 时统一释放）
 
-    // ---- 顶点环 ----
-    VkBuffer vbuf = VK_NULL_HANDLE;
-    VkDeviceMemory vmem = VK_NULL_HANDLE;
-    VkVertex* vmap = nullptr;
+    // ---- 顶点 ----
+    // 每槽一块（GPU 上跑的帧和 CPU 正在录的帧不能共用一块：写第 N+1 帧的顶点时
+    // 第 N 帧可能还在读它自己的那块）。100000 顶点 × 20 B × 2 槽 = 4 MB。
     std::vector<VkVertex> verts;                 // 本帧顶点（提交时拷进 vmap）
 
     struct Batch {
@@ -518,6 +559,115 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         }
         g_vk.vkFreeMemory(device, m, nullptr);
         m = VK_NULL_HANDLE;
+    }
+
+    // ============================================================
+    // 双槽流水线：槽的建立 / 等待 / 回收
+    // ============================================================
+    bool initSlot(Slot& s) {
+        VkCommandBufferAllocateInfo cbi{};
+        cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        cbi.commandPool = cmdPool;
+        cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        cbi.commandBufferCount = 1;
+        if (g_vk.vkAllocateCommandBuffers(device, &cbi, &s.cmd) != VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] initSlot: vkAllocateCommandBuffers 失败\n");
+            return false;
+        }
+        VkFenceCreateInfo fci{};
+        fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+        // ★ 必须一开始就是 signaled：beginFrame 的第一步是 wait 这一槽的 fence，
+        // 建出来是 unsignaled 的话第一帧直接死等（P2 实测挂死，CPU 0%）。
+        fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
+        if (g_vk.vkCreateFence(device, &fci, nullptr, &s.fence) != VK_SUCCESS) {
+            std::fprintf(stderr, "[vk] initSlot: vkCreateFence 失败\n");
+            return false;
+        }
+        return true;
+    }
+
+    // 交换链信号量：与交换链同生共死。
+    // 它们在 WSI 那一组函数里（只有 loadSwapchainFns 之后才非空），所以离屏模式没有这两个对象。
+    bool createSlotSemaphores() {
+        if (!g_vk.vkCreateSemaphore) return false;
+        VkSemaphoreCreateInfo smi{};
+        smi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        for (int i = 0; i < kSlots; i++) {
+            if (g_vk.vkCreateSemaphore(device, &smi, nullptr, &slots[i].semAvail) != VK_SUCCESS ||
+                g_vk.vkCreateSemaphore(device, &smi, nullptr, &slots[i].semDone) != VK_SUCCESS) {
+                std::fprintf(stderr, "[vk] 信号量创建失败，退回读回呈现\n");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    void destroySlotSemaphores() {
+        for (int i = 0; i < kSlots; i++) {
+            Slot& s = slots[i];
+            if (s.semAvail && g_vk.vkDestroySemaphore)
+                g_vk.vkDestroySemaphore(device, s.semAvail, nullptr);
+            if (s.semDone && g_vk.vkDestroySemaphore)
+                g_vk.vkDestroySemaphore(device, s.semDone, nullptr);
+            s.semAvail = s.semDone = VK_NULL_HANDLE;
+        }
+    }
+
+    // 等 fence（BINUI_VK_PERF 时把等待时间记进本帧）
+    void waitFence(VkFence f) {
+        if (perfOn) {
+            const double t = VkNowMs();
+            g_vk.vkWaitForFences(device, 1, &f, VK_TRUE, UINT64_MAX);
+            perfWaitFrame += VkNowMs() - t;
+            return;
+        }
+        g_vk.vkWaitForFences(device, 1, &f, VK_TRUE, UINT64_MAX);
+    }
+
+    void freeStaging(Slot& s) {
+        for (auto& kv : s.staging) {
+            g_vk.vkDestroyBuffer(device, kv.first, nullptr);
+            freeMem(kv.second);
+        }
+        s.staging.clear();
+    }
+
+    // 等这一槽的 GPU 工作跑完，并回收它的 staging
+    void waitSlot(Slot& s) {
+        if (!s.submitted) return;
+        waitFence(s.fence);
+        s.submitted = false;
+        freeStaging(s);
+    }
+
+    Slot& cs() { return slots[slotIdx]; }
+
+    // ============================================================
+    // 帧耗时拆分（BINUI_VK_PERF=1）
+    // ============================================================
+    void perfFrameAdd(double rec, double wait, double pres) {
+        perfRec += rec;
+        perfWait += wait;
+        perfPres += pres;
+        if (++perfN % 60 != 0) return;
+        const double n = 60.0;
+        std::fprintf(stderr,
+                     "[vk][perf] %lld 帧: 平均 %.3f ms/帧 = 录制 %.3f + 等 GPU %.3f + 呈现 %.3f\n",
+                     perfN, (perfRec + perfWait + perfPres) / n, perfRec / n, perfWait / n,
+                     perfPres / n);
+        perfRec = perfWait = perfPres = 0.0;
+    }
+
+    void perfBeginFrame() {
+        if (!perfOn) return;
+        perfTBegin = VkNowMs();
+        perfWaitFrame = 0.0;
+    }
+
+    void perfEndFrame(double tPresent) {
+        if (!perfOn) return;
+        const double now = VkNowMs();
+        perfFrameAdd(tPresent - perfTBegin, perfWaitFrame, now - tPresent - perfWaitFrame);
     }
 
     // ============================================================
@@ -856,6 +1006,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // 交换链（窗口模式）
     // ============================================================
     void destroySwapchain() {
+        destroySlotSemaphores();
         for (VkImageView v : swapViews)
             if (v) g_vk.vkDestroyImageView(device, v, nullptr);
         swapViews.clear();
@@ -982,6 +1133,11 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         }
         swapFormat = sf.format;
         swapExtent = ext;
+        // 信号量与交换链同生共死：重建交换链时一起重建（此刻设备已 idle，见 recreateSwapchain）
+        if (!createSlotSemaphores()) {
+            destroySwapchain();
+            return false;
+        }
         // 拖边框时尺寸每帧变一次、交换链每帧重建一次：默认不打印，排查用 BINUI_VK_TRACE=1
         if (std::getenv("BINUI_VK_TRACE"))
             std::fprintf(stderr, "[vk] 交换链 %ux%u，%u 张，%s，presentMode=%d\n", ext.width,
@@ -1006,23 +1162,29 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     }
 
     // 丢帧（最小化 / 交换链过期 / acquire 失败）时也必须把命令缓冲**提交**掉：
-    // beginFrame 每帧开头等 fence，而 fence 只在 vkQueueSubmit 时才会置位 ——
+    // beginFrame 每帧开头等这一槽的 fence，而 fence 只在 vkQueueSubmit 时才会置位 ——
     // 漏提交就是"下一帧永远等不到"的死锁。压力测试第一轮最小化就抓到了这个（挂死）。
+    //
+    // 丢帧是异常路径，直接同步掉（提交 + 等完），不留"在飞的一帧"给下一帧收拾。
     void submitNoPresent() {
-        g_vk.vkEndCommandBuffer(cmd);
+        Slot& s = cs();
+        // 正常帧的串行化点在 present()：丢帧也一样，提交前先等上一帧
+        if (prevSlot >= 0 && prevSlot != slotIdx) waitSlot(slots[prevSlot]);
+        prevSlot = -1;
+        g_vk.vkEndCommandBuffer(s.cmd);
         recording = false;
         cmdOpen = false;
         VkSubmitInfo si{};
         si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         si.commandBufferCount = 1;
-        si.pCommandBuffers = &cmd;
-        if (g_vk.vkQueueSubmit(queue, 1, &si, fence) != VK_SUCCESS) {
+        si.pCommandBuffers = &s.cmd;
+        if (g_vk.vkQueueSubmit(queue, 1, &si, s.fence) != VK_SUCCESS) {
             std::fprintf(stderr, "[vk] submitNoPresent: vkQueueSubmit 失败，后端转为未就绪\n");
             ready = false;
             return;
         }
-        g_vk.vkWaitForFences(device, 1, &fence, VK_TRUE, UINT64_MAX);
-        freeStaging();
+        s.submitted = true;
+        waitSlot(s);
     }
     // 客户区是否铺满整块显示器（borderless 全屏）。
     // 与 GL 后端 0.9.1 的 clientCoversMonitor() 同一判定与同一理由：这种状态下 DWM 会把
@@ -1288,8 +1450,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         region.imageExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
         g_vk.vkCmdCopyBufferToImage(cmd, stage, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                                     1, &region);
-        // staging 的生命期到本帧 fence 为止（拷贝是异步的，现在还不能释放）
-        stagingToFree.emplace_back(stage, stageMem);
+        // staging 的生命期到本槽的 fence 为止（拷贝是异步的，现在还不能释放）
+        cs().staging.emplace_back(stage, stageMem);
         return true;
     }
 
@@ -1340,35 +1502,41 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             if (pu.tex) stageUpload(*pu.tex, pu.x, pu.y, pu.w, pu.h, pu.data.data(), pu.rowBytes);
     }
 
-    void freeStaging() {
-        for (auto& kv : stagingToFree) {
-            g_vk.vkDestroyBuffer(device, kv.first, nullptr);
-            freeMem(kv.second);
-        }
-        stagingToFree.clear();
-    }
-
-    // 一次性提交：初始化期（白纹理）没有帧，用它把像素/清零送上去
+    // 一次性提交：初始化期（白纹理）没有帧，用它把像素/清零送上去。
+    // 固定借用 0 号槽：这时还没有任何帧在录制（init 里调用），槽是空闲的。
     bool oneShot(const std::function<void()>& fn) {
+        const int savedIdx = slotIdx;
+        const VkCommandBuffer savedCmd = cmd;
+        slotIdx = 0;
+        Slot& s = slots[0];
+        cmd = s.cmd;
+        bool ok = true;
         VkCommandBufferBeginInfo bi{};
         bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-        g_vk.vkResetCommandBuffer(cmd, 0);
-        if (g_vk.vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS) return false;
-        cmdOpen = true;
-        fn();
-        cmdOpen = false;
-        if (g_vk.vkEndCommandBuffer(cmd) != VK_SUCCESS) return false;
-        VkSubmitInfo si{};
-        si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-        si.commandBufferCount = 1;
-        si.pCommandBuffers = &cmd;
-        if (g_vk.vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
-            std::fprintf(stderr, "[vk] oneShot: vkQueueSubmit 失败\n");
-            return false;
+        if (g_vk.vkResetCommandBuffer(cmd, 0) != VK_SUCCESS) ok = false;
+        if (ok && g_vk.vkBeginCommandBuffer(cmd, &bi) != VK_SUCCESS) ok = false;
+        if (ok) {
+            cmdOpen = true;
+            fn();
+            cmdOpen = false;
+            if (g_vk.vkEndCommandBuffer(cmd) != VK_SUCCESS) ok = false;
         }
-        if (g_vk.vkQueueWaitIdle(queue) != VK_SUCCESS) return false;
-        freeStaging();
-        return true;
+        if (ok) {
+            VkSubmitInfo si{};
+            si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+            si.commandBufferCount = 1;
+            si.pCommandBuffers = &cmd;
+            if (g_vk.vkQueueSubmit(queue, 1, &si, VK_NULL_HANDLE) != VK_SUCCESS) {
+                std::fprintf(stderr, "[vk] oneShot: vkQueueSubmit 失败\n");
+                ok = false;
+            } else if (g_vk.vkQueueWaitIdle(queue) != VK_SUCCESS) {
+                ok = false;
+            }
+        }
+        freeStaging(s);
+        cmd = savedCmd;
+        slotIdx = savedIdx;
+        return ok;
     }
 
     bool createSamplers() {
@@ -1607,15 +1775,18 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // ============================================================
     // 绘制
     // ============================================================
-    void ensureVertBuf() {
-        if (vbuf) return;
+    // 顶点缓冲按槽建（懒建：off-screen 只画一帧时也只建一个槽的）
+    void ensureVertBuf(Slot& s) {
+        if (s.vbuf) return;
         if (!createBuffer(kMaxVertices * sizeof(VkVertex), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                           VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                          vbuf, vmem))
+                          s.vbuf, s.vmem)) {
+            std::fprintf(stderr, "[vk] ensureVertBuf: 顶点缓冲创建失败\n");
             return;
+        }
         void* mapped = nullptr;
-        if (g_vk.vkMapMemory(device, vmem, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS)
-            vmap = static_cast<VkVertex*>(mapped);
+        if (g_vk.vkMapMemory(device, s.vmem, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS)
+            s.vmap = static_cast<VkVertex*>(mapped);
         verts.reserve(kMaxVertices);
         batches.reserve(kMaxBatches);
     }
@@ -1714,9 +1885,9 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     VkApplicationInfo app{};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app.pApplicationName = "binUI";
-    app.applicationVersion = VK_MAKE_VERSION(0, 10, 0);
+    app.applicationVersion = VK_MAKE_VERSION(0, 10, 1);
     app.pEngineName = "binUI";
-    app.engineVersion = VK_MAKE_VERSION(0, 10, 0);
+    app.engineVersion = VK_MAKE_VERSION(0, 10, 1);
     app.apiVersion = VK_API_VERSION_1_0;
     const char* instExt[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     VkInstanceCreateInfo ici{};
@@ -1785,14 +1956,7 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     // 交换链函数（窗口模式）：取不到就不起窗口失败，而是降级为"读回 + GDI 贴屏"
     if (d.windowMode && g_vk.loadSwapchainFns(d.instance)) {
         if (d.createSwapchain()) {
-            VkSemaphoreCreateInfo smi{};
-            smi.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
-            if (g_vk.vkCreateSemaphore(d.device, &smi, nullptr, &d.semAvail) == VK_SUCCESS &&
-                g_vk.vkCreateSemaphore(d.device, &smi, nullptr, &d.semDone) == VK_SUCCESS) {
-                d.useSwapchain = true;
-            } else {
-                std::fprintf(stderr, "[vk] 信号量创建失败，退回读回呈现\n");
-            }
+            d.useSwapchain = true;
         } else {
             std::fprintf(stderr, "[vk] 交换链创建失败，退回读回呈现（性能会差很多）\n");
         }
@@ -1800,24 +1964,19 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     if (d.windowMode && !d.useSwapchain)
         std::fprintf(stderr, "[vk] 窗口模式：present 走读回 + GDI 贴屏\n");
 
-    // 命令池 / 命令缓冲 / fence
+    // 命令池 + 双槽（命令缓冲 / fence / 信号量）
     VkCommandPoolCreateInfo cpi{};
     cpi.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
     cpi.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     cpi.queueFamilyIndex = d.queueFamily;
     VK_CHECK(g_vk.vkCreateCommandPool(d.device, &cpi, nullptr, &d.cmdPool), "vkCreateCommandPool");
-    VkCommandBufferAllocateInfo cbi{};
-    cbi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
-    cbi.commandPool = d.cmdPool;
-    cbi.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    cbi.commandBufferCount = 1;
-    VK_CHECK(g_vk.vkAllocateCommandBuffers(d.device, &cbi, &d.cmd), "vkAllocateCommandBuffers");
-    VkFenceCreateInfo fci{};
-    fci.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
-    // ★ 必须一开始就是 signaled：beginFrame 的第一步是 wait 这一帧的 fence，
-    // 建出来是 unsignaled 的话第一帧直接死等（实测挂死，CPU 0%）。
-    fci.flags = VK_FENCE_CREATE_SIGNALED_BIT;
-    VK_CHECK(g_vk.vkCreateFence(d.device, &fci, nullptr, &d.fence), "vkCreateFence");
+    for (int i = 0; i < Impl::kSlots; i++) {
+        if (!d.initSlot(d.slots[i])) {
+            std::fprintf(stderr, "[vk] 命令槽 %d 初始化失败\n", i);
+            return false;
+        }
+    }
+    d.cmd = d.slots[0].cmd;   // 离屏/单帧模式下 oneShot 与 beginFrame 都从 0 号槽开始
 
     d.clipL = 0; d.clipT = 0; d.clipR = width; d.clipB = height;
     if (!d.createTargets()) return false;
@@ -1848,9 +2007,6 @@ void BinUIVK::shutdown() {
     d.dibBits = nullptr;
     d.dibW = d.dibH = 0;
     d.destroySwapchain();
-    if (d.semAvail) g_vk.vkDestroySemaphore(d.device, d.semAvail, nullptr);
-    if (d.semDone) g_vk.vkDestroySemaphore(d.device, d.semDone, nullptr);
-    d.semAvail = d.semDone = VK_NULL_HANDLE;
     if (d.surface) g_vk.vkDestroySurfaceKHR(d.instance, d.surface, nullptr);
     d.surface = VK_NULL_HANDLE;
     d.useSwapchain = false;
@@ -1880,13 +2036,28 @@ void BinUIVK::shutdown() {
     if (d.pipeline) g_vk.vkDestroyPipeline(d.device, d.pipeline, nullptr);
     if (d.pipeLayout) g_vk.vkDestroyPipelineLayout(d.device, d.pipeLayout, nullptr);
     if (d.dsLayout) g_vk.vkDestroyDescriptorSetLayout(d.device, d.dsLayout, nullptr);
-    if (d.vbuf) g_vk.vkDestroyBuffer(d.device, d.vbuf, nullptr);
-    // 先解映射再释放：freeMem 会把句柄置空，之后 vkUnmapMemory 拿到空句柄就直接崩
-    //（P4 压力测试第一次跑就抓到 —— 以前只是"顺序不对但侥幸没崩"）
-    if (d.vmem) g_vk.vkUnmapMemory(d.device, d.vmem);
-    d.freeMem(d.vmem);
+    // 双槽：每槽自己一套顶点缓冲 / fence / 信号量
+    for (int i = 0; i < Impl::kSlots; i++) {
+        Impl::Slot& s = d.slots[i];
+        if (s.vbuf) g_vk.vkDestroyBuffer(d.device, s.vbuf, nullptr);
+        // 先解映射再释放：freeMem 会把句柄置空，之后 vkUnmapMemory 拿到空句柄就直接崩
+        //（P4 压力测试第一次跑就抓到 —— 以前只是"顺序不对但侥幸没崩"）
+        if (s.vmem) g_vk.vkUnmapMemory(d.device, s.vmem);
+        d.freeMem(s.vmem);
+        d.freeStaging(s);
+        if (s.fence) g_vk.vkDestroyFence(d.device, s.fence, nullptr);
+        if (s.semAvail) g_vk.vkDestroySemaphore(d.device, s.semAvail, nullptr);
+        if (s.semDone) g_vk.vkDestroySemaphore(d.device, s.semDone, nullptr);
+        s = Impl::Slot{};   // 命令缓冲由命令池统一释放
+    }
+    d.cmd = VK_NULL_HANDLE;
+    d.vbuf = VK_NULL_HANDLE;
+    d.vmap = nullptr;
+    d.vmem = VK_NULL_HANDLE;
+    d.slotIdx = 0;
+    d.prevSlot = -1;
+    d.frameNo = 0;
     d.destroyTargets();
-    if (d.fence) g_vk.vkDestroyFence(d.device, d.fence, nullptr);
     if (d.cmdPool) g_vk.vkDestroyCommandPool(d.device, d.cmdPool, nullptr);
     g_vk.vkDestroyDevice(d.device, nullptr);
     if (d.instance) g_vk.vkDestroyInstance(d.instance, nullptr);
@@ -1955,14 +2126,25 @@ void BinUIVK::beginFrame(const void* clipRect) {
     d.clipL = l; d.clipT = t; d.clipR = r; d.clipB = b;
     d.scissorDepth = 0;
 
-    g_vk.vkWaitForFences(d.device, 1, &d.fence, VK_TRUE, UINT64_MAX);
-    g_vk.vkResetFences(d.device, 1, &d.fence);
-    d.freeStaging();          // 上一帧的 staging 到这里才能释放（GPU 已停下）
-    g_vk.vkResetCommandBuffer(d.cmd, 0);
+    // ---- 换到本帧的槽 ----
+    // 这一槽上次提交是**两帧前**，present() 的串行化点已经等过一帧，这里通常立即返回；
+    // 只有丢帧路径（submitNoPresent 已同步）或第一帧会真等。等完后 fence 一定是置位的，
+    // 于是可以安全地复位给本帧的提交用。
+    d.slotIdx = static_cast<int>(d.frameNo++ % Impl::kSlots);
+    Impl::Slot& slot = d.slots[d.slotIdx];
+    d.waitSlot(slot);
+    g_vk.vkResetFences(d.device, 1, &slot.fence);
+    d.ensureVertBuf(slot);
+    d.cmd = slot.cmd;          // 当前槽别名：绘制/上传代码只认 d.cmd / d.vbuf / d.vmap
+    d.vbuf = slot.vbuf;
+    d.vmem = slot.vmem;
+    d.vmap = slot.vmap;
+    d.perfBeginFrame();
+    g_vk.vkResetCommandBuffer(slot.cmd, 0);
 
     VkCommandBufferBeginInfo bi{};
     bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    g_vk.vkBeginCommandBuffer(d.cmd, &bi);
+    g_vk.vkBeginCommandBuffer(slot.cmd, &bi);
     d.recording = true;
     d.cmdOpen = true;
     // 帧外攒下的上传（排版阶段光栅化的字形、prepareImage）在这里补录：
@@ -2003,7 +2185,7 @@ void BinUIVK::beginFrame(const void* clipRect) {
     cr.layerCount = 1;
     g_vk.vkCmdClearAttachments(d.cmd, 1, &ca, 1, &cr);
 
-    d.ensureVertBuf();
+    d.ensureVertBuf(d.slots[d.slotIdx]);
     d.verts.clear();
     d.batches.clear();
     d.cur = Impl::Batch{};
@@ -2013,6 +2195,8 @@ void BinUIVK::beginFrame(const void* clipRect) {
 void BinUIVK::present() {
     Impl& d = *impl_;
     if (!d.ready || !d.recording) return;
+    const double tPresent = d.perfOn ? VkNowMs() : 0.0;
+    Impl::Slot& slot = d.slots[d.slotIdx];
     d.flush();
     g_vk.vkCmdEndRenderPass(d.cmd);
 
@@ -2028,6 +2212,7 @@ void BinUIVK::present() {
             if (ce.width == 0 || ce.height == 0) {
                 // 最小化：没有可呈现的像素，本帧丢掉但不报错（恢复时会重建）
                 d.submitNoPresent();
+                d.perfEndFrame(tPresent);
                 return;
             }
             if (ce.width != 0xFFFFFFFFu &&
@@ -2050,10 +2235,11 @@ void BinUIVK::present() {
     VkImage swapImg = VK_NULL_HANDLE;
     if (!gdiPath) {
         const VkResult ar = g_vk.vkAcquireNextImageKHR(d.device, d.swapchain, UINT64_MAX,
-                                                       d.semAvail, VK_NULL_HANDLE, &imageIndex);
+                                                       slot.semAvail, VK_NULL_HANDLE, &imageIndex);
         if (ar == VK_ERROR_OUT_OF_DATE_KHR || ar == VK_SUBOPTIMAL_KHR) {
             d.recreateSwapchain();
             d.submitNoPresent();   // 本帧仍然提交掉，下帧用新交换链
+            d.perfEndFrame(tPresent);
             return;
         }
         if (ar != VK_SUCCESS) {
@@ -2062,6 +2248,7 @@ void BinUIVK::present() {
             if (ar == VK_ERROR_DEVICE_LOST) d.ready = false;   // 设备丢了就别再画
             d.useSwapchain = false;
             d.submitNoPresent();
+            d.perfEndFrame(tPresent);
             return;
         }
         swapImg = d.swapImages[imageIndex];
@@ -2129,30 +2316,44 @@ void BinUIVK::present() {
     d.recording = false;
     d.cmdOpen = false;
 
+    // ---- 串行化点 ----
+    // 提交新一帧之前必须等上一帧的 fence：渲染目标（MSAA 累积图 / resolve 图）和纹理布局
+    // 是帧间共享的，GPU 上不能同时有两帧在跑。**但录制已经并行了** —— beginFrame 到
+    // 这里之间的 CPU 工作（遍历、排版、路径细分、顶点填充）都发生在上一帧还在 GPU 上跑的时候，
+    // 这正是双槽换来的收益。放在提交前而不是 beginFrame，是为了把重叠窗口拉到最大。
+    if (d.prevSlot >= 0 && d.prevSlot != d.slotIdx) d.waitSlot(d.slots[d.prevSlot]);
+
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
     si.commandBufferCount = 1;
-    si.pCommandBuffers = &d.cmd;
+    si.pCommandBuffers = &slot.cmd;
     const VkPipelineStageFlags waitStage = VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkSemaphore sig = VK_NULL_HANDLE;
     if (!gdiPath) {
         si.waitSemaphoreCount = 1;
-        si.pWaitSemaphores = &d.semAvail;
+        si.pWaitSemaphores = &slot.semAvail;
         si.pWaitDstStageMask = &waitStage;
         si.signalSemaphoreCount = 1;
-        si.pSignalSemaphores = &d.semDone;
-        sig = d.semDone;
+        si.pSignalSemaphores = &slot.semDone;
+        sig = slot.semDone;
     }
-    if (g_vk.vkQueueSubmit(d.queue, 1, &si, d.fence) != VK_SUCCESS) {
+    if (g_vk.vkQueueSubmit(d.queue, 1, &si, slot.fence) != VK_SUCCESS) {
         std::fprintf(stderr, "[vk] present: vkQueueSubmit 失败，后端转为未就绪\n");
         d.ready = false;
+        d.perfEndFrame(tPresent);
         return;
     }
-    g_vk.vkWaitForFences(d.device, 1, &d.fence, VK_TRUE, UINT64_MAX);
-    d.freeStaging();   // 本帧的 staging 到这里才算用完（拷贝已经执行完）
+    slot.submitted = true;
+    d.prevSlot = d.slotIdx;
+
+    // 像素要拿回 CPU 的两条路必须同步等：GDI 贴屏（接下来就要读这块内存）和
+    // capture 读回（工具在帧循环结束后立刻取像素）。交换链那条路把等待留给下一帧 ——
+    // 这就是流水线的全部意义。
+    if (gdiPath || d.capture) d.waitSlot(slot);
 
     if (gdiPath) {
         d.blitToWindow(static_cast<const uint8_t*>(d.readbackMapped), d.w, d.h);
+        d.perfEndFrame(tPresent);
         return;
     }
     VkPresentInfoKHR pi{};
@@ -2170,6 +2371,7 @@ void BinUIVK::present() {
         if (pr == VK_ERROR_DEVICE_LOST) d.ready = false;
         d.useSwapchain = false;
     }
+    d.perfEndFrame(tPresent);
 }
 
 // 强制读回 + GDI 贴屏（拖拽 resize 期由上层调用；全屏直翻转守卫由 present() 内部处理）

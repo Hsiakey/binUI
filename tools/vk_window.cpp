@@ -150,7 +150,9 @@ int main(int argc, char** argv) {
         return 1;
     }
     gfx.setTransparent(transparent);
-    gfx.setCaptureReadback(true);   // 每帧把交换链图像读回，最后写 PNG
+    // 只有要存 PNG 时才每帧把交换链图像读回：读回是一次全屏拷贝，会掩盖真实吞吐
+    // （--frames 300 不带 --out 就是纯性能测量）。验收用例都带 --out，行为不变。
+    gfx.setCaptureReadback(outPath != nullptr);
 
     double t0 = NowMs();
     int drawn = 0;
