@@ -498,6 +498,11 @@ PIXEL_VK_TOL   ?= 1.5
 PIXEL_VK_CHTOL ?= 128
 # 真实示例（整页 UI，不是单点卡片）：文本、图片、组件、SVG 混排
 VK_DEMO_CASES  := features fontshow svgdemo texturedemo
+# 动画中途帧（v0.11.10）：`from { transform: scale(0.77) }` → t=0 就落在**小数缩放**上，
+# 专门覆盖"几何是小数时"的路径（亚像素坐标 + 小数圆角半径 + 圆角模板重采样）。
+# 这条用例就是 VK 圆角模板从 NEAREST 改 LINEAR 的判据：改之前 252x156 区域有差异，
+# 改之后不同像素 0（最大通道差 1）。只进跨后端比对，不建 GDI 基准图。
+ANIM_CASES := anim-midphase
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 
@@ -517,6 +522,12 @@ pixels-vk: tools
 	    $(BIN_DIR)/vk_shot$(EXT) examples/$$d/main.html $(PIXEL_VK_OUT)/demo-$$d.png >/dev/null 2>&1 || { echo "VK 渲染失败: $$d"; fail=1; continue; }; \
 	    $(BIN_DIR)/gl_shot$(EXT) examples/$$d/main.html $(PIXEL_VK_OUT)/demo-$$d.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$d"; fail=1; continue; }; \
 	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/demo-$$d.gl.png $(PIXEL_VK_OUT)/demo-$$d.png $(PIXEL_VK_TOL) $(PIXEL_VK_OUT)/demo-$$d.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	done; \
+	for a in $(ANIM_CASES); do \
+	    echo "--- anim/$$a ---"; \
+	    $(BIN_DIR)/vk_shot$(EXT) docs/issues/assets/$$a.html $(PIXEL_VK_OUT)/anim-$$a.png >/dev/null 2>&1 || { echo "VK 渲染失败: $$a"; fail=1; continue; }; \
+	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$a.html $(PIXEL_VK_OUT)/anim-$$a.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$a"; fail=1; continue; }; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/anim-$$a.gl.png $(PIXEL_VK_OUT)/anim-$$a.png 0 $(PIXEL_VK_OUT)/anim-$$a.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
 	done; \
 	exit $$fail
 
@@ -548,6 +559,12 @@ pixels-d3d11: tools
 	    $(BIN_DIR)/d3d11_shot$(EXT) examples/$$d/main.html $(PIXEL_D3D_OUT)/demo-$$d.png >/dev/null 2>&1 || fail=1; \
 	    $(BIN_DIR)/gl_shot$(EXT) examples/$$d/main.html $(PIXEL_D3D_OUT)/demo-$$d.gl.png >/dev/null 2>&1 || fail=1; \
 	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/demo-$$d.gl.png $(PIXEL_D3D_OUT)/demo-$$d.png $(PIXEL_D3D_TOL) $(PIXEL_D3D_OUT)/demo-$$d.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	done; exit $$fail
+	@fail=0; for a in $(ANIM_CASES); do \
+	    echo "--- anim/$$a ---"; \
+	    $(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/$$a.html $(PIXEL_D3D_OUT)/anim-$$a.png >/dev/null 2>&1 || fail=1; \
+	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$a.html $(PIXEL_D3D_OUT)/anim-$$a.gl.png >/dev/null 2>&1 || fail=1; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/anim-$$a.gl.png $(PIXEL_D3D_OUT)/anim-$$a.png $(PIXEL_D3D_TOL) $(PIXEL_D3D_OUT)/anim-$$a.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
 	done; exit $$fail
 	@echo "--- 脏矩形重绘 vs 全量重绘（阈值 0）---"
 	@$(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/probe.html $(PIXEL_D3D_OUT)/probe.dirty.png --frames 8 --dirty >/dev/null

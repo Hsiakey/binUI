@@ -1667,7 +1667,11 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         }
         RoundTex& rt = rounds[key];
         rt.t = t;
-        if (!createTexImage(rt.tex, t, t, false)) {
+        // v0.11.10：圆角模板**必须线性采样**，与 GL / D3D11 一致。
+        // 静态帧里"角片边长 == 模板 texel 数"（1:1 对齐），NEAREST 与 LINEAR 逐像素相同；
+        // 但缩放动画里角片被非整数拉伸（rf/t ≠ 1），NEAREST 会把弧线量化成一格格台阶，
+        // 表现为"只有放大/缩小在抖、平移不抖" —— 正是 VK 独占、另两个后端没有的现象。
+        if (!createTexImage(rt.tex, t, t, true)) {
             rounds.erase(key);
             return;
         }

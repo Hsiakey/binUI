@@ -5,6 +5,47 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.11.10] - 2026-11-11
+
+只剩 Vulkan 的"放大/缩小抖、平移不抖"：**圆角模板纹理在 VK 上是 NEAREST 采样**。
+静态画面逐像素不变。
+
+### 修复 — VK 的圆角模板改用线性采样（与 GL / D3D11 一致）
+
+三个后端都用"圆角模板位图 + 九宫格"画圆角矩形，但模板纹理的过滤器不一致：
+
+| 后端 | 模板纹理 |
+|---|---|
+| GL | LINEAR（`CreateTexture2D(..., true)`） |
+| D3D11 | 线性采样器（`curLinear = 1`） |
+| **Vulkan** | **NEAREST**（`createTexImage(rt.tex, t, t, false)`） |
+
+静态帧看不出：角片边长 `rf == r`、模板 `t = 2r+4`，九宫格按 1 texel : 1 像素映射，
+NEAREST 与 LINEAR 逐像素相同（三套门禁因此一直没抓到）。**缩放动画里 `rf` 是小数**，
+九宫格把模板非整数拉伸，NEAREST 把弧线量化成 texel 台阶、每帧变一次 → 圆角在抖；
+平移不改变 `rf`，所以平移稳定。
+
+改成 `createTexImage(rt.tex, t, t, true)`。
+
+### 新增回归用例 — 小数几何
+
+`docs/issues/assets/anim-midphase.html`：`from { transform: scale(0.77) }`，渲染第一帧
+就落在**小数缩放**上（不用等动画跑起来）：
+
+- 改之前：`vk_shot` vs `gl_shot` **差异区域 252×156**，容差 0 失败；
+- 改之后：**不同像素 0、最大通道差 1**，容差 0 通过。
+
+已进 `pixels-vk`（阈值 0）和 `pixels-d3d11`（3%）的清单；其余静态用例读数一位没变
+（`features` 最大通道差 43、`svgdemo` 56 …）。
+
+### 验收
+
+0 warning；四套测试全绿；`pixels` 10/10 零差异；`pixels-vk` 15/15（新增 anim 用例，
+不同像素 0）；`pixels-d3d11` 全过（新增 anim 用例）；`vk-window` / `vk-stress` 全过；
+`demos-vk` / `demos-d3d11` 各 8 个；`check_examples` 11/11。详见
+`docs/vulkan_design.md` §7.11。
+
+
 ## [0.11.9] - 2026-11-11
 
 Vulkan 独占的动画抖动：**present 不等"这一帧真的上屏"**。无像素变化。
