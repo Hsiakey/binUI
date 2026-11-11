@@ -1081,6 +1081,10 @@ void BinUIGLGdi::fillRoundedXf(float w, float h, float radius, bool stroke, floa
     // 圆环模板是"1px 环"，多层同心 = 每层往里缩 1px、半径减 1（与 strokeRounded 一致）
     Premult(color);
     int emitted = 0;
+    // 诊断（BINUI_XF_DUMP=1）：把前两次调用的九宫格分格与 UV 打出来。仿射路径"角看起来
+    // 不对"时，先看这里的 local/uv/screen 三组数是否自洽（格边共享、UV 镜像、1:1 采样），
+    // 再去怀疑模板或采样器。
+    static int dumpLeft = getenv("BINUI_XF_DUMP") ? 2 : 0;
     for (int k = 0; k < layers; k++) {
         const float lx = static_cast<float>(k), ly = static_cast<float>(k);
         const float lw = w - 2.0f * k, lh = h - 2.0f * k;
@@ -1105,9 +1109,21 @@ void BinUIGLGdi::fillRoundedXf(float w, float h, float radius, bool stroke, floa
             }
             impl_->emitQuadUV(sp, uv, color);
             emitted++;
+            if (dumpLeft > 0) {
+                std::fprintf(stderr,
+                             "[xf] w=%.2f h=%.2f r=%.2f t=%d rri=%d cell=%d "
+                             "local=(%.2f,%.2f %.2fx%.2f) uv=(%.3f,%.3f)-(%.3f,%.3f) "
+                             "screen=(%.2f,%.2f)(%.2f,%.2f)(%.2f,%.2f)(%.2f,%.2f)\n",
+                             (double)w, (double)h, (double)rf, rt.t, rri, i,
+                             (double)c.x, (double)c.y, (double)c.w, (double)c.h,
+                             (double)c.u0, (double)c.v0, (double)c.u1, (double)c.v1,
+                             (double)sp[0], (double)sp[1], (double)sp[2], (double)sp[3],
+                             (double)sp[4], (double)sp[5], (double)sp[6], (double)sp[7]);
+            }
         }
     }
     impl_->curTex = impl_->whiteTex;
+    if (dumpLeft > 0) { dumpLeft--; }
     if (emitted == 0) {
         // 模板不可用：至少把变换后的外框画出来，别让节点凭空消失
         const float p[8] = { 0, 0, w, 0, 0, h, w, h };

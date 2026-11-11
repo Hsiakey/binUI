@@ -502,7 +502,7 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # 专门覆盖"几何是小数时"的路径（亚像素坐标 + 小数圆角半径 + 圆角模板重采样）。
 # 这条用例就是 VK 圆角模板从 NEAREST 改 LINEAR 的判据：改之前 252x156 区域有差异，
 # 改之后不同像素 0（最大通道差 1）。只进跨后端比对，不建 GDI 基准图。
-ANIM_CASES := anim-midphase
+ANIM_CASES := anim-midphase affine-corners
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 
