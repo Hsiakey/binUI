@@ -3186,11 +3186,30 @@ BinUIRenderer::DrawState BinUIRenderer::drawState(uint16_t nodeId) const {
         auto f = rt->floatTargets.find(ANIM_OPACITY);
         if (f != rt->floatTargets.end()) st.opacity = f->second;
     }
-    if (r && r->offSet) {
-        st.offX = r->offX; st.offY = r->offY;
+    // 平移三路来源（过渡/关键帧的合并平移、单轴 offXSet/offYSet、样式目标）必须和
+    // drawOffsetX/Y 完全一致。曾经这里漏掉单轴通道：drawOffsetY 有值、绘制却读
+    // drawState 拿到 0 —— 表现是"整页没有动画，只在结束时刻跳一下"。
+    if (r && (r->offSet || r->offXSet)) {
+        st.offX = r->offX;
     } else if (rt) {
-        auto f = rt->floatTargets.find(ANIM_TRANSLATE);
-        if (f != rt->floatTargets.end()) { st.offX = f->second; st.offY = f->second; }
+        auto fx = rt->floatTargets.find(ANIM_TRANSLATE_X);
+        if (fx != rt->floatTargets.end()) {
+            st.offX = fx->second;
+        } else {
+            auto f = rt->floatTargets.find(ANIM_TRANSLATE);
+            if (f != rt->floatTargets.end()) st.offX = f->second;
+        }
+    }
+    if (r && (r->offSet || r->offYSet)) {
+        st.offY = r->offY;
+    } else if (rt) {
+        auto fy = rt->floatTargets.find(ANIM_TRANSLATE_Y);
+        if (fy != rt->floatTargets.end()) {
+            st.offY = fy->second;
+        } else {
+            auto f = rt->floatTargets.find(ANIM_TRANSLATE);
+            if (f != rt->floatTargets.end()) st.offY = f->second;
+        }
     }
     if (r && r->scaleSet) {
         st.scale = r->scale;

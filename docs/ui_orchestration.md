@@ -37,13 +37,19 @@
    元素会飞出内容区，盖到标题栏/侧栏上。做法是在页面外面包一层
    `overflow:hidden` 的视口容器（裁剪链自动生效，见 appshow 的 `#viewport`），
    并且把边框/圆角放在视口上、页面本身用白底方块 —— 否则滑动时能看到 4 个角缺口。
-5. **`press` / `release` 的命中口径必须一致**（0.12.3 修）。
+5. **同一个动画值只能有一个出口**（0.12.5 修）。
+   绘制/命中读的是 `drawState()`，而位移还有一条 `drawOffsetX/Y()` —— 两处各自维护
+   "从哪取平移"的逻辑，加单轴通道时只改了一处，于是 `drawOffsetY` 有值、绘制读的是 0，
+   表现就是**页面没有动画、只在结束时刻跳一下**。现在 `drawState()` 的三路来源与
+   `drawOffsetX/Y` 完全一致；自检也改成读 `drawState()`（和绘制同源），这类"两套口径"
+   才不会再漏。
+6. **`press` / `release` 的命中口径必须一致**（0.12.3 修）。
    `press` 用 `hitTestEx(allowStyled=true)`（"声明了状态样式的普通元素"也算可点），
    而 `release` 早先用的是严格 `hitTest`（只认 `BINUI_INTERACTIVE`）——
    于是"只写了 `:hover` 的普通 div"按下去有视觉反馈、松手却永远不产生 CLICK，
    点击被**静默吞掉**。现在两处同口径，且 `allowStyled` 接受任意一种状态样式
    （只写 `:hover` 也算）。
-6. **`@keyframes` 是全局命名空间。**
+7. **`@keyframes` 是全局命名空间。**
    `<use src>` 是编译期内联到同一个文档、`kfGroups` 按名字全局匹配且**先到先用**，
    两个组件都定义 `@keyframes fade` 会静默串味。约定：`@keyframes <组件名>-<用途>`。
 
