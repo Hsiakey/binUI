@@ -49,23 +49,6 @@ float gWrappedLineStep = 0.0f;
 
 // ---------- 小工具 ----------
 // 按透明度缩放 alpha（0xAARRGGBB；RGB 保持直线色，Premult 时统一缩放）
-uint32_t ScaleAlpha(uint32_t c, float op) {
-    if (op >= 1.0f) return c;
-    if (op <= 0.0f) return c & 0x00FFFFFF;
-    uint32_t a = (uint32_t)(((c >> 24) & 0xFF) * op);
-    if (a > 255) a = 255;
-    return (c & 0x00FFFFFF) | (a << 24);
-}
-
-std::wstring Utf8ToWide(const std::string& s) {
-    if (s.empty()) return L"";
-    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), nullptr, 0);
-    std::wstring w(n, 0);
-    if (n > 0)
-        MultiByteToWideChar(CP_UTF8, 0, s.c_str(), static_cast<int>(s.size()), &w[0], n);
-    return w;
-}
-
 bool gdiplusReady() {
     static bool ok = [] {
         Gdiplus::GdiplusStartupInput in;
@@ -274,6 +257,8 @@ struct BinUID3D::Impl {
     bool vsync = true;
     bool ready = false;
     bool transparent = false; // 分层窗口（UpdateLayeredWindow）
+    bool forceGdi = false;    // 拖拽 resize 期由上层置位：强制读回 + GDI 贴屏
+    bool coversMonitor = false; // 客户区铺满整块显示器 → 绕开直翻转
 
     // 分层窗口呈现缓冲（32bit BGRA premultiplied）
     HBITMAP layeredDib = nullptr;
@@ -1066,9 +1051,93 @@ struct BinUID3D::Impl {
         }
     }
 
+    // 读回 present：离屏 → staging → CPU 内存 → GDI 贴屏。
+    // 透明窗用 UpdateLayeredWindow（预乘 alpha 自己合成），普通窗用 SetDIBitsToDevice。
+    // 与 GL/Vulkan 后端的读回路径同一套语义，像素来源仍是同一张 offTex。
+    bool presentReadback() {
+        const int w = winW, h = winH;
+        if (!offTex || w <= 0 || h <= 0) return false;
+        if (!stagingTex || layeredW != w || layeredH != h) {
+            if (stagingTex) { stagingTex->Release(); stagingTex = nullptr; }
+            if (layeredDib) { DeleteObject(layeredDib); layeredDib = nullptr; }
+            if (layeredDC) { DeleteDC(layeredDC); layeredDC = nullptr; }
+            D3D11_TEXTURE2D_DESC td = {};
+            offTex->GetDesc(&td);
+            td.Usage = D3D11_USAGE_STAGING;
+            td.BindFlags = 0;
+            td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            if (FAILED(device->CreateTexture2D(&td, nullptr, &stagingTex))) {
+                std::fprintf(stderr, "[d3d11] staging texture failed\n");
+                return false;
+            }
+            BITMAPINFO bi = {};
+            bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bi.bmiHeader.biWidth = w;
+            bi.bmiHeader.biHeight = -h; // 顶层（top-down）
+            bi.bmiHeader.biPlanes = 1;
+            bi.bmiHeader.biBitCount = 32;
+            bi.bmiHeader.biCompression = BI_RGB;
+            layeredDib = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &layeredBits, nullptr, 0);
+            layeredDC = CreateCompatibleDC(nullptr);
+            layeredW = w;
+            layeredH = h;
+        }
+        if (!stagingTex || !layeredDib || !layeredBits) return false;
+        ctx->CopyResource(stagingTex, offTex);
+        D3D11_MAPPED_SUBRESOURCE map = {};
+        if (FAILED(ctx->Map(stagingTex, 0, D3D11_MAP_READ, 0, &map))) return false;
+        const uint8_t* src = static_cast<const uint8_t*>(map.pData);
+        uint8_t* dst = static_cast<uint8_t*>(layeredBits);
+        const size_t srcPitch = map.RowPitch;
+        const size_t dstPitch = static_cast<size_t>(w) * 4;
+        for (int y = 0; y < h; y++) memcpy(dst + y * dstPitch, src + y * srcPitch, dstPitch);
+        ctx->Unmap(stagingTex, 0);
+
+        if (transparent) {
+            HDC screenDC = GetDC(nullptr);
+            HGDIOBJ old = SelectObject(layeredDC, layeredDib);
+            RECT wr;
+            GetWindowRect(hwnd, &wr);
+            POINT dstPt = { wr.left, wr.top };
+            SIZE sz = { w, h };
+            POINT srcPt = { 0, 0 };
+            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+            UpdateLayeredWindow(hwnd, screenDC, &dstPt, &sz, layeredDC, &srcPt, 0, &bf, ULW_ALPHA);
+            SelectObject(layeredDC, old);
+            ReleaseDC(nullptr, screenDC);
+            return true;
+        }
+        BITMAPINFO bi = {};
+        bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bi.bmiHeader.biWidth = w;
+        bi.bmiHeader.biHeight = -h;
+        bi.bmiHeader.biPlanes = 1;
+        bi.bmiHeader.biBitCount = 32;
+        bi.bmiHeader.biCompression = BI_RGB;
+        HDC dc = GetDC(hwnd);
+        SetDIBitsToDevice(dc, 0, 0, w, h, 0, 0, 0, h, layeredBits, &bi, DIB_RGB_COLORS);
+        ReleaseDC(hwnd, dc);
+        return true;
+    }
+
+    // 客户区是否铺满整块显示器（borderless 全屏）。
+    // 与 GL 0.9.1 / Vulkan 后端同一判定与同一理由：这种状态下 DWM 会把呈现提升成
+    // 直翻转，实测在远程桌面/虚拟显示器上画面会停住（应用仍在满帧绘制）。
+    bool clientCoversMonitor() const {
+        if (!hwnd) return false;
+        RECT cr;
+        if (!GetClientRect(hwnd, &cr)) return false;
+        const HMONITOR mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi{};
+        mi.cbSize = sizeof(mi);
+        if (!mon || !GetMonitorInfoW(mon, &mi)) return false;
+        const int mw = mi.rcMonitor.right - mi.rcMonitor.left;
+        const int mh = mi.rcMonitor.bottom - mi.rcMonitor.top;
+        return (cr.right - cr.left) >= mw && (cr.bottom - cr.top) >= mh;
+    }
+
     void shutdown() {
-        for (auto& kv : atlases) {
-            if (kv.second->tex) kv.second->tex->Release();
+        for (auto& kv : atlases) {            if (kv.second->tex) kv.second->tex->Release();
             if (kv.second->srv) kv.second->srv->Release();
             delete kv.second;
         }
@@ -1135,6 +1204,7 @@ bool BinUID3D::init(void* hwnd, int width, int height, bool vsync) {
     impl_->fontReady = impl_->font.init();
     binui_font::registerSystemFonts(impl_->font);   // 失败仅降级：文本/emoji 不绘制
     impl_->ready = true;
+    impl_->coversMonitor = impl_->clientCoversMonitor();
     float v[2] = { static_cast<float>(width), static_cast<float>(height) };
     impl_->ctx->UpdateSubresource(impl_->cb, 0, nullptr, v, 0, 0);
     return true;
@@ -1164,6 +1234,7 @@ void BinUID3D::resize(int width, int height) {
         impl_->createRenderTarget();
     }
     impl_->createOffscreen(); // 离屏随窗口重建（内容丢弃，下帧全量重绘）
+    impl_->coversMonitor = impl_->clientCoversMonitor();
     float v[2] = { static_cast<float>(width), static_cast<float>(height) };
     impl_->ctx->UpdateSubresource(impl_->cb, 0, nullptr, v, 0, 0);
     impl_->scissor[0] = 0;
@@ -1173,7 +1244,10 @@ void BinUID3D::resize(int width, int height) {
 }
 
 void BinUID3D::beginFrame(const void* clipRect) {
-    (void)clipRect; // 脏区底座色由 drawNodesD3D 根节点背景填充提供，无需在此清屏
+    // 不在这里整帧 ClearRenderTargetView：该 API 不受 scissor 限制，会清空整个离屏，
+    // 局部重绘时把脏区以外的持久像素抹掉（悬停后其余元素消失的根因）。
+    // 脏区底色由共享遍历里根节点的背景填充提供（与 GL/Vulkan 同一份 drawNodesBinUI）。
+    (void)clipRect;
     if (!impl_->ready) return;
     impl_->verts.clear();
     impl_->batches.clear();
@@ -1197,59 +1271,16 @@ void BinUID3D::beginFrame(const void* clipRect) {
 void BinUID3D::present() {
     if (!impl_->ready) return;
     impl_->flushAll(); // 画到离屏帧缓冲
+    if (std::getenv("BINUI_D3D_TRACE"))
+        std::fprintf(stderr, "[d3d] present: verts=%zu batches=%zu transparent=%d forceGdi=%d covers=%d\n",
+                     impl_->verts.size(), impl_->batches.size(), (int)impl_->transparent,
+                     (int)impl_->forceGdi, (int)impl_->coversMonitor);
 
-    if (impl_->transparent) {
-        // 分层窗口：离屏 BGRA premultiplied 读回（top-down，无需翻转）→ UpdateLayeredWindow
-        int w = impl_->winW, h = impl_->winH;
-        if (!impl_->stagingTex || impl_->layeredW != w || impl_->layeredH != h) {
-            if (impl_->stagingTex) { impl_->stagingTex->Release(); impl_->stagingTex = nullptr; }
-            if (impl_->layeredDib) { DeleteObject(impl_->layeredDib); impl_->layeredDib = nullptr; }
-            if (impl_->layeredDC) { DeleteDC(impl_->layeredDC); impl_->layeredDC = nullptr; }
-            D3D11_TEXTURE2D_DESC td = {};
-            impl_->offTex->GetDesc(&td);
-            td.Usage = D3D11_USAGE_STAGING;
-            td.BindFlags = 0;
-            td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-            if (FAILED(impl_->device->CreateTexture2D(&td, nullptr, &impl_->stagingTex))) {
-                std::fprintf(stderr, "[d3d11] staging texture failed\n");
-                return;
-            }
-            BITMAPINFO bi = {};
-            bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-            bi.bmiHeader.biWidth = w;
-            bi.bmiHeader.biHeight = -h; // 顶层（top-down）
-            bi.bmiHeader.biPlanes = 1;
-            bi.bmiHeader.biBitCount = 32;
-            bi.bmiHeader.biCompression = BI_RGB;
-            impl_->layeredDib = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &impl_->layeredBits, nullptr, 0);
-            impl_->layeredDC = CreateCompatibleDC(nullptr);
-            impl_->layeredW = w;
-            impl_->layeredH = h;
-        }
-        if (!impl_->layeredDib || !impl_->layeredBits) return;
-        impl_->ctx->CopyResource(impl_->stagingTex, impl_->offTex);
-        D3D11_MAPPED_SUBRESOURCE map = {};
-        if (SUCCEEDED(impl_->ctx->Map(impl_->stagingTex, 0, D3D11_MAP_READ, 0, &map))) {
-            const uint8_t* src = static_cast<const uint8_t*>(map.pData);
-            uint8_t* dst = static_cast<uint8_t*>(impl_->layeredBits);
-            size_t srcPitch = map.RowPitch;
-            size_t dstPitch = static_cast<size_t>(w) * 4;
-            for (int y = 0; y < h; y++)
-                memcpy(dst + y * dstPitch, src + y * srcPitch, dstPitch);
-            impl_->ctx->Unmap(impl_->stagingTex, 0);
-            HDC screenDC = GetDC(nullptr);
-            HGDIOBJ old = SelectObject(impl_->layeredDC, impl_->layeredDib);
-            RECT wr;
-            GetWindowRect(impl_->hwnd, &wr);
-            POINT dstPt = { wr.left, wr.top };
-            SIZE sz = { w, h };
-            POINT srcPt = { 0, 0 };
-            BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-            UpdateLayeredWindow(impl_->hwnd, screenDC, &dstPt, &sz,
-                                impl_->layeredDC, &srcPt, 0, &bf, ULW_ALPHA);
-            SelectObject(impl_->layeredDC, old);
-            ReleaseDC(nullptr, screenDC);
-        }
+    // 读回呈现的三条触发条件与 GL/Vulkan 后端同一套理由：
+    // 透明窗口必须自己合成（交换链拿不到预乘 alpha）；客户区铺满整块显示器时 DWM 会把
+    // 呈现提升成直翻转（远程桌面/虚拟显示器上实测画面会停住）；拖拽 resize 期由上层强制。
+    if (impl_->transparent || impl_->forceGdi || impl_->coversMonitor) {
+        impl_->presentReadback();
         return;
     }
 
@@ -1576,1229 +1607,21 @@ void BinUID3D::setFontName(const char* name) {
     if (name && *name) impl_->asciiFont = name;
 }
 
-// ============================================================
-// 视频节点绘制辅助（v9，与 GL 后端同构）
-// ============================================================
-namespace binui {
-
-static void FormatVideoTime(double sec, char* buf, size_t n) {
-    if (sec < 0) sec = 0;
-    int s = (int)(sec + 0.5);
-    snprintf(buf, n, "%d:%02d", s / 60, s % 60);
-}
-
-// 控制条：底条 + 进度轨道/已播放/滑块 + 播放暂停图标 + 时间文本
-template <typename Gfx>
-static void DrawVideoControlsTmpl(Gfx& gfx, const BinUIRenderer& renderer,
-                                  const BinUIRenderer::NodeInfo& node,
-                                  float x, float y, float nw, float opacity) {
-    BinUIRenderer::VideoBarGeo g;
-    if (!BinUIRenderer::VideoBarLayout(node, g)) return;
-    (void)y; // 控制条几何全部由 VideoBarLayout 按节点自身坐标给出，y 仅为与 GL 后端同构的签名
-    const auto* v = renderer.findVideo(node.id);
-    if (!v) return;
-
-    uint32_t barBg   = ScaleAlpha(0xB4000000, opacity);
-    uint32_t trackC  = ScaleAlpha(0x4DFFFFFF, opacity);
-    uint32_t solidC  = ScaleAlpha(0xFFFFFFFF, opacity);
-    uint32_t timeC   = ScaleAlpha(0xD9FFFFFF, opacity);
-
-    // 底条（覆盖到视频底缘）
-    gfx.fillRect(x, g.y, nw, g.h, barBg);
-
-    double dur = v->duration, pos = v->position;
-    float ratio = (dur > 0) ? (float)std::min(std::max(pos / dur, 0.0), 1.0) : 0.0f;
-
-    // 进度轨道 + 已播放段
-    gfx.fillRounded(g.trX, g.trY, g.trW, g.trH, g.trH * 0.5f, trackC);
-    float playedW = g.trW * ratio;
-    if (playedW >= 2.0f)
-        gfx.fillRounded(g.trX, g.trY, playedW, g.trH, g.trH * 0.5f, solidC);
-
-    // 滑块（圆）
-    float tcx = g.trX + playedW;
-    float tcy = g.trY + g.trH * 0.5f;
-    gfx.fillRounded(tcx - g.thumbR, tcy - g.thumbR,
-                    g.thumbR * 2, g.thumbR * 2, g.thumbR, solidC);
-
-    // 播放/暂停图标（按钮中心）
-    float bx = g.btnX + g.btnS * 0.5f;
-    float by = g.btnY + g.btnS * 0.5f;
-    if (v->playing) { // ⏸ 两根竖条
-        gfx.fillRect(bx - 5, by - 7, 3.5f, 14.0f, solidC);
-        gfx.fillRect(bx + 1.5f, by - 7, 3.5f, 14.0f, solidC);
-    } else {          // ▶ 行扫描三角形（宽边在左、顶点朝右）
-        for (int j = 0; j < 7; j++) {
-            float frac = 1.0f - std::fabs(j - 3) / 4.0f;
-            float wl = 13.0f * frac;
-            if (wl >= 1.0f) gfx.fillRect(bx - 5.5f, by - 7 + j * 2.0f, wl, 2.0f, solidC);
-        }
-    }
-
-    // 时间文本（右对齐）：m:ss / m:ss
-    char cur[16] = "0:00", tot[16] = "0:00";
-    FormatVideoTime(pos, cur, sizeof(cur));
-    if (dur > 0) FormatVideoTime(dur, tot, sizeof(tot));
-    std::string label = std::string(cur) + " / " + tot;
-    float tw = gfx.textWidth(12.0f, 400, label);
-    int asc = 0, lh = 0;
-    gfx.fontMetrics(12.0f, 400, asc, lh);
-    gfx.drawText(x + nw - 10 - tw, g.y + (g.h - lh) * 0.5f + asc,
-                 12.0f, 400, label, timeC);
-}
-
-} // namespace binui（视频绘制辅助）
 
 // ============================================================
-// drawNodesD3D：与 drawNodesGDI 语义一致的节点树 GPU 绘制
+// 读回 + GDI 贴屏（拖拽 resize 期 / 全屏直翻转守卫 / 无交换链降级）
 // ============================================================
-namespace binui {
-void drawNodesD3D(BinUID3D& gfx, const BinUIRenderer& renderer, const void* clipRect,
-                  const std::function<void(BinUID3D&, uint16_t, float, float, float, float)>& canvas) {
-    const auto& nodes = renderer.getNodes();
-    int winW = gfx.width();
-    int winH = gfx.height();
-
-    int clipL = 0, clipT = 0, clipR = winW, clipB = winH;
-    if (clipRect) {
-        const int* c = static_cast<const int*>(clipRect);
-        int l = c[0], t = c[1], r = c[2], b = c[3];
-        if (r > l && b > t && l >= 0 && t >= 0 && r <= winW && b <= winH) {
-            clipL = l; clipT = t; clipR = r; clipB = b;
-        }
-    }
-
-    std::unordered_map<uint16_t, size_t> byId;
-    byId.reserve(nodes.size());
-    for (size_t i = 0; i < nodes.size(); i++) byId[nodes[i].id] = i;
-
-    std::unordered_map<uint16_t, binui::BinUIRenderer::ScrollState> scrolls;
-    // 真要出竖直滚动条的容器 → 给它留 gutter（右侧扣掉滚动条宽度），
-    // 否则滚动条会直接压住最右一列内容（docs/issues/05）。
-    std::unordered_map<uint16_t, int32_t> gutterR, gutterB;
-    const int32_t sbW = static_cast<int32_t>(renderer.scrollbarStyle().width);
-    for (const auto& node : nodes) {
-        if (node.flags & BINUI_SCROLLABLE) {
-            if (const auto* s = renderer.scrollState(node.id)) scrolls[node.id] = *s;
-            if (renderer.contentHeight(node.id) > node.height + 0.5f) gutterR[node.id] = sbW;
-            if (renderer.contentWidth(node.id) > node.width + 0.5f) gutterB[node.id] = sbW;
-        }
-    }
-
-    // 预计算：父传子祖先索引 / 隐藏 / 滚动偏移 / 最内层滚动视口
-    std::vector<int32_t> parentIdx(nodes.size(), -1);
-    std::vector<uint8_t> hidden(nodes.size(), 0);
-    std::vector<float> offX(nodes.size(), 0), offY(nodes.size(), 0);
-    std::vector<int32_t> vpL(nodes.size(), 0), vpT(nodes.size(), 0),
-                         vpR(nodes.size(), 0), vpB(nodes.size(), 0);
-    std::vector<uint8_t> hasVp(nodes.size(), 0);
-    for (size_t i = 0; i < nodes.size(); i++) {
-        const auto& node = nodes[i];
-        if (node.parentId == 0xFFFF) continue;
-        auto pit = byId.find(node.parentId);
-        if (pit == byId.end()) continue;
-        const size_t pi = pit->second;
-        parentIdx[i] = static_cast<int32_t>(pi);
-        if (hidden[pi] || !(nodes[pi].flags & BINUI_VISIBLE)) { hidden[i] = 1; continue; }
-        offX[i] = offX[pi];
-        offY[i] = offY[pi];
-        const auto& par = nodes[pi];
-        if (par.flags & BINUI_SCROLLABLE) {
-            auto sit = scrolls.find(par.id);
-            if (sit != scrolls.end()) { offX[i] += sit->second.x; offY[i] += sit->second.y; }
-            hasVp[i] = 1;
-            vpL[i] = static_cast<int32_t>(par.x);
-            vpT[i] = static_cast<int32_t>(par.y);
-            vpR[i] = static_cast<int32_t>(par.x + par.width);
-            vpB[i] = static_cast<int32_t>(par.y + par.height);
-            auto gitR = gutterR.find(par.id);
-            if (gitR != gutterR.end()) vpR[i] -= gitR->second;
-            auto gitB = gutterB.find(par.id);
-            if (gitB != gutterB.end()) vpB[i] -= gitB->second;
-        } else {
-            hasVp[i] = hasVp[pi];
-            vpL[i] = vpL[pi]; vpT[i] = vpT[pi];
-            vpR[i] = vpR[pi]; vpB[i] = vpB[pi];
-        }
-    }
-
-    // 根节点背景（填充绘制范围；RGBA 画布按 alpha 与底色合成）
-    for (const auto& node : nodes) {
-        if (node.type == BINUI_ROOT && (node.flags & BINUI_VISIBLE)) {
-            gfx.fillRect(static_cast<float>(clipL), static_cast<float>(clipT),
-                         static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT),
-                         node.color);
-            break;
-        }
-    }
-
-    // 绘制顺序：按 z-index 分层（v10）由渲染器统一给出，同层流式先于 absolute、DOM 顺序
-    // 裁剪链缓存：每个节点复用，避免逐节点分配
-    std::vector<uint16_t> clipAncs;
-    const std::vector<uint32_t> order = renderer.drawOrder();
-    for (size_t oi = 0; oi < order.size(); oi++) {
-        const size_t i = order[oi];
-        const auto& node = nodes[i];
-        if (!(node.flags & BINUI_VISIBLE) || hidden[i]) continue;
-        if (node.type == BINUI_ROOT) continue;
-
-        int x = static_cast<int>(node.x) - static_cast<int>(offX[i]);
-        int y = static_cast<int>(node.y) - static_cast<int>(offY[i]);
-        int nw = static_cast<int>(node.width);
-        int nh = static_cast<int>(node.height);
-
-        // BINUI_LINE：x,y = 起点；width,height = 终点；radius = 线宽
-        if (node.type == BINUI_LINE) {
-            float x1 = node.x - offX[i], y1 = node.y - offY[i];
-            float x2 = node.width - offX[i], y2 = node.height - offY[i];
-            uint32_t dc = renderer.drawColor(node.id);
-            float op = renderer.drawOpacity(node.id);
-            float ddx = renderer.drawOffsetX(node.id), ddy = renderer.drawOffsetY(node.id);
-            x1 += ddx; y1 += ddy; x2 += ddx; y2 += ddy;
-            if (op < 1.0f) dc = ScaleAlpha(dc, op);
-            float mnx = std::min(x1, x2), mny = std::min(y1, y2);
-            float mxx = std::max(x1, x2), mxy = std::max(y1, y2);
-            // 线宽扩展：水平/垂直线的某维跨度为 0，零面积 clip 会把整批绘制在 flush 时丢弃
-            float lw = (float)node.radius;
-            mnx -= lw; mny -= lw; mxx += lw; mxy += lw;
-            if (mxx <= clipL || mnx >= clipR || mxy <= clipT || mny >= clipB) continue;
-            if (hasVp[i] && (mxx <= vpL[i] || mnx >= vpR[i] || mxy <= vpT[i] || mny >= vpB[i])) continue;
-            int savedDepth = gfx.pushClip(mnx, mny, mxx - mnx, mxy - mny);
-            gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
-                         static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
-            bool draw = true;
-            renderer.clippingAncestors(node.id, clipAncs);
-            for (uint16_t ancId : clipAncs) {
-                auto pit = byId.find(ancId);
-                if (pit == byId.end()) continue;
-                const auto& par = nodes[pit->second];
-                if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
-                gfx.pushClip(par.x, par.y, par.width, par.height);
-            }
-            if (draw) gfx.fillLine(x1, y1, x2, y2, (float)node.radius, dc);
-            gfx.popClipTo(savedDepth);
-            continue;
-        }
-
-        // v7 动画：颜色（含 hover/按下 tint 与过渡）、透明度、平移、缩放、圆角
-        uint32_t dc = renderer.drawColor(node.id);
-        // v13 扩展绘制段：文字色 / 四边边框 / 渐变底色 / 字重 / 行高 / 文字装饰。
-        // 注意这里**不做**"全透明节点跳过"：GPU 本来就有 alpha 混合，alpha==0 的底画了
-        // 也看不见；而透明底 + 不透明文字色的 LABEL、透明底 + 边框的卡片都必须照画
-        // （GDI 那边跳过是因为它没有合成，会画成一整块黑）。
-        const BinUIPaintNode* pt = renderer.paintOf(node.id);
-        const bool hasBorder = pt && (pt->flags & PAINT_BORDER);
-        const bool hasGrad = pt && (pt->flags & PAINT_GRADIENT);
-        float opacity = renderer.drawOpacity(node.id);
-        // v14 禁用：整块压到 55%（颜色/文字/图片一起淡）
-        if (renderer.isDisabled(node.id)) opacity *= 0.55f;
-        float dx = renderer.drawOffsetX(node.id);
-        float dy = renderer.drawOffsetY(node.id);
-        float scale = renderer.drawScale(node.id);
-        float animRadius = renderer.drawRadius(node.id);
-        if (opacity < 1.0f) dc = ScaleAlpha(dc, opacity);
-        if (scale != 1.0f) {
-            float cx = x + nw / 2.0f, cy = y + nh / 2.0f;
-            nw = (int)(nw * scale); nh = (int)(nh * scale);
-            x = (int)(cx - nw / 2.0f); y = (int)(cy - nh / 2.0f);
-        }
-        x += (int)dx; y += (int)dy;
-        int effRadius = animRadius >= 0 ? (int)animRadius : (int)node.radius;
-
-        if (x + nw <= clipL || x >= clipR || y + nh <= clipT || y >= clipB) continue;
-        if (hasVp[i] && (x + nw <= vpL[i] || x >= vpR[i] ||
-                         y + nh <= vpT[i] || y >= vpB[i])) continue;
-
-        // 裁剪链：自身 + 祖先 + 本次重绘范围（scissor 求交）。
-        // 关键：持久离屏上节点重绘若不做脏矩形裁剪，会把整个节点矩形重涂，
-        // 覆盖掉脏区以外（未重绘）的子元素/兄弟元素 → 悬停时内部元素消失。
-        int savedDepth = gfx.pushClip(static_cast<float>(x), static_cast<float>(y),
-                                      static_cast<float>(nw), static_cast<float>(nh));
-        gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
-                     static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
-        bool draw = true;
-        // 裁剪链交给渲染器判定（clippingAncestors）：只有 overflow:auto/scroll/hidden
-        // 的祖先才裁子元素。普通 div（含组件自己的根 div）按 CSS 语义不裁。
-        renderer.clippingAncestors(node.id, clipAncs);
-        for (uint16_t ancId : clipAncs) {
-            auto pit = byId.find(ancId);
-            if (pit == byId.end()) continue;
-            const auto& par = nodes[pit->second];
-            if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
-            gfx.pushClip(par.x, par.y, par.width, par.height);
-        }
-
-        if (draw) {
-            uint32_t cc = dc;
-            uint32_t textCol = ScaleAlpha(0xFFFFFFFF, opacity);
-            uint32_t accentCol = ScaleAlpha(0xFFBB86FC, opacity);
-            int pad = node.padding;
-            int fs = node.fontSize ? node.fontSize : 14;
-            // v14：斜体 / 占位符（三端同一份 textFlags 语义）
-            const bool italic = pt && (pt->textFlags & TEXT_ITALIC) != 0;
-            const bool placeholder = pt && (pt->textFlags & TEXT_PLACEHOLDER) != 0;
-
-            // ---- v13 扩展绘制：底色/边框的统一入口 ----
-            // 底色可能是渐变（切成一批条带），也可能就是原来那一个矩形；
-            // 圆角走 fillRounded，方角走 fillRect（GPU 有 alpha 混合，直接画即可）。
-            auto fillNodeBg = [&](uint32_t color, float radius) {
-                binui::PaintBand bands[binui::kMaxPaintBands];
-                const int bn = binui::BuildFillBands(pt, static_cast<float>(x), static_cast<float>(y),
-                                                     static_cast<float>(nw), static_cast<float>(nh),
-                                                     radius, color, bands);
-                for (int k = 0; k < bn; k++) {
-                    const binui::PaintBand& b = bands[k];
-                    if (b.w <= 0.0f || b.h <= 0.0f) continue;
-                    if (b.round && b.radius > 0.0f)
-                        gfx.fillRounded(b.x, b.y, b.w, b.h, b.radius, b.color);
-                    else
-                        gfx.fillRect(b.x, b.y, b.w, b.h, b.color);
-                }
-            };
-            // 边框画在节点内侧，四边可不同宽（几何在 binui_paint.h 里算）
-            auto drawNodeBorder = [&]() {
-                if (!hasBorder) return;
-                // 等宽 1px 边框 + 圆角：圆角走九宫格圆环（解析式 AA），直边再用精确色
-                // 补 1px 矩形。逐行条带在 45° 处每行 1.4~2px 宽且没有 AA，圆角会比直边
-                // 又粗又亮；圆环模板覆盖率约 0.8，画两遍叠到 ~0.96 才不发灰。
-                const uint8_t* bw = pt->borderW;
-                const bool uniform1px = bw[0] == 1 && bw[1] == 1 && bw[2] == 1 && bw[3] == 1 &&
-                                        pt->borderColor[0] == pt->borderColor[1] &&
-                                        pt->borderColor[0] == pt->borderColor[2] &&
-                                        pt->borderColor[0] == pt->borderColor[3];
-                if (uniform1px && effRadius > 0.5f) {
-                    // 圆角走九宫格圆环（解析式 AA，模板覆盖率已修成满值）；直边段由模板
-                    // 直接铺满，颜色与作者给的一致，详见 GL 后端同段注释。
-                    gfx.strokeRounded(static_cast<float>(x), static_cast<float>(y),
-                                      static_cast<float>(nw), static_cast<float>(nh),
-                                      static_cast<float>(effRadius), 1.0f, pt->borderColor[0]);
-                    return;
-                }
-                binui::PaintBand bb[binui::kMaxBorderBands];
-                const int bn = binui::BuildBorderBands(pt, static_cast<float>(x), static_cast<float>(y),
-                                                       static_cast<float>(nw), static_cast<float>(nh),
-                                                       static_cast<float>(effRadius), bb);
-                for (int k = 0; k < bn; k++)
-                    if (bb[k].w > 0.0f && bb[k].h > 0.0f)
-                        gfx.fillRect(bb[k].x, bb[k].y, bb[k].w, bb[k].h, bb[k].color);
-            };
-
-            switch (node.type) {
-                case BINUI_LABEL: {
-                    // v13 扩展绘制段：文字色 / 字重 / 行高 / 下划线（与 drawNodesGDI 同语义）
-                    const bool paintText = pt && (pt->flags & PAINT_TEXT_COLOR);
-                    // 文字色：扩展绘制段给了 textColor 就按作者的，否则沿用 cc ——
-                    // drawColor 已经把 hover/过渡/动画和 opacity 都算进去了，与改动前一致
-                    const uint32_t tcol = paintText ? ScaleAlpha(pt->textColor, opacity) : cc;
-                    const int wt = binui::PaintWeightOf(pt);
-                    // LABEL 也可以有底色了：给了渐变，或扩展绘制段显式给了文字色
-                    // （此时 node.color 存的是底色）且底色不透明 —— 都说明作者要一块底
-                    if (hasGrad || (paintText && ((node.color >> 24) & 0xFF)))
-                        fillNodeBg(dc, static_cast<float>(node.radius));
-                    if (node.text.empty()) break;
-
-                    int asc = 0, lh = 0;
-                    gfx.fontMetrics(static_cast<float>(fs), wt, asc, lh, italic);
-                    const float boxW = static_cast<float>(nw - 2 * pad);
-                    const float availW = boxW > 1.0f ? boxW : 1.0f;
-                    const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
-                                    : (node.flags & BINUI_TEXT_RIGHT) ? 2 : 0;
-                    // line-height：只有作者声明了才覆盖行距，0 让后端用字体自身的行高
-                    const float lineStep = (pt && (pt->flags & PAINT_LINE_HEIGHT))
-                                         ? binui::PaintLineHeight(pt, static_cast<float>(fs)) : 0.0f;
-                    const float step = lineStep > 0.0f ? lineStep : static_cast<float>(lh);
-                    const bool hasRule = pt && (pt->flags & (PAINT_UNDERLINE | PAINT_STRIKE | PAINT_OVERLINE));
-                    // 装饰线：几何在 binui_paint.h 里算，这里只负责填矩形；
-                    // 颜色跟文字一起吃 opacity，否则淡出时只剩一条实心线
-                    auto drawRules = [&](float rx, float ry, float rw) {
-                        binui::PaintBand rules[3];
-                        const int rn = binui::BuildTextRuleBands(pt, rx, ry, rw,
-                                                                static_cast<float>(fs), rules);
-                        for (int k = 0; k < rn; k++)
-                            if (rules[k].w > 0.0f)
-                                gfx.fillRect(rules[k].x, rules[k].y, rules[k].w, rules[k].h,
-                                             ScaleAlpha(rules[k].color, opacity));
-                    };
-
-                    if (node.text.find('\n') != std::string::npos) {
-                        // 多行文本（<br> / '\n'）：整块垂直居中，逐行换行绘制（按 align 对齐）
-                        size_t lines = 1;
-                        for (char c : node.text) if (c == '\n') lines++;
-                        const float blockH = static_cast<float>(lines - 1) * step + static_cast<float>(lh);
-                        float top = static_cast<float>(y) + (nh - blockH) / 2.0f;
-                        if (top < static_cast<float>(y)) top = static_cast<float>(y);
-                        // 行距交给 drawTextWrapped（见 gWrappedLineStep 的说明）
-                        gWrappedLineStep = lineStep;
-                        gfx.drawTextWrapped(static_cast<float>(x + pad), top, availW,
-                                            static_cast<float>(fs), wt, node.text, tcol, align,
-                                            italic);
-                        gWrappedLineStep = 0.0f;
-
-                        // 文字装饰线：逐 '\n' 段补画细条（段内自动换行出的子行不追，
-                        // 近似即可 —— 宽度取内容盒宽度）；超出节点的部分由本节点的 scissor 裁掉
-                        if (hasRule) {
-                            float ly = top;
-                            for (size_t p0 = 0;;) {
-                                drawRules(static_cast<float>(x + pad), ly, availW);
-                                const size_t nl = node.text.find('\n', p0);
-                                if (nl == std::string::npos) break;
-                                p0 = nl + 1;
-                                ly += step;
-                            }
-                        }
-                    } else {
-                        const float tw = gfx.textWidth(static_cast<float>(fs), wt, node.text, italic);
-                        float tx = static_cast<float>(x + pad);
-                        if (align != 0) {
-                            tx += (align == 1) ? (availW - tw) / 2.0f : (availW - tw);
-                            if (tx < static_cast<float>(x + pad)) tx = static_cast<float>(x + pad);
-                        }
-                        const float textTop = static_cast<float>(y) + (nh - lh) / 2.0f;
-                        gfx.drawText(tx, textTop + asc, static_cast<float>(fs), wt, node.text, tcol,
-                                     false, false, italic);
-
-                        // 单行装饰线：用上面算好的文字起点与实测宽度（居中/右对齐后的位置）
-                        if (hasRule) drawRules(tx, textTop, tw);
-                    }
-                    break;
-                }
-                case BINUI_BUTTON: {
-                    fillNodeBg(dc, static_cast<float>(effRadius));
-                    if (!node.text.empty()) {
-                        // 文字色：扩展绘制段给了就按作者的，否则按钮文字默认白色
-                        const uint32_t bcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
-                                            ? ScaleAlpha(pt->textColor, opacity) : textCol;
-                        int bs = node.fontSize ? node.fontSize : 14;
-                        // 字重：作者声明了 font-weight 就按声明（取法与 LABEL 同一套
-                        // PaintWeightOf，归一化到 400/700 两档）；没声明才回落 700 ——
-                        // 按钮的旧观感就是粗体，这里不能让老布局突然变细。
-                        // textWidth / fontMetrics / drawText 三处必须同一个值，
-                        // 否则宽度按 700 量、字形按 400 画，居中会偏。
-                        const int wt = (pt && (pt->flags & PAINT_WEIGHT))
-                                     ? binui::PaintWeightOf(pt) : 700;
-                        const float fs = static_cast<float>(bs);
-                        float tw = gfx.textWidth(fs, wt, node.text, italic);
-                        int asc = 0, lh = 0;
-                        gfx.fontMetrics(fs, wt, asc, lh, italic);
-                        // 水平对齐：与上面 BINUI_LABEL 分支完全同一套算法
-                        //（flags 都不置位 = 左对齐，CENTER 居中，RIGHT 右对齐）。
-                        // 以前写死 (nw - 2*pad - tw)/2，text-align:left 写了也没效果。
-                        const float boxW = static_cast<float>(nw - 2 * pad);
-                        const float availW = boxW > 1.0f ? boxW : 1.0f;
-                        const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
-                                        : (node.flags & BINUI_TEXT_RIGHT) ? 2 : 0;
-                        float tx = static_cast<float>(x + pad);
-                        if (align != 0) {
-                            tx += (align == 1) ? (availW - tw) / 2.0f : (availW - tw);
-                            // 文字比盒子宽时别越过左内边距（与 LABEL 一致）
-                            if (tx < static_cast<float>(x + pad)) tx = static_cast<float>(x + pad);
-                        }
-                        float base = y + (nh - lh) / 2.0f + asc;
-                        gfx.drawText(tx, base, fs, wt, node.text, bcol, false, false, italic);
-                    }
-                    break;
-                }
-                case BINUI_INPUT: {
-                    // 输入框背景（style 里的 background / 渐变）
-                    fillNodeBg(dc, static_cast<float>(node.radius));
-                    // 输入框的强调色：作者给了 textColor 就用它，否则回退内置紫
-                    const uint32_t inAccent = (pt && (pt->flags & PAINT_TEXT_COLOR))
-                                                  ? ScaleAlpha(pt->textColor, opacity) : accentCol;
-                    // 底部强调线是"控件可供性"，不是正文：压到 35% 免得在浅底上成一道黑杠
-                    // 底部强调线 35%：作者给了 border 就不画（直角 Material 下划线遗留，
-                    // 横穿圆角输入框会在框底多出一道悬空横杠）
-                    if (!hasBorder) {
-                        gfx.fillRect(static_cast<float>(x), static_cast<float>(y + nh - 2),
-                                     static_cast<float>(nw), 2, ScaleAlpha(inAccent, 0.35f));
-                    }
-
-                    bool editing = renderer.isFocused(node.id);
-                    std::string text = node.text;
-                    size_t caret = 0, selStart = 0;
-                    if (editing) {
-                        text = renderer.edit().value;
-                        caret = renderer.edit().caret;
-                        selStart = renderer.edit().selStart;
-                    }
-
-                    // 光标/选区的竖直范围 = 文字行高（不是整条节点高度）：
-                    // 36px 高的输入框里以前光标有 32px，比 13px 的字高出一倍。
-                    int asc = 0, lh = 0;
-                    gfx.fontMetrics(static_cast<float>(fs), 400, asc, lh, italic);
-                    if (lh <= 0) lh = fs + 2;
-                    const float dlineTop = static_cast<float>(y) + (nh - lh) / 2.0f;
-                    const float dlineH = static_cast<float>(lh);
-                    if (!text.empty()) {
-                        float base = static_cast<float>(y) + (nh - lh) / 2.0f + asc;
-                        float tx = static_cast<float>(x + pad + 4);
-                        // 占位符按 45% 色画（不是真实内容，视觉上要和已输入文本区分开）
-                        const uint32_t inCol = (placeholder && !editing)
-                                                   ? ScaleAlpha(inAccent, 0.55f) : inAccent;
-                        gfx.drawText(tx, base, static_cast<float>(fs), 400, text, inCol,
-                                     false, false, italic);
-
-                        if (editing) {
-                            size_t a = std::min(caret, selStart);
-                            size_t b = std::max(caret, selStart);
-                            if (a != b) {
-                                float wa = gfx.textWidth(static_cast<float>(fs), 400, text.substr(0, a));
-                                float wb = gfx.textWidth(static_cast<float>(fs), 400, text.substr(0, b));
-                                gfx.fillRect(tx + wa, dlineTop,
-                                             wb - wa, dlineH,
-                                             (inAccent & 0x00FFFFFFu) | 0x66000000u);
-                            }
-                            if (caretBlinkOn()) {
-                                float wc = gfx.textWidth(static_cast<float>(fs), 400, text.substr(0, caret));
-                                gfx.fillRect(tx + wc, dlineTop, 1.5f, dlineH, inAccent);
-                            }
-                        }
-                    }
-                    break;
-                }
-                case BINUI_LIST: {
-                    fillNodeBg(dc, static_cast<float>(effRadius));
-                    if (!node.text.empty()) {
-                        const int align = (node.flags & BINUI_TEXT_CENTER) ? 1
-                                        : (node.flags & BINUI_TEXT_RIGHT) ? 2 : 0;
-                        // 文字色/字重同样走扩展绘制段（原来是写死的白色 + 400）
-                        // 文字色：显式优先；否则按自身底色亮度选深浅（以前一律白字）
-                        const uint32_t lcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
-                                            ? ScaleAlpha(pt->textColor, opacity)
-                                            : ScaleAlpha(binui::PaintContrastText(dc), opacity);
-                        gfx.drawTextWrapped(static_cast<float>(x + pad + 12),
-                                            static_cast<float>(y + pad + 8),
-                                            static_cast<float>(nw - 2 * pad - 24),
-                                            static_cast<float>(fs), binui::PaintWeightOf(pt),
-                                            node.text, lcol, align, italic);
-                    }
-                    break;
-                }
-                case BINUI_IMAGE: {
-                    const ImageResource* img = renderer.getImage(node.imageIndex);
-                    bool drawn = false;
-                    if (img && !img->data.empty()) {
-                        uint32_t gen = renderer.imageGeneration(node.imageIndex);
-                        if (img->rawPixels) {
-                            if (gfx.prepareImageRaw(node.imageIndex, img->width, img->height,
-                                                    img->data.data(), gen))
-                                gfx.drawImage(node.imageIndex, static_cast<float>(x),
-                                              static_cast<float>(y),
-                                              static_cast<float>(nw), static_cast<float>(nh));
-                            drawn = true;
-                        } else if (gfx.prepareImage(node.imageIndex, img->data.data(),
-                                                    img->data.size(), gen)) {
-                            gfx.drawImage(node.imageIndex, static_cast<float>(x),
-                                          static_cast<float>(y),
-                                          static_cast<float>(nw), static_cast<float>(nh));
-                            drawn = true;
-                        }
-                    }
-                    if (!drawn) {
-                        // 有真实图片资源时底色不画（图片自己盖住整个盒子）；
-                        // 回退时支持渐变/圆角动画，所以半径仍用动画后的 effRadius
-                        fillNodeBg(dc, static_cast<float>(effRadius));
-                        if (!node.text.empty()) {
-                            int asc = 0, lh = 0;
-                            gfx.fontMetrics(24.0f, 300, asc, lh);
-                            gfx.drawText(x + nw / 2.0f, y + nh / 2.0f - lh / 2.0f + asc,
-                                         24.0f, 300, node.text, textCol, true, false);
-                        }
-                    }
-                    break;
-                }
-                case BINUI_VIDEO: {
-                    // 底色：无解码帧时显示（深色海报底），有渐变/圆角动画时同样走这条路
-                    fillNodeBg(dc, static_cast<float>(effRadius));
-
-                    // 解码帧（伪图片槽，rawPixels）：contain-fit letterbox
-                    const ImageResource* img = renderer.getImage(node.imageIndex);
-                    if (img && img->rawPixels && !img->data.empty() &&
-                        img->width > 0 && img->height > 0) {
-                        uint32_t gen = renderer.imageGeneration(node.imageIndex);
-                        if (gfx.prepareImageRaw(node.imageIndex, img->width, img->height,
-                                                img->data.data(), gen)) {
-                            float ar = static_cast<float>(img->width) / img->height;
-                            float boxAr = static_cast<float>(nw) / nh;
-                            float fw, fh;
-                            if (ar > boxAr) { fw = static_cast<float>(nw); fh = fw / ar; }
-                            else            { fh = static_cast<float>(nh); fw = fh * ar; }
-                            gfx.drawImage(node.imageIndex,
-                                          x + (nw - fw) * 0.5f, y + (nh - fh) * 0.5f, fw, fh);
-                        }
-                    }
-
-                    // 浏览器式控制条（暂停常显/播放中悬停显示）
-                    if (renderer.videoControlsVisible(node.id))
-                        DrawVideoControlsTmpl(gfx, renderer, node,
-                                              static_cast<float>(x), static_cast<float>(y),
-                                              static_cast<float>(nw), opacity);
-                    break;
-                }
-                case BINUI_SVG:
-                case BINUI_CANVAS: {
-                    int radius = effRadius;
-                    if (radius > 0)
-                        gfx.fillRounded(static_cast<float>(x), static_cast<float>(y),
-                                        static_cast<float>(nw), static_cast<float>(nh),
-                                        static_cast<float>(radius), cc);
-                    else
-                        gfx.fillRect(static_cast<float>(x), static_cast<float>(y),
-                                     static_cast<float>(nw), static_cast<float>(nh), cc);
-                    if (node.type == BINUI_CANVAS && canvas)
-                        canvas(gfx, node.id, static_cast<float>(x), static_cast<float>(y),
-                               static_cast<float>(nw), static_cast<float>(nh));
-                    break;
-                }
-                case BINUI_PATH: {
-                    // v15 SVG 路径：填充 + 描边，几何全在 binui_paint.h（三端共用）
-                    const auto* pr = renderer.pathOf(node.id);
-                    if (!pr || pr->first.empty()) break;
-                    static thread_local binui::PathRenderBuffers pbuf;
-                    binui::PathPaintSpec pspec;
-                    pspec.fillColor = ScaleAlpha(pr->head.fillColor, opacity);
-                    pspec.strokeColor = ScaleAlpha(pr->head.strokeColor, opacity);
-                    pspec.fillGrad = pr->hasGrad ? &pr->grad : nullptr;
-                    pspec.strokeGrad = pr->hasStrokeGrad ? &pr->strokeGrad : nullptr;
-                    pspec.opacity = opacity;
-                    binui::PaintPathNode(
-                        pr->head, pr->pts.data(), pr->first.data(), pr->count.data(),
-                        pr->closed.data(), static_cast<int>(pr->first.size()),
-                        static_cast<float>(x), static_cast<float>(y),
-                        static_cast<float>(nw), static_cast<float>(nh), pspec,
-                        renderer.pathBandCache(node.id), renderer.pathCacheGen(), pbuf,
-                        [&](const binui::PaintBand* b, int n) {
-                            for (int k = 0; k < n; k++)
-                                gfx.fillRect(b[k].x, b[k].y, b[k].w, b[k].h, b[k].color);
-                        },
-                        [&](float x0, float y0, float x1, float y1, float lw, uint32_t lc) {
-                            gfx.fillLine(x0, y0, x1, y1, lw, lc);
-                        },
-                        [&](float rx, float ry, float rw, float rh, float rr, uint32_t dc) {
-                            gfx.fillRounded(rx, ry, rw, rh, rr, dc);
-                        });
-                    break;
-                }
-                default:
-                    break;
-            }
-
-            // 边框最后画（盖在底色/文字之上），位置在键盘焦点环之前 ——
-            // 与 drawNodesGDI 的叠放顺序一致
-            drawNodeBorder();
-
-            // 焦点环三态（见 GL 后端同段与 docs/keyboard_focus.md）：
-            // 输入元素待编辑 = 虚线 + 对比色；普通焦点 = 实线 + 对比色；编辑中 = 实线加粗 + 蓝。
-            {
-                const BinUIRenderer::FocusRing ring = renderer.focusRingOf(node.id);
-                if (ring != BinUIRenderer::FocusRing::None) {
-                    const bool editing = ring == BinUIRenderer::FocusRing::Editing;
-                    const bool dashed = ring == BinUIRenderer::FocusRing::Dashed;
-                    const float thick = editing ? 2.0f : 1.0f;
-                    uint32_t ringCol = textCol;
-                    if (editing) {
-                        ringCol = ScaleAlpha(BinUIRenderer::kFocusRingEditColor, opacity);
-                    } else if (((dc >> 24) & 0xFFu) >= 0x80u) {
-                        const float bgLum = (0.2126f * static_cast<float>((dc >> 16) & 0xFFu) +
-                                             0.7152f * static_cast<float>((dc >> 8) & 0xFFu) +
-                                             0.0722f * static_cast<float>(dc & 0xFFu)) / 255.0f;
-                        if (bgLum > 0.7f) ringCol = ScaleAlpha(0xFF1A1A1Au, opacity);
-                    }
-                    const float fr = effRadius > 2 ? static_cast<float>(effRadius) - 1.0f : 0.0f;
-                    const float fx = static_cast<float>(x) + 1.0f, fy = static_cast<float>(y) + 1.0f;
-                    const float fw = static_cast<float>(nw) - 2.0f, fh = static_cast<float>(nh) - 2.0f;
-                    if (dashed) {
-                        PaintSegment segs[kMaxFocusDashSegments];
-                        const int n = BuildDashedRoundRing(fx, fy, fw, fh, fr, 6.0f, 4.0f,
-                                                           segs, kMaxFocusDashSegments);
-                        for (int si = 0; si < n; si++)
-                            gfx.fillLine(segs[si].x0, segs[si].y0, segs[si].x1, segs[si].y1,
-                                         1.0f, ringCol);
-                    } else if (fr >= 1.0f) {
-                        gfx.strokeRounded(fx, fy, fw, fh, fr, thick, ringCol);
-                    } else {
-                        gfx.fillLine(fx, fy, fx + fw, fy, thick, ringCol);
-                        gfx.fillLine(fx, fy + fh, fx + fw, fy + fh, thick, ringCol);
-                        gfx.fillLine(fx, fy, fx, fy + fh, thick, ringCol);
-                        gfx.fillLine(fx + fw, fy, fx + fw, fy + fh, thick, ringCol);
-                    }
-                }
-            }
-        }
-
-        gfx.popClipTo(savedDepth);
-    }
-
-    // 滚动条（轨道 + 滑块）：同样裁剪到本次重绘范围，避免滚动条整条重涂
-    int sbDepth = gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
-                               static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
-    for (const auto& node : nodes) {
-        if (!(node.flags & BINUI_SCROLLABLE) || !(node.flags & BINUI_VISIBLE)) continue;
-        float ch = renderer.contentHeight(node.id);
-        auto sit = scrolls.find(node.id);
-        float sx = sit != scrolls.end() ? sit->second.x : 0;
-        float sy = sit != scrolls.end() ? sit->second.y : 0;
-        int x = static_cast<int>(node.x), y = static_cast<int>(node.y);
-        int nw = static_cast<int>(node.width), nh = static_cast<int>(node.height);
-        float cw = renderer.contentWidth(node.id);
-        const bool needV = ch > nh + 0.5f;
-        const bool needH = cw > nw + 0.5f;
-        if (!needV && !needH) continue;
-
-        // 滚动条配色/宽度由渲染器提供（C ABI 与编译器 scrollbar-* 落到同一处）。
-        // 以前这里写死 8px + #2E2E2E/#5A5A5A，浅色主题下就是右边一条黑杠，
-        // 而且没有任何入口能覆盖。
-        const auto& sb = renderer.scrollbarStyle();
-        const int barW = sb.width;
-        const float thumbThick = static_cast<float>(std::max(2, barW / 2));
-        if (needV) {
-            gfx.fillRect(static_cast<float>(x + nw - barW), static_cast<float>(y),
-                         static_cast<float>(barW), static_cast<float>(nh), sb.track);
-            float thumbH = std::max(24.0f, static_cast<float>(nh) * nh / ch);
-            float maxScroll = ch - nh;
-            // 位置算法（贴右、按滚动比例）保持原样；只有宽度跟着轨道换算
-            float thumbY = maxScroll > 0 ? sy / maxScroll * (nh - thumbH) : 0;
-            // 滑块宽度沿用"轨道一半"的老比例（轨道 8 → 滑块 4），左右各留 (barW-thumbW)/2
-            const float thumbX = static_cast<float>(x + nw - barW) + (barW - thumbThick) * 0.5f;
-            gfx.fillRect(thumbX, static_cast<float>(y) + thumbY, thumbThick, thumbH, sb.thumb);
-        }
-        if (needH) {
-            // 水平条：贴底边，宽度扣掉竖直条占的那一格，避免右下角叠在一起
-            const int trackW = nw - (needV ? barW : 0);
-            gfx.fillRect(static_cast<float>(x), static_cast<float>(y + nh - barW),
-                         static_cast<float>(trackW), static_cast<float>(barW), sb.track);
-            float thumbW = std::max(24.0f, static_cast<float>(nw) * nw / cw);
-            float maxScroll = cw - nw;
-            float thumbX = maxScroll > 0 ? sx / maxScroll * (nw - thumbW) : 0;
-            const float thumbY = static_cast<float>(y + nh - barW) + (barW - thumbThick) * 0.5f;
-            gfx.fillRect(static_cast<float>(x) + thumbX, thumbY, thumbW, thumbThick, sb.thumb);
-        }
-    }
-    gfx.popClipTo(sbDepth);
+void BinUID3D::presentViaGdi() {
+    if (!impl_->ready) return;
+    impl_->forceGdi = true;
+    present();
+    impl_->forceGdi = false;
 }
 
-// ============================================================
-// placeCaretAtClickD3D（基于字形 advance 测量）
-// ============================================================
-size_t placeCaretAtClickD3D(BinUIRenderer& renderer, BinUID3D& gfx, float cx, float cy,
-                            bool extend) {
-    if (!renderer.isEditing()) return 0;
-    const auto& edit = renderer.edit();
-
-    const auto& nodes = renderer.getNodes();
-    const binui::BinUIRenderer::NodeInfo* node = nullptr;
-    for (const auto& n : nodes) {
-        if (n.id == edit.nodeId) { node = &n; break; }
-    }
-    if (!node || node->type != BINUI_INPUT) return 0;
-    if (cy < node->y || cy > node->y + node->height) return 0;
-    std::wstring wtext = Utf8ToWide(edit.value);
-    float textX = static_cast<float>(node->x) + node->padding + 4;
-    float target = cx - textX;
-    int fs = node->fontSize ? node->fontSize : 14;
-    if (target <= 0) { renderer.setCaretByUtf16Index(0, extend); return 0; }
-
-    // 累计前缀宽度（UTF-16 单位），找越过点击点的位置
-    std::string prefix;
-    size_t idx = 0;
-    float w = 0;
-    for (size_t i = 0; i < wtext.size(); i++) {
-        unsigned cp = wtext[i];
-        std::string ch;
-        if (cp < 0x80) ch += static_cast<char>(cp);
-        else if (cp < 0x800) {
-            ch += static_cast<char>(0xC0 | (cp >> 6));
-            ch += static_cast<char>(0x80 | (cp & 0x3F));
-        } else if (cp < 0x10000) {
-            ch += static_cast<char>(0xE0 | (cp >> 12));
-            ch += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            ch += static_cast<char>(0x80 | (cp & 0x3F));
-        } else {
-            ch += static_cast<char>(0xF0 | (cp >> 18));
-            ch += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-            ch += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            ch += static_cast<char>(0x80 | (cp & 0x3F));
-        }
-        float cw = gfx.textWidth(static_cast<float>(fs), 400, prefix + ch) - w;
-        if (w + cw / 2 >= target) break; // 越过字形中点即算越过
-        w += cw;
-        prefix += ch;
-        idx = i + 1;
-    }
-    renderer.setCaretByUtf16Index(idx, extend);
-    return idx;
+const uint8_t* BinUID3D::readbackPixels(int& outW, int& outH) {
+    if (!impl_->ready) return nullptr;
+    if (!impl_->presentReadback()) return nullptr;
+    outW = impl_->winW;
+    outH = impl_->winH;
+    return static_cast<const uint8_t*>(impl_->layeredBits);
 }
-
-// ============================================================
-// 光标闪烁
-// ============================================================
-bool caretBlinkOn() {
-    using namespace std::chrono;
-    static auto last = steady_clock::now();
-    static bool on = true;
-    auto now = steady_clock::now();
-    if (duration_cast<milliseconds>(now - last).count() >= 500) {
-        on = !on;
-        last = now;
-    }
-    return on;
-}
-
-// 标题栏判定（与 GDI 后端 isTitlebarDrag 语义一致）：
-// hitTest 只命中交互节点（按钮/输入等）→ 命中则不拖；
-// 否则检查点击是否落在任一可见 TITLEBAR 节点矩形内
-bool isTitlebarDrag(const BinUIRenderer& renderer, float x, float y) {
-    const auto& nodes = renderer.getNodes();
-    if (renderer.hitTest(x, y) >= 0) return false;
-    for (const auto& n : nodes)
-        if ((n.flags & BINUI_TITLEBAR) && (n.flags & BINUI_VISIBLE) &&
-            x >= n.x && x <= n.x + n.width && y >= n.y && y <= n.y + n.height)
-            return true;
-    return false;
-}
-
-void BinUIAppD3D::beginWindowDrag() {
-    if (!hwnd_) return;
-    ReleaseCapture();
-    POINT p;
-    GetCursorPos(&p);
-    SendMessageA(static_cast<HWND>(hwnd_), WM_NCLBUTTONDOWN, HTCAPTION,
-                 MAKELPARAM(p.x, p.y));
-}
-
-void BinUIAppD3D::minimize() {
-    if (hwnd_) ShowWindow(static_cast<HWND>(hwnd_), SW_MINIMIZE);
-}
-
-// 手动 resize 拖拽循环（窗口无 WS_THICKFRAME，系统不提供 resize，这里自行实现）。
-// 关键：拖拽期间每轮消息后立即渲染一帧（与 GDI 的 WM_PAINT 同步重绘一致），
-// 否则窗口尺寸变了却无呈现，松手才补一帧 → 卡顿/花屏。
-// 手动 resize 拖拽循环（窗口无 WS_THICKFRAME，系统不提供 resize，这里自行实现）。
-// 与 GL 外壳同构：边框跟手（SetWindowPos），内容按显示器刷新率出帧，
-// 每帧都走 renderFrame（update_ + 重排 + 呈现），所以拖拽期间动画不会冻住。
-// 以前这里是"每轮循环 renderOnce + Sleep(1)"：一秒几百帧、CPU 打满、
-// 消息队列堆在后面，表现出来反而是一顿一顿的。
-void BinUIAppD3D::startResize(int hit) {
-    const int MIN_W = 320, MIN_H = 240;
-    HWND hwnd = static_cast<HWND>(hwnd_);
-    SetCapture(hwnd);
-    POINT start;
-    GetCursorPos(&start);
-    RECT startRect;
-    GetWindowRect(hwnd, &startRect);
-
-    int refreshHz = 60;
-    {
-        HDC dc = GetDC(hwnd);
-        const int hz = dc ? GetDeviceCaps(dc, VREFRESH) : 0;
-        if (dc) ReleaseDC(hwnd, dc);
-        if (hz > 1) refreshHz = hz;
-        if (refreshHz > 360) refreshHz = 360;
-    }
-    const auto frameBudget = std::chrono::microseconds(1000000 / refreshHz);
-    auto nextFrame = std::chrono::steady_clock::now();
-    RECT applied = startRect;
-
-    while (GetAsyncKeyState(VK_LBUTTON) & 0x8000) {
-        MSG m;
-        while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) {
-            TranslateMessage(&m);
-            DispatchMessageW(&m);
-        }
-        POINT cur;
-        GetCursorPos(&cur);
-        RECT r = startRect;
-        int dx = cur.x - start.x, dy = cur.y - start.y;
-        switch (hit) {
-            case HTLEFT:          r.left += dx; break;
-            case HTRIGHT:         r.right += dx; break;
-            case HTTOP:           r.top += dy; break;
-            case HTBOTTOM:        r.bottom += dy; break;
-            case HTTOPLEFT:       r.left += dx; r.top += dy; break;
-            case HTTOPRIGHT:      r.right += dx; r.top += dy; break;
-            case HTBOTTOMLEFT:    r.left += dx; r.bottom += dy; break;
-            case HTBOTTOMRIGHT:   r.right += dx; r.bottom += dy; break;
-        }
-        if (r.right - r.left < MIN_W) {
-            if (hit == HTLEFT || hit == HTTOPLEFT || hit == HTBOTTOMLEFT)
-                r.left = r.right - MIN_W;
-            else
-                r.right = r.left + MIN_W;
-        }
-        if (r.bottom - r.top < MIN_H) {
-            if (hit == HTTOP || hit == HTTOPLEFT || hit == HTTOPRIGHT)
-                r.top = r.bottom - MIN_H;
-            else
-                r.bottom = r.top + MIN_H;
-        }
-        // 等比缩放（<canvas aspect="...">）：以主导边为基准约束另一边
-        if (aspect_ > 0) {
-            LONG wd = r.right - r.left, ht = r.bottom - r.top;
-            if (hit == HTTOP || hit == HTBOTTOM) {
-                wd = static_cast<LONG>(ht * aspect_ + 0.5f);
-                if (hit == HTTOP) r.top = r.bottom - ht;
-                else r.bottom = r.top + ht;
-            } else {
-                ht = static_cast<LONG>(wd / aspect_ + 0.5f);
-                if (hit == HTTOPLEFT || hit == HTTOP || hit == HTTOPRIGHT)
-                    r.top = r.bottom - ht;
-                else
-                    r.bottom = r.top + ht;
-            }
-            if (hit == HTLEFT || hit == HTTOPLEFT || hit == HTBOTTOMLEFT)
-                r.left = r.right - wd;
-            else
-                r.right = r.left + wd;
-        }
-        if (r.left != applied.left || r.top != applied.top ||
-            r.right != applied.right || r.bottom != applied.bottom) {
-            SetWindowPos(hwnd, nullptr, r.left, r.top,
-                r.right - r.left, r.bottom - r.top, SWP_NOZORDER | SWP_NOACTIVATE);
-            applied = r;
-        }
-
-        const auto now = std::chrono::steady_clock::now();
-        if (now >= nextFrame) {
-            renderFrame();
-            nextFrame = now + frameBudget;
-            if (std::chrono::steady_clock::now() - nextFrame > frameBudget * 2)
-                nextFrame = std::chrono::steady_clock::now();
-        } else {
-            const auto wait = std::chrono::duration_cast<std::chrono::milliseconds>(nextFrame - now);
-            MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(wait.count()),
-                                        QS_ALLINPUT, 0x0004 /* MWMO_INPUTAVAILABLE */);
-        }
-    }
-    applyPendingResize();
-    renderFrame();   // 松手后的最终帧
-    ReleaseCapture();
-}
-
-// ============================================================
-// BinUIAppD3D：无边框窗口 + 事件循环
-// ============================================================
-// 光标形状缓存（与 GL 外壳一致）：IDC_* 是系统共享资源，只加载一次
-static HCURSOR D3DCursorHandleOf(int kind) {
-    static HCURSOR cache[5] = {};
-    if (kind < 0 || kind > 4) kind = 0;
-    if (!cache[kind]) {
-        LPCWSTR id = reinterpret_cast<LPCWSTR>(IDC_ARROW);
-        switch (kind) {
-            case 1: id = reinterpret_cast<LPCWSTR>(IDC_HAND);   break;
-            case 2: id = reinterpret_cast<LPCWSTR>(IDC_IBEAM);  break;
-            case 3: id = reinterpret_cast<LPCWSTR>(IDC_SIZENS); break;
-            case 4: id = reinterpret_cast<LPCWSTR>(IDC_SIZEWE); break;
-            default: break;
-        }
-        cache[kind] = LoadCursorW(nullptr, id);
-    }
-    return cache[kind];
-}
-
-LRESULT CALLBACK BinUIAppD3D::wndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    BinUIAppD3D* app = reinterpret_cast<BinUIAppD3D*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-    if (!app) return DefWindowProcW(hwnd, msg, wParam, lParam);
-
-    switch (msg) {
-        case WM_MOUSEMOVE: {
-            if (!app->trackingLeave_) {
-                POINT cursor;
-                RECT wrect;
-                if (GetCursorPos(&cursor) && GetWindowRect(hwnd, &wrect) && PtInRect(&wrect, cursor)) {
-                    TRACKMOUSEEVENT tme = { sizeof(TRACKMOUSEEVENT), TME_LEAVE, hwnd, 0 };
-                    TrackMouseEvent(&tme);
-                    app->trackingLeave_ = true;
-                }
-            }
-            app->handleMouseMove(static_cast<float>(LOWORD(lParam)),
-                                 static_cast<float>(HIWORD(lParam)));
-            return 0;
-        }
-        case WM_LBUTTONDOWN:
-            app->handleMousePress(static_cast<float>(LOWORD(lParam)),
-                                  static_cast<float>(HIWORD(lParam)));
-            return 0;
-        case WM_LBUTTONDBLCLK:
-            app->handleMousePress(static_cast<float>(LOWORD(lParam)),
-                                  static_cast<float>(HIWORD(lParam)));
-            if (app->dblclick_)
-                app->dblclick_(static_cast<float>(LOWORD(lParam)),
-                               static_cast<float>(HIWORD(lParam)));
-            return 0;
-            SetFocus(hwnd);
-            return 0;
-        case WM_LBUTTONUP:
-            app->handleMouseRelease(static_cast<float>(LOWORD(lParam)),
-                                    static_cast<float>(HIWORD(lParam)));
-            return 0;
-        case WM_MOUSELEAVE:
-            app->trackingLeave_ = false;
-            app->handleMouseLeave();
-            return 0;
-        case WM_MOUSEWHEEL: {
-            short delta = static_cast<short>(HIWORD(wParam));
-            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            ScreenToClient(hwnd, &pt);
-            app->handleMouseWheel(static_cast<float>(pt.x), static_cast<float>(pt.y),
-                                  static_cast<float>(delta) / 120.0f * 40.0f);
-            return 0;
-        }
-        case WM_CHAR:
-            app->handleChar(static_cast<wchar_t>(wParam));
-            return 0;
-        case WM_KEYDOWN:
-            app->handleKey(static_cast<int>(wParam));
-            return 0;
-        case WM_KILLFOCUS:
-            app->handleFocusLost();
-            return 0;
-        case WM_SIZE:
-            app->handleResize(LOWORD(lParam), HIWORD(lParam));
-            return 0;
-        case WM_NCLBUTTONDOWN: {
-            // 无 WS_THICKFRAME：命中边框热区时自行启动 resize 循环
-            if (!app->resizable_) return DefWindowProcW(hwnd, msg, wParam, lParam);
-            switch (wParam) {
-                case HTLEFT: case HTRIGHT: case HTTOP: case HTBOTTOM:
-                case HTTOPLEFT: case HTTOPRIGHT: case HTBOTTOMLEFT:
-                case HTBOTTOMRIGHT: {
-                    if (IsZoomed(hwnd))
-                        return DefWindowProcW(hwnd, msg, wParam, lParam);
-                    app->startResize(static_cast<int>(wParam));
-                    return 0;
-                }
-                default:
-                    return DefWindowProcW(hwnd, msg, wParam, lParam);
-            }
-        }
-        case WM_NCHITTEST: {
-            // 无边框窗口：边框 8px 热区用于调整大小，其余为客户区
-            if (!app->resizable_) return HTCLIENT;
-            RECT rc;
-            GetWindowRect(hwnd, &rc);
-            POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-            const int bw = 8;
-            bool l = pt.x - rc.left < bw, t = pt.y - rc.top < bw;
-            bool r = rc.right - pt.x < bw, b = rc.bottom - pt.y < bw;
-            if (l && t) return HTTOPLEFT;
-            if (r && t) return HTTOPRIGHT;
-            if (l && b) return HTBOTTOMLEFT;
-            if (r && b) return HTBOTTOMRIGHT;
-            if (l) return HTLEFT;
-            if (r) return HTRIGHT;
-            if (t) return HTTOP;
-            if (b) return HTBOTTOM;
-            return HTCLIENT;
-        }
-        case WM_SETCURSOR: {
-            if (LOWORD(lParam) != HTCLIENT) break;
-            if (!app->cursor_) break;
-            POINT pt;
-            if (!GetCursorPos(&pt) || !ScreenToClient(hwnd, &pt)) break;
-            SetCursor(D3DCursorHandleOf(app->cursor_(static_cast<float>(pt.x),
-                                                     static_cast<float>(pt.y))));
-            return TRUE;
-        }
-        case WM_CLOSE:
-            app->requestExit();
-            return 0;
-        case WM_DESTROY:
-            PostQuitMessage(0);
-            return 0;
-    }
-    return DefWindowProcW(hwnd, msg, wParam, lParam);
-}
-
-BinUIAppD3D::BinUIAppD3D(int width, int height, bool vsync)
-    : width_(width), height_(height), vsync_(vsync) {}
-
-void BinUIAppD3D::setWindowOptions(bool resizable, float aspect, bool transparent, const char* title) {
-    resizable_ = resizable;
-    aspect_ = aspect > 0 ? aspect : 0;
-    transparent_ = transparent;
-    if (title) title_ = title;
-}
-
-BinUIAppD3D::~BinUIAppD3D() { gfx_.shutdown(); }
-
-void BinUIAppD3D::invalidateRect(int x, int y, int w, int h) {
-    if (w <= 0 || h <= 0) return;
-    if (dirty_) {
-        dirtyL_ = std::min(dirtyL_, x);
-        dirtyT_ = std::min(dirtyT_, y);
-        dirtyR_ = std::max(dirtyR_, x + w);
-        dirtyB_ = std::max(dirtyB_, y + h);
-    } else {
-        dirty_ = true;
-        dirtyL_ = x; dirtyT_ = y; dirtyR_ = x + w; dirtyB_ = y + h;
-    }
-}
-
-void BinUIAppD3D::invalidateAll() {
-    dirty_ = true;
-    dirtyL_ = 0; dirtyT_ = 0; dirtyR_ = width_; dirtyB_ = height_;
-}
-
-int BinUIAppD3D::run() {
-    SetProcessDPIAware();
-
-    // Unicode 窗口类：ANSI 窗口在 CP936 下把中文拆成两个 WM_CHAR（DBCS 字节），
-    // 输入框会得到乱码（中 -> "ÖÐ"）；IME 输入同理
-    const wchar_t* CLASS_NAME = L"BinUIAppD3DWindow";
-    WNDCLASSW wc = {};
-    wc.lpfnWndProc = BinUIAppD3D::wndProc;
-    wc.hInstance = GetModuleHandleW(nullptr);
-    wc.lpszClassName = CLASS_NAME;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = nullptr;
-    RegisterClassW(&wc);
-
-    RECT work = { 0, 0, 800, 600 };
-    SystemParametersInfoA(SPI_GETWORKAREA, 0, &work, 0);
-    int winW = std::min(width_, static_cast<int>(work.right - work.left));
-    int winH = std::min(height_, static_cast<int>(work.bottom - work.top));
-    int winX = work.left + ((work.right - work.left) - winW) / 2;
-    int winY = work.top + ((work.bottom - work.top) - winH) / 2;
-
-    // 无边框：WS_POPUP 无标题栏/边框/系统菜单；WS_MAXIMIZEBOX 允许 Win+↑ 最大化
-    DWORD exStyle = 0;
-    if (transparent_) exStyle |= WS_EX_LAYERED;
-    wchar_t wtitle[512] = {};
-    if (!title_.empty())
-        MultiByteToWideChar(CP_UTF8, 0, title_.c_str(), -1, wtitle,
-                            static_cast<int>(sizeof(wtitle) / sizeof(wtitle[0])));
-    HWND hwnd = CreateWindowExW(exStyle, CLASS_NAME, wtitle,
-        WS_POPUP | WS_MAXIMIZEBOX | WS_VISIBLE, winX, winY, winW, winH,
-        nullptr, nullptr, wc.hInstance, nullptr);
-    if (!hwnd) {
-        std::fprintf(stderr, "[d3d11] Failed to create window\n");
-        return 1;
-    }
-    hwnd_ = hwnd;
-    SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
-
-    // 禁用 Windows 11 DWM 自动圆角：UI 圆角由 border-radius 属性自控（跨平台一致）
-    DWORD corner = DWMWCP_DONOTROUND;
-    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
-
-    gfx_.setTransparent(transparent_);
-    if (!gfx_.init(hwnd, winW, winH, vsync_)) {
-        std::fprintf(stderr, "[d3d11] D3D11 init failed\n");
-        return 1;
-    }
-    // WS_VISIBLE 只保证"可见"，SetFocus 只改本线程键盘焦点 —— 都不会把窗口提到
-    // 前台，于是从控制台启动时窗口被 cmd 压在后面。这里补一次显式前台化。
-    BinUIForceForeground(hwnd);
-    SetFocus(hwnd);
-    width_ = winW;
-    height_ = winH;
-    invalidateAll(); // 首帧全量绘制（初始脏矩形为空，避免透明窗口首帧空白）
-
-    lastTime_ = std::chrono::steady_clock::now();
-    running_ = true;
-    MSG msg = {};
-
-    while (running_) {
-        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
-            if (msg.message == WM_QUIT) { running_ = false; break; }
-            TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-        if (!running_) break;
-
-        renderFrame();   // update_（动画）+ 挂起 resize + 绘制
-        Sleep(1);
-    }
-
-    DestroyWindow(hwnd);
-    hwnd_ = nullptr;
-    return 0;
-}
-
-void BinUIAppD3D::handleMouseMove(float x, float y) { if (move_) move_(x, y); }
-void BinUIAppD3D::handleMousePress(float x, float y) { if (press_) press_(x, y); }
-void BinUIAppD3D::handleMouseRelease(float x, float y) { if (release_) release_(x, y); }
-void BinUIAppD3D::handleMouseLeave() { if (leave_) leave_(); }
-
-void BinUIAppD3D::handleMouseWheel(float x, float y, float dy) { if (wheel_) wheel_(x, y, dy); }
-
-void BinUIAppD3D::handleResize(int w, int h) {
-    if (w <= 0 || h <= 0) return;
-    // 只记录：拖拽期间 WM_SIZE 高频到达，实际 resize（重排/FBO 重建/重绘）每帧应用一次
-    pendingW_ = w;
-    pendingH_ = h;
-}
-
-void BinUIAppD3D::applyPendingResize() {
-    if (pendingW_ <= 0 || pendingH_ <= 0) return;
-    int w = pendingW_, h = pendingH_;
-    pendingW_ = pendingH_ = 0;
-    width_ = w;
-    height_ = h;
-    if (resize_) resize_(w, h);
-    gfx_.resize(w, h);
-    invalidateAll();
-}
-
-void BinUIAppD3D::renderOnce() {
-    applyPendingResize();
-    if (dirty_ && gfx_.isReady()) {
-        int rc[4] = { dirtyL_, dirtyT_, dirtyR_, dirtyB_ };
-        gfx_.beginFrame(rc);
-        if (draw_) draw_(gfx_, rc);
-        gfx_.present();
-        dirty_ = false;
-    }
-}
-
-// 一帧 = 推进动画（update_）+ 应用挂起 resize + 绘制呈现。
-// 拖拽 resize 与正常事件循环都走它，保证两条路径的时间/动画口径一致。
-void BinUIAppD3D::renderFrame() {
-    const auto now = std::chrono::steady_clock::now();
-    float dt = std::chrono::duration<float>(now - lastTime_).count();
-    lastTime_ = now;
-    if (dt > 0.1f) dt = 1.0f / 60.0f;
-    if (update_) update_(dt);
-    renderOnce();
-}
-
-void BinUIAppD3D::handleChar(wchar_t ch) {
-    if (ch >= 0xD800 && ch <= 0xDBFF) { pendingHigh_ = ch; return; }
-    unsigned cp;
-    if (ch >= 0xDC00 && ch <= 0xDFFF && pendingHigh_) {
-        cp = 0x10000 + ((static_cast<unsigned>(pendingHigh_) - 0xD800) << 10) + (ch - 0xDC00);
-        pendingHigh_ = 0;
-    } else {
-        pendingHigh_ = 0;
-        cp = static_cast<unsigned>(ch);
-    }
-    if (cp < 0x20 || cp == 0x7F) return;
-    if (char_) {
-        std::string s;
-        if (cp < 0x80) s += static_cast<char>(cp);
-        else if (cp < 0x800) {
-            s += static_cast<char>(0xC0 | (cp >> 6));
-            s += static_cast<char>(0x80 | (cp & 0x3F));
-        } else if (cp < 0x10000) {
-            s += static_cast<char>(0xE0 | (cp >> 12));
-            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            s += static_cast<char>(0x80 | (cp & 0x3F));
-        } else {
-            s += static_cast<char>(0xF0 | (cp >> 18));
-            s += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
-            s += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
-            s += static_cast<char>(0x80 | (cp & 0x3F));
-        }
-        char_(s);
-    }
-}
-
-void BinUIAppD3D::handleKey(int vk) {
-    if (key_) key_(vk);
-}
-
-void BinUIAppD3D::handleFocusLost() {
-    pendingHigh_ = 0;
-    if (focus_) focus_(false);
-}
-
-} // namespace binui

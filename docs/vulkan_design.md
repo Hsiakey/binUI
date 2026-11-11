@@ -785,6 +785,88 @@ P6 的 `BINUI_VK_PERF` 拆分说 `svgdemo` 960×560 每帧 1.447 ms 里 **1.244 
 
 ---
 
+## 7.4 P7 落地记录：D3D11 并入共享代码并进构建（2026-11-11，v0.11.0）
+
+### 7.4.1 起因
+
+§3.2b 记过一笔：D3D11 后端（`server/backends/binui_d3d11.cpp`，2804 行）**根本不在构建里**。
+它自带一整套重复：自己的节点树遍历（`drawNodesD3D`，622 行 + 视频控制条）、自己的字形图集
+（`Atlas`/`ColorAtlas` 格子打包，与 `binui_glyph_atlas.h` 同功能）、自己的图片解码
+（`DecodeImagePixels`，与 `binui_win_image.h` 同源）、自己的光标定位/闪烁/标题栏判定、
+自己的无边框窗口外壳（`BinUIAppD3D`，约 440 行）。Vulkan 做完后，这些重复第一次有了
+可比对的"标准答案"，于是把它并进来。
+
+### 7.4.2 做了什么
+
+| 项 | 改动 |
+|---|---|
+| 接口 | `class BinUID3D : public IBinUIGfx`，全部原语标 `override`（之前只是签名碰巧相同） |
+| 遍历 | 删掉 `drawNodesD3D` + `DrawVideoControlsTmpl`/`FormatVideoTime`；改走 `drawNodesBinUI` |
+| 外壳 | 删掉 `BinUIAppD3D`（含 `wndProc`/`staticResize`/事件分发）；`using BinUIAppD3D = BinUIAppT<BinUID3D>` |
+| 输入辅助 | 删掉 `placeCaretAtClickD3D` / `caretBlinkOn` / `isTitlebarDrag`；用 `binui_app.h` 的共享模板 |
+| 呈现 | 新增 `presentViaGdi()` + `Impl::presentReadback()`（透明窗 / 全屏直翻转守卫 / 拖拽期），与 GL/Vulkan 同一套触发条件 |
+| 入口 | `binui_ui.h` 加 `BINUI_GPU_D3D11` 分支；`drawUi()` 三个后端统一调 `drawNodesBinUI`（GL 原来的 `drawNodesGLGdi` 就是这个 wrapper，行为不变） |
+| 构建 | `Makefile`：`binui_d3d11.o` 规则 + `D3D11_LIBS`（d3d11/dxgi/d3dcompiler/dwmapi）+ `make demos-d3d11` → `examples/*_d3d11.exe`（8 个） |
+
+净效果：`binui_d3d11.cpp` **2804 → 1615 行**（-42%），`binui_d3d11.h` 192 → 106 行。
+D3D11 第一次进构建，并且**白拿**了 v13~v19 的全部特性（边框/渐变/文字装饰/SVG 路径/
+脏矩形/帧节流/IME），因为遍历和外壳都是共享的。
+
+### 7.4.3 验收工具：`d3d11_shot`（隐藏窗口 + 读回）
+
+D3D11 的交换链必须绑窗口，没有"无窗口离屏"这条腿，所以 `tools/d3d11_shot.cpp` 开一个
+**隐藏窗口**（`WS_POPUP`、不 `ShowWindow`）跑 N 帧，然后从**离屏纹理**读回像素
+（新增 `BinUID3D::readbackPixels`）。这一点很关键：先用屏幕截屏（`window_capture` 的
+`PrintWindow`）时抓到的是一张**纯白图** —— flip-model 交换链的内容不在 GDI 表面上，
+窗口被别的窗口（这个 GUI）盖住时 DWM 也没有可复制的内容。改成后端自己读回之后，
+窗口被遮挡/隐藏都照样抓得到真实像素。
+
+### 7.4.4 与 GL 的逐像素比对（`make pixels-d3d11`，14 用例）
+
+| 用例 | 不同像素 | 说明 |
+|---|---|---|
+| `probe` / `radius-matrix` / `texturedemo` | **0** | 纯几何 / 图片，逐位相同 |
+| `svgfinish` / `svggrad` / `svgjoin` | 3 / 8 / 57 | 圆角边缘 |
+| `svgdemo` / `display-none2` / `fontshow` | 116 / 168 / 336 | 文本 + 圆角 |
+| `svgaa` / `svgpath` / `svgstroke` | 272 / 284 / 305 | 圆角 + 文本 |
+| `features` | 2492 (0.297%) | 整页 |
+| `circle` | 1200 (**2.041%**，最大的一处) | 圆 |
+| 脏矩形重绘 vs 全量重绘（阈值 0） | **0** | 持久离屏 + 脏矩形是对的 |
+| 强制读回 + GDI 贴屏 vs 交换链（阈值 0） | **0** | 同一张 offTex，两条呈现路线一致 |
+
+两处差异的根因都在"D3D11 还没换成共享实现"（**P7b 待办**）：
+
+1. **圆角模板**：D3D11 自己的 `roundFor` 用 `t = max(8, 4r)` 加自己的覆盖率算法；GL/Vulkan
+   用 `binui_paint.h` 的 `RoundTemplateSize` / `BuildRoundedNineSlice`。所以 `circle` 差 2%、
+   所有带圆角的卡片差 0.03~0.3% —— 是**转角边缘一个采样点**的量级，不是布局/颜色错误
+   （`probe`/`radius-matrix`/`texturedemo` 零差异就是证据）。
+2. **文本**：D3D11 仍走 `binui_font_renderer` + 自带图集，与 `binui_glyph_atlas.h` 不是同一份字节。
+
+因此 `make pixels-d3d11` 目前的判据是 **3%**（`PIXEL_D3D_TOL`），比 `pixels-vk` 的 1.5% 宽；
+P7b 把上面两样也换成共享实现后收紧到 1.5% → 0。
+
+### 7.4.5 验收（v0.11.0）
+
+| 项 | 结果 |
+|---|---|
+| 干净重编 | **0 warning**（`-Wall -Wextra`，三个后端 + 8 个 d3d11 demo + d3d11_shot） |
+| 四套测试 | 全绿 |
+| `make pixels`（GDI 基准） | 10/10 零差异（共享遍历改动后不变） |
+| `make pixels-vk` | 14/14（不同像素 0） |
+| `make pixels-d3d11`（新） | 14 用例全过（判据 3%，差异集中圆角/文本，见 §7.4.4）；脏矩形 vs 全量、GDI vs 交换链 **两条阈值 0 全过** |
+| `make demos-d3d11` | 8 个 `*_d3d11.exe` 链接成功；`svgdemo_d3d11` 跑 3 秒无崩溃、`d3d11_shot` 出图为完整页面 |
+| `make demos-vk` / `check_examples` | 8 个 / 11-11 无问题 |
+
+### 7.4.6 仍未做的
+
+- **P7b**：D3D11 的圆角模板 + 文本/图片换成 `binui_paint.h` / `binui_glyph_atlas.h` /
+  `binui_win_image.h`（三端几何与文本逐位相同，`pixels-d3d11` 收紧到 1.5% → 0）；
+- D3D11 没有 4× MSAA（离屏是单采样）—— 圆角/线条靠模板与解析式覆盖率抗锯齿，SVG 斜边
+  与 GL/Vulkan 的 4× MSAA 不同源；
+- 跨显示器 DPI / RDP / 验证层 0 error：条件不具备（见 §6.1.3）。
+
+---
+
 ## 8. 风险与回滚
 
 | 风险 | 触发 | 缓解 | 回滚 |

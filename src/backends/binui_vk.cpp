@@ -1885,9 +1885,9 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     VkApplicationInfo app{};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app.pApplicationName = "binUI";
-    app.applicationVersion = VK_MAKE_VERSION(0, 10, 2);
+    app.applicationVersion = VK_MAKE_VERSION(0, 11, 0);
     app.pEngineName = "binUI";
-    app.engineVersion = VK_MAKE_VERSION(0, 10, 2);
+    app.engineVersion = VK_MAKE_VERSION(0, 11, 0);
     app.apiVersion = VK_API_VERSION_1_0;
     const char* instExt[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     VkInstanceCreateInfo ici{};

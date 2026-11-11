@@ -67,6 +67,13 @@ $(BUILD_DIR)/binui_vk.o: $(SRC_DIR)/backends/binui_vk.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
 
+# D3D11 后端（P7）：与 GL / Vulkan 同构，实现同一份 IBinUIGfx。
+# 链接 d3d11 / dxgi / d3dcompiler（运行期着色器编译）；dwmapi 供全屏守卫与远程会话判定。
+D3D11_LIBS := -ld3d11 -ldxgi -ld3dcompiler -ldwmapi
+$(BUILD_DIR)/binui_d3d11.o: $(SRC_DIR)/backends/binui_d3d11.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
+
 $(BUILD_DIR)/examples/app_win32.o: $(SRC_DIR)/platform/app_win32.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
@@ -287,6 +294,34 @@ demos-vk: $(DEMO_VK_BINS)
 	@echo "vk demos -> $(DEMO_VK_BINS)"
 
 # =============================================
+# D3D11 版示例（P7）：同一份 demo 源码 + -DBINUI_GPU_D3D11，链接 binui_d3d11.o。
+#   make demos-d3d11     → examples/*_d3d11.exe（与 GL / VK 版并存，便于三方 A/B）
+# =============================================
+D3D11_DEMOS := svgdemo fontshow animshow buttonshow flexshow cubedemo texturedemo features
+
+define D3D11_DEMO_RULE
+$(DEMO_DIR)/$(1)_d3d11$(EXT): $(BUILD_DIR)/binui_d3d11.o $(BUILD_DIR)/examples/$(1)/main_d3d11.o $(LIB_A) $(EXA_DIR)/$(1)/main.html
+	@mkdir -p $(DEMO_DIR)/$(1)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $$@ $(BUILD_DIR)/binui_d3d11.o $(BUILD_DIR)/examples/$(1)/main_d3d11.o $(LIB_A) \
+	    $(WINLIBS) $(D3D11_LIBS) -limm32 \
+	    -Lthird_party/freetype/build -lfreetype \
+	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
+	cp -f $(EXA_DIR)/$(1)/main.html $(DEMO_DIR)/$(1)/main.html
+
+$(BUILD_DIR)/examples/$(1)/main_d3d11.o: examples/$(1)/main.cpp
+	@mkdir -p $(BUILD_DIR)/examples/$(1)
+	$(CXX) $(CXXFLAGS) -DBINUI_GPU_D3D11 -I$(INC_DIR) -Isrc -c examples/$(1)/main.cpp -o $$@
+endef
+
+$(foreach d,$(D3D11_DEMOS),$(eval $(call D3D11_DEMO_RULE,$(d))))
+
+DEMO_D3D11_BINS := $(foreach d,$(D3D11_DEMOS),$(DEMO_DIR)/$(d)_d3d11$(EXT))
+
+.PHONY: demos-d3d11
+demos-d3d11: $(DEMO_D3D11_BINS)
+	@echo "d3d11 demos -> $(DEMO_D3D11_BINS)"
+
+# =============================================
 # C ABI：给 Python / Go / Rust 等宿主语言的绑定入口（include/binui_c.h）
 #   build-mingw/libbinui_c.a    静态库：C / C++ / Rust 直接链
 #   build-mingw/bin/binui_c.dll 动态库：Python ctypes / Go cgo（免编译，随包分发）
@@ -334,7 +369,8 @@ TOOL_BINS := \
     $(BIN_DIR)/check_examples$(EXT) \
     $(BIN_DIR)/vk_shot$(EXT) \
     $(BIN_DIR)/vk_window$(EXT) \
-    $(BIN_DIR)/vk_stress$(EXT)
+    $(BIN_DIR)/vk_stress$(EXT) \
+    $(BIN_DIR)/d3d11_shot$(EXT)
 
 # 把 .bui 还原成打包前的目录结构（读同目录的 binui.res，header-only，不用链接库）
 $(BIN_DIR)/binui_export$(EXT): tools/binui_export.cpp
@@ -387,6 +423,16 @@ $(BIN_DIR)/vk_stress$(EXT): tools/vk_stress.cpp $(BUILD_DIR)/binui_vk.o $(LIB_A)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c tools/vk_stress.cpp -o $(BUILD_DIR)/vk_stress.o
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_stress.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
 		-luser32 -lgdi32 -lgdiplus -lole32 -lpsapi \
+		-Lthird_party/freetype/build -lfreetype \
+		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
+
+# D3D11 出图工具（P7）：隐藏窗口跑 N 帧 + 从离屏纹理读回 → PNG。
+# 不走屏幕截屏，所以窗口被遮挡也能抓到真实像素（flip-model 交换链的 PrintWindow 是白屏）。
+$(BIN_DIR)/d3d11_shot$(EXT): tools/d3d11_shot.cpp $(BUILD_DIR)/binui_d3d11.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c tools/d3d11_shot.cpp -o $(BUILD_DIR)/d3d11_shot.o
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/d3d11_shot.o $(BUILD_DIR)/binui_d3d11.o $(LIB_A) \
+		-luser32 -lgdi32 -lgdiplus -lole32 $(D3D11_LIBS) \
 		-Lthird_party/freetype/build -lfreetype \
 		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
@@ -467,8 +513,43 @@ pixels-vk: tools
 	done; \
 	exit $$fail
 
-.PHONY: vk-window
+# =============================================
+# D3D11 后端的像素回归（P7 起）：同样与 GL **逐像素**比。
+#
+# 现状（P7a）：判据放宽到 $(PIXEL_D3D_TOL)%。已知差异来源有两处，都是"D3D11 还没换成
+# 共享实现"：它自己的**圆角模板**（模板边长 max(8,4r) + 自己的覆盖率算法，而 GL/Vulkan
+# 用 binui_paint.h 的 RoundTemplateSize/BuildRoundedNineSlice）和自己的**文本光栅化**
+# （binui_font_renderer + 自带图集）。实测 circle 2.04%、svgstroke 0.28%、svgaa 0.25%，
+# 纯几何且无圆角的用例（probe / radius-matrix）是**零差异**。
+# P7b（把这两样也换成共享实现）之后这里收紧到 1.5% → 0。
+# =============================================
+PIXEL_D3D_OUT := $(BUILD_DIR)/pixels-d3d11
+PIXEL_D3D_TOL ?= 3
 
+.PHONY: pixels-d3d11
+
+pixels-d3d11: tools
+	@mkdir -p $(PIXEL_D3D_OUT)
+	@fail=0; for c in $(PIXEL_CASES); do \
+	    echo "--- $$c ---"; \
+	    $(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_D3D_OUT)/$$c.png >/dev/null 2>&1 || fail=1; \
+	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_D3D_OUT)/$$c.gl.png >/dev/null 2>&1 || fail=1; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/$$c.gl.png $(PIXEL_D3D_OUT)/$$c.png $(PIXEL_D3D_TOL) $(PIXEL_D3D_OUT)/$$c.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	done; exit $$fail
+	@fail=0; for d in $(VK_DEMO_CASES); do \
+	    echo "--- demo/$$d ---"; \
+	    $(BIN_DIR)/d3d11_shot$(EXT) examples/$$d/main.html $(PIXEL_D3D_OUT)/demo-$$d.png >/dev/null 2>&1 || fail=1; \
+	    $(BIN_DIR)/gl_shot$(EXT) examples/$$d/main.html $(PIXEL_D3D_OUT)/demo-$$d.gl.png >/dev/null 2>&1 || fail=1; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/demo-$$d.gl.png $(PIXEL_D3D_OUT)/demo-$$d.png $(PIXEL_D3D_TOL) $(PIXEL_D3D_OUT)/demo-$$d.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	done; exit $$fail
+	@echo "--- 脏矩形重绘 vs 全量重绘（阈值 0）---"
+	@$(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/probe.html $(PIXEL_D3D_OUT)/probe.dirty.png --frames 8 --dirty >/dev/null
+	@$(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/probe.png $(PIXEL_D3D_OUT)/probe.dirty.png 0
+	@echo "--- 强制读回 + GDI 贴屏 vs 交换链（阈值 0）---"
+	@$(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/probe.html $(PIXEL_D3D_OUT)/probe.gdi.png --gdi >/dev/null
+	@$(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/probe.png $(PIXEL_D3D_OUT)/probe.gdi.png 0
+
+.PHONY: vk-window
 # 窗口模式验收：拿真实窗口跑 N 帧，读回**交换链图像**与 GL 同尺寸输出比（阈值 0）。
 # 覆盖：交换链呈现 / 强制 GDI 读回 / resize 后交换链重建 / 全屏直翻转守卫 / 透明窗。
 vk-window: tools

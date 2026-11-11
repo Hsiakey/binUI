@@ -5,6 +5,55 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.11.0] - 2026-11-11
+
+D3D11 后端**并入共享代码并进入构建**。新后端参与构建 = MINOR；无二进制布局改动
+（`BINUI_VERSION` 仍 19）。
+
+### 新增 — D3D11 成为第三个共享后端
+
+`src/backends/binui_d3d11.cpp` 原来是个**不在 `Makefile` 里**的独立实现（2804 行），
+自带一份节点树遍历、字形图集、图片解码、光标定位和无边框窗口外壳。现在：
+
+- `class BinUID3D : public IBinUIGfx`（之前只是签名碰巧相同），全部原语 `override`；
+- 节点树遍历改走共享的 `drawNodesBinUI`（`binui_draw_nodes.h`），删掉 `drawNodesD3D`
+  与视频控制条那份拷贝；
+- 窗口外壳改走共享模板 `BinUIAppT<Gfx>`（`binui_app.h`），删掉整块 `BinUIAppD3D`；
+- 光标定位 / 光标闪烁 / 标题栏判定用 `binui_app.h` 的共享实现；
+- 新增 `presentViaGdi()` + 读回贴屏路径，与 GL/Vulkan 同一套触发条件（透明窗 /
+  客户区铺满显示器 / 拖拽 resize 期）；
+- `binui_ui.h` 加 `BINUI_GPU_D3D11` 分支，`drawUi()` 三个后端统一调 `drawNodesBinUI`；
+- `Makefile`：`binui_d3d11.o` + `D3D11_LIBS` + **`make demos-d3d11`** → 8 个
+  `examples/*_d3d11.exe`。
+
+净效果：`binui_d3d11.cpp` 2804 → **1615 行**，`binui_d3d11.h` 192 → 106 行；
+D3D11 白拿 v13~v19 的全部特性（边框 / 渐变 / 文字装饰 / SVG 路径 / 脏矩形 / 帧节流 / IME）。
+
+### 验证：新增 `d3d11_shot` + `make pixels-d3d11`
+
+D3D11 的交换链必须绑窗口，所以 `tools/d3d11_shot.cpp` 开**隐藏窗口**跑 N 帧，再从离屏纹理
+读回像素（新增 `BinUID3D::readbackPixels`）。之前用屏幕截屏（`PrintWindow`）抓到的是纯白图
+—— flip-model 交换链的内容不在 GDI 表面上。有了它，`make pixels-d3d11` 才能自动化跑：
+
+| 用例 | 不同像素 |
+|---|---|
+| `probe` / `radius-matrix` / `texturedemo` | **0** |
+| `svgdemo` / `fontshow` / `features` | 116 (0.022%) / 336 (0.049%) / 2492 (0.297%) |
+| `circle`（最大） | 1200 (2.041%) |
+| 脏矩形重绘 vs 全量重绘（阈值 0） | **0** |
+| 强制读回 + GDI 贴屏 vs 交换链（阈值 0） | **0** |
+
+差异根因是两处"还没换成共享实现"：D3D11 自己的**圆角模板**（`max(8,4r)` + 自己的覆盖率算法
+vs `binui_paint.h` 的 `RoundTemplateSize`）和**文本光栅化**（`binui_font_renderer` 自带图集）。
+所以 `make pixels-d3d11` 的判据先放宽到 3%（`PIXEL_D3D_TOL`），P7b 之后收紧到 1.5% → 0。
+
+### 验收
+
+0 warning（三个后端 + 8 个 d3d11 demo + d3d11_shot）；四套测试全绿；`make pixels` 10/10 零差异；
+`make pixels-vk` 14/14；`make pixels-d3d11` 14 用例 + 两条阈值 0 全过；`make demos-d3d11` 8 个；
+`make demos-vk` 8 个；`check_examples` 11/11。
+
+
 ## [0.10.2] - 2026-11-11
 
 性能修复：**热路径里的 `std::getenv`**。无 API / 二进制布局改动（`BINUI_VERSION` 仍 19）。
