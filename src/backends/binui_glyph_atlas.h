@@ -182,6 +182,28 @@ struct GlyphQuad {
 };
 
 // ============================================================
+// 整形结果缓存（v20）：同一串文本每帧都要打，而"码点 → 面 → 图集格子"这条链
+// 每次都要 UTF-8 解码 + 逐簇 faceIdxForCp + 两级哈希查表。实测 1.35 µs/标签
+// （features 一帧 43 个标签 = 0.058 ms，占遍历 2/3），静态页面上这些结果其实**永远不变**。
+// 所以按 (文本, 字号, 字重, 斜体, 字体面) 缓存一份"相对原点 + 相对基线"的四边形表，
+// 命中时只做 emit。图集代数（纹理新建/销毁、换字体）一变整表作废。
+// ============================================================
+struct GlyphRunQuad {
+    void* tex = nullptr;
+    float x = 0, y = 0, w = 0, h = 0;
+    float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+    bool white = false;   // 彩色字形用白顶点（不染色）
+};
+struct GlyphRun {
+    uint64_t gen = 0;                 // 建立时的图集代数
+    float advance = 0;                // 总前进宽（textWidth 直接复用）
+    float lineH = 0;                  // 行高（centerV 用）
+    float ascent = 0;                 // 基线偏移
+    std::vector<GlyphRunQuad> quads;  // 相对 (0, baseline) 的位置
+    uint64_t lastUse = 0;             // LRU 时钟
+};
+
+// ============================================================
 // GlyphAtlas：排版 + 光栅化 + 图集代管理
 // ============================================================
 class GlyphAtlas {
@@ -196,6 +218,54 @@ public:
     void setHost(IGlyphTexHost* host) { host_ = host; }
     bool hasHost() const { return host_ != nullptr; }
 
+    // 纹理/字体变动即让整形缓存失效（见 GlyphRun 注释）
+    void bumpAtlasGen() {
+        ++atlasGen_;
+        runs_.clear();
+    }
+
+    static constexpr size_t kMaxRuns = 1024;   // 整形缓存条目上限（LRU）
+
+    // 缓存 key：文本 + 字号 + 字重 + 斜体 + 字体面（FNV-1a）
+    uint64_t RunKey(const std::string& s, float size, int weight, bool italic) const {
+        uint64_t h = 1469598103934665603ull;
+        auto mix = [&h](uint64_t v) {
+            for (int i = 0; i < 8; i++) {
+                h ^= (v >> (i * 8)) & 0xFF;
+                h *= 1099511628211ull;
+            }
+        };
+        for (unsigned char c : s) {
+            h ^= c;
+            h *= 1099511628211ull;
+        }
+        uint32_t su = 0;
+        std::memcpy(&su, &size, sizeof(su));
+        mix(su);
+        mix(static_cast<uint64_t>(weight));
+        mix(italic ? 1u : 0u);
+        for (unsigned char c : asciiFont_) {
+            h ^= c;
+            h *= 1099511628211ull;
+        }
+        return h;
+    }
+
+    // 重放整形结果：颜色按调用方给的（灰字形染色，彩色字形白顶点）
+    void EmitRun(const GlyphRun& run, float x, float baseline, uint32_t color,
+                 const EmitFn& emit) {
+        for (const GlyphRunQuad& q : run.quads) {
+            GlyphQuad g;
+            g.tex = q.tex;
+            g.x = x + q.x;
+            g.y = baseline + q.y;
+            g.w = q.w; g.h = q.h;
+            g.u0 = q.u0; g.v0 = q.v0; g.u1 = q.u1; g.v1 = q.v1;
+            g.color = q.white ? 0xFFFFFFFFu : color;
+            emit(g);
+        }
+    }
+
     // 初始化 FreeType/HarfBuzz + 注册系统字体；false = 字体服务不可用（文本降级为空白）
     bool initFonts() {
         fontReady_ = font_.init();
@@ -205,13 +275,23 @@ public:
     bool fontReady() const { return fontReady_; }
 
     void setFontName(const char* name) {
-        if (name && *name) asciiFont_ = name;
+        if (name && *name && asciiFont_ != name) {
+            asciiFont_ = name;
+            bumpAtlasGen();   // 换字体面 → 整形缓存里的 tex/UV 全部作废
+        }
     }
     const std::string& fontName() const { return asciiFont_; }
 
-    // 文本宽度（像素，逐字形 advance 之和；与 drawText 用的是同一套度量）
+    // 文本宽度（像素，逐字形 advance 之和；与 drawText 用的是同一套度量）。
+    // 命中整形缓存时直接返回缓存里的总宽，不走解码 + 逐簇度量。
     float textWidth(float size, int weight, const std::string& utf8, bool italic) {
-        if (!host_) return 0;
+        if (!host_ || utf8.empty()) return 0;
+        const uint64_t key = RunKey(utf8, size, weight, italic);
+        auto it = runs_.find(key);
+        if (it != runs_.end() && it->second.gen == atlasGen_) {
+            it->second.lastUse = ++runClock_;
+            return it->second.advance;
+        }
         const std::vector<uint32_t> cps = Utf8ToCodepoints(utf8);
         float w = 0;
         size_t i = 0;
@@ -237,6 +317,22 @@ public:
     void drawText(float x, float y, float size, int weight, const std::string& utf8,
                   uint32_t color, bool centerH, bool centerV, bool italic, const EmitFn& emit) {
         if (!host_ || utf8.empty()) return;
+        uint32_t premult = color;
+        PremultColor(premult);
+
+        // ---- 整形缓存：命中时只剩"按四边形表发射"这一件事 ----
+        const uint64_t key = RunKey(utf8, size, weight, italic);
+        GlyphRun* run = nullptr;
+        auto it = runs_.find(key);
+        if (it != runs_.end() && it->second.gen == atlasGen_) {
+            it->second.lastUse = ++runClock_;
+            run = &it->second;
+            if (centerH) x -= run->advance / 2;
+            if (centerV) y -= run->lineH / 2.0f;
+            EmitRun(*run, std::floor(x + 0.5f), std::floor(y + 0.5f), premult, emit);
+            return;
+        }
+
         if (centerH) x -= textWidth(size, weight, utf8, italic) / 2;
 
         int ascent = 0, lineH = 0;
@@ -248,7 +344,27 @@ public:
         x = std::floor(x + 0.5f);
 
         const std::vector<uint32_t> cps = Utf8ToCodepoints(utf8);
-        PremultColor(color);
+        color = premult;
+
+        // 边画边记一份 run（相对 x=0、基线 = 0），下次直接重放
+        GlyphRun built;
+        built.gen = atlasGen_;
+        built.lineH = static_cast<float>(lineH);
+        built.ascent = static_cast<float>(ascent);
+        const float originX = x;
+        const float originBaseline = baseline;
+        auto record = [&](void* tex, float qx, float qy, float qw, float qh,
+                          float gx, float gy, float gw, float gh, float t, bool white) {
+            GlyphRunQuad q;
+            q.tex = tex;
+            q.x = qx - originX;
+            q.y = qy - originBaseline;
+            q.w = qw; q.h = qh;
+            q.u0 = gx / t; q.v0 = gy / t;
+            q.u1 = (gx + gw) / t; q.v1 = (gy + gh) / t;
+            q.white = white;
+            built.quads.push_back(q);
+        };
 
         float cx = x;
         auto drawGray = [&](uint32_t cp) {
@@ -261,6 +377,7 @@ public:
             const float gx = (g->cell % a->cols) * cell;
             const float gy = (g->cell / a->cols) * cell;
             const float top = baseline - (a->ascent + 1);
+            record(a->tex, cx, top, cell, cell, gx, gy, cell, cell, t, false);
             emitGlyph(emit, a->tex, cx, top, cell, cell, gx, gy, cell, t, color);
             cx += g->advW;
         };
@@ -280,6 +397,9 @@ public:
                     const float gx = (g->cell % ca->cols) * ccw;
                     const float gy = (g->cell / ca->cols) * ca->cellH;
                     const float top = baseline - g->baseline;
+                    record(ca->tex, cx, top, static_cast<float>(g->w),
+                           static_cast<float>(g->h), gx, gy, static_cast<float>(g->w),
+                           static_cast<float>(g->h), t, true);
                     emitGlyph(emit, ca->tex, cx, top, static_cast<float>(g->w),
                               static_cast<float>(g->h), gx, gy, static_cast<float>(g->w),
                               t, 0xFFFFFFFF);   // 彩色字形：白色顶点，不染色
@@ -291,6 +411,17 @@ public:
             for (size_t k = 0; k < n; k++) drawGray(cps[i + k]);
             i += n;
         }
+
+        built.advance = cx - originX;
+        built.lastUse = ++runClock_;
+        // 缓存上限（主题/字号一多会一路涨）：超了按 LRU 淘汰
+        if (runs_.size() >= kMaxRuns && !built.quads.empty()) {
+            auto victim = runs_.begin();
+            for (auto k = runs_.begin(); k != runs_.end(); ++k)
+                if (k->second.lastUse < victim->second.lastUse) victim = k;
+            runs_.erase(victim);
+        }
+        if (!built.quads.empty()) runs_.emplace(key, std::move(built));
     }
 
     // 自动换行绘制。对齐：0=左 1=居中 2=右（相对 [x, x+maxW]）
@@ -334,18 +465,17 @@ public:
 
     // 释放所有图集纹理与缓存（shutdown / 上下文重建时调用）
     void clear() {
+        atlasGen_++;
+        runs_.clear();
         for (auto& kv : atlases_) {
             for (Atlas* a : kv.second) {
-                if (a) {
-                    if (a->tex && host_) host_->destroyTex(a->tex);
-                    delete a;
-                }
+                if (a->tex && host_) host_->destroyTex(a->tex);
+                delete a;
             }
         }
         atlases_.clear();
         for (auto& kv : colorAtlases_) {
             ColorAtlas* a = kv.second;
-            if (!a) continue;
             if (a->tex && host_) host_->destroyTex(a->tex);
             delete a;
         }
@@ -701,6 +831,11 @@ private:
     static constexpr const char* kEmojiFont = "Segoe UI Emoji";
 
     IGlyphTexHost* host_ = nullptr;
+    // 整形结果缓存（键 = 文本+字号+字重+斜体+字体面）
+    std::unordered_map<uint64_t, GlyphRun> runs_;
+    uint64_t runClock_ = 0;
+    // 图集代数：任何纹理新建/销毁都 ++，缓存条目按它判断是否过期
+    uint64_t atlasGen_ = 1;
     binui_font::FontEngine font_;
     bool fontReady_ = false;
     std::string asciiFont_ = "Segoe UI";

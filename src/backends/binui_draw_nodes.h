@@ -119,11 +119,66 @@ static void DrawVideoControlsTmpl(Gfx& gfx, const BinUIRenderer& renderer,
                  12.0f, 400, label, timeC);
 }
 
+// ============================================================
+// 遍历分段计时（BINUI_DRAW_PROF=1 → 每 60 帧往 stderr 打一行）
+// ------------------------------------------------------------
+// 只统计"遍历本身"的 CPU 时间（各节点分支 + 前置索引构建），不含后端 present。
+// 用它回答"CPU 侧还剩多少、在哪个节点类型上"，而不是靠猜。
+// 关掉时是一根可预测的空分支（static const bool，只查一次环境变量）。
+// ============================================================
+struct DrawProfBucket {
+    double us = 0;
+    int n = 0;
+};
+struct DrawProf {
+    DrawProfBucket index;                    // byId / scrolls / gutter 前置
+    DrawProfBucket byType[32];               // 节点分支（按 BinUINodeType）
+    DrawProfBucket boundsCull;               // 视口/脏矩形剔除掉、没进 switch 的
+    int nodes = 0;
+    int frames = 0;
+    double frameUs = 0;
+};
+
+inline double DrawProfNowUs() {
+    using namespace std::chrono;
+    return duration<double, std::micro>(steady_clock::now().time_since_epoch()).count();
+}
+
+inline DrawProf& DrawProfState() {
+    static DrawProf p;
+    return p;
+}
+
+inline bool DrawProfEnabled() {
+    static const bool on = std::getenv("BINUI_DRAW_PROF") != nullptr;
+    return on;
+}
+
+inline void DrawProfFlush() {
+    DrawProf& p = DrawProfState();
+    const double n = p.frames > 0 ? static_cast<double>(p.frames) : 1.0;
+    std::fprintf(stderr,
+                 "[draw][prof] %d 帧: 遍历 %.3f ms/帧，节点 %d/帧（索引 %.3f / 剔除 %.3f）\n",
+                 p.frames, p.frameUs / n / 1000.0, static_cast<int>(p.nodes / n),
+                 p.index.us / n / 1000.0, p.boundsCull.us / n / 1000.0);
+    for (int t = 0; t < 32; t++) {
+        if (p.byType[t].n == 0) continue;
+        std::fprintf(stderr, "[draw][prof]   type %2d: %.3f ms/帧（%d 个/帧，%d 次）\n", t,
+                     p.byType[t].us / n / 1000.0, static_cast<int>(p.byType[t].n / n),
+                     p.byType[t].n);
+    }
+    std::fflush(stderr);
+    p = DrawProf{};
+}
+
 inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const void* clipRect,
                  const CanvasFn& canvas) {
     const auto& nodes = renderer.getNodes();
     int winW = gfx.width();
     int winH = gfx.height();
+    const bool prof = DrawProfEnabled();
+    DrawProf& pr = DrawProfState();
+    const double tFrame0 = prof ? DrawProfNowUs() : 0.0;
 
     // ★ 环境变量**只查一次**：下面两处调试打印原本在每个节点身上调 std::getenv，
     // 而 UCRT 的 getenv 每次都要遍历环境表（≈0.5 µs/次）。一个几千节点的页面光这一项
@@ -139,6 +194,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         }
     }
 
+    const double tIndex0 = prof ? DrawProfNowUs() : 0.0;
     std::unordered_map<uint16_t, size_t> byId;
     byId.reserve(nodes.size());
     for (size_t i = 0; i < nodes.size(); i++) byId[nodes[i].id] = i;
@@ -203,6 +259,10 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             break;
         }
     }
+    if (prof) {
+        pr.index.us += DrawProfNowUs() - tIndex0;
+        pr.frames++;
+    }
 
     // 绘制顺序：按 z-index 分层（v10）由渲染器统一给出，同层流式先于 absolute、DOM 顺序
     // 裁剪链缓存：每个节点复用，避免逐节点分配
@@ -213,6 +273,20 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         const auto& node = nodes[i];
         if (!(node.flags & BINUI_VISIBLE) || hidden[i]) continue;
         if (node.type == BINUI_ROOT) continue;
+
+        // 分段计时的 RAII：节点里有 continue，靠析构统一归账
+        struct ProfScope {
+            DrawProf* p;
+            int type;
+            double t0;
+            ProfScope(DrawProf* pp, int t) : p(pp), type(t & 31), t0(pp ? DrawProfNowUs() : 0) {}
+            ~ProfScope() {
+                if (!p) return;
+                p->byType[type].us += DrawProfNowUs() - t0;
+                p->byType[type].n++;
+                p->nodes++;
+            }
+        } profScope(prof ? &pr : nullptr, static_cast<int>(node.type));
 
         int x = static_cast<int>(node.x) - static_cast<int>(offX[i]);
         int y = static_cast<int>(node.y) - static_cast<int>(offY[i]);
@@ -752,6 +826,11 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         }
     }
     gfx.popClipTo(sbDepth);
+
+    if (prof) {
+        pr.frameUs += DrawProfNowUs() - tFrame0;
+        if (pr.frames >= 60) DrawProfFlush();
+    }
 }
 
 } // namespace binui

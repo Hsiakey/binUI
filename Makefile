@@ -400,27 +400,33 @@ $(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -o $@ $< \
 	    $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
 
-$(BIN_DIR)/vk_shot$(EXT): tools/vk_shot.cpp $(BUILD_DIR)/binui_vk.o $(LIB_A)
+# ★ 工具的 .o 必须**单独成规则**：以前把编译写进 exe 的 recipe，于是 -MMD 生成的
+#   build-mingw/vk_window.d 谁都不依赖，结果"改了共享头（binui_draw_nodes.h 等）但工具
+#   不重编"——直接链了旧 .o，验出来的行为是旧的（本轮就在 BINUI_DRAW_PROF 上踩到）。
+$(BUILD_DIR)/vk_shot.o: tools/vk_shot.cpp
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
+$(BIN_DIR)/vk_shot$(EXT): $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c tools/vk_shot.cpp -o $(BUILD_DIR)/vk_shot.o
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
 		-luser32 -lgdi32 -lgdiplus -lole32 \
 		-Lthird_party/freetype/build -lfreetype \
 		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
 # 真实窗口 + 交换链的验收工具（P2b）：跑 N 帧，把**交换链图像**读回写 PNG
-$(BIN_DIR)/vk_window$(EXT): tools/vk_window.cpp $(BUILD_DIR)/binui_vk.o $(LIB_A)
+$(BUILD_DIR)/vk_window.o: tools/vk_window.cpp
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
+$(BIN_DIR)/vk_window$(EXT): $(BUILD_DIR)/vk_window.o $(BUILD_DIR)/binui_vk.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c tools/vk_window.cpp -o $(BUILD_DIR)/vk_window.o
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_window.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
 		-luser32 -lgdi32 -lgdiplus -lole32 \
 		-Lthird_party/freetype/build -lfreetype \
 		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
 # 鲁棒性压测工具（P4）：resize 抖动 / 最小化 / 透明切换 / GDI 切换 / init-shutdown 循环 / 双实例
-$(BIN_DIR)/vk_stress$(EXT): tools/vk_stress.cpp $(BUILD_DIR)/binui_vk.o $(LIB_A)
+$(BUILD_DIR)/vk_stress.o: tools/vk_stress.cpp
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
+$(BIN_DIR)/vk_stress$(EXT): $(BUILD_DIR)/vk_stress.o $(BUILD_DIR)/binui_vk.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c tools/vk_stress.cpp -o $(BUILD_DIR)/vk_stress.o
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_stress.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
 		-luser32 -lgdi32 -lgdiplus -lole32 -lpsapi \
 		-Lthird_party/freetype/build -lfreetype \
@@ -428,9 +434,10 @@ $(BIN_DIR)/vk_stress$(EXT): tools/vk_stress.cpp $(BUILD_DIR)/binui_vk.o $(LIB_A)
 
 # D3D11 出图工具（P7）：隐藏窗口跑 N 帧 + 从离屏纹理读回 → PNG。
 # 不走屏幕截屏，所以窗口被遮挡也能抓到真实像素（flip-model 交换链的 PrintWindow 是白屏）。
-$(BIN_DIR)/d3d11_shot$(EXT): tools/d3d11_shot.cpp $(BUILD_DIR)/binui_d3d11.o $(LIB_A)
+$(BUILD_DIR)/d3d11_shot.o: tools/d3d11_shot.cpp
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
+$(BIN_DIR)/d3d11_shot$(EXT): $(BUILD_DIR)/d3d11_shot.o $(BUILD_DIR)/binui_d3d11.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c tools/d3d11_shot.cpp -o $(BUILD_DIR)/d3d11_shot.o
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/d3d11_shot.o $(BUILD_DIR)/binui_d3d11.o $(LIB_A) \
 		-luser32 -lgdi32 -lgdiplus -lole32 $(D3D11_LIBS) \
 		-Lthird_party/freetype/build -lfreetype \
