@@ -5,6 +5,39 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.11.2] - 2026-11-11
+
+D3D11 最后一块重复实现并入共享代码：**文本/图片改用 `binui_glyph_atlas.h` /
+`binui_win_image.h`**。无 API / 布局改动，无像素变化。
+
+### 重构 — 三端同一份文本实现
+
+- 实现 `IGlyphTexHost`（`createTex` / `updateTex` / `destroyTex`）：句柄用 SRV 指针，纹理通过
+  `glyphTexOf` 反查；新建纹理必须给零缓冲（图集里的空格子会被当真字形画）。
+- `drawText` / `drawTextWrapped` / `textWidth` / `fontMetrics` 变成 `GlyphAtlas` 的一行调用；
+  emoji（COLR/CPAL 簇合成）、逐字形回退、hinting/gamma/像素对齐这些细节从后端消失。
+- 删掉 `Atlas` / `ColorAtlas` / `Glyph` / `ColorGlyph` / `IsEmojiCp` / `EmojiClusterLen` /
+  `EmojiClusterKey` / `getAtlas` / `rasterGlyph` / `glyphFor` / `getColorAtlas` /
+  `rasterColorCluster` / `colorGlyphFor` / `faceIdxForCp` / `emojiFaceIdx`，以及本地
+  `DecodeImagePixels` 与 `gWrappedLineStep`。
+- 图片解码改调 `binui::DecodeImagePixels`（与 GL / Vulkan 同一份）。
+
+**尺寸**：`binui_d3d11.cpp` 2804（0.10.x）→ 1693（0.11.0）→ **1216 行**，与 GL 后端（1186 行）
+同量级。三个后端现在是同一个形状：薄后端 + 共享遍历 / 图集 / 图片解码 / 窗口外壳。
+
+### 像素
+
+`make pixels-d3d11` 的 14 个用例数字与 0.11.1 **完全一致**（`probe` / `radius-matrix` /
+`texturedemo` / `display-none2` / `svggrad` / `svgfinish` 全 0；`features` 132、`fontshow` 8、
+`svgdemo` 104、`circle` 1200、`svgaa` 272、`svgstroke` 247）—— 说明两套图集光栅化出的位图
+本来就相同，这次改的是结构不是像素。
+
+### 验收
+
+0 warning；四套测试全绿；`make pixels` 10/10 零差异；`make pixels-vk` 14/14；
+`make pixels-d3d11` 全过（含两条阈值 0）；`demos-d3d11` / `demos-vk` 各 8 个；`check_examples` 11/11。
+
+
 ## [0.11.1] - 2026-11-11
 
 D3D11 像素对齐补丁：**圆角模板换成共享实现** + **离屏改 4× MSAA**。无 API / 布局改动。
