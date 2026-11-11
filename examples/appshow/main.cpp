@@ -32,10 +32,8 @@ namespace {
 constexpr int kPages = 4;
 constexpr int kRows = 6;
 constexpr int kSwitch = 4;
-constexpr double kSlide = 26.0;      // 页面上下切入的位移（像素）
-constexpr double kPageOut = 0.16;    // 旧页退场
-constexpr double kPageIn = 0.22;     // 新页进场
-constexpr double kPageOverlap = 0.06;  // 新页比旧页晚多少开始
+constexpr double kPageH = 676.0;     // 内容视口高度 = 一"格"页面的高度
+constexpr double kPush = 0.28;       // 整块推走/顶进来的时长（两页同时，硬连在一起）
 
 const char* TypeName(uint8_t t) {
     switch (t) {
@@ -68,6 +66,7 @@ struct Fade {
     float from = 1.0f, to = 1.0f;
     double start = 0.0, dur = 0.2;
     bool eased = true;
+    bool easeInOut = false;
     bool hold = false;
     std::function<void()> onDone;
     bool done = false;
@@ -139,7 +138,7 @@ struct Shell {
 
     void fade(std::vector<uint16_t> ids, float from, float to, double delay, double dur,
               std::function<void()> done = nullptr, uint16_t prop = ANIM_OPACITY,
-              bool hold = false) {
+              bool hold = false, bool inOut = false) {
         Fade f;
         f.ids = std::move(ids);
         f.prop = prop;
@@ -148,6 +147,7 @@ struct Shell {
         f.start = now + delay;
         f.dur = dur;
         f.eased = true;
+        f.easeInOut = inOut;
         f.hold = hold;
         f.onDone = std::move(done);
         if (delay <= 0.0) setValue(f.ids, f.prop, from);   // 起点立刻到位
@@ -162,7 +162,9 @@ struct Shell {
                 continue;
             }
             const double k = f.dur <= 0.0 ? 1.0 : std::min(1.0, (now - f.start) / f.dur);
-            const float e = f.eased ? EaseOut((float)k) : (float)k;
+            float e = f.eased ? EaseOut((float)k) : (float)k;
+            if (f.easeInOut)
+                e = (float)k * (float)k * (3.0f - 2.0f * (float)k);   // smoothstep
             setValue(f.ids, f.prop, f.from + (f.to - f.from) * e);
             touchAll(f.ids);
             if (k >= 1.0) {
@@ -199,14 +201,17 @@ struct Shell {
         }
     }
 
-    // ---- 页面编排：旧页向上滑出 + 淡出 → 新页（延 60ms）自下向上滑入 + 淡入 ----
+    // ---- 页面编排：整块推（新页在后面顶上来 / 旧页被推走），方向跟着导航顺序 ----
+    // "推上去"：从上层页面切到下层（next > prev），旧页往上走、新页从下面顶进来。
+    // "顶下来"：反过来。两页同一条时间轴、同样时长 —— 它们是一节胶片，不能各走各的。
     void goPage(int next) {
         if (next < 0 || next >= kPages || next == curPage) return;
         if (busy && now < busyUntil) return;
         const int prev = curPage;
+        const int dir = (next > prev) ? 1 : -1;   // +1 推上去，-1 顶下来
         curPage = next;
         busy = true;
-        busyUntil = now + kPageOverlap + kPageIn + 0.05;
+        busyUntil = now + kPush + 0.06;
 
         for (int i = 0; i < kPages; i++) {
             if (indIds[i]) {
@@ -219,29 +224,29 @@ struct Shell {
             }
         }
 
-        // 新页先摆到"下方 26px + 全透明"，再等 60ms 往上滑进来
-        setValue(pageSub[next], ANIM_OPACITY, 0.0f);
-        setValue(pageSub[next], ANIM_TRANSLATE_Y, (float)kSlide);
+        // 新页先摆到视口外（dir*H），旧页在 0：两页正好首尾相接
+        setValue(pageSub[next], ANIM_TRANSLATE_Y, (float)(dir * kPageH));
+        setValue(pageSub[next], ANIM_OPACITY, 1.0f);
         r.setVisible(pageIds[next], true);
         touchAll(pageSub[next]);
 
-        // 旧页：向上滑出 22px，同时淡出；滑完才隐藏
-        fade(pageSub[prev], 1.0f, 0.0f, 0.0, kPageOut, [this, prev]() {
+        // 同一条时长、同一条缓动：旧页 0 → -dir*H，新页 dir*H → 0
+        fade(pageSub[prev], 0.0f, (float)(-dir * kPageH), 0.0, kPush, [this, prev]() {
             r.setVisible(pageIds[prev], false);
+            setValue(pageSub[prev], ANIM_TRANSLATE_Y, 0.0f);   // 归位，下次直接可用
             touchAll(pageSub[prev]);
-        }, ANIM_OPACITY);
-        fade(pageSub[prev], 0.0f, (float)-22.0, 0.0, kPageOut, nullptr, ANIM_TRANSLATE_Y);
+        }, ANIM_TRANSLATE_Y, /*hold=*/false, /*inOut=*/true);
+        fade(pageSub[next], (float)(dir * kPageH), 0.0f, 0.0, kPush, nullptr,
+             ANIM_TRANSLATE_Y, false, true);
 
-        // 新页：从 +26 → 0，同时淡入
-        fade(pageSub[next], 0.0f, 1.0f, kPageOverlap, kPageIn, nullptr, ANIM_OPACITY);
-        fade(pageSub[next], (float)kSlide, 0.0f, kPageOverlap, kPageIn, nullptr, ANIM_TRANSLATE_Y);
-        if (next == 1) replayRows(kPageOverlap + 0.10);   // 数据页：行再逐行进场
+        // 数据页的行交错放在推完之后，否则会跟整页位移打架
+        if (next == 1) replayRows(kPush + 0.04);
 
         setStatus("页 " + std::to_string(next + 1) + "/" + std::to_string(kPages) +
-                  " · 旧页上滑淡出 160ms → 新页延 60ms 上滑淡入 220ms" +
-                  (next == 1 ? " · 6 行按 45ms 交错" : ""));
+                  (dir > 0 ? " · 推上去：旧页上移 676px，新页从下方顶上来 280ms"
+                           : " · 顶下来：旧页下移 676px，新页从上方顶进来 280ms") +
+                  (next == 1 ? "（随后 6 行按 45ms 交错）" : ""));
     }
-
     void openDialog(const std::string& title, const std::string& body, bool confirm) {
         if (modalOpen) return;
         modalOpen = true;
@@ -595,12 +600,18 @@ int main(int argc, char* argv[]) {
     const bool autoDemo = std::getenv("BINUI_APPSHOW_AUTO") != nullptr;
     double demoT = 0.0;
     int demoStep = 0;
+    const char* pendingReport = nullptr;
     auto demoReport = [&](const char* tag) {
-        std::printf("[demo] %-9s t=%.2f p0=%.2f p1=%.2f p2=%.2f dy1=%+.1f veil=%.2f rows=",
-                    tag, demoT, (double)renderer.drawOpacity(sh.pageIds[0]),
-                    (double)renderer.drawOpacity(sh.pageIds[1]),
-                    (double)renderer.drawOpacity(sh.pageIds[2]),
+        std::printf("[demo] %-10s t=%.2f dy=[%+.0f %+.0f %+.0f %+.0f] vis=%d%d%d%d veil=%.2f rows=",
+                    tag, demoT,
+                    (double)renderer.drawOffsetY(sh.pageIds[0]),
                     (double)renderer.drawOffsetY(sh.pageIds[1]),
+                    (double)renderer.drawOffsetY(sh.pageIds[2]),
+                    (double)renderer.drawOffsetY(sh.pageIds[3]),
+                    (int)renderer.isNodeVisible(sh.pageIds[0]),
+                    (int)renderer.isNodeVisible(sh.pageIds[1]),
+                    (int)renderer.isNodeVisible(sh.pageIds[2]),
+                    (int)renderer.isNodeVisible(sh.pageIds[3]),
                     (double)renderer.drawOpacity(idVeil));
         for (int i = 0; i < kRows; i++) std::printf("%.2f ", (double)renderer.drawOpacity(sh.rowIds[i]));
         std::printf("\n");
@@ -621,8 +632,9 @@ int main(int argc, char* argv[]) {
             // kind 0 = 点坐标；1 = 只报告
             static const Step steps[] = {
                 {0.30, 0,   50.0f,  183.0f, "nav-1"},      // 侧栏第 2 项（点在文字上 → 冒泡到 nav-1）
-                {0.62, 1,    0.0f,    0.0f, "slide-mid"},
-                {1.10, 0,   50.0f,  271.0f, "nav-3"},      // 第 4 项
+                {0.44, 1,    0.0f,    0.0f, "push-40%"},
+                {0.62, 1,    0.0f,    0.0f, "push-end"},
+                {1.10, 0,   50.0f,  271.0f, "nav-3"},      // 第 4 项（推上去）
                 {1.60, 1,    0.0f,    0.0f, "slide-end"},
                 {1.90, 0,  305.0f,  429.0f, "btn-danger"}, // 第 4 页的"清空全部数据"
                 {2.30, 1,    0.0f,    0.0f, "dlg-in"},
@@ -635,16 +647,19 @@ int main(int argc, char* argv[]) {
             if (demoStep < n && demoT > steps[demoStep].at) {
                 const Step& s = steps[demoStep];
                 if (s.kind == 0) autoClick(s.x, s.y);
-                demoReport(s.tag);
+                pendingReport = s.tag;
                 demoStep++;
             } else if (demoStep >= n && demoT > steps[n - 1].at + 0.30) {
                 demoStep = n + 1;
                 app.requestExit();
             }
+
         }        // 引擎自己的动画时钟（组件内的 @keyframes）走 stepAnimations；
         // 宿主的编排时钟是上面的 sh.now，两者互不干扰。
         for (uint16_t id : renderer.stepAnimations()) sh.touch(id);
         sh.tickFades();
+        // 报告放在动画步进之后：animResult_ 这时才反映本帧的设值（否则读到上一帧的值）
+        if (pendingReport) { demoReport(pendingReport); pendingReport = nullptr; }
         (void)winW; (void)winH;
     });
 
