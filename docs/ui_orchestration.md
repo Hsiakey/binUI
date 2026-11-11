@@ -191,6 +191,10 @@ BINUI_APPSHOW_AUTO=1 build-mingw/bin/examples/appshow.exe
 
 ![半透明组件重叠](img/appshow-overlap.png)
 
+真实窗口里抓的一张（同一页，验证嵌套裁剪容器在滚动页带里没有被裁掉）：
+
+![真实窗口](img/appshow-overlap-live.png)
+
 点「叠在一起」之后（真实窗口截图，20 块叠在池心，交叠区就是 alpha 合成的结果）：
 
 ![叠在一起](img/appshow-overlap-clump.png)
