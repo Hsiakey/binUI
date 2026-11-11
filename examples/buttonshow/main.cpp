@@ -100,7 +100,7 @@ int main(int argc, char* argv[]) {
         std::printf("[buttonshow] click: %s\n", label->c_str());
     });
 
-    app.setDrawFn([&](UiBackend& gfx, const void* clip) {
+    app.setDrawFn([&](IBinUIGfx& gfx, const void* clip) {
         drawUi(gfx, renderer, clip, nullptr);
     });
     app.setMoveFn([&](float x, float y) {

@@ -5,6 +5,43 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.11.3] - 2026-11-11
+
+三件"本机条件不具备"的事先留接口，其中两件连**模拟开关**都做了（能模拟就能测）。
+详见 `docs/vulkan_design.md` §7.5。
+
+### 新增 — 跨显示器 DPI 接口 + 模拟开关
+
+- 窗口外壳处理 `WM_DPICHANGED`：按系统建议的矩形摆窗口 → 走与 `WM_SIZE` 相同的
+  "挂起 → 帧内应用"路径 → 记录新 DPI → 回调 `setDpiChangedFn(dpi)`；新增 `dpi()` 读数。
+- `BINUI_FORCE_DPI=120|144|168` 在单显示器机器上模拟换屏后的 DPI（启动打印一行确认）。
+- 库不改进程 DPI 策略（那是应用的 `SetProcessDpiAwarenessContext`），所以"真的拖到另一块
+  屏上"仍需双屏机器验收。
+
+### 新增 — 远程会话（RDP / 虚拟显示器）判定
+
+- `binui::RemoteSession()`：`GetSystemMetrics(SM_REMOTESESSION)`，`BINUI_FORCE_REMOTE=1` 可模拟。
+- 远程会话一律走"读回 + GDI 贴屏"，绕开直翻转（原来只有"客户区铺满显示器"这一个触发条件）。
+  三个后端与外壳共用这一处判定。
+
+实测（`BINUI_FORCE_REMOTE=1`）：Vulkan `vk_window` 600×260 从 `present=交换链` 631.7 fps
+切到 `present=GDI 读回` 184.4 fps，**像素 0 差异（阈值 0）**；D3D11 `d3d11_shot` 同样 0 差异。
+代价是吞吐，换的是"远程环境不停帧"。
+
+### 变更 — 为运行期 `BINUI_GPU` 清掉前置障碍
+
+- `BinUIAppT<Gfx>::DrawFn` 与 `<canvas>` 回调改成吃 `IBinUIGfx&`，8 个示例的 `setDrawFn` /
+  `canvasCb` 一并改成接口类型 —— 调用方不再依赖具体后端类型；`drawUi()` 不再需要把接口
+  往下转型。`binui_ui.h` 留了 `UiBackendName()` 和"接哪里"的注释，还缺的只有
+  `IBinUIApp` 抽象 + 工厂（约半天，纯加法）。
+
+### 验收
+
+0 warning（三个后端 + 全部 demo）；四套测试全绿；`make pixels` 10/10 零差异；
+`make pixels-vk` 14/14；`make pixels-d3d11` 全过；`demos-vk` / `demos-d3d11` 各 8 个；
+`check_examples` 11/11。
+
+
 ## [0.11.2] - 2026-11-11
 
 D3D11 最后一块重复实现并入共享代码：**文本/图片改用 `binui_glyph_atlas.h` /

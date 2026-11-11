@@ -109,7 +109,7 @@ int main(int argc, char* argv[]) {
     };
     reindexNodes();
 
-    app.setDrawFn([&](UiBackend& gfx, const void* clip) {
+    app.setDrawFn([&](IBinUIGfx& gfx, const void* clip) {
         drawUi(gfx, renderer, clip, nullptr);
     });
 

@@ -103,7 +103,7 @@ int main(int argc, char* argv[]) {
         if (renderer.invalidRect(id, bx, by, bw, bh))
             app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
     };
-    app.setDrawFn([&](UiBackend& gfx, const void* clip) {
+    app.setDrawFn([&](IBinUIGfx& gfx, const void* clip) {
         drawUi(gfx, renderer, clip, nullptr);
     });
     app.setMoveFn([&](float x, float y) {

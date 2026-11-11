@@ -1885,9 +1885,9 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     VkApplicationInfo app{};
     app.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
     app.pApplicationName = "binUI";
-    app.applicationVersion = VK_MAKE_VERSION(0, 11, 2);
+    app.applicationVersion = VK_MAKE_VERSION(0, 11, 3);
     app.pEngineName = "binUI";
-    app.engineVersion = VK_MAKE_VERSION(0, 11, 2);
+    app.engineVersion = VK_MAKE_VERSION(0, 11, 3);
     app.apiVersion = VK_API_VERSION_1_0;
     const char* instExt[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     VkInstanceCreateInfo ici{};
@@ -2224,11 +2224,12 @@ void BinUIVK::present() {
 
     // 呈现路线（设计 §5.5）：
     //   A. 交换链可用且不需要绕开直翻转 → resolve → blit 到交换链图像 → vkQueuePresentKHR
-    //   B. 其余情况（透明窗口 / 客户区铺满显示器 / 上层要求拖拽期走 GDI / 无交换链）
-    //      → resolve → 读回 buffer → SetDIBitsToDevice 或 UpdateLayeredWindow
+    //   B. 其余情况（透明窗口 / 客户区铺满显示器 / 远程会话 / 上层要求拖拽期走 GDI /
+    //      无交换链）→ resolve → 读回 buffer → SetDIBitsToDevice 或 UpdateLayeredWindow
     // 两条路线用的是**同一张 resolve 图**，所以窗口模式与离屏模式的像素完全一致。
+    // 远程会话（RDP）走 B 是实测结论：虚拟显示器上 A 会停帧（GL 0.9.1 同样处理）。
     const bool gdiPath = !d.useSwapchain || d.transparent || d.forceGdi ||
-                         (d.windowMode && d.coversMonitor);
+                         (d.windowMode && d.coversMonitor) || RemoteSession();
     d.lastPresentWasGdi = gdiPath;
 
     uint32_t imageIndex = 0;

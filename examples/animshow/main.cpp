@@ -84,7 +84,7 @@ int main(int argc, char* argv[]) {
     };
     int palIdx = 0;
 
-    app.setDrawFn([&](UiBackend& gfx, const void* clip) { drawUi(gfx, renderer, clip); });
+    app.setDrawFn([&](IBinUIGfx& gfx, const void* clip) { drawUi(gfx, renderer, clip); });
     app.setMoveFn([&](float x, float y) {
         int old = renderer.hoveredNode();
         renderer.setHover(x, y);

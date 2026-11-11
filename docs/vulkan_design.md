@@ -880,6 +880,53 @@ D3D11 的交换链必须绑窗口，没有"无窗口离屏"这条腿，所以 `t
 
 ---
 
+## 7.5 预留接口与未来计划（2026-11-11，v0.11.3）
+
+三件"本机条件不具备、但接口先留好"的事。原则：**能模拟的就必须能测**，只写文档的下场是
+下次接手时又得从头查一遍。
+
+### 7.5.1 跨显示器 DPI
+
+- **接口**：窗口外壳处理 `WM_DPICHANGED`（[binui_app.h](../src/backends/binui_app.h)）：
+  按系统建议的矩形摆窗口 → 走与 `WM_SIZE` 相同的"挂起 → 帧内应用"路径（重排 + 后端
+  `resize` + 全量重绘）→ 记下新 DPI → 回调 `setDpiChangedFn(dpi)`。`dpi()` 可读当前值。
+- **模拟**：`BINUI_FORCE_DPI=120|144|168` 覆盖 DPI 取值，单显示器机器上也能把这条路径跑通。
+- **验证**：`BINUI_FORCE_DPI=120` 跑 `svgdemo`，启动即打印
+  `[dpi] BINUI_FORCE_DPI=120（模拟换屏后的 DPI）`，窗口正常出图。
+- **仍缺**：真正的跨屏缩放取决于**应用**是否把进程设成 per-monitor-v2
+  （`SetProcessDpiAwarenessContext`）。库不改进程 DPI 策略（这是越界，见 `openChild` 注释），
+  所以"拖到另一块 DPI 不同的屏上"这一步只能在双屏机器上验收。
+
+### 7.5.2 远程会话（RDP / 虚拟显示器）
+
+- **判定**：`binui::RemoteSession()`（[binui_app.h](../src/backends/binui_app.h)）：
+  `GetSystemMetrics(SM_REMOTESESSION)`，`BINUI_FORCE_REMOTE=1` 可模拟（本机没有 RDP 会话）。
+- **行为**：远程会话一律走"读回 + GDI 贴屏"，绕开直翻转。三个后端与外壳共用这一处判定
+  （外壳置 `fullscreenPresent_`，VK/D3D11 在 `present()` 里也各自兜一层，因为工具不走外壳）。
+- **证据**（本机模拟，本次实测）：
+
+  | 后端 | 常规 | `BINUI_FORCE_REMOTE=1` | 像素 |
+  |---|---|---|---|
+  | Vulkan（`vk_window`，600×260，10 帧） | 631.7 fps，`present=交换链` | 184.4 fps，`present=GDI 读回` | **0 差异（阈值 0）** |
+  | D3D11（`d3d11_shot`，420×260） | 交换链 | 读回贴屏 | **0 差异（阈值 0）** |
+
+  也就是读回的代价是**吞吐**（631.7 → 184.4 fps，全屏拷贝 + `SetDIBitsToDevice`），
+  像素不受影响 —— 这正是"远程环境宁可慢也不能停帧"的取舍。
+
+### 7.5.3 运行期 `BINUI_GPU=vk|gl|d3d11`
+
+- **现状**：编译期选（`-DBINUI_GPU_VK` / `-DBINUI_GPU_D3D11`），一份源码编三个 exe。
+- **已清掉的前置障碍**（这是本轮实际做的事）：
+  1. `BinUIAppT<Gfx>::DrawFn` 与 `<canvas>` 回调都改成吃 `IBinUIGfx&`，8 个示例的
+     `setDrawFn` / `canvasCb` 一并改成接口类型 —— 调用方不再依赖具体后端类型；
+  2. 遍历、字形图集、图片解码、窗口外壳全是共享的（§7.4），后端本身只剩 ~1200 行；
+  3. `binui_ui.h` 里留了 `UiBackendName()` 与"接哪里"的注释。
+- **还缺**：一个 `IBinUIApp`（`run/pump/退出/setXXX`）抽象 + 工厂
+  `CreateUiApp(BackendId)`（按 `getenv("BINUI_GPU")` 返回某个 `BinUIAppT<Gfx>`），
+  并把三个后端的 `.o` 同时链进同一个 exe。评估：约半天，纯加法，不改现有接口。
+
+---
+
 ## 8. 风险与回滚
 
 | 风险 | 触发 | 缓解 | 回滚 |

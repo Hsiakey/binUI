@@ -20,6 +20,7 @@
 #include "binui_compiler.h"
 #include "binui_paths.h"
 #include "binui_renderer.h"
+#include "backends/binui_draw_nodes.h"   // drawNodesBinUI（后端无关遍历）
 #include "backends/binui_gl-gdi.h"
 
 namespace {
@@ -215,8 +216,8 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
     binui::BinUIAppGLGdi& sh = *a->shell;
 
     // ---- 绘制 ----
-    sh.setDrawFn([a](binui::BinUIGLGdi& gfx, const void* clip) {
-        binui::drawNodesGLGdi(gfx, a->renderer, clip, nullptr);
+    sh.setDrawFn([a](binui::IBinUIGfx& gfx, const void* clip) {
+        binui::drawNodesBinUI(gfx, a->renderer, clip, binui::CanvasFn{});
     });
 
     // ---- IME：把组字窗/候选窗摆到光标下方（中文输入时没有这个，它们会飘到屏幕角落） ----
@@ -420,7 +421,7 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
 
 extern "C" {
 
-const char* BINUI_C_CALL binui_version(void) { return "0.11.2"; }
+const char* BINUI_C_CALL binui_version(void) { return "0.11.3"; }
 
 int32_t BINUI_C_CALL binui_abi_version(void) { return BINUI_C_ABI_VERSION; }
 

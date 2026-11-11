@@ -974,7 +974,7 @@ void BinUID3D::present() {
     // 读回呈现的三条触发条件与 GL/Vulkan 后端同一套理由：
     // 透明窗口必须自己合成（交换链拿不到预乘 alpha）；客户区铺满整块显示器时 DWM 会把
     // 呈现提升成直翻转（远程桌面/虚拟显示器上实测画面会停住）；拖拽 resize 期由上层强制。
-    if (impl_->transparent || impl_->forceGdi || impl_->coversMonitor) {
+    if (impl_->transparent || impl_->forceGdi || impl_->coversMonitor || RemoteSession()) {
         impl_->presentReadback();
         return;
     }

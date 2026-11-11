@@ -111,7 +111,7 @@ int main(int argc, char* argv[]) {
     const float vpCy = 56 + 520 * 0.5f + 20;   // 稍微下移，给标题留位置
     float spinX = 0.5f, spinY = 0.6f;
 
-    app.setDrawFn([&](UiBackend& gfx, const void* clip) {
+    app.setDrawFn([&](IBinUIGfx& gfx, const void* clip) {
         drawUi(gfx, renderer, clip, nullptr);   // 先把 UI 画完
         // 再把 3D 线框画在 UI 之上（视口区域内没有别的节点，不会挡住控件）
         const float dist = 4.0f, scale = 300.0f;

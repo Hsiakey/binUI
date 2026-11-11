@@ -94,7 +94,7 @@ int main(int argc, char* argv[]) {
     for (int k = 0; k < kN; k++) bars[k] = 0.2f + 0.6f * (float)k / (float)kN;
 
     // ---- 绘制：节点树 + <canvas> 命令式回调 ----
-    auto canvasCb = [&](UiBackend& gfx, uint16_t id, float x, float y, float w, float h) {
+    auto canvasCb = [&](IBinUIGfx& gfx, uint16_t id, float x, float y, float w, float h) {
         if (id != cvId) return;
         float gap = 4.0f;
         float bw = (w - (kN + 1) * gap) / kN;
@@ -104,7 +104,7 @@ int main(int argc, char* argv[]) {
             gfx.fillRounded(x + gap + k * (bw + gap), y + h - bh, bw, bh, bw / 2, c);
         }
     };
-    app.setDrawFn([&](UiBackend& gfx, const void* clip) {
+    app.setDrawFn([&](IBinUIGfx& gfx, const void* clip) {
         drawUi(gfx, renderer, clip, canvasCb);
     });
 

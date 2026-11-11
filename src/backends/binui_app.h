@@ -33,10 +33,25 @@
 #include <string>
 #include <vector>
 
+#include "binui_gfx.h"   // IBinUIGfx：draw 回调只认接口，不认具体后端
+
 #include "binui_renderer.h"
 #include "platform/binui_win32_foreground.h"   // BinUIForceForeground：把窗口提到前台
 
 namespace binui {
+
+// 是否远程会话（RDP / 虚拟显示器）：这种环境下 swapchain 直翻转会停帧
+// （GL 0.9.1 与 Vulkan 后端都实测过），**三个后端**据此默认走读回 + GDI 贴屏。
+// BINUI_FORCE_REMOTE=1 可在本机模拟（本机没有 RDP 会话，否则这条分支无法验收）。
+// 放在命名空间而不是模板静态里：后端（binui_gl-gdi / binui_vk / binui_d3d11）要调它。
+inline bool RemoteSession() {
+    static const bool remote = [] {
+        const char* e = std::getenv("BINUI_FORCE_REMOTE");
+        if (e && *e && std::strcmp(e, "0") != 0) return true;
+        return GetSystemMetrics(SM_REMOTESESSION) != 0;
+    }();
+    return remote;
+}
 
 // ============================================================
 // 帧耗时统计（BINUI_PERF=1 → 每 60 帧往 stderr 打一行）
@@ -191,12 +206,17 @@ template <class Gfx>
 class BinUIAppT {
 public:
     using UpdateFn  = std::function<void(float dt)>;
-    using DrawFn    = std::function<void(Gfx&, const void* clipRect)>;
+    // 绘制回调只认**接口**（IBinUIGfx）而不是具体后端：这样同一份 draw 代码既能被
+    // GL / Vulkan / D3D11 三个编译期实例复用，将来做运行期后端选择（BINUI_GPU）时
+    // 也不必再改一遍调用方。见 docs/vulkan_design.md §7.5。
+    using DrawFn    = std::function<void(IBinUIGfx&, const void* clipRect)>;
     using MoveFn    = std::function<void(float x, float y)>;
     using PressFn   = std::function<void(float x, float y)>;
     using ReleaseFn = std::function<void(float x, float y)>;
     using LeaveFn   = std::function<void()>;
     using ResizeFn  = std::function<void(int w, int h)>;
+    // DPI 变化（WM_DPICHANGED，或 BINUI_FORCE_DPI 模拟）：参数是新的 DPI（96 = 100%）
+    using DpiFn     = std::function<void(int dpi)>;
     using CharFn    = std::function<void(const std::string& utf8)>;
     using KeyFn     = std::function<void(int vk)>;
     using WheelFn   = std::function<void(float x, float y, float dy)>;
@@ -227,6 +247,10 @@ public:
     void setReleaseFn(ReleaseFn fn) { release_ = std::move(fn); }
     void setLeaveFn(LeaveFn fn)     { leave_ = std::move(fn); }
     void setResizeFn(ResizeFn fn)   { resize_ = std::move(fn); }
+    void setDpiChangedFn(DpiFn fn)  { dpiChanged_ = std::move(fn); }
+    // 当前 DPI（96 = 100%）。BINUI_FORCE_DPI=120|144|168 可在一台单显示器机器上
+    // 模拟换屏后的 DPI，用来验证这条路径（见 dpiOf）。
+    int dpi() const { return dpi_; }
     void setCharFn(CharFn fn)       { char_ = std::move(fn); }
     void setKeyFn(KeyFn fn)         { key_ = std::move(fn); }
     void setWheelFn(WheelFn fn)     { wheel_ = std::move(fn); }
@@ -301,6 +325,10 @@ private:
     void handleKey(int vk);
     void handleFocusLost();
     void handleResize(int w, int h);
+    // 跨显示器 DPI（预留接口）：应用系统建议的窗口矩形 + 记录 DPI + 回调宿主
+    void handleDpiChanged(int newDpi, const void* suggestedRect);
+    // 取当前 DPI（BINUI_FORCE_DPI 可覆盖，用于单显示器模拟换屏）
+    static int dpiOf(HWND hwnd);
     // IME UI 定位：把组字窗/候选框摆到宿主给出的光标处（客户区坐标）。
     // allowContextReset = 组字刚开始时重挂一次 IME 上下文 —— 不重挂的话输入法
     // 会沿用上一次建好的 UI，后续 ImmSetCompositionWindow 返回成功却不生效。
@@ -328,6 +356,8 @@ private:
     ReleaseFn release_;
     LeaveFn leave_;
     ResizeFn resize_;
+    DpiFn dpiChanged_;
+    int dpi_ = 96;
     CharFn char_;
     KeyFn key_;
     WheelFn wheel_;
@@ -824,6 +854,11 @@ inline LRESULT CALLBACK BinUIAppT<Gfx>::wndProc(HWND hwnd, UINT msg, WPARAM wPar
         case WM_SIZE:
             app->handleResize(LOWORD(lParam), HIWORD(lParam));
             return 0;
+        case WM_DPICHANGED:
+            // 跨显示器 DPI（预留接口）：应用系统建议的矩形，再走 resize 路径重排。
+            // 进程不是 per-monitor aware 时这个窗口消息根本不会来，所以变量必须带默认值。
+            app->handleDpiChanged(HIWORD(wParam), reinterpret_cast<const void*>(lParam));
+            return 0;
         case WM_NCLBUTTONDOWN: {
             // 无 WS_THICKFRAME：命中边框热区时自行启动 resize 循环
             // 子窗口没有非客户区，也没有"让系统带着拖动"的语义 —— 一律交给宿主
@@ -1157,6 +1192,12 @@ inline bool BinUIAppT<Gfx>::open() {
     }
     hwnd_ = hwnd;
     childMode_ = false;
+    // 记下建窗时的 DPI（BINUI_FORCE_DPI 可覆盖）。换屏后 WM_DPICHANGED 会更新它，
+    // 并通过 setDpiChangedFn 的回调通知宿主。
+    dpi_ = dpiOf(hwnd);
+    if (std::getenv("BINUI_FORCE_DPI"))
+        std::fprintf(stderr, "[dpi] BINUI_FORCE_DPI=%d（模拟换屏后的 DPI）\n", dpi_);
+    if (RemoteSession()) std::fprintf(stderr, "[dpi] 远程会话：呈现默认走读回 + GDI 贴屏\n");
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 
     // 禁用 Windows 11 DWM 自动圆角：UI 圆角由 border-radius 属性自控（跨平台一致）
@@ -1418,6 +1459,58 @@ inline void BinUIAppT<Gfx>::handleResize(int w, int h) {
     pendingH_ = h;
 }
 
+// 取 DPI：BINUI_FORCE_DPI 优先（单显示器机器上模拟换屏），否则用 GetDpiForWindow
+// （Win10 1607+，不存在时退回 GetDeviceCaps）。返回 96 = 100%。
+template <class Gfx>
+inline int BinUIAppT<Gfx>::dpiOf(HWND hwnd) {
+    static const int forced = [] {
+        const char* e = std::getenv("BINUI_FORCE_DPI");
+        if (!e || !*e) return 0;
+        const int v = std::atoi(e);
+        return (v >= 48 && v <= 960) ? v : 0;
+    }();
+    if (forced > 0) return forced;
+    using GetDpiForWindowFn = UINT(WINAPI*)(HWND);
+    static GetDpiForWindowFn getDpi = [] {
+        HMODULE u = GetModuleHandleW(L"user32.dll");
+        return u ? reinterpret_cast<GetDpiForWindowFn>(
+                       reinterpret_cast<void*>(GetProcAddress(u, "GetDpiForWindow")))
+                 : nullptr;
+    }();
+    if (getDpi && hwnd) {
+        const UINT d = getDpi(hwnd);
+        if (d >= 48) return static_cast<int>(d);
+    }
+    HDC dc = hwnd ? GetDC(hwnd) : GetDC(nullptr);
+    int d = 96;
+    if (dc) {
+        d = static_cast<int>(GetDeviceCaps(dc, LOGPIXELSX));
+        if (hwnd) ReleaseDC(hwnd, dc);
+        else ReleaseDC(nullptr, dc);
+    }
+    return d > 0 ? d : 96;
+}
+
+// WM_DPICHANGED，wParam 低字是新 DPI、lParam 是系统建议的新窗口矩形。
+// 库这一层能做的只有三件（都不碰进程 DPI 策略，见 openChild 的注释）：
+//   1. 按系统建议的矩形摆窗口（不摆的话 Windows 会把窗口按位图拉伸）；
+//   2. 走和 WM_SIZE 相同的"挂起 → 帧内应用"路径（重排 + 后端 resize + 全量重绘）；
+//   3. 记下新 DPI 并回调宿主（应用据此调 setUiScale / 换图标等）。
+// 真正的"跨屏缩放"取决于应用是否把进程设成 per-monitor-v2；本机单显示器时这条
+// 路径只能用 BINUI_FORCE_DPI 模拟（见 dpiOf），所以它现在是**接口 + 模拟**状态，
+// 见 docs/vulkan_design.md §7.5。
+template <class Gfx>
+inline void BinUIAppT<Gfx>::handleDpiChanged(int newDpi, const void* suggestedRect) {
+    if (newDpi > 0) dpi_ = newDpi;
+    const HWND h = static_cast<HWND>(hwnd_);
+    if (h && suggestedRect && !childMode_) {
+        const RECT* rc = static_cast<const RECT*>(suggestedRect);
+        SetWindowPos(h, nullptr, rc->left, rc->top, rc->right - rc->left,
+                     rc->bottom - rc->top, SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+    if (dpiChanged_) dpiChanged_(dpi_);
+}
+
 // 客户区是否盖满整块显示器（borderless 全屏）。
 // 这种状态下 NVIDIA 的 SwapBuffers 会被 DWM 提升成直翻转，实测在远程桌面/虚拟显示器上
 // 画面会**停住不动**（应用仍在 100fps 绘制，屏幕却是旧帧），切回普通尺寸就恢复。
@@ -1446,7 +1539,11 @@ inline void BinUIAppT<Gfx>::applyPendingResize() {
     height_ = h;
     if (resize_) resize_(w, h);
     gfx_.resize(w, h);
+    // 客户区铺满显示器 → 绕开直翻转（DWM 会把呈现提升成直翻转，远程/虚拟显示器上会停帧）
     fullscreenPresent_ = clientCoversMonitor();
+    // 远程会话（RDP）本身也走读回贴屏：这条路径在虚拟显示器上是实测唯一稳定的。
+    // 本机没有 RDP 会话时用 BINUI_FORCE_REMOTE=1 模拟（见 RemoteSession）。
+    if (RemoteSession()) fullscreenPresent_ = true;
     invalidateAll();
 }
 

@@ -143,7 +143,7 @@ int main(int argc, char* argv[]) {
         std::printf("[fontshow] char: %s  U+%04X\n", utf8.c_str(), FirstCodePoint(utf8));
     });
 
-    app.setDrawFn([&](UiBackend& gfx, const void* clip) {
+    app.setDrawFn([&](IBinUIGfx& gfx, const void* clip) {
         drawUi(gfx, renderer, clip, nullptr);
     });
     app.setMoveFn([&](float x, float y) {
