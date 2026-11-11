@@ -74,6 +74,9 @@ struct FramePerf {
     double lastFrameMs = 0;
     double maxInterval = 0;
     long long missed = 0;
+    // 帧间隔直方图（1ms 一档，0..19，20+ 归末档）：平均值看不出"两张快、一张慢"的
+    // 拍子，直方图一眼就能看出来。缩放类动画对这种拍子最敏感（形状每帧都在变）。
+    long long hist[21] = {};
     double winStart = 0;               // 本统计窗口的起始时刻（算 fps）
     int    frames  = 0;
     long long drawn = 0;               // 累计真正绘制的帧数（不随窗口重置）
@@ -115,6 +118,17 @@ inline void PerfFlush() {
     p.maxTotal = p.maxPresent = p.maxResize = 0;
     p.maxInterval = 0;
     p.missed = 0;
+    {   // 直方图：一行紧凑打印，0ms..19ms、20ms+
+        char line[512];
+        int o = 0;
+        for (int i = 0; i < 21 && o < 480; i++) {
+            if (p.hist[i] == 0) continue;
+            o += std::snprintf(line + o, sizeof(line) - static_cast<size_t>(o), "%s%dms:%lld",
+                               o ? " " : "", i, p.hist[i]);
+            p.hist[i] = 0;
+        }
+        std::fprintf(stderr, "[perf] 间隔直方图 %s\n", o ? line : "(无)");
+    }
     p.sumRead = p.sumBlit = p.sumPrep = p.sumDib = p.sumUpdate = p.sumCtx = 0;
     p.frames = 0;
     p.winStart = NowMs();
@@ -1454,11 +1468,12 @@ inline int BinUIAppT<Gfx>::pump(int timeoutMs) {
         const auto now = std::chrono::steady_clock::now();
         waitForFrame(nextFrameTime_ > now ? nextFrameTime_ : now);
     } else if (timeoutMs > 0) {
-        // 完全空闲：睡到有输入或超时。这里**故意不用**高精度定时器 —— 空闲时"多久醒"
-        // 无所谓（OS 会合并到 15.6ms 计时器节拍），改用高精度反而把 64 次/秒的唤醒
-        // 变成 1000 次/秒（实测静态页空闲 CPU 从 1% 涨到 10%）。
-        MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(timeoutMs),
-                                    QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        // 没有脏区也要按帧点醒来：上一帧画完 dirty_ 就清了，"有没有下一帧"要到
+        // 下一次 renderFrame 里 update_（推进动画）才知道。这里若按 timeoutMs（1ms）试，
+        // 要么退化成 15.6ms 的粗睡（动画掉回 64fps），要么高精度地每秒醒 1000 次。
+        // 直接睡到 nextFrameTime_：这就是 120 次/秒的"帧点"，输入照样能唤醒（QS_ALLINPUT）。
+        const auto now = std::chrono::steady_clock::now();
+        if (nextFrameTime_ > now) waitForFrame(nextFrameTime_);
     }
 
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -1642,7 +1657,16 @@ inline void BinUIAppT<Gfx>::renderOnce() {
         // 前者绕开 NVIDIA 在 resize+SwapBuffers 组合下的崩溃，
         // 后者绕开全屏直翻转导致的"画面停住"（见 clientCoversMonitor 注释）。
         if ((gdiPresent_ || fullscreenPresent_) && !transparent_) gfx_.presentViaGdi();
-        else gfx_.present();
+        else {
+            gfx_.present();
+            // v0.11.8：**与桌面合成器对齐**。present 只是把帧排进队列，真正的显示节拍
+            // 是 DWM 的合成（每刷新周期一次）。不对齐的话，我们按 8.33±1ms 出帧，
+            // 越过刷新边界的那些帧会被多留一个周期 —— 平均 120fps 但肉眼是"抖"：
+            // VK 后端实测帧间隔 7ms/8ms/9ms 三档混在一起（GL 那边每 15.6ms 一次，
+            // 正好是刷新的整数倍，反而看着"均匀但慢"）。
+            // 只在真走交换链时 Flush：GDI 读回 / 远程会话 / 拖拽那几条路径不该被合成器拖住。
+            if (pacedByPresent()) DwmFlush();
+        }
         dirty_ = false;
         if (perf.on) {
             const double t3 = NowMs();
@@ -1655,6 +1679,10 @@ inline void BinUIAppT<Gfx>::renderOnce() {
                 const double iv = t0 - perf.lastFrameMs;
                 if (iv > perf.maxInterval) perf.maxInterval = iv;
                 if (iv > frameBudget_.count() / 1000.0 * 1.5) ++perf.missed;
+                int slot = static_cast<int>(iv);
+                if (slot < 0) slot = 0;
+                if (slot > 20) slot = 20;
+                ++perf.hist[slot];
                 // 单次 >100ms 的间隔单独打一行（带时间偏移）：排查"卡一下"时最需要的就是
                 // "什么时候卡的、卡了多久"，而不是平均帧率。
                 if (iv > 100.0)

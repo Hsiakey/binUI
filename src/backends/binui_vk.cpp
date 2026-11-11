@@ -2447,13 +2447,16 @@ void BinUIVK::fillRect(float x, float y, float w, float h, uint32_t color) {
 void BinUIVK::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
     Impl& d = *impl_;
     if (!d.ready || w <= 0 || h <= 0) return;
-    int r = static_cast<int>(radius);
-    r = std::max(0, std::min(r, static_cast<int>(std::min(w, h) / 2)));
-    if (r <= 0) { fillRect(x, y, w, h, color); return; }
+    // v0.11.8：几何半径用浮点，角片模板按最近的整数半径取（模板是位图，只能整数）。
+    // 静态页面传进来本来就是整数，逐像素等价；缩放动画里半径必须连续，
+    // 否则圆/胶囊的 2r 与 w 会周期性错开 1px，中间那几块一胀一缩。
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    if (rf <= 0.0f) { fillRect(x, y, w, h, color); return; }
+    const int r = std::max(1, static_cast<int>(std::lround(rf)));
     Impl::RoundTex& rt = d.roundFor(r, false);
     if (!rt.tex.image) { fillRect(x, y, w, h, color); return; }
     PaintQuad q[9];
-    const int n = BuildRoundedNineSlice(x, y, w, h, static_cast<float>(r),
+    const int n = BuildRoundedNineSlice(x, y, w, h, rf,
                                        static_cast<float>(rt.t), q, 9);
     if (n <= 0) { fillRect(x, y, w, h, color); return; }
     Premult(color);
@@ -2491,9 +2494,9 @@ void BinUIVK::strokeRounded(float x, float y, float w, float h, float radius,
     Impl& d = *impl_;
     if (!d.ready || w <= 0 || h <= 0 || thickness <= 0) return;
     // P2 先按"四边 + 四角"的九宫格模板画；与 GL 的 strokeRounded 同源（同一套模板与几何）
-    int r = static_cast<int>(radius);
-    r = std::max(0, std::min(r, static_cast<int>(std::min(w, h) / 2)));
-    if (r <= 0) {
+    // v0.11.8：几何半径用浮点（缩放动画要连续），模板按最近整数
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    if (rf <= 0.0f) {
         // 直角边框：上/下/左/右四条
         fillRect(x, y, w, thickness, color);
         fillRect(x, y + h - thickness, w, thickness, color);
@@ -2501,10 +2504,11 @@ void BinUIVK::strokeRounded(float x, float y, float w, float h, float radius,
         fillRect(x + w - thickness, y + thickness, thickness, h - 2 * thickness, color);
         return;
     }
+    const int r = std::max(1, static_cast<int>(std::lround(rf)));
     Impl::RoundTex& rt = d.roundFor(r, true);
     if (!rt.tex.image) return;
     PaintQuad q[9];
-    const int n = BuildRoundedNineSlice(x, y, w, h, static_cast<float>(r),
+    const int n = BuildRoundedNineSlice(x, y, w, h, rf,
                                        static_cast<float>(rt.t), q, 9);
     if (n <= 0) return;
     Premult(color);

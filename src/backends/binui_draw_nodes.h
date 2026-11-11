@@ -380,11 +380,13 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             nw = static_cast<float>(static_cast<int>(node.width));
             nh = static_cast<float>(static_cast<int>(node.height));
         }
-        int effRadius = animRadius >= 0 ? (int)animRadius : (int)node.radius;
-        // 缩放动画要连圆角一起缩放（CSS 的 transform: scale 就是这么做的）：
-        // 半径不跟着变的话，40px 盒子 1.45× 放大后圆角看起来"变方"了。
-        if (animGeo && scale != 1.0f)
-            effRadius = static_cast<int>(std::lround(effRadius * scale));
+        // 圆角：**浮点**。缩放动画里半径要和 w/h 一起连续变化 ——
+        // 40px 盒子放大 1.45× 时半径也必须乘 1.45（CSS 的 transform: scale 就是这样），
+        // 而且圆/胶囊（radius = 短边一半）在缩放时如果半径取整，2r 与 w 会周期性错开
+        // 1px，九宫格中间那几块在 0/1/2px 之间跳，圆看起来"一胀一缩"（VK/D3D11 上最明显）。
+        // 后端的角片模板仍按最近的整数半径取（模板是位图，只能按整数建）。
+        float effRadius = animRadius >= 0 ? animRadius : static_cast<float>(node.radius);
+        if (animGeo && scale != 1.0f) effRadius *= scale;
 
         if (x + nw <= clipL || x >= clipR || y + nh <= clipT || y >= clipB) continue;
         if (hasVp[i] && (x + nw <= vpL[i] || x >= vpR[i] ||
@@ -405,9 +407,9 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             ch = std::ceil(y + nh) - fy0;
         }
         if (dbgClip) {
-            std::fprintf(stderr, "[clip] node=%u type=%u own=(%.1f,%.1f %.1fx%.1f) dx=%.1f dy=%.1f\n",
+            std::fprintf(stderr, "[clip] node=%u type=%u own=(%.1f,%.1f %.1fx%.1f) dx=%.1f dy=%.1f r=%.1f\n",
                          (unsigned)node.id, (unsigned)node.type, (double)x, (double)y,
-                         (double)nw, (double)nh, (double)dx, (double)dy);
+                         (double)nw, (double)nh, (double)dx, (double)dy, (double)effRadius);
         }
         int savedDepth = gfx.pushClip(cl, ct, cw, ch);
         gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),

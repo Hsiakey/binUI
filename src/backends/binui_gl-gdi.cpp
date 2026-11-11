@@ -1054,18 +1054,21 @@ void BinUIGLGdi::fillLine(float x0, float y0, float x1, float y1, float width, u
 
 void BinUIGLGdi::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    int r = static_cast<int>(radius);
-    // 半径钳到短边一半：再大就是圆/胶囊，多出来的部分没有几何意义
-    r = std::max(0, std::min(r, static_cast<int>(std::min(w, h) / 2)));
-    if (r <= 0) { fillRect(x, y, w, h, color); return; }
+    // 半径钳到短边一半：再大就是圆/胶囊，多出来的部分没有几何意义。
+    // v0.11.7：半径的**几何**用浮点（缩放动画里半径要跟 w/h 一起连续变化），
+    // 只有"角片模板"仍取最近的整数半径 —— 模板是位图，只能按整数建。
+    // 静态页面传进来的本来就是整数，两种写法逐像素等价。
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    if (rf <= 0.0f) { fillRect(x, y, w, h, color); return; }
 
+    const int r = std::max(1, static_cast<int>(std::lround(rf)));
     RoundTex& rt = impl_->roundFor(r, false);
     if (!rt.tex) { fillRect(x, y, w, h, color); return; }
 
     // 九宫格拆分走共用几何（include/binui_paint.h）：角片边长 = r，
     // 中段宽高按 max(0, …) 跳过，所以 r == 短边一半时四角正好拼成圆/胶囊。
     PaintQuad q[9];
-    const int n = BuildRoundedNineSlice(x, y, w, h, static_cast<float>(r), rt.t, q, 9);
+    const int n = BuildRoundedNineSlice(x, y, w, h, rf, rt.t, q, 9);
     if (n <= 0) { fillRect(x, y, w, h, color); return; }
 
     Premult(color);
@@ -1079,9 +1082,9 @@ void BinUIGLGdi::fillRounded(float x, float y, float w, float h, float radius, u
 void BinUIGLGdi::strokeRounded(float x, float y, float w, float h, float radius,
                             float thickness, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    int r = static_cast<int>(radius);
-    r = std::max(0, std::min(r, static_cast<int>(std::min(w, h) / 2)));
-    if (r <= 0) { fillRect(x, y, w, h, color); return; }
+    // v0.11.8：几何半径用浮点（缩放动画要连续），模板按最近整数取
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    if (rf <= 0.0f) { fillRect(x, y, w, h, color); return; }
 
     // 线宽：以前这里 (void)thickness 把参数丢了，所有描边都是 1px（"2px 编辑环"实际
     // 只有 1px）。stroke 纹理本身就是 1px 的环，所以按厚度画多层同心圆角环叠出粗描边：
@@ -1093,11 +1096,13 @@ void BinUIGLGdi::strokeRounded(float x, float y, float w, float h, float radius,
         const float ex = x + k, ey = y + k;
         const float ew = w - 2.0f * k, eh = h - 2.0f * k;
         if (ew <= 1.0f || eh <= 1.0f) break;
-        const int rr = std::max(1, r - k);
+        const float rfk = rf - static_cast<float>(k);
+        if (rfk <= 0.0f) break;
+        const int rr = std::max(1, static_cast<int>(std::lround(rfk)));
         RoundTex& rt = impl_->roundFor(rr, true);
         if (!rt.tex) break;
         PaintQuad q[9];
-        const int n = BuildRoundedNineSlice(ex, ey, ew, eh, static_cast<float>(rr), rt.t, q, 9);
+        const int n = BuildRoundedNineSlice(ex, ey, ew, eh, rfk, rt.t, q, 9);
         if (n <= 0) break;
         impl_->curTex = rt.tex;
         for (int i = 0; i < n; i++)

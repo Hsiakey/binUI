@@ -1053,18 +1053,19 @@ void BinUID3D::fillLine(float x0, float y0, float x1, float y1, float width, uin
 
 void BinUID3D::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    int r = static_cast<int>(radius);
-    r = std::max(0, std::min(r, static_cast<int>(std::min(w, h) / 2)));
-    if (r <= 0) { fillRect(x, y, w, h, color); return; }
+    // v0.11.8：几何半径用浮点（缩放动画里半径要跟着连续变），角片模板仍取最近的整数。
+    // 圆/胶囊在缩放时如果半径取整，2r 与 w 会周期性错开 1px，中间几块在 0/1/2px 之间跳。
+    float c = std::min(radius, std::min(w, h) * 0.5f);
+    if (c <= 0.0f) { fillRect(x, y, w, h, color); return; }
 
+    const int r = std::max(1, static_cast<int>(std::lround(c)));
     RoundTex& rt = impl_->roundFor(r, false);
     if (!rt.srv) { fillRect(x, y, w, h, color); return; }
 
     float t = static_cast<float>(rt.t);
-    float cu = static_cast<float>(rt.corner) / t;
+    float cu = c / t;
     float strip0 = 0.5f;
     float strip1 = 0.5f + 1.0f / t;
-    float c = static_cast<float>(rt.corner);
 
     Premult(color);
     impl_->curLinear = 1;
@@ -1089,9 +1090,9 @@ void BinUID3D::fillRounded(float x, float y, float w, float h, float radius, uin
 void BinUID3D::strokeRounded(float x, float y, float w, float h, float radius,
                              float thickness, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    int r = static_cast<int>(radius);
-    r = std::max(0, std::min(r, static_cast<int>(std::min(w, h) / 2)));
-    if (r <= 0) { fillRect(x, y, w, h, color); return; }
+    // v0.11.8：几何半径用浮点（缩放动画要连续），模板按最近整数取
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    if (rf <= 0.0f) { fillRect(x, y, w, h, color); return; }
 
     // 线宽：不再丢弃 thickness —— stroke 纹理是 1px 环，按厚度画同心层叠出粗描边
     // （GL 后端同款做法，保证"2px 编辑环"三端一致）。
@@ -1104,15 +1105,17 @@ void BinUID3D::strokeRounded(float x, float y, float w, float h, float radius,
         const float ex = x + k, ey = y + k;
         const float ew = w - 2.0f * k, eh = h - 2.0f * k;
         if (ew <= 1.0f || eh <= 1.0f) break;
-        const int rr = std::max(1, r - k);
+        const float cr = std::min(rf - static_cast<float>(k), std::min(ew, eh) * 0.5f);
+        if (cr <= 0.0f) break;
+        const int rr = std::max(1, static_cast<int>(std::lround(cr)));
         RoundTex& rt = impl_->roundFor(rr, true);
         if (!rt.srv) break;
 
         const float t = static_cast<float>(rt.t);
-        const float cu = static_cast<float>(rt.corner) / t;
+        const float cu = cr / t;
         const float strip0 = 0.5f;
         const float strip1 = 0.5f + 1.0f / t;
-        const float c = static_cast<float>(rt.corner);
+        const float c = cr;
         impl_->curSrv = rt.srv;
         auto quad = [&](float qx, float qy, float qw, float qh,
                         float u0, float v0, float u1, float v1) {
