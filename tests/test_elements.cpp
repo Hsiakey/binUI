@@ -601,6 +601,65 @@ static void TestIssueRegressions() {
              a2 && std::fabs(a2->height - 40) < 0.6f && b2 && std::fabs(b2->y - by0) < 0.6f);
     }
 
+    // ---- 局部重排 · 自然内容重排：文字换行 / flex 分配 / min·max·auto·百分比 ----
+    {
+        const char* html = R"HTML(<app_window width="480" height="400" bg="#101014">
+<html width="480" height="400" bg="#101014"><body>
+  <div id="card" style="position:absolute; left:20; top:20; width:400; height:300; padding:16">
+    <span id="para" style="width:100%; font-size:13px">这是一段会换行的正文，用来验证盒子变窄时文字自然折行、节点高度跟着变高，后面的兄弟节点也要被顶下去。</span>
+    <div id="chips" style="width:100%; height:30; display:flex; gap:8">
+      <div style="flex:1; height:30"></div>
+      <div style="flex:1; height:30"></div>
+      <div style="flex:1; height:30"></div>
+    </div>
+    <div id="after" style="width:100%; height:20"></div>
+  </div>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("自然重排: 编译并加载", !bin.empty() && r.loadLayout(bin.data(), bin.size()));
+        const uint16_t card = r.findNodeByName("card");
+        const uint16_t para = r.findNodeByName("para");
+        const uint16_t chips = r.findNodeByName("chips");
+        const uint16_t after = r.findNodeByName("after");
+        const uint16_t chip1 = r.getNodes()[0].id;   // 占位，下面现找
+
+        auto node = [&](uint16_t id) { return IssueNode(r, id); };
+        const auto* p0 = node(para);
+        const auto* a0 = node(after);
+        const float h0 = p0 ? p0->height : 0.0f;
+        const float y0 = a0 ? a0->y : 0.0f;
+        TEST("自然重排: 宽盒子时正文是一两行", h0 > 0.0f && h0 < 40.0f);
+
+        // 把卡片压窄到 200：正文折行变高，后面的兄弟被顶下去
+        TEST("自然重排: 压窄卡片", r.resizeNodeBounds(card, 20, 20, 200, 300));
+        const auto* p1 = node(para);
+        const auto* a1 = node(after);
+        TEST("自然重排: 文字换行后高度变大", p1 && p1->height > h0 + 20.0f);
+        TEST("自然重排: 兄弟被顶下去", a1 && a1->y > y0 + 20.0f);
+        TEST("自然重排: 正文宽度跟着内容盒",
+             p1 && std::fabs(p1->width - (200 - 32)) < 0.6f);
+
+        // flex 行按新宽度重新分配：三个 flex:1 等分
+        const auto* c1 = node(chips);
+        TEST("自然重排: flex 行宽度跟着内容盒", c1 && std::fabs(c1->width - (200 - 32)) < 0.6f);
+        std::vector<const BinUIRenderer::NodeInfo*> kids;
+        for (const auto& n : r.getNodes())
+            if (n.parentId == chips) kids.push_back(&n);
+        TEST("自然重排: flex 子项重新等分", kids.size() == 3 &&
+             std::fabs(kids[0]->width - kids[2]->width) < 0.6f &&
+             kids[0]->width > 1.0f &&
+             std::fabs((kids[2]->x + kids[2]->width) - (c1->x + c1->width)) < 0.6f);
+
+        // 再拉宽到 600：正文回到矮的形态，兄弟回来
+        const float hNarrow = p1 ? p1->height : 0.0f;   // 先存值：p1 指向的节点会被重排改写
+        TEST("自然重排: 拉宽卡片", r.resizeNodeBounds(card, 20, 20, 600, 300));
+        const auto* p2 = node(para);
+        TEST("自然重排: 变宽后高度回落", p2 && p2->height < hNarrow);
+        (void)chip1;
+    }
+
     // ---- 剪贴板的文本层动作：selectedText / deleteSelection / selectAll ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

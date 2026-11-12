@@ -799,26 +799,38 @@ void BinUIRenderer::setText(uint16_t nodeId, const std::string& text) {
     // issue 06b：编译期"高度是按文本估算撑开的"节点（规格段 heightAuto=1）换文本后
     // 要按同一口径重算高度，否则第二行起画到节点盒外、压到下一个元素身上。
     // 作者显式写了 height 的节点（heightAuto=0）不动 —— 作者说了算。
-    const BinUISpecNode* spec = (it->second < specOf_.size()) ? specOf_[it->second] : nullptr;
-    if (!spec || !spec->heightAuto) return;
-    // 与编译器同一个类型集合（src/compiler/binui_compiler.cpp:4122-4145 只估这三类）
-    if (node.type != BINUI_LABEL && node.type != BINUI_LIST && node.type != BINUI_BUTTON) return;
+    const float natural = autoTextHeight(it->second, node.width);
+    if (natural > 0.0f) node.height = natural;
+}
+
+// 文本节点的"自然高度"：heightAuto 的 LABEL / LIST / BUTTON 按**给定宽度**重算行数。
+// 与 setText（换文本后重算）、重排（换宽度后重算）共用同一份口径 —— 编译器那边也是
+// 同一套估算（binui_text_estimate.h），三处不一致就会"窗口不动时对得上、一拖就跑"。
+// 返回 -1 = 这个节点不是"高度跟着文字走"的节点。
+float BinUIRenderer::autoTextHeight(size_t idx, float width) const {
+    if (idx >= nodes_.size() || idx >= specOf_.size() || !specOf_[idx]) return -1.0f;
+    const BinUISpecNode* spec = specOf_[idx];
+    if (!spec->heightAuto) return -1.0f;
+    const NodeInfo& node = nodes_[idx];
+    // 与编译器同一个类型集合（src/compiler/binui_compiler.cpp 只估这三类）
+    if (node.type != BINUI_LABEL && node.type != BINUI_LIST && node.type != BINUI_BUTTON)
+        return -1.0f;
 
     const float fontSize = node.fontSize > 0 ? static_cast<float>(node.fontSize) : 14.0f;
     // 可用宽度 = 内容宽度（去掉左右 padding）；LIST 文字左右各有 12px 内缩（同编译器口径）
-    float avail = node.width - 2.0f * static_cast<float>(node.padding);
+    float avail = width - 2.0f * static_cast<float>(node.padding);
     if (node.type == BINUI_LIST) avail -= 24.0f;
     if (avail < 8.0f) avail = 8.0f;   // 极窄时按 8px 兜底（EstimateLineCount 内部也会兜）
     // lineHeight：扩展绘制段的百分数（0 = 未声明，EstimateLineStep 按 1.35×字号）
     int lineHeightPct = 0;
-    if (const BinUIPaintNode* p = paintOf(nodeId)) lineHeightPct = p->lineHeight;
-    // 直接采用新文本算出的高度（短文本跟着变矮），但**不低于编译期的基线高度**：
+    if (const BinUIPaintNode* p = paintOf(node.id)) lineHeightPct = p->lineHeight;
+    // 直接采用按宽度算出的高度（窄了换行变高、宽了变矮），但**不低于编译期的基线高度**：
     // 编译器那边是 max(元素默认盒高, 估算高度)，这里漏了基线就会把短文本压扁
     // （13px 的 span 默认盒高 20，估算只有 17.6）。
-    float h = EstimateTextHeight(text, fontSize, avail, lineHeightPct);
+    float h = EstimateTextHeight(node.text, fontSize, avail, lineHeightPct);
     if (spec->autoBase > 0 && h < static_cast<float>(spec->autoBase))
         h = static_cast<float>(spec->autoBase);
-    node.height = h;
+    return h;
 }
 
 void BinUIRenderer::setVisible(uint16_t nodeId, bool visible) {
@@ -1189,6 +1201,20 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
         if (auto oit = boundsOverride_.find(node.id); oit != boundsOverride_.end())
             ov = &oit->second;
         if (ov) { w = (*ov)[2]; h = (*ov)[3]; }
+
+        // 文本节点：宽度变了就按行数重算高度（自然换行）。窄了换行变高、宽了变矮，
+        // 兄弟/容器的位置要跟着挪 —— 这一步必须在"流式光标推进"之前做完。
+        // flex 子项跳过：它的高度由父容器的 flex 分配决定（flex:1 撑满剩余高度），
+        // 文字高度只是 flex-basis 的参考，不能反过来盖掉分配结果。
+        if (!(spec && (spec->flags & SPEC_IN_FLEX))) {
+            const float natural = autoTextHeight(i, w);
+            if (natural > 0.0f) {
+                h = natural;
+                if (spec)
+                    h = ClampSize(h, spec, c.ch, SPEC_MINH_PCT, SPEC_MAXH_PCT,
+                                  spec->minH, spec->maxH);
+            }
+        }
 
         // ---- 位置 ----
         float x, y;

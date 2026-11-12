@@ -267,6 +267,35 @@ renderer.clearBoundsOverride(id);           // 解除钉住：下次窗口重排
 4. **滚动条优先**。可滚动容器的右下角既是 resize 热区又是滚动条，`press()` 先判滚动条 ——
    想拖尺寸就把 `resize` 开在没有滚动条的边上。
 
+### 自然内容重排：文字换行 / flex / 百分比 / min·max / auto
+
+"局部重排"不是把子节点按比例挪一下，而是**按各自的规则重新算**，和窗口 resize 时是同一套：
+
+| 规则 | 谁负责 | 说明 |
+|---|---|---|
+| `width:100%`、`width:50%` | `SPEC_PCT_W` | 按**父内容盒**（去掉 padding）百分比重算 |
+| 未声明宽度（`auto` / 块级填满） | `SPEC_AUTO_W` | `父内容宽 − margin` |
+| `min/max-width/height` | `ClampSize` | 百分比/弹性分配之后钳制（与编译器同口径） |
+| 流式（没有 `top`） | 父容器流光标 | 上一个兄弟变高 → 后面的整体下移 |
+| `display:flex` | 主/次轴重算 | 固定项先占位，`flex:N` 分剩余空间，`gap`/`justify`/`align` 都参与 |
+| **文字换行** | `autoTextHeight()` + 绘制侧折行 | 宽度变了就按行数重算高度（`heightAuto` 且没写 `height` 的 LABEL/LIST/BUTTON）；绘制侧 `drawTextWrapped` 按同一份估算折行 |
+| 容器自动高度 | `growContainer()` | 流式内容超出时容器自己长高（滚动容器除外） |
+
+文字这条是这次补的关键一环：以前"高度按文字估"只在 `setText` 里做，**重排时不重算**，
+所以盒子变窄后文字还是按旧行数占位（第二行直接压到下一个元素上）。现在 `autoTextHeight()`
+被 `setText` 与重排共用，`relayoutFrom` 在"流式光标推进之前"就把它算好 —— 这一步的顺序
+很关键，晚了兄弟就按旧高度落位。
+
+flex 子项**不套用**文字自然高度：它的高度由父容器分配（`flex:1` 撑满剩余），文字高度只是
+`flex-basis` 的参考，反过来盖掉分配结果就会把整列压塌。
+
+![自然重排之前（470×212）](img/appshow-reflow-before.png)
+
+同一个卡片拖到 260×156：正文折成三行、节点自动变高，三个 `flex:1` 的色块从 139 收到 69，
+三条百分比色条跟着内容盒变窄、最后一条被 `overflow:hidden` 裁掉（自然的溢出行为）：
+
+![自然重排之后（260×156）](img/appshow-reflow-after.png)
+
 ![可缩放元素](img/appshow-resize.png)
 
 真实窗口里拖大两块（`resize: both` 的卡片 470×212 → 600×277，只开对角的

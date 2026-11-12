@@ -929,9 +929,10 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 } else {
                     RECT mr = { 0, 0, 0, 10 };
                     DrawTextW(hdc, wtext.c_str(), -1, &mr, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
-                    // 只有"明显放不下"（超宽 20% 以上）才换行：GPU 后端画单行文本从不换行，
-                    // 阈值取松一点可以兼顾"长段落别被裁掉"和"窄盒子里的短标签别乱折行"
-                    if (mr.right > (nw - 2 * pad) * 1.2f)
+                    // v21 自然排版：一行放不下就折行（与 GPU 后端同一口径，见
+                    // binui_draw_nodes.h 的 LABEL 分支）。以前是"超宽 20% 才折"，
+                    // 与 GPU 端对不上：同一份 UI 在 GDI 里单行裁掉、在 GL 里折成两行。
+                    if (mr.right > (nw - 2 * pad))
                         DrawTextW(hdc, wtext.c_str(), -1, &tr, halign | DT_WORDBREAK);
                     else
                         DrawTextW(hdc, wtext.c_str(), -1, &tr, halign | DT_VCENTER | DT_SINGLELINE);

@@ -68,6 +68,7 @@
         .rs-v  { font-size:15; font-weight:700; color:#3E8BFF; }
         .rs-d  { font-size:11; color:#94A3B8; }
         .rs-bar { background:#DCE7F7; border-radius:4; }
+        .rs-chip { background:#CFE0F8; border-radius:6; }
     </style>
 </head>
 <body>
@@ -122,10 +123,15 @@
         <div id="rs-all" class="rs" style="position:absolute; left:24; top:424; width:470; height:212; overflow:hidden; resize:both; padding:18">
             <span class="rs-t" style="width:100%; height:18">resize: both —— 四边 + 四角</span>
             <span id="rs-sz" class="rs-v" style="width:100%; height:26">470 × 212</span>
-            <span class="rs-d" style="width:100%; height:16">下面三条是 62% / 40% / 52%，盒子一变它们就跟着变</span>
-            <div id="rs-bar0" class="rs-bar" style="width:62%; height:8; margin-top:12"></div>
-            <div class="rs-bar" style="width:40%; height:8; margin-top:7"></div>
-            <div class="rs-bar" style="width:52%; height:8; margin-top:7"></div>
+            <span id="rs-para" class="rs-d" style="width:100%">这段正文没有写 height：盒子一变窄它就自然折行、节点跟着变高，下面那行 flex 子项和三条百分比色条就全被顶下去。</span>
+            <div id="rs-chips" style="width:100%; height:26; display:flex; gap:8; margin-top:8">
+                <div class="rs-chip" style="flex:1; height:26"></div>
+                <div class="rs-chip" style="flex:1; height:26"></div>
+                <div class="rs-chip" style="flex:1; height:26"></div>
+            </div>
+            <div class="rs-bar" style="width:62%; height:8; margin-top:10"></div>
+            <div class="rs-bar" style="width:40%; height:8; margin-top:6"></div>
+            <div class="rs-bar" style="width:52%; height:8; margin-top:6"></div>
         </div>
 
         <div id="rs-corner" class="rs" style="position:absolute; left:510; top:424; width:250; height:212; overflow:hidden; resize:top-left bottom-right; padding:16">
@@ -276,4 +282,5 @@
 </body>
 </html>
 </app_window>
+
 

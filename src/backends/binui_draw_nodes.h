@@ -20,6 +20,7 @@
 #include "binui_gfx.h"
 #include "binui_paint.h"     // PaintBand / BuildFillBands（路径与渐变条带）
 #include "binui_renderer.h"
+#include "binui_text_estimate.h"   // 折行行数估算（与布局同一份口径）
 
 namespace binui {
 
@@ -620,11 +621,32 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                             p0 = nl + 1;
                         }
                     } else {
+                        // 量一次宽度：既要判"放不放得下"，对齐/装饰线也用它
+                        // （字宽走字形图集的 run 缓存，稳定后只是一次查表）
+                        const float tw = gfx.textWidth(static_cast<float>(fs), wt, node.text, italic);
+                        // 自然排版（v21）：一行放不下就按盒子宽度折行。节点高度由布局按
+                        // 同一份估算撑开（BinUIRenderer::autoTextHeight），这里是它的绘制侧：
+                        // 行数估算 → 块高 → 垂直居中 → drawTextWrapped 逐行画。
+                        if (tw > availW + 0.5f && availW > 1.0f) {
+                            const int nlines = binui::EstimateLineCount(
+                                node.text, static_cast<float>(fs), availW);
+                            const float lstep = (pt && (pt->flags & PAINT_LINE_HEIGHT))
+                                              ? binui::PaintLineHeight(pt, static_cast<float>(fs))
+                                              : static_cast<float>(lh);
+                            const float blockH = static_cast<float>(nlines) * lstep;
+                            float top = static_cast<float>(y) + (nh - blockH) * 0.5f;
+                            if (top < static_cast<float>(y)) top = static_cast<float>(y);
+                            gfx.drawTextWrapped(static_cast<float>(x + pad), top, availW,
+                                                static_cast<float>(fs), wt, node.text, lcol,
+                                                align, italic);
+                            // 装饰线只画在首行（折行文本的下划线按块近似）
+                            if (hasRule)
+                                drawTextRules(static_cast<float>(x + pad), top,
+                                              std::min(tw, availW));
+                            break;
+                        }
                         float base = static_cast<float>(y) + (nh - lh) / 2.0f + asc;
                         float tx = static_cast<float>(x + pad);
-                        float tw = 0.0f;
-                        if (align != 0 || hasRule)
-                            tw = gfx.textWidth(static_cast<float>(fs), wt, node.text, italic);
                         if (align != 0) {
                             tx += (align == 1) ? (availW - tw) / 2.0f : (availW - tw);
                             if (tx < static_cast<float>(x + pad)) tx = static_cast<float>(x + pad);

@@ -148,6 +148,7 @@ struct Shell {
     int rsCursorEdge = 0, rsCursorCorner = 0;
     bool rsWasResizing = false;
     float rsDirty = 0.0f;
+    float rsParaBefore = 0.0f, rsChipBefore = 0.0f;   // 拖动前的正文高度 / flex 子项宽度
     uint32_t rng = 0x2545F491u;
     double readT = 0.0;
     float frameMs = 16.0f;
@@ -947,14 +948,18 @@ int main(int argc, char* argv[]) {
         }
         if (sh.rsCursorCorner > 0) {
             const auto* n = patch(sh.nid("rs-all"));
-            const auto* bar = patch(sh.nid("rs-bar0"));
+            const auto* para = patch(sh.nid("rs-para"));
+            float chip = 0.0f;
+            for (const auto& k : renderer.getNodes())
+                if (k.parentId == sh.nid("rs-chips")) { chip = k.width; break; }
             // 光标 kind 与 BinUIRenderer::CursorKind 同值：3=上下 4=左右 5=⤡ 6=⤢
             std::printf("[demo] %-11s 可缩放面板 %.0f×%.0f（拖动前 470×212）"
                         "光标 右边缘=%d 右下角=%d 进入缩放态=%d 脏矩形宽=%.0f\n",
                         "", n ? (double)n->width : 0.0, n ? (double)n->height : 0.0,
                         sh.rsCursorEdge, sh.rsCursorCorner, (int)sh.rsWasResizing, (double)sh.rsDirty);
-            std::printf("[demo] %-11s 62%% 色条 %.0f（拖动前 269：局部重排跟着内容盒走）\n",
-                        "", bar ? (double)bar->width : 0.0);
+            std::printf("[demo] %-11s 自然重排：正文高 %.0f → %.0f（换行变高）· flex 子项宽 %.0f → %.0f\n",
+                        "", (double)sh.rsParaBefore, para ? (double)para->height : 0.0,
+                        (double)sh.rsChipBefore, (double)chip);
         }
     };
 
@@ -1008,7 +1013,7 @@ int main(int argc, char* argv[]) {
                 }
                 if (s.kind == 3) {
                     // 拖第 1 页 rs-all 的右下角：整条链路都是引擎的
-                    // （光标 → press 命中热区 → move 改矩形 → release 收尾）
+                    // （光标 → press 命中热区 → move 改矩形 + 局部重排 → release 收尾）
                     const uint16_t id = sh.nid("rs-all");
                     const auto* n = patch(id);
                     if (n) {
@@ -1017,13 +1022,18 @@ int main(int argc, char* argv[]) {
                         const float ey = n->y + n->height - 1.0f;
                         sh.rsCursorEdge   = (int)renderer.cursorAt(ex, n->y + n->height * 0.5f);
                         sh.rsCursorCorner = (int)renderer.cursorAt(ex, ey);
+                        // 记录拖动前的自然内容高度（正文）与 flex 子项宽度
+                        if (const auto* p = patch(sh.nid("rs-para"))) sh.rsParaBefore = p->height;
+                        for (const auto& k : renderer.getNodes())
+                            if (k.parentId == sh.nid("rs-chips")) { sh.rsChipBefore = k.width; break; }
                         renderer.setHover(ex, ey);
                         onPress(ex, ey);
                         sh.rsWasResizing = renderer.isResizing();
-                        renderer.setHover(ex + 70.0f, ey + 46.0f);
+                        // 往里收 90×40：盒子变窄 → 正文折行变高，flex 子项变窄
+                        renderer.setHover(ex - 210.0f, ey - 50.0f);
                         float dx = 0, dy = 0, dw = 0, dh = 0;
                         sh.rsDirty = renderer.takeResizeDirty(dx, dy, dw, dh) ? dw : 0.0f;
-                        onRelease(ex + 70.0f, ey + 46.0f);
+                        onRelease(ex - 210.0f, ey - 50.0f);
                     }
                 }
                 pendingReport = s.tag;
@@ -1074,3 +1084,4 @@ int main(int argc, char* argv[]) {
     std::printf("[appshow] binUI 应用壳演示：4 页 / %d 节点\n", (int)renderer.getNodes().size());
     return app.run();
 }
+

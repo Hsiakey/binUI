@@ -555,6 +555,9 @@ private:
     void clampScrollOffsets();            // 重排后把滚动偏移钳回内容范围
     // 子树在屏幕坐标下的包围盒（缩放拖拽算脏矩形用；含祖先滚动偏移、不做视口裁剪）
     bool subtreeScreenBounds(uint16_t nodeId, float& l, float& t, float& r, float& b) const;
+    // 文本节点的"自然高度"：heightAuto 的 LABEL/LIST/BUTTON 按给定宽度重算行数。
+    // setText（换文本）与重排（换宽度）共用同一份口径；不是这类节点返回 -1。
+    float autoTextHeight(size_t idx, float width) const;
     // 按根节点底色亮度派生滚动条默认色（浅底浅色、深底深色）
     void deriveScrollbarStyleFromRoot();
     BinUIScrollbarStyle scrollbarStyle_;
