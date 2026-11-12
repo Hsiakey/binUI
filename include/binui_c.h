@@ -307,9 +307,20 @@ BINUI_C_API void BINUI_C_CALL binui_scroll_by(void* app, int32_t node_id, float 
 BINUI_C_API float BINUI_C_CALL binui_content_height(void* app, int32_t node_id);
 
 /* 直接改节点矩形（宿主自己排版 / 手动撑高）。只动这一个节点，不牵动兄弟节点。
- * 返回 1 = 成功，0 = 无此节点或参数非法（NaN / 负尺寸）。 */
+ * 返回 1 = 成功，0 = 无此节点或参数非法（NaN / 负尺寸）。
+ *
+ * 要"内容跟着盒子排"用下面三个（v21 局部重排）。 */
 BINUI_C_API int32_t BINUI_C_CALL binui_set_node_bounds(void* app, int32_t node_id,
                                                        float x, float y, float w, float h);
+/* 局部重排：盒子不变，只按当前盒子重排这棵子树（百分比 / 流式 / flex / min·max）。
+ * 返回 1 = 成功，0 = 无此节点 / 布局没有规格段 / 等比缩放窗口（那里没有内容盒重排）。 */
+BINUI_C_API int32_t BINUI_C_CALL binui_relayout_subtree(void* app, int32_t node_id);
+/* 改矩形 + 钉住尺寸 + 局部重排（缩放拖拽内部就是它）。节点在流式/flex 父容器里时
+ * 连兄弟位置一起修正。返回 1 = 成功。 */
+BINUI_C_API int32_t BINUI_C_CALL binui_resize_node_bounds(void* app, int32_t node_id,
+                                                          float x, float y, float w, float h);
+/* 解除钉住：下次重排（含窗口 resize）回到作者声明的尺寸。 */
+BINUI_C_API void BINUI_C_CALL binui_clear_bounds_override(void* app, int32_t node_id);
 
 /* 动态节点：在 parent_id 下追加一个节点，返回新节点 id（>= 0）；失败返回 -1。
  * type 用 BINUI_NODE_*；color 为 0xAARRGGBB；radius / font_size 传 0 = 默认。

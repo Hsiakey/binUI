@@ -947,11 +947,14 @@ int main(int argc, char* argv[]) {
         }
         if (sh.rsCursorCorner > 0) {
             const auto* n = patch(sh.nid("rs-all"));
+            const auto* bar = patch(sh.nid("rs-bar0"));
             // 光标 kind 与 BinUIRenderer::CursorKind 同值：3=上下 4=左右 5=⤡ 6=⤢
             std::printf("[demo] %-11s 可缩放面板 %.0f×%.0f（拖动前 470×212）"
                         "光标 右边缘=%d 右下角=%d 进入缩放态=%d 脏矩形宽=%.0f\n",
                         "", n ? (double)n->width : 0.0, n ? (double)n->height : 0.0,
                         sh.rsCursorEdge, sh.rsCursorCorner, (int)sh.rsWasResizing, (double)sh.rsDirty);
+            std::printf("[demo] %-11s 62%% 色条 %.0f（拖动前 269：局部重排跟着内容盒走）\n",
+                        "", bar ? (double)bar->width : 0.0);
         }
     };
 

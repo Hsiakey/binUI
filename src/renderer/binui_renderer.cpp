@@ -181,6 +181,9 @@ void BinUIRenderer::shutdown() {
     focusRingHideAt_ = 0;
     scroll_.clear();
     scrollDragNode_ = -1;
+    resizeNode_ = -1;
+    resizeHandle_ = 0;
+    boundsOverride_.clear();
     specOf_.clear();
     flexOf_.clear();
     specData_.clear();
@@ -226,6 +229,9 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
     nodes_.clear();
     nodeIndexById_.clear();
     mountedAnchors_.clear();
+    boundsOverride_.clear();     // 新布局：上回拖出来的尺寸作废
+    resizeNode_ = -1;
+    resizeHandle_ = 0;
     specOf_.clear();
     flexOf_.clear();
     specData_.clear();
@@ -1106,8 +1112,20 @@ void BinUIRenderer::relayout(int width, int height) {
     nodes_[0].y = 0;
     nodes_[0].width = static_cast<float>(width);
     nodes_[0].height = static_cast<float>(height);
-    if (!hasSpecs_) return;
+    if (!hasSpecs_) return;      // 无规格段 = 静态布局，没有重排依据
+    relayoutFrom(0);
+    // 视口 = 窗口：重排后把根钉回窗口尺寸（内容变高/变宽时不许把根撑大，
+    // 否则一次 resize 之后画面会"长"到窗口外，与编译器同口径）。
+    nodes_[0].width = static_cast<float>(width);
+    nodes_[0].height = static_cast<float>(height);
+    clampScrollOffsets();
+}
 
+// 局部重排（v21）：从 startIdx 开始，按规格段重算这个节点与整棵子树。
+// 与 relayout 是同一个算法，区别只有两点：起点不是我根、也不把根钉回窗口。
+// 缩放拖拽就是用它：拖完一个盒子立刻按新内容盒排子节点（百分比 / 流式 / flex /
+// min·max 全跟着走），节点在流式子项或 flex 子项里时连兄弟位置一起修正。
+void BinUIRenderer::relayoutFrom(size_t startIdx) {
     // 容器上下文：内容盒原点/尺寸 + 独立流光标（与编译器 Ctx 一致）
     struct RCtx {
         uint16_t nodeId;
@@ -1117,9 +1135,11 @@ void BinUIRenderer::relayout(int width, int height) {
         float    cursorY;
     };
     std::vector<RCtx> stack;
-    float rootPad = nodes_[0].padding;
-    stack.push_back({ 0, 0, rootPad, rootPad,
-                      (float)width - 2 * rootPad, (float)height - 2 * rootPad, 0 });
+    const NodeInfo& rootNode = nodes_[startIdx];
+    stack.push_back({ rootNode.id, startIdx,
+                      rootNode.x + rootNode.padding, rootNode.y + rootNode.padding,
+                      rootNode.width - 2 * rootNode.padding,
+                      rootNode.height - 2 * rootNode.padding, 0 });
 
     // 容器高度不足时扩展到容纳流式内容（滚动容器保持固定视口）
     auto growContainer = [&](RCtx& c) {
@@ -1132,14 +1152,16 @@ void BinUIRenderer::relayout(int width, int height) {
     // flex 子项布局结果：childId -> {x, y, w, h}（相对父内容盒）
     std::unordered_map<uint16_t, std::array<float, 4>> flexPos;
 
-    for (size_t i = 1; i < nodes_.size(); i++) {
+    for (size_t i = startIdx + 1; i < nodes_.size(); i++) {
         NodeInfo& node = nodes_[i];
-        const BinUISpecNode* spec = specOf_[i];
+        const BinUISpecNode* spec = (i < specOf_.size()) ? specOf_[i] : nullptr;
 
         while (stack.size() > 1 && stack.back().nodeId != node.parentId) {
             growContainer(stack.back());
             stack.pop_back();
         }
+        // 局部重排：父链已经弹回起点（说明这个节点不在本子树里）——跳过
+        if (stack.back().nodeId != node.parentId) continue;
         RCtx& c = stack.back();
 
         // ---- 尺寸 ----
@@ -1161,6 +1183,12 @@ void BinUIRenderer::relayout(int width, int height) {
                 h = ClampSize(h, spec, c.ch, SPEC_MINH_PCT, SPEC_MAXH_PCT, spec->minH, spec->maxH);
             }
         }
+        // 尺寸覆盖（缩放拖拽钉住的节点）：规格段算出来的宽高让位给宿主拖出来的值，
+        // 且必须在"流式光标推进"之前生效 —— 否则下面的兄弟会按旧高度落位。
+        const std::array<float, 4>* ov = nullptr;
+        if (auto oit = boundsOverride_.find(node.id); oit != boundsOverride_.end())
+            ov = &oit->second;
+        if (ov) { w = (*ov)[2]; h = (*ov)[3]; }
 
         // ---- 位置 ----
         float x, y;
@@ -1180,6 +1208,7 @@ void BinUIRenderer::relayout(int width, int height) {
             x = c.ox + (node.x - c.ox); // 无规格：保持原位
             y = c.oy + (node.y - c.oy);
         }
+        if (ov) { x = (*ov)[0]; y = (*ov)[1]; }
         node.x = x;
         node.y = y;
         node.width = w;
@@ -1311,18 +1340,17 @@ void BinUIRenderer::relayout(int width, int height) {
                           w - 2 * node.padding, h - 2 * node.padding, 0 });
     }
 
-    // 收尾：弹出剩余容器并自动扩展，最后扩展根（与编译器一致）
+    // 收尾：弹出剩余容器并自动扩展，最后扩展起点容器（与编译器一致）。
+    // 起点容器是"这棵子树的根"：relayout 里由调用方把根钉回窗口尺寸。
     while (stack.size() > 1) {
         growContainer(stack.back());
         stack.pop_back();
     }
     growContainer(stack[0]);
-    // 视口 = 窗口：重排后把根钉回窗口尺寸（内容变高/变宽时不许把根撑大，
-    // 否则一次 resize 之后画面会"长"到窗口外，与编译器同口径）。
-    nodes_[0].width = static_cast<float>(width);
-    nodes_[0].height = static_cast<float>(height);
+}
 
-    // 滚动偏移按新视口钳制
+// 滚动偏移按新的内容/视口钳制（重排后内容可能变短）
+void BinUIRenderer::clampScrollOffsets() {
     for (auto& [id, s] : scroll_) {
         auto it = nodeIndexById_.find(id);
         if (it == nodeIndexById_.end()) continue;
@@ -1339,6 +1367,34 @@ void BinUIRenderer::relayout(int width, int height) {
         s.x = std::min(std::max(s.x, 0.0f), maxX);
         s.y = std::min(std::max(s.y, 0.0f), maxY);
     }
+}
+
+// ---- 局部重排（v21）：宿主/缩放拖拽改了一个盒子之后，只重排这棵子树 ----
+bool BinUIRenderer::relayoutSubtree(uint16_t nodeId) {
+    auto it = nodeIndexById_.find(nodeId);
+    if (it == nodeIndexById_.end()) return false;
+    if (!hasSpecs_) return false;         // 静态布局没有重排依据
+    if (proportionalScale_) return false; // 等比模式：节点树由窗口比例决定，不做流式重排
+    relayoutFrom(it->second);
+    clampScrollOffsets();
+    return true;
+}
+
+bool BinUIRenderer::resizeNodeBounds(uint16_t nodeId, float x, float y, float w, float h) {
+    if (!setNodeBounds(nodeId, x, y, w, h)) return false;
+    boundsOverride_[nodeId] = { x, y, w, h };
+    auto it = nodeIndexById_.find(nodeId);
+    if (it == nodeIndexById_.end()) return true;
+    // 在流式/flex 父容器里：连兄弟一起重排（否则后面的兄弟不会让位）；
+    // 否则只重排自己这棵子树（子节点的百分比/流式/flex 跟着新盒子走）
+    const uint16_t pid = nodes_[it->second].parentId;
+    const uint16_t base = (pid != 0xFFFF && nodeIndexById_.count(pid)) ? pid : nodeId;
+    relayoutSubtree(base);
+    return true;
+}
+
+void BinUIRenderer::clearBoundsOverride(uint16_t nodeId) {
+    boundsOverride_.erase(nodeId);
 }
 
 int BinUIRenderer::hitTest(float x, float y) const {
@@ -1871,27 +1927,86 @@ void BinUIRenderer::dragResize(float px, float py) {
     }
     if (x == n.x && y == n.y && w == n.width && h == n.height) return;
 
-    // 脏矩形 = 旧矩形 ∪ 新矩形（屏幕坐标）；宿主拿它做局部重绘
-    const float nxs = x - resizeOffX_, nys = y - resizeOffY_;
-    const float oxs = n.x - resizeOffX_, oys = n.y - resizeOffY_;
-    const float l = std::min(nxs, oxs), t = std::min(nys, oys);
-    const float r = std::max(nxs + w, oxs + n.width);
-    const float b = std::max(nys + h, oys + n.height);
-    float dl = l, dt = t, dr = r, db = b;
+    // 脏矩形 = 旧子树包围盒 ∪ 新子树包围盒（屏幕坐标）。局部重排会挪动子节点，
+    // 只按盒子本身算的话，缩小时子节点被挤出去的那一圈会留残影。
+    float ol = 0, ot = 0, orr = 0, ob = 0;
+    const bool hasOld = subtreeScreenBounds(static_cast<uint16_t>(resizeNode_), ol, ot, orr, ob);
+
+    // 改矩形 + 钉住尺寸 + 局部重排（子节点按新内容盒重排；流式/flex 里连兄弟一起让位）
+    resizeNodeBounds(static_cast<uint16_t>(resizeNode_), x, y, w, h);
+
+    float nl = 0, nt = 0, nr = 0, nb = 0;
+    if (subtreeScreenBounds(static_cast<uint16_t>(resizeNode_), nl, nt, nr, nb)) {
+        if (hasOld) {
+            nl = std::min(nl, ol); nt = std::min(nt, ot);
+            nr = std::max(nr, orr); nb = std::max(nb, ob);
+        }
+    } else if (hasOld) {
+        nl = ol; nt = ot; nr = orr; nb = ob;
+    }
+    float dl = nl, dt = nt, dr = nr, db = nb;
     if (resizeDirtyOn_) {
-        dl = std::min(resizeDirty_[0], l);
-        dt = std::min(resizeDirty_[1], t);
-        dr = std::max(resizeDirty_[0] + resizeDirty_[2], r);
-        db = std::max(resizeDirty_[1] + resizeDirty_[3], b);
+        dl = std::min(resizeDirty_[0], nl);
+        dt = std::min(resizeDirty_[1], nt);
+        dr = std::max(resizeDirty_[0] + resizeDirty_[2], nr);
+        db = std::max(resizeDirty_[1] + resizeDirty_[3], nb);
     }
     resizeDirty_[0] = dl;
     resizeDirty_[1] = dt;
     resizeDirty_[2] = dr - dl;
     resizeDirty_[3] = db - dt;
     resizeDirtyOn_ = true;
+}
 
-    // 只改这一个节点（与 setNodeBounds 同语义）：子节点/兄弟不重排
-    n.x = x; n.y = y; n.width = w; n.height = h;
+// 子树在屏幕坐标下的包围盒（含祖先滚动偏移；不做视口裁剪 —— 脏矩形必须覆盖全部）
+bool BinUIRenderer::subtreeScreenBounds(uint16_t nodeId, float& l, float& t, float& r, float& b) const {
+    auto rootIt = nodeIndexById_.find(nodeId);
+    if (rootIt == nodeIndexById_.end()) return false;
+    auto offsetOf = [&](size_t idx) {
+        float ox = 0, oy = 0;
+        size_t cur = idx;
+        for (int guard = 0; guard < 64; guard++) {
+            const auto& nd = nodes_[cur];
+            if (nd.parentId == 0xFFFF) break;
+            auto pit = nodeIndexById_.find(nd.parentId);
+            if (pit == nodeIndexById_.end()) break;
+            const auto& par = nodes_[pit->second];
+            if (par.flags & BINUI_SCROLLABLE) {
+                auto sit = scroll_.find(par.id);
+                if (sit != scroll_.end()) { ox += sit->second.x; oy += sit->second.y; }
+            }
+            cur = pit->second;
+        }
+        return std::pair<float, float>(ox, oy);
+    };
+    // 节点是否在这棵子树里：沿父链向上找
+    auto inSubtree = [&](size_t idx) {
+        size_t cur = idx;
+        for (int guard = 0; guard < 64; guard++) {
+            if (cur == rootIt->second) return true;
+            const auto& nd = nodes_[cur];
+            if (nd.parentId == 0xFFFF) return false;
+            auto pit = nodeIndexById_.find(nd.parentId);
+            if (pit == nodeIndexById_.end()) return false;
+            cur = pit->second;
+        }
+        return false;
+    };
+    bool any = false;
+    for (size_t i = 0; i < nodes_.size(); i++) {
+        const NodeInfo& nd = nodes_[i];
+        if (!(nd.flags & BINUI_VISIBLE)) continue;
+        if (!inSubtree(i)) continue;
+        const auto off = offsetOf(i);
+        const float x0 = nd.x - off.first, y0 = nd.y - off.second;
+        const float x1 = x0 + nd.width, y1 = y0 + nd.height;
+        if (!any) { l = x0; t = y0; r = x1; b = y1; any = true; }
+        else {
+            l = std::min(l, x0); t = std::min(t, y0);
+            r = std::max(r, x1); b = std::max(b, y1);
+        }
+    }
+    return any;
 }
 
 // ============ 指针状态（hover / 按下） ============

@@ -523,6 +523,84 @@ static void TestIssueRegressions() {
         r.release(-21, 199);
     }
 
+    // ---- 局部重排：盒子变了，子树按规格段（百分比 / 流式 / 覆盖）重排 ----
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014"><body>
+  <div id="box" style="position:absolute; left:20; top:20; width:200; height:120; padding:10">
+    <span id="pct"   style="width:50%; height:16; font-size:12px">百分比</span>
+    <span id="flow1" style="width:100%; height:16; font-size:12px">流式一</span>
+    <span id="flow2" style="width:100%; height:16; font-size:12px">流式二</span>
+  </div>
+  <div id="col" style="position:absolute; left:20; top:170; width:200; height:110">
+    <div id="a" style="height:40"><span style="height:16; font-size:12px">A</span></div>
+    <div id="b" style="height:40"><span style="height:16; font-size:12px">B</span></div>
+  </div>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("重排: 编译并加载", !bin.empty() && r.loadLayout(bin.data(), bin.size()));
+        const uint16_t box = r.findNodeByName("box");
+        const uint16_t pct = r.findNodeByName("pct");
+        const uint16_t flow1 = r.findNodeByName("flow1");
+        const uint16_t flow2 = r.findNodeByName("flow2");
+        const uint16_t col = r.findNodeByName("col");
+        const uint16_t a = r.findNodeByName("a");
+        const uint16_t b = r.findNodeByName("b");
+
+        const auto* p0 = IssueNode(r, pct);
+        const auto* f10 = IssueNode(r, flow1);
+        const auto* f20 = IssueNode(r, flow2);
+        // 内容盒宽 = 200 - 2*10 = 180；50% = 90，100% = 180
+        TEST("重排: 初始百分比宽度", p0 && std::fabs(p0->width - 90.0f) < 0.6f);
+        TEST("重排: 初始流式宽度", f10 && std::fabs(f10->width - 180.0f) < 0.6f);
+        TEST("重排: 流式第二个排在第一个下面",
+             f10 && f20 && f20->y >= f10->y + f10->height - 0.01f);
+
+        // 盒子改宽 200 → 300：子节点的百分比/自动宽跟着变
+        TEST("重排: resizeNodeBounds 生效", r.resizeNodeBounds(box, 20, 20, 300, 120));
+        const auto* p1 = IssueNode(r, pct);
+        const auto* f11 = IssueNode(r, flow1);
+        TEST("重排: 百分比子节点跟着变宽", p1 && std::fabs(p1->width - 140.0f) < 0.6f);
+        TEST("重排: 自动宽子节点跟着变宽", f11 && std::fabs(f11->width - 280.0f) < 0.6f);
+        TEST("重排: 子节点跟着父盒子的 x 走",
+             p1 && f11 && std::fabs(p1->x - (20 + 10)) < 0.01f &&
+             std::fabs(f11->x - (20 + 10)) < 0.01f);
+
+        // 只改盒子再手动重排（宿主换文本撑高时用）：同一个结果
+        r.setNodeBounds(box, 20, 20, 100, 120);
+        TEST("重排: 只改盒子时子节点先不动", [&] {
+            const auto* q = IssueNode(r, pct);
+            return q && std::fabs(q->width - 140.0f) < 0.6f;
+        }());
+        TEST("重排: relayoutSubtree 后百分比重算", r.relayoutSubtree(box));
+        const auto* p2 = IssueNode(r, pct);
+        TEST("重排: 100 宽的盒子 50% = 40", p2 && std::fabs(p2->width - 40.0f) < 0.6f);
+
+        // 流式父容器：把 A 拖高，B 应该被顶下去
+        const auto* a0 = IssueNode(r, a);
+        const auto* b0 = IssueNode(r, b);
+        const float by0 = b0 ? b0->y : 0;
+        TEST("重排: 改高流式子项", r.resizeNodeBounds(a, a0->x, a0->y, a0->width, 90));
+        const auto* b1 = IssueNode(r, b);
+        TEST("重排: 兄弟跟着让位", b1 && std::fabs(b1->y - (by0 + 50)) < 0.6f);
+        TEST("重排: 兄弟自身高度不变", b1 && std::fabs(b1->height - 40) < 0.6f);
+        (void)col;
+
+        // 钉住的尺寸在 window resize 后仍保持；解除后回到规格值
+        r.setSize(400, 300);
+        const auto* a1 = IssueNode(r, a);
+        TEST("重排: 窗口重排后仍保持拖动尺寸", a1 && std::fabs(a1->height - 90) < 0.6f);
+        r.clearBoundsOverride(a);
+        TEST("重排: 解除覆盖后标记消失", !r.hasBoundsOverride(a));
+        r.relayoutSubtree(col);
+        const auto* a2 = IssueNode(r, a);
+        const auto* b2 = IssueNode(r, b);
+        TEST("重排: 解除后回到声明高度",
+             a2 && std::fabs(a2->height - 40) < 0.6f && b2 && std::fabs(b2->y - by0) < 0.6f);
+    }
+
     // ---- 剪贴板的文本层动作：selectedText / deleteSelection / selectAll ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

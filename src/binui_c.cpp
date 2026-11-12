@@ -430,7 +430,7 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
 
 extern "C" {
 
-const char* BINUI_C_CALL binui_version(void) { return "0.12.11"; }
+const char* BINUI_C_CALL binui_version(void) { return "0.12.12"; }
 
 int32_t BINUI_C_CALL binui_abi_version(void) { return BINUI_C_ABI_VERSION; }
 
@@ -771,6 +771,29 @@ int32_t BINUI_C_CALL binui_set_node_bounds(void* appp, int32_t node_id,
     return 1;
 }
 
+int32_t BINUI_C_CALL binui_relayout_subtree(void* appp, int32_t node_id) {
+    App* a = A(appp);
+    if (!a || node_id < 0) return 0;
+    if (!a->renderer.relayoutSubtree(static_cast<uint16_t>(node_id))) return 0;
+    if (a->shell) a->shell->invalidateAll();
+    return 1;
+}
+
+int32_t BINUI_C_CALL binui_resize_node_bounds(void* appp, int32_t node_id,
+                                              float x, float y, float w, float h) {
+    App* a = A(appp);
+    if (!a || node_id < 0) return 0;
+    if (!a->renderer.resizeNodeBounds(static_cast<uint16_t>(node_id), x, y, w, h)) return 0;
+    if (a->shell) a->shell->invalidateAll();
+    return 1;
+}
+
+void BINUI_C_CALL binui_clear_bounds_override(void* appp, int32_t node_id) {
+    App* a = A(appp);
+    if (!a || node_id < 0) return;
+    a->renderer.clearBoundsOverride(static_cast<uint16_t>(node_id));
+}
+
 int32_t BINUI_C_CALL binui_add_node(void* appp, int32_t parent_id, int32_t type,
                                     float x, float y, float w, float h,
                                     uint32_t color, int32_t radius, int32_t font_size) {
@@ -888,3 +911,4 @@ int32_t BINUI_C_CALL binui_mount_components(void* appp, const char* layout_dir_u
 }
 
 } // extern "C"
+

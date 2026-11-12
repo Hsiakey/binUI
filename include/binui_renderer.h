@@ -187,6 +187,18 @@ public:
     // 只改这一个节点，不牵动兄弟节点（不做流式重排）；宿主需要自己挪后续节点。
     // 返回 false = 无此节点。
     bool setNodeBounds(uint16_t nodeId, float x, float y, float w, float h);
+    // ---- 局部重排（v21）----
+    // setNodeBounds 只改盒子、不动内容；下面这组按编译期规格段（百分比 / 流式 / flex /
+    // min·max）把**这棵子树**重新排一遍：
+    //   relayoutSubtree(id)        —— 盒子不变，只按盒子重排内容（宿主换文本撑高后调用）
+    //   resizeNodeBounds(id,...)   —— 改矩形 + 钉住尺寸覆盖 + 重排（缩放拖拽内部就用它）；
+    //                                节点在流式/flex 父容器里时连兄弟位置一起修正
+    //   clearBoundsOverride(id)    —— 解除钉住：下次 window resize/重排回到规格值的尺寸
+    // 不做的事：不改兄弟（除非本节点在流式/flex 里）、不重算文本高度、不重排父级链。
+    bool relayoutSubtree(uint16_t nodeId);
+    bool resizeNodeBounds(uint16_t nodeId, float x, float y, float w, float h);
+    void clearBoundsOverride(uint16_t nodeId);
+    bool hasBoundsOverride(uint16_t nodeId) const { return boundsOverride_.count(nodeId) != 0; }
     // 该节点的规格段是否带 heightAuto 标记（高度是编译期按文本估算撑开的）。
     // true 的节点在 setText 换文本时会自动重算高度；作者显式写了 height 的为 false。
     bool specHeightAuto(uint16_t nodeId) const;
@@ -538,6 +550,11 @@ private:
     // 累加祖先滚动偏移（布局坐标 → 屏幕坐标）；点落在某个滚动祖先的视口外返回 false
     bool screenOffsetOf(size_t nodeIndex, float px, float py, float& ox, float& oy) const;
     void relayout(int width, int height); // 运行时重排（百分比/流式/flex；无规格段仅同步根）
+    // 局部重排的共用算法：从 startIdx 起按规格段重算这棵子树（relayout 也从根走它）
+    void relayoutFrom(size_t startIdx);
+    void clampScrollOffsets();            // 重排后把滚动偏移钳回内容范围
+    // 子树在屏幕坐标下的包围盒（缩放拖拽算脏矩形用；含祖先滚动偏移、不做视口裁剪）
+    bool subtreeScreenBounds(uint16_t nodeId, float& l, float& t, float& r, float& b) const;
     // 按根节点底色亮度派生滚动条默认色（浅底浅色、深底深色）
     void deriveScrollbarStyleFromRoot();
     BinUIScrollbarStyle scrollbarStyle_;
@@ -592,6 +609,8 @@ private:
     float   resizeOffX_ = 0, resizeOffY_ = 0;  // 按下时节点的祖先滚动偏移（屏幕坐标换算基准）
     float   resizeDirty_[4] = {0, 0, 0, 0};    // 拖动脏矩形（屏幕坐标）
     bool    resizeDirtyOn_ = false;
+    // 尺寸覆盖（v21）：宿主拖过尺寸的节点，重排时保持这个矩形不被规格段改写
+    std::unordered_map<uint16_t, std::array<float, 4>> boundsOverride_;
     // 缩放规格段（v3）：节点下标 -> 规格；flex 容器 id -> 容器规格
     std::vector<const BinUISpecNode*> specOf_;
     std::unordered_map<uint16_t, const BinUISpecFlex*> flexOf_;
