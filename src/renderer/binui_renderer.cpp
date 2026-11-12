@@ -1655,11 +1655,16 @@ int BinUIRenderer::hitScrollBar(float x, float y, bool& vertical) const {
     return -1;
 }
 
-// 光标形状：先看是不是压在滚动条上，再看光标下是什么节点
+// 光标形状：拖动缩放/滚动条时锁形状，否则先看滚动条，再看缩放热区，最后看命中节点
+static BinUIRenderer::CursorKind CursorOfResizeHandle(uint8_t h);   // 定义在下面（缩放段）
 BinUIRenderer::CursorKind BinUIRenderer::cursorAt(float x, float y) const {
+    if (resizeNode_ >= 0) return CursorOfResizeHandle(resizeHandle_); // 拖拽中形状不变
     bool vertical = true;
     if (hitScrollBar(x, y, vertical) >= 0)
         return vertical ? CursorKind::SizeNS : CursorKind::SizeWE;
+
+    uint8_t rh = 0;
+    if (resizeHandleAt(x, y, &rh) >= 0) return CursorOfResizeHandle(rh);
 
     const int id = hitTest(x, y);
     if (id < 0) return CursorKind::Arrow;
@@ -1677,6 +1682,218 @@ bool BinUIRenderer::scrollBarHitTest(float x, float y) const {
     return hitScrollBar(x, y, v) >= 0;
 }
 
+// ============ 元素缩放（v21：CSS resize） ============
+
+uint8_t BinUIRenderer::resizeMaskOf(uint16_t nodeId) const {
+    const BinUIPaintNode* p = paintOf(nodeId);
+    if (!p || !(p->flags & PAINT_RESIZE)) return 0;
+    return p->resizeMask;
+}
+
+bool BinUIRenderer::setResizeMask(uint16_t nodeId, uint8_t mask) {
+    auto it = paintIdx_.find(nodeId);
+    if (it == paintIdx_.end()) return false;
+    BinUIPaintNode& p = paints_[it->second];
+    p.resizeMask = mask;
+    if (mask) p.flags |= PAINT_RESIZE;
+    else      p.flags &= static_cast<uint16_t>(~PAINT_RESIZE);
+    return true;
+}
+
+uint16_t BinUIRenderer::resizingNode() const {
+    return resizeNode_ < 0 ? 0xFFFFu : static_cast<uint16_t>(resizeNode_);
+}
+
+bool BinUIRenderer::takeResizeDirty(float& x, float& y, float& w, float& h) {
+    if (!resizeDirtyOn_) return false;
+    x = resizeDirty_[0];
+    y = resizeDirty_[1];
+    w = resizeDirty_[2];
+    h = resizeDirty_[3];
+    resizeDirtyOn_ = false;
+    return true;
+}
+
+// 布局坐标 → 屏幕坐标：累加祖先滚动容器的偏移。口径与 hitTestEx 完全一致
+// （先自下而上收集祖先链，再由外向内累加），否则"命中用一套坐标、画用另一套"。
+// px/py 也顺手做过视口检查：点落在某个滚动祖先的视口外 → 不可交互。
+bool BinUIRenderer::screenOffsetOf(size_t idx, float px, float py,
+                                   float& ox, float& oy) const {
+    size_t chain[64];
+    int cn = 0;
+    size_t cur = idx;
+    while (cn < 64) {
+        const auto& anc = nodes_[cur];
+        if (anc.parentId == 0xFFFF) break;
+        auto pit = nodeIndexById_.find(anc.parentId);
+        if (pit == nodeIndexById_.end()) break;
+        cur = pit->second;
+        if (!(nodes_[cur].flags & BINUI_VISIBLE)) return false;
+        chain[cn++] = cur;
+    }
+    ox = 0;
+    oy = 0;
+    for (int k = cn - 1; k >= 0; k--) {
+        const auto& par = nodes_[chain[k]];
+        if (!(par.flags & BINUI_SCROLLABLE)) continue;
+        if (px < par.x - ox || px > par.x - ox + par.width ||
+            py < par.y - oy || py > par.y - oy + par.height)
+            return false;
+        auto sit = scroll_.find(par.id);
+        if (sit != scroll_.end()) { ox += sit->second.x; oy += sit->second.y; }
+    }
+    return true;
+}
+
+// 缩放光标：边 → 单向；角 → 对角
+static BinUIRenderer::CursorKind CursorOfResizeHandle(uint8_t h) {
+    switch (h) {
+        case RESIZE_LEFT:
+        case RESIZE_RIGHT:        return BinUIRenderer::CursorKind::SizeWE;
+        case RESIZE_TOP:
+        case RESIZE_BOTTOM:       return BinUIRenderer::CursorKind::SizeNS;
+        case RESIZE_TOP_LEFT:
+        case RESIZE_BOTTOM_RIGHT: return BinUIRenderer::CursorKind::SizeNWSE;
+        case RESIZE_TOP_RIGHT:
+        case RESIZE_BOTTOM_LEFT:  return BinUIRenderer::CursorKind::SizeNESW;
+        default:                  return BinUIRenderer::CursorKind::Arrow;
+    }
+}
+
+// 指针下的缩放热区。顺序与命中测试一致：绘制顺序逆序（最上层优先）。
+// 角 > 边；点在两条边的交叉带里（元素很小）时取更近的那条。
+int BinUIRenderer::resizeHandleAt(float x, float y, uint8_t* handleOut) const {
+    const std::vector<uint32_t> order = drawOrder();
+    for (size_t oi = order.size(); oi-- > 0;) {
+        const size_t i = order[oi];
+        const NodeInfo& n = nodes_[i];
+        if (!(n.flags & BINUI_VISIBLE)) continue;
+        if (n.flags & BINUI_DISABLED) continue;         // 禁用节点不给缩放热区
+        const uint8_t mask = resizeMaskOf(n.id);
+        if (!mask) continue;
+
+        float ox = 0, oy = 0;
+        if (!screenOffsetOf(i, x, y, ox, oy)) continue; // 祖先不可见 / 视口外
+        const float l = n.x - ox, t = n.y - oy;
+        const float r = l + n.width, b = t + n.height;
+        // 热区贴着盒子外侧也算（和窗口边框一次拖动一致），只外扩 kResizeSlop
+        if (x < l - kResizeSlop || x > r + kResizeSlop ||
+            y < t - kResizeSlop || y > b + kResizeSlop)
+            continue;
+
+        const float dL = std::fabs(x - l), dR = std::fabs(x - r);
+        const float dT = std::fabs(y - t), dB = std::fabs(y - b);
+        uint8_t h = 0;
+
+        // 1) 四角：角的方块内（kResizeCorner），且该角开放
+        if (dL <= kResizeCorner && dT <= kResizeCorner && (mask & RESIZE_TOP_LEFT))         h = RESIZE_TOP_LEFT;
+        else if (dR <= kResizeCorner && dT <= kResizeCorner && (mask & RESIZE_TOP_RIGHT))  h = RESIZE_TOP_RIGHT;
+        else if (dL <= kResizeCorner && dB <= kResizeCorner && (mask & RESIZE_BOTTOM_LEFT)) h = RESIZE_BOTTOM_LEFT;
+        else if (dR <= kResizeCorner && dB <= kResizeCorner && (mask & RESIZE_BOTTOM_RIGHT)) h = RESIZE_BOTTOM_RIGHT;
+
+        // 2) 四边：kResizeSlop 的带宽内；两条边都够近时取更近的
+        if (!h) {
+            const bool onL = dL <= kResizeSlop && (mask & RESIZE_LEFT);
+            const bool onR = dR <= kResizeSlop && (mask & RESIZE_RIGHT);
+            const bool onT = dT <= kResizeSlop && (mask & RESIZE_TOP);
+            const bool onB = dB <= kResizeSlop && (mask & RESIZE_BOTTOM);
+            const bool haveX = onL || onR, haveY = onT || onB;
+            if (haveX && haveY) {
+                const float dx = std::min(onL ? dL : 1e9f, onR ? dR : 1e9f);
+                const float dy = std::min(onT ? dT : 1e9f, onB ? dB : 1e9f);
+                if (dx <= dy) { h = onL ? RESIZE_LEFT : RESIZE_RIGHT; }
+                else          { h = onT ? RESIZE_TOP  : RESIZE_BOTTOM; }
+            } else if (haveX) {
+                h = onL ? (onR && dR < dL ? RESIZE_RIGHT : RESIZE_LEFT)
+                        : RESIZE_RIGHT;
+            } else if (haveY) {
+                h = onT ? (onB && dB < dT ? RESIZE_BOTTOM : RESIZE_TOP)
+                        : RESIZE_BOTTOM;
+            }
+        }
+        if (!h) continue;
+        if (handleOut) *handleOut = h;
+        return n.id;
+    }
+    return -1;
+}
+
+void BinUIRenderer::beginResize(uint16_t nodeId, uint8_t handle, float px, float py) {
+    auto it = nodeIndexById_.find(nodeId);
+    if (it == nodeIndexById_.end()) return;
+    const NodeInfo& n = nodes_[it->second];
+    resizeNode_ = nodeId;
+    resizeHandle_ = handle;
+    resizeStartX_ = px;
+    resizeStartY_ = py;
+    resizeOrigX_ = n.x;
+    resizeOrigY_ = n.y;
+    resizeOrigW_ = n.width;
+    resizeOrigH_ = n.height;
+    // 祖先滚动偏移在按下这一刻定死：拖拽期间容器不会自己滚（真滚了也只是视觉偏移）
+    float ox = 0, oy = 0;
+    screenOffsetOf(it->second, px, py, ox, oy);
+    resizeOffX_ = ox;
+    resizeOffY_ = oy;
+    resizeDirtyOn_ = false;
+}
+
+void BinUIRenderer::dragResize(float px, float py) {
+    if (resizeNode_ < 0) return;
+    auto it = nodeIndexById_.find(static_cast<uint16_t>(resizeNode_));
+    if (it == nodeIndexById_.end()) { resizeNode_ = -1; return; }
+    NodeInfo& n = nodes_[it->second];
+
+    const float dx = px - resizeStartX_;
+    const float dy = py - resizeStartY_;
+    float x = resizeOrigX_, y = resizeOrigY_, w = resizeOrigW_, h = resizeOrigH_;
+    const bool takeL = (resizeHandle_ & (RESIZE_LEFT | RESIZE_TOP_LEFT | RESIZE_BOTTOM_LEFT)) != 0;
+    const bool takeR = (resizeHandle_ & (RESIZE_RIGHT | RESIZE_TOP_RIGHT | RESIZE_BOTTOM_RIGHT)) != 0;
+    const bool takeT = (resizeHandle_ & (RESIZE_TOP | RESIZE_TOP_LEFT | RESIZE_TOP_RIGHT)) != 0;
+    const bool takeB = (resizeHandle_ & (RESIZE_BOTTOM | RESIZE_BOTTOM_LEFT | RESIZE_BOTTOM_RIGHT)) != 0;
+
+    // 最小尺寸：顶住被拖的那条边（另一边不动），不反过来把盒子推走
+    if (takeL) {
+        w = resizeOrigW_ - dx;
+        if (w < kResizeMinSize) w = kResizeMinSize;
+        x = resizeOrigX_ + resizeOrigW_ - w;
+    } else if (takeR) {
+        w = resizeOrigW_ + dx;
+        if (w < kResizeMinSize) w = kResizeMinSize;
+    }
+    if (takeT) {
+        h = resizeOrigH_ - dy;
+        if (h < kResizeMinSize) h = kResizeMinSize;
+        y = resizeOrigY_ + resizeOrigH_ - h;
+    } else if (takeB) {
+        h = resizeOrigH_ + dy;
+        if (h < kResizeMinSize) h = kResizeMinSize;
+    }
+    if (x == n.x && y == n.y && w == n.width && h == n.height) return;
+
+    // 脏矩形 = 旧矩形 ∪ 新矩形（屏幕坐标）；宿主拿它做局部重绘
+    const float nxs = x - resizeOffX_, nys = y - resizeOffY_;
+    const float oxs = n.x - resizeOffX_, oys = n.y - resizeOffY_;
+    const float l = std::min(nxs, oxs), t = std::min(nys, oys);
+    const float r = std::max(nxs + w, oxs + n.width);
+    const float b = std::max(nys + h, oys + n.height);
+    float dl = l, dt = t, dr = r, db = b;
+    if (resizeDirtyOn_) {
+        dl = std::min(resizeDirty_[0], l);
+        dt = std::min(resizeDirty_[1], t);
+        dr = std::max(resizeDirty_[0] + resizeDirty_[2], r);
+        db = std::max(resizeDirty_[1] + resizeDirty_[3], b);
+    }
+    resizeDirty_[0] = dl;
+    resizeDirty_[1] = dt;
+    resizeDirty_[2] = dr - dl;
+    resizeDirty_[3] = db - dt;
+    resizeDirtyOn_ = true;
+
+    // 只改这一个节点（与 setNodeBounds 同语义）：子节点/兄弟不重排
+    n.x = x; n.y = y; n.width = w; n.height = h;
+}
+
 // ============ 指针状态（hover / 按下） ============
 
 void BinUIRenderer::applyFocus(int nodeId) {
@@ -1692,6 +1909,11 @@ void BinUIRenderer::applyFocus(int nodeId) {
 }
 
 void BinUIRenderer::setHover(float x, float y) {
+    // 拖动元素缩放：每步改节点矩形，不更新悬停（和滚动条拖动同一套"拖拽独占指针"）
+    if (resizeNode_ >= 0) {
+        dragResize(x, y);
+        return;
+    }
     // 拖动滚动条时更新滚动位置，不更新悬停
     if (scrollDragNode_ >= 0) {
         dragScroll(x, y);
@@ -1750,6 +1972,7 @@ void BinUIRenderer::dragScroll(float px, float py) {
 int BinUIRenderer::press(float x, float y) {
     // 滚动条拖动优先于节点按下
     scrollDragNode_ = -1;
+    resizeNode_ = -1;          // 上一次缩放拖拽（没收到 release 的脏路径）就此收尾
     bool vert = true;
     int sb = hitScrollBar(x, y, vert);
     if (sb >= 0) {
@@ -1764,6 +1987,16 @@ int BinUIRenderer::press(float x, float y) {
                 scrollDragGrab_ = (vert ? y - n.y : x - n.x) - tp;
         }
         return sb;
+    }
+
+    // 元素缩放热区：抢在命中之前（贴边就是想改尺寸）。不抢焦点、不发 PRESS/CLICK。
+    {
+        uint8_t rh = 0;
+        const int rid = resizeHandleAt(x, y, &rh);
+        if (rid >= 0) {
+            beginResize(static_cast<uint16_t>(rid), rh, x, y);
+            return rid;
+        }
     }
 
     int id = hitTestEx(x, y, true, BINUI_ST_ACTIVE);
@@ -1798,6 +2031,12 @@ int BinUIRenderer::press(float x, float y) {
 }
 
 int BinUIRenderer::release(float x, float y) {
+    if (resizeNode_ >= 0) {
+        resizeNode_ = -1;   // 缩放结束：不产生点击
+        resizeHandle_ = 0;
+        pressedId_ = -1;
+        return -1;
+    }
     if (scrollDragNode_ >= 0) {
         scrollDragNode_ = -1; // 滚动条松开：不产生点击
         return -1;
@@ -1836,6 +2075,8 @@ void BinUIRenderer::cancelPress() {
     int old = pressedId_;
     pressedId_ = -1;
     scrollDragNode_ = -1;
+    resizeNode_ = -1;
+    resizeHandle_ = 0;
     vidPressNode_ = -1;
     vidPressRegion_ = 0;
     vidScrubbing_ = false;

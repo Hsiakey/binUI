@@ -203,3 +203,56 @@ BINUI_APPSHOW_AUTO=1 build-mingw/bin/examples/appshow.exe
 结果；再点「重排池子」散开。这一版还顺手逼出四个渲染缺陷（见 `CHANGELOG.md` 0.12.8）：
 半透明渐变的横向条纹（条带 0.5px 重叠 + alpha 混合）、`opacity` 不管渐变底/边框、
 圆角模板 LRU 帧内删纹理导致整块纯色、GL/D3D11 批次表存 vector 元素指针。
+
+## 10. 元素缩放（`resize`）：把"窗口改大小"搬进 UI
+
+第 1 页下面三块卡片的尺寸可以拖：鼠标贴到**开放的那条边 / 那个角**上，光标变成系统
+resize 形状，按住拖动直接改这个盒子。和滚动条拖动同一条路子 —— **引擎自己接管拖拽，
+宿主只读回尺寸**，不用写坐标换算，也不用自己画手柄。
+
+```css
+#panel { resize: both; }                      /* 四边 + 四角 */
+#panel { resize: horizontal; }                /* 只开左右 */
+#panel { resize: top-left bottom-right; }     /* 只开两个对角，边中间不响应 */
+#panel { resize: left-resize right-resize; }  /* <名字>-resize 拼法等价 */
+```
+
+| 取值 | 位图（`BinUIResizeFlag`） | 光标 |
+|---|---|---|
+| `both` / `all` | `RESIZE_ALL`（8 位全开） | 四条边 + 四个角 |
+| `horizontal` / `vertical` | `LEFT|RIGHT` / `TOP|BOTTOM` | 只有 ↔ 或 ↕ |
+| `left` `right` `top` `bottom` | 单边 | ↔ ↕ |
+| `top-left` `top-right` `bottom-left` `bottom-right` | 单个角 | ⤡ / ⤢ |
+
+**谁做什么：**
+
+| 引擎 | 宿主 |
+|---|---|
+| 光标形状（`cursorAt()` → `BinUIAppT` 映射到 `IDC_SIZEWE/SIZENS/SIZENWSE/SIZENESW`） | 接一行 `app.setCursorFn`（8 个示例与 C ABI 都接了） |
+| 热区判定（贴边 ±4px、四角 12×12、最上层优先、祖先裁剪/视口外不算） | — |
+| 拖拽：快照原矩形 + 祖先滚动偏移，按下那条边反向改 `x/y`，另一条边不动 | 拖完读 `renderer.getNodes()` 里的矩形（`appshow` 的尺寸读数就这么来的） |
+| 最小 8px 钳制、禁用节点不响应、滚动条优先 | 用 `takeResizeDirty()` 取"旧∪新"脏矩形做局部重绘 |
+| 不发 `PRESS`/`CLICK`（拖边不是点按钮） | 想锁死尺寸用 `setResizeMask(id, 0)` |
+
+**四个坑：**
+
+1. **子节点不重排**。引擎只改这一个节点（和 `setNodeBounds` 同语义）：绝对定位的
+   子节点不会跟着挪。要"内容跟着缩"，现在只能给容器 `overflow:hidden` 让它裁，
+   或者宿主自己按新尺寸重排子节点。运行时重排整棵子树**还没有**接口。
+2. **坐标两套**。热区判定把布局坐标换算成屏幕坐标（累加祖先滚动偏移，口径与
+   `hitTestEx` 完全一致）；拖拽期间的位移直接用屏幕位移，因为拖的时候容器不会自己滚。
+3. **脏矩形要"旧 ∪ 新"**。只失效新矩形，缩小后会留一圈旧边框残影；`takeResizeDirty()`
+   已经把旧矩形并进去了，取一次就清零。
+4. **滚动条优先**。可滚动容器的右下角既是 resize 热区又是滚动条，`press()` 先判滚动条 ——
+   想拖尺寸就把 `resize` 开在没有滚动条的边上。
+
+![可缩放元素](img/appshow-resize.png)
+
+真实窗口里拖大两块（`resize: both` 的卡片 470×212 → 600×277，只开对角的
+250×212 → 306×244）。读数不是宿主自己算的，是每帧读回来的节点矩形：
+
+![拖完之后](img/appshow-resize-drag.png)
+
+光标是在真实窗口里逐点查的（`GetCursorInfo` + `LoadCursorW(IDC_*)` 对表）：
+左边/右边 `SIZEWE`、上边/下边 `SIZENS`、左上/右下 `SIZENWSE`、右上/左下 `SIZENESW`，
+只开对角的卡片边中间是箭头，只开左右的卡片上边是箭头。

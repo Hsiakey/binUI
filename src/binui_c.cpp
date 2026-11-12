@@ -277,6 +277,15 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
         }
         const int oldId = a->renderer.hoveredNode();
         a->renderer.setHover(x, y);
+        // 拖动元素缩放（CSS resize）：矩形变了就按引擎给的"旧∪新"脏矩形重绘
+        {
+            float rx = 0, ry = 0, rw = 0, rh = 0;
+            if (a->renderer.takeResizeDirty(rx, ry, rw, rh))
+                a->shell->invalidateRect(static_cast<int>(std::floor(rx)) - 1,
+                                         static_cast<int>(std::floor(ry)) - 1,
+                                         static_cast<int>(std::ceil(rx + rw)) + 1,
+                                         static_cast<int>(std::ceil(ry + rh)) + 1);
+        }
         const int newId = a->renderer.hoveredNode();
         if (oldId == newId) return;
         InvalidateNode(a, oldId);
@@ -421,7 +430,7 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
 
 extern "C" {
 
-const char* BINUI_C_CALL binui_version(void) { return "0.12.10"; }
+const char* BINUI_C_CALL binui_version(void) { return "0.12.11"; }
 
 int32_t BINUI_C_CALL binui_abi_version(void) { return BINUI_C_ABI_VERSION; }
 

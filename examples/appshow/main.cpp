@@ -144,6 +144,10 @@ struct Shell {
     bool bubblesPaused = false;
     int popped = 0;
     int lastPop = -1;      // 最近被戳破的组件下标（自检报告用）
+    // 第 1 页的可缩放面板：自检时把"光标 / 缩放态 / 脏矩形"记下来报告
+    int rsCursorEdge = 0, rsCursorCorner = 0;
+    bool rsWasResizing = false;
+    float rsDirty = 0.0f;
     uint32_t rng = 0x2545F491u;
     double readT = 0.0;
     float frameMs = 16.0f;
@@ -706,9 +710,20 @@ int main(int argc, char* argv[]) {
 
     app.setDrawFn([&](IBinUIGfx& gfx, const void* clip) { drawUi(gfx, renderer, clip); });
 
+    // 可缩放面板（第 1 页）：拖拽在引擎里，宿主只把节点矩形读回来当读数
+    const uint16_t rsIds[3] = { sh.nid("rs-all"), sh.nid("rs-corner"), sh.nid("rs-h") };
+    const uint16_t rsTxt[3] = { sh.nid("rs-sz"), sh.nid("rs-sz2"), sh.nid("rs-sz3") };
+    std::string rsLast[3];
+
     app.setMoveFn([&](float x, float y) {
         const int old = renderer.hoveredNode();
         renderer.setHover(x, y);
+        // CSS resize 拖拽：引擎给出"旧∪新"脏矩形（屏幕坐标），照它重绘即可
+        {
+            float rx = 0, ry = 0, rw = 0, rh = 0;
+            if (renderer.takeResizeDirty(rx, ry, rw, rh))
+                app.invalidateRect((int)rx - 2, (int)ry - 2, (int)(rw + 4), (int)(rh + 4));
+        }
         const int cur = renderer.hoveredNode();
         auto touchNode = [&](int id) {
             if (id < 0) return;
@@ -875,6 +890,8 @@ int main(int argc, char* argv[]) {
         const auto kr = renderer.handleKey(vk, mods);
         for (uint16_t id : kr.changed) sh.touch(id);
     });
+    // 光标形状交给引擎：输入框 I 型、可交互节点手型、可缩放元素的边/角是系统 resize 光标
+    app.setCursorFn([&](float x, float y) { return (int)renderer.cursorAt(x, y); });
 
     app.setImeActiveFn([&] { return renderer.isEditing(); });
     app.setFocusFn([&](bool focused) {
@@ -928,6 +945,14 @@ int main(int argc, char* argv[]) {
                             (double)renderer.drawScale(p.body), (double)renderer.drawOpacity(p.body));
             }
         }
+        if (sh.rsCursorCorner > 0) {
+            const auto* n = patch(sh.nid("rs-all"));
+            // 光标 kind 与 BinUIRenderer::CursorKind 同值：3=上下 4=左右 5=⤡ 6=⤢
+            std::printf("[demo] %-11s 可缩放面板 %.0f×%.0f（拖动前 470×212）"
+                        "光标 右边缘=%d 右下角=%d 进入缩放态=%d 脏矩形宽=%.0f\n",
+                        "", n ? (double)n->width : 0.0, n ? (double)n->height : 0.0,
+                        sh.rsCursorEdge, sh.rsCursorCorner, (int)sh.rsWasResizing, (double)sh.rsDirty);
+        }
     };
 
     app.setUpdateFn([&](float dt) {
@@ -962,6 +987,8 @@ int main(int argc, char* argv[]) {
                 {4.40, 2,    0.0f,    0.0f, "bub-pop"},    // 点一块组件（坐标由宿主现算）
                 {4.52, 1,    0.0f,    0.0f, "bub-pop-mid"},
                 {5.10, 1,    0.0f,    0.0f, "bub-respawn"},
+                {5.30, 0,   50.0f,  139.0f, "nav-0-back"},  // 回第 1 页（可缩放面板）
+                {5.75, 3,    0.0f,    0.0f, "rs-drag"},     // 拖 rs-all 的右下角（引擎接管）
             };
             const int n = (int)(sizeof(steps) / sizeof(steps[0]));
             if (demoStep < n && demoT > steps[demoStep].at) {
@@ -976,6 +1003,26 @@ int main(int argc, char* argv[]) {
                         break;
                     }
                 }
+                if (s.kind == 3) {
+                    // 拖第 1 页 rs-all 的右下角：整条链路都是引擎的
+                    // （光标 → press 命中热区 → move 改矩形 → release 收尾）
+                    const uint16_t id = sh.nid("rs-all");
+                    const auto* n = patch(id);
+                    if (n) {
+                        // 页 0 在页带顶部且没滚动 → 布局坐标 == 窗口坐标
+                        const float ex = n->x + n->width - 1.0f;
+                        const float ey = n->y + n->height - 1.0f;
+                        sh.rsCursorEdge   = (int)renderer.cursorAt(ex, n->y + n->height * 0.5f);
+                        sh.rsCursorCorner = (int)renderer.cursorAt(ex, ey);
+                        renderer.setHover(ex, ey);
+                        onPress(ex, ey);
+                        sh.rsWasResizing = renderer.isResizing();
+                        renderer.setHover(ex + 70.0f, ey + 46.0f);
+                        float dx = 0, dy = 0, dw = 0, dh = 0;
+                        sh.rsDirty = renderer.takeResizeDirty(dx, dy, dw, dh) ? dw : 0.0f;
+                        onRelease(ex + 70.0f, ey + 46.0f);
+                    }
+                }
                 pendingReport = s.tag;
                 demoStep++;
             } else if (demoStep >= n && demoT > steps[n - 1].at + 0.30) {
@@ -987,6 +1034,19 @@ int main(int argc, char* argv[]) {
         // 宿主的编排时钟是上面的 sh.now，两者互不干扰。
         sh.frameMs = sh.frameMs * 0.9f + dt * 1000.0f * 0.1f;
         sh.stepScroll();
+        // 第 1 页的三块可缩放面板：读数跟着节点矩形走（引擎拖、宿主只读，不反向写尺寸）
+        if (sh.curPage == 0) {
+            for (int i = 0; i < 3; i++) {
+                const auto* n = patch(rsIds[i]);
+                if (!n) continue;
+                char buf[48];
+                std::snprintf(buf, sizeof(buf), "%.0f × %.0f", (double)n->width, (double)n->height);
+                if (rsLast[i] == buf) continue;
+                rsLast[i] = buf;
+                renderer.setText(rsTxt[i], rsLast[i]);
+                sh.touch(rsTxt[i]);
+            }
+        }
         // 只在这一页、且页带没在滚的时候推进组件：
         //   · 不在这一页 → 省 ~600 次 setStyleFloat/帧
         //   · 正在滚 → 宿主算的脏矩形是"滚定后"的窗口坐标，滚动中会错位（引擎按滚动偏移

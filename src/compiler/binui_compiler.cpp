@@ -2411,6 +2411,7 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
         "min-width", "max-width", "min-height", "max-height",
         "display", "position", "left", "top", "overflow", "opacity", "align",
+        "resize",
         "flex", "flex-direction", "justify-content", "align-items", "gap",
         "animation", "transition", "transform", "white-space",
         "aspect", "resizable", "window_resize", "transparent", "ui_scale",
@@ -5859,6 +5860,46 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         }
 
         if (clipOnly) pflags |= PAINT_CLIP_ONLY;
+
+        // v21 resize：把鼠标贴到这条边/这个角上就能拖动改盒子尺寸（浏览器 `resize` 的
+        // 加强版 —— 浏览器的 resize 只认 both/horizontal/vertical，这里按边/角分别开放）。
+        // 取值：none | both|all | horizontal | vertical | left right top bottom |
+        //       top-left top-right bottom-left bottom-right，也接受 `<名字>-resize` 拼法
+        //       （left-resize / top-left-resize）。只写两个角时，两条边的中间段不响应。
+        {
+            std::string rv = lowerStr(pick(e.attrs, style, "resize", "resize", ""));
+            if (!rv.empty() && rv != "none") {
+                uint8_t mask = 0;
+                bool bad = false;
+                std::string norm;
+                for (char ch : rv) norm.push_back(ch == ',' ? ' ' : ch);   // 逗号当分隔符
+                for (const std::string& rawTok : splitCssTokens(norm)) {
+                    std::string tok = rawTok;
+                    if (tok.size() > 7 && tok.compare(tok.size() - 7, 7, "-resize") == 0)
+                        tok.resize(tok.size() - 7);                        // left-resize → left
+                    if (tok == "both" || tok == "all")          mask |= RESIZE_ALL;
+                    else if (tok == "horizontal")                mask |= RESIZE_LEFT | RESIZE_RIGHT;
+                    else if (tok == "vertical")                  mask |= RESIZE_TOP | RESIZE_BOTTOM;
+                    else if (tok == "left")                      mask |= RESIZE_LEFT;
+                    else if (tok == "right")                     mask |= RESIZE_RIGHT;
+                    else if (tok == "top")                       mask |= RESIZE_TOP;
+                    else if (tok == "bottom")                    mask |= RESIZE_BOTTOM;
+                    else if (tok == "top-left" || tok == "left-top")       mask |= RESIZE_TOP_LEFT;
+                    else if (tok == "top-right" || tok == "right-top")     mask |= RESIZE_TOP_RIGHT;
+                    else if (tok == "bottom-left" || tok == "left-bottom") mask |= RESIZE_BOTTOM_LEFT;
+                    else if (tok == "bottom-right" || tok == "right-bottom") mask |= RESIZE_BOTTOM_RIGHT;
+                    else bad = true;
+                }
+                if (bad)
+                    Warn("CSS resize 的取值只支持 none/both|all/horizontal/vertical/"
+                         "left/right/top/bottom/top-left/top-right/bottom-left/bottom-right"
+                         "（也可写 <名字>-resize）：\"" + rv + "\"");
+                if (mask) {
+                    paint.resizeMask = mask;
+                    pflags |= PAINT_RESIZE;
+                }
+            }
+        }
 
         // 静态 opacity：编译期折进节点颜色 alpha（binUI 没有合成组，子节点不受影响；
         // 动画里的 opacity 仍走 v7 动画系统）。必须在 n.color 赋值之后处理。

@@ -243,7 +243,8 @@ public:
     using KeyFn     = std::function<void(int vk)>;
     using WheelFn   = std::function<void(float x, float y, float dy)>;
     using FocusFn   = std::function<void(bool focused)>;
-    // 光标查询：给定客户区坐标，返回 BinUICursorKind（0=箭头 1=手型 2=I 型 3=竖直 4=水平）。
+    // 光标查询：给定客户区坐标，返回 BinUICursorKind
+    // （0=箭头 1=手型 2=I 型 3=竖直拖动 4=水平拖动 5=左上/右下角 6=右上/左下角）。
     using CursorFn  = std::function<int(float x, float y)>;
     // 双击：宿主拿到的是客户区坐标（双击选词用）
     using DoubleClickFn = std::function<void(float x, float y)>;
@@ -740,15 +741,17 @@ inline bool BinUIAppT<Gfx>::applyImePlacement(HWND hwnd, bool allowContextReset)
 
 // 光标形状缓存：IDC_* 是系统共享资源，LoadCursor 只想加载一次
 static HCURSOR CursorHandleOf(int kind) {
-    static HCURSOR cache[5] = {};
-    if (kind < 0 || kind > 4) kind = 0;
+    static HCURSOR cache[7] = {};
+    if (kind < 0 || kind > 6) kind = 0;
     if (!cache[kind]) {
         LPCWSTR id = reinterpret_cast<LPCWSTR>(IDC_ARROW);
         switch (kind) {
-            case 1: id = reinterpret_cast<LPCWSTR>(IDC_HAND);   break;  // 可交互（按钮等）
-            case 2: id = reinterpret_cast<LPCWSTR>(IDC_IBEAM);  break;  // 输入框
-            case 3: id = reinterpret_cast<LPCWSTR>(IDC_SIZENS); break;  // 竖直滚动条
-            case 4: id = reinterpret_cast<LPCWSTR>(IDC_SIZEWE); break;  // 水平滚动条
+            case 1: id = reinterpret_cast<LPCWSTR>(IDC_HAND);    break;  // 可交互（按钮等）
+            case 2: id = reinterpret_cast<LPCWSTR>(IDC_IBEAM);   break;  // 输入框
+            case 3: id = reinterpret_cast<LPCWSTR>(IDC_SIZENS);  break;  // 竖直滚动条 / 上下边
+            case 4: id = reinterpret_cast<LPCWSTR>(IDC_SIZEWE);  break;  // 水平滚动条 / 左右边
+            case 5: id = reinterpret_cast<LPCWSTR>(IDC_SIZENWSE); break; // 左上-右下角
+            case 6: id = reinterpret_cast<LPCWSTR>(IDC_SIZENESW); break; // 右上-左下角
             default: break;
         }
         cache[kind] = LoadCursorW(nullptr, id);

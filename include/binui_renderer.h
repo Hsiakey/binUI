@@ -313,11 +313,38 @@ public:
 
     // ============ 光标 ============
     // 窗口外壳拿它决定鼠标指针形状（WM_SETCURSOR）。按"光标下是什么"给：
-    //   输入框 → I 型；可交互（按钮等）→ 手型；滚动条边缘 → 竖直/水平拖动；其余 → 箭头。
-    // 以前整个库只加载了 IDC_ARROW：文本框里不变 I 型、按钮上没有手型，用过就知道"不像原生"。
-    enum class CursorKind : uint8_t { Arrow = 0, Hand = 1, IBeam = 2, SizeNS = 3, SizeWE = 4 };
+    //   输入框 → I 型；可交互（按钮等）→ 手型；滚动条边缘 → 竖直/水平拖动；
+    //   可缩放元素的边/角 → 系统 resize 光标；其余 → 箭头。
+    enum class CursorKind : uint8_t {
+        Arrow = 0, Hand = 1, IBeam = 2,
+        SizeNS = 3, SizeWE = 4,          // 上下 / 左右边
+        SizeNWSE = 5, SizeNESW = 6,      // 左上-右下 / 右上-左下角
+    };
     CursorKind cursorAt(float x, float y) const;
     bool scrollBarHitTest(float x, float y) const;             // 点是否在滚动条区域（测试用）
+
+    // ============ 元素缩放（v21：CSS resize） ============
+    // 编译器把 `resize: left right top bottom + 四角` 编成节点的 resizeMask；指针贴到
+    // 开放的那条边/那个角上，引擎自己接管拖拽 —— 和滚动条拖动同一条路子：
+    //   · cursorAt() 把 4 种系统 resize 光标交给外壳，宿主不用自己判边
+    //   · press() 命中热区就进入缩放态（不发 PRESS/CLICK），setHover() 期间每步改
+    //     节点矩形，release() 收尾（同样不发 CLICK）
+    //   · 只改这一个节点：子节点不重排（引擎没有运行时重排子树的接口），超出盒子
+    //     的部分由 overflow 决定裁不裁
+    // 热区：贴边 ±4px；四角 12×12。最小尺寸 8px，拖动时被拖的那条边顶住不动。
+    static constexpr float kResizeSlop     = 4.0f;
+    static constexpr float kResizeCorner   = 12.0f;
+    static constexpr float kResizeMinSize  = 8.0f;
+    uint8_t resizeMaskOf(uint16_t nodeId) const;                // BinUIResizeFlag（0 = 不可缩放）
+    // 指针下的缩放热区：返回节点 id（-1 = 没有），handle 输出命中位（BinUIResizeFlag）
+    int resizeHandleAt(float x, float y, uint8_t* handle = nullptr) const;
+    bool isResizing() const { return resizeNode_ >= 0; }
+    uint16_t resizingNode() const;                              // 0xFFFF = 不在缩放
+    // 运行时开关缩放（宿主做"锁定尺寸"按钮之类）。返回 false = 无此节点。
+    bool setResizeMask(uint16_t nodeId, uint8_t mask);
+    // 拖动期间累积的脏矩形（**屏幕坐标**，已含旧矩形 ∪ 新矩形）；取一次后清零。
+    // 宿主在 move 回调里取它调 invalidateRect 即可，不用每帧整窗重绘。
+    bool takeResizeDirty(float& x, float& y, float& w, float& h);
 
     // ============ 视频（v9：<video> 节点播放状态） ============
     // 播放时钟由 stepAnimations() 驱动（应用每帧已调用）；解码帧由可选模块
@@ -505,6 +532,11 @@ private:
     void commitTextEvent(); // 编辑值变化时派发 INPUT 事件
     void applyFocus(int nodeId); // 按节点类型聚焦/失焦
     void dragScroll(float px, float py); // 滚动条拖动
+    // 元素缩放：进入 / 拖一步 / 收尾（press / setHover / release 内部）
+    void beginResize(uint16_t nodeId, uint8_t handle, float px, float py);
+    void dragResize(float px, float py);
+    // 累加祖先滚动偏移（布局坐标 → 屏幕坐标）；点落在某个滚动祖先的视口外返回 false
+    bool screenOffsetOf(size_t nodeIndex, float px, float py, float& ox, float& oy) const;
     void relayout(int width, int height); // 运行时重排（百分比/流式/flex；无规格段仅同步根）
     // 按根节点底色亮度派生滚动条默认色（浅底浅色、深底深色）
     void deriveScrollbarStyleFromRoot();
@@ -552,6 +584,14 @@ private:
     int scrollDragNode_ = -1;   // 正在拖动滚动条（thumb 位置偏移）
     float scrollDragGrab_ = 0;
     bool scrollDragVert_ = true;
+    // 元素缩放拖拽（v21）：按下时快照原矩形 + 祖先滚动偏移，拖动中按屏幕位移改节点矩形
+    int     resizeNode_ = -1;
+    uint8_t resizeHandle_ = 0;      // BinUIResizeFlag（正在拖的那条边/角）
+    float   resizeStartX_ = 0, resizeStartY_ = 0;
+    float   resizeOrigX_ = 0, resizeOrigY_ = 0, resizeOrigW_ = 0, resizeOrigH_ = 0;
+    float   resizeOffX_ = 0, resizeOffY_ = 0;  // 按下时节点的祖先滚动偏移（屏幕坐标换算基准）
+    float   resizeDirty_[4] = {0, 0, 0, 0};    // 拖动脏矩形（屏幕坐标）
+    bool    resizeDirtyOn_ = false;
     // 缩放规格段（v3）：节点下标 -> 规格；flex 容器 id -> 容器规格
     std::vector<const BinUISpecNode*> specOf_;
     std::unordered_map<uint16_t, const BinUISpecFlex*> flexOf_;

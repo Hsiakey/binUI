@@ -17,7 +17,9 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v17: 渐变描边（stroke="url(#id)"）+ stroke-linecap="square"，多一条可选渐变记录
 // v18: 径向渐变的焦点 fx/fy（BinUIPathGradient 92 -> 100 字节）
 // v19: 路径边缘抗锯齿开关（shape-rendering=auto/optimizeQuality → PATH_AA）
-constexpr uint32_t BINUI_VERSION    = 20;
+// v20: 无格式变化（渲染器内部：非等比缩放的脏矩形按外接圆算）
+// v21: 扩展绘制段追加 resizeMask（CSS resize 的边/角位图），BinUIPaintNode 44 -> 48 字节
+constexpr uint32_t BINUI_VERSION    = 21;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -390,6 +392,7 @@ enum BinUIPaintFlag : uint16_t {
     PAINT_STRIKE      = 1 << 11, // 文字删除线
     PAINT_OVERLINE    = 1 << 12, // 文字上划线
     PAINT_CLIP_ONLY   = 1 << 13, // 只裁剪不滚动（CSS overflow:hidden 与 auto/scroll 的区别）
+    PAINT_RESIZE      = 1 << 14, // resizeMask 有效（CSS resize：贴边拖动改盒子尺寸）
 };
 
 // 渐变方向（PAINT_GRADIENT 且非 RADIAL 时有效）
@@ -397,6 +400,26 @@ enum BinUIGradDir : uint8_t {
     BINUI_GRAD_V = 0, // to bottom（默认，CSS 180deg）
     BINUI_GRAD_H = 1, // to right（CSS 90deg）
     BINUI_GRAD_D = 2, // to bottom right（CSS 135deg）
+};
+
+// 元素缩放热区（v21，BinUIPaintNode::resizeMask）。CSS `resize` 的取值：
+//   none / both|all / horizontal / vertical / left|right|top|bottom /
+//   top-left|top-right|bottom-left|bottom-right（也接受 `<名字>-resize` 拼法）
+// 边框和四角分开记：只写两个角（`resize: top-left bottom-right`）时两条边中间
+// 那段不该能拖 —— 位图比"有左边就自动有角"更贴近作者的意图。
+enum BinUIResizeFlag : uint8_t {
+    RESIZE_LEFT         = 1 << 0,
+    RESIZE_RIGHT        = 1 << 1,
+    RESIZE_TOP          = 1 << 2,
+    RESIZE_BOTTOM       = 1 << 3,
+    RESIZE_TOP_LEFT     = 1 << 4,
+    RESIZE_TOP_RIGHT    = 1 << 5,
+    RESIZE_BOTTOM_LEFT  = 1 << 6,
+    RESIZE_BOTTOM_RIGHT = 1 << 7,
+    // 简写组合（编译期用，运行期只认位）
+    RESIZE_SIDES   = RESIZE_LEFT | RESIZE_RIGHT | RESIZE_TOP | RESIZE_BOTTOM,
+    RESIZE_CORNERS = RESIZE_TOP_LEFT | RESIZE_TOP_RIGHT | RESIZE_BOTTOM_LEFT | RESIZE_BOTTOM_RIGHT,
+    RESIZE_ALL     = RESIZE_SIDES | RESIZE_CORNERS,
 };
 
 // 文字/表单附加标记（v14，BinUIPaintNode::textFlags）。
@@ -420,6 +443,8 @@ struct BinUIPaintNode {
     uint8_t  weight;       // CSS font-weight / 100（4 = 常规，7 = 粗体；0 = 未声明）
     uint8_t  lineHeight;   // 行高百分数：0 = 默认（135），150 = 1.5 倍字号
     uint8_t  borderStyle;  // 0 = solid（预留 dashed/dotted）
+    uint8_t  resizeMask;   // v21：BinUIResizeFlag（PAINT_RESIZE 置位时有效，0 = 不可缩放）
+    uint8_t  reserve[3];   // 对齐填充（留给后续绘制标记，旧布局这三位恒为 0）
     uint32_t textColor;    // AARRGGBB
     uint32_t borderColor[4]; // 上右下左各自的颜色（AARRGGBB）
     uint32_t gradFrom;     // AARRGGBB（渐变起点色）
@@ -427,7 +452,7 @@ struct BinUIPaintNode {
     uint32_t textFlags;    // v14：BinUITextFlag（斜体/占位符/只读/初始勾选）
 };
 #pragma pack(pop)
-static_assert(sizeof(BinUIPaintNode) == 44, "BinUIPaintNode must be 44 bytes");
+static_assert(sizeof(BinUIPaintNode) == 48, "BinUIPaintNode must be 48 bytes");
 
 // ============================================================
 // 路径段（v15，恒定写出，位于扩展绘制段之后、名称段之前）

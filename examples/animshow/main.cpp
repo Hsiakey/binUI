@@ -145,6 +145,8 @@ int main(int argc, char* argv[]) {
 
     // 中文输入法会把字母键变成 VK_PROCESSKEY 自己组字 —— 非编辑态必须把 IME 摘掉，
     // WASD 焦点导航才收得到；进输入框编辑时窗口会自动挂回去（组字/候选框照旧）。
+    // 光标形状交给引擎：输入框 I 型、可交互节点手型、可缩放元素的边/角是系统 resize 光标
+    app.setCursorFn([&](float x, float y) { return (int)renderer.cursorAt(x, y); });
     app.setImeActiveFn([&] { return renderer.isEditing(); });
     app.setFocusFn([&](bool focused) {
         if (!focused) {

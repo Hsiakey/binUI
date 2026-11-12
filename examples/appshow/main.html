@@ -61,6 +61,13 @@
         /* 组件里的文字：半透明组件的标题/副标题（也吃节点透明度，重叠时会被"透"过去） */
         .blob-t { font-size:13; font-weight:700; color:rgba(255,255,255,0.92); }
         .blob-s { font-size:11; color:rgba(255,255,255,0.62); }
+
+        /* ---- 可缩放元素（CSS resize）：浅底卡片，拖边/角直接改盒子 ---- */
+        .rs    { background:#F8FAFD; border:1px solid #DFE8F5; border-radius:12; }
+        .rs-t  { font-size:13; font-weight:700; color:#1F2A37; }
+        .rs-v  { font-size:15; font-weight:700; color:#3E8BFF; }
+        .rs-d  { font-size:11; color:#94A3B8; }
+        .rs-bar { background:#DCE7F7; border-radius:4; }
     </style>
 </head>
 <body>
@@ -106,6 +113,34 @@
         <button id="btn-open" class="btn-p" style="position:absolute; left:24; top:368; width:120; height:32">打开弹窗</button>
         <button id="btn-toast" class="btn-s" style="position:absolute; left:156; top:368; width:120; height:32">弹个提示</button>
         <span class="h2" style="position:absolute; left:292; top:376; width:600; height:16">弹窗 = 遮罩 + 面板两层，面板比遮罩晚 40ms 进场</span>
+
+        <!-- 可缩放元素：`resize` 属性能拖的边/角由作者点名，拖拽本身在引擎里
+             （光标、热区、最小尺寸都归引擎），宿主只读回尺寸画读数。 -->
+        <span class="h2" style="position:absolute; left:24; top:402; width:980; height:16">可缩放元素（resize）：鼠标贴到开着的边/角上是系统 resize 光标，拖动直接改这个盒子，宿主只读回尺寸</span>
+
+        <div id="rs-all" class="rs" style="position:absolute; left:24; top:424; width:470; height:212; overflow:hidden; resize:both">
+            <span class="rs-t" style="position:absolute; left:18; top:14; width:330; height:18">resize: both —— 四边 + 四角</span>
+            <span id="rs-sz" class="rs-v" style="position:absolute; left:18; top:38; width:330; height:26">470 × 212</span>
+            <span class="rs-d" style="position:absolute; left:18; top:70; width:430; height:16">↔ ↕ 与两条对角共四种光标，都贴在这个盒子的边上</span>
+            <div class="rs-bar" style="position:absolute; left:18; top:104; width:210; height:8"></div>
+            <div class="rs-bar" style="position:absolute; left:18; top:122; width:132; height:8"></div>
+            <div class="rs-bar" style="position:absolute; left:18; top:140; width:170; height:8"></div>
+            <div class="rs-bar" style="position:absolute; left:18; top:158; width:96;  height:8"></div>
+        </div>
+
+        <div id="rs-corner" class="rs" style="position:absolute; left:510; top:424; width:250; height:212; overflow:hidden; resize:top-left bottom-right">
+            <span class="rs-t" style="position:absolute; left:16; top:14; width:220; height:18">只开两个对角</span>
+            <span id="rs-sz2" class="rs-v" style="position:absolute; left:16; top:38; width:220; height:26">250 × 212</span>
+            <span class="rs-d" style="position:absolute; left:16; top:70; width:215; height:16">边中间不响应（在位图里只开了 TL / BR）</span>
+        </div>
+
+        <div id="rs-h" class="rs" style="position:absolute; left:776; top:424; width:258; height:212; overflow:hidden; resize:horizontal">
+            <span class="rs-t" style="position:absolute; left:16; top:14; width:225; height:18">只有左右两条边</span>
+            <span id="rs-sz3" class="rs-v" style="position:absolute; left:16; top:38; width:225; height:26">258 × 212</span>
+            <span class="rs-d" style="position:absolute; left:16; top:70; width:230; height:16">高度锁死，光标只在这两条边变 ↔</span>
+        </div>
+
+        <span class="h2" style="position:absolute; left:24; top:650; width:1010; height:16">引擎只改这一个盒子：子节点不重排（没有运行时重排子树的接口），超出部分由 overflow 裁掉；最小 8px。</span>
     </div>
 
     <!-- ============ 页面：数据 ============ -->

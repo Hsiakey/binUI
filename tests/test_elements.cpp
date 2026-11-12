@@ -427,6 +427,102 @@ static void TestIssueRegressions() {
         TEST("光标: 竖直滚动条上是上下箭头", r.cursorAt(374, 60) == CK::SizeNS);
     }
 
+    // ---- 元素缩放（CSS resize）：位图解析 / 热区光标 / 拖动改矩形 ----
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014"><body>
+  <div id="all"  style="position:absolute; left:20;  top:20;  width:120; height:80; resize:both"></div>
+  <div id="h"    style="position:absolute; left:20;  top:120; width:120; height:80; resize:horizontal"></div>
+  <div id="tl"   style="position:absolute; left:20;  top:220; width:120; height:60; resize:top-left bottom-right"></div>
+  <div id="none" style="position:absolute; left:200; top:20;  width:120; height:80"></div>
+  <div id="dis"  disabled style="position:absolute; left:200; top:120; width:120; height:80; resize:both"></div>
+  <div id="lr"   style="position:absolute; left:200; top:220; width:120; height:60; resize:left-resize right-resize"></div>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("resize: 编译并加载", !bin.empty() && r.loadLayout(bin.data(), bin.size()));
+        using CK = BinUIRenderer::CursorKind;
+        const uint16_t idAll  = r.findNodeByName("all");
+        const uint16_t idH    = r.findNodeByName("h");
+        const uint16_t idTl   = r.findNodeByName("tl");
+        const uint16_t idNone = r.findNodeByName("none");
+        const uint16_t idLr   = r.findNodeByName("lr");
+        TEST("resize: both 是八方向全集",
+             r.resizeMaskOf(idAll) == RESIZE_ALL && RESIZE_ALL == 0xFF);
+        TEST("resize: horizontal 只有左右",
+             r.resizeMaskOf(idH) == (RESIZE_LEFT | RESIZE_RIGHT));
+        TEST("resize: 只写两角时边中间不响应",
+             r.resizeMaskOf(idTl) == (RESIZE_TOP_LEFT | RESIZE_BOTTOM_RIGHT));
+        TEST("resize: 没写属性就没有热区", r.resizeMaskOf(idNone) == 0);
+        TEST("resize: <名字>-resize 拼法等价", r.resizeMaskOf(idLr) == (RESIZE_LEFT | RESIZE_RIGHT));
+
+        // 光标（盒子 all 在 20..140 × 20..100）
+        TEST("resize: 左边是左右光标", r.cursorAt(21, 60) == CK::SizeWE);
+        TEST("resize: 右边也是左右光标", r.cursorAt(139, 60) == CK::SizeWE);
+        TEST("resize: 上边是上下光标", r.cursorAt(80, 21) == CK::SizeNS);
+        TEST("resize: 左上角是 NW 光标", r.cursorAt(21, 21) == CK::SizeNWSE);
+        TEST("resize: 右下角是 NW 光标", r.cursorAt(139, 99) == CK::SizeNWSE);
+        TEST("resize: 右上角是 NE 光标", r.cursorAt(139, 21) == CK::SizeNESW);
+        TEST("resize: 盒子中间是箭头（不是热区）", r.cursorAt(80, 60) == CK::Arrow);
+        TEST("resize: horizontal 只有左右边，上面没有", r.cursorAt(80, 121) == CK::Arrow);
+        TEST("resize: 只写角时左边中间没有热区", r.cursorAt(21, 250) == CK::Arrow);
+        TEST("resize: 只写角时角上仍然有", r.cursorAt(21, 221) == CK::SizeNWSE);
+        TEST("resize: 禁用节点没有热区", r.cursorAt(201, 121) == CK::Arrow);
+
+        // 拖右下角：宽高各 +40
+        const auto* n0 = IssueNode(r, idAll);
+        const float w0 = n0 ? n0->width : 0, h0 = n0 ? n0->height : 0;
+        r.press(139, 99);
+        TEST("resize: 按下角进入缩放态", r.isResizing() && r.resizingNode() == idAll);
+        r.setHover(179, 139);
+        const auto* n1 = IssueNode(r, idAll);
+        TEST("resize: 右下角拖动同时改宽高",
+             n1 && std::fabs(n1->width - (w0 + 40)) < 0.6f &&
+             std::fabs(n1->height - (h0 + 40)) < 0.6f && std::fabs(n1->x - 20) < 0.01f);
+        float dx = 0, dy = 0, dw = 0, dh = 0;
+        TEST("resize: 拖动给出脏矩形", r.takeResizeDirty(dx, dy, dw, dh) && dw >= w0);
+        TEST("resize: 脏矩形取一次就清零", !r.takeResizeDirty(dx, dy, dw, dh));
+        TEST("resize: 拖动中光标锁住形状", r.cursorAt(300, 300) == CK::SizeNWSE);
+        TEST("resize: 松开不产生点击", r.release(179, 139) == -1 && !r.isResizing());
+
+        // 拖左边：x 与宽反向变化，右边界不动
+        const auto* ln = IssueNode(r, idAll);
+        const float right0 = ln ? ln->x + ln->width : 0;
+        r.press(21, 60);
+        r.setHover(51, 60);
+        const auto* n2 = IssueNode(r, idAll);
+        TEST("resize: 拖左边时右边界不动",
+             n2 && std::fabs(n2->x - 50) < 0.6f &&
+             std::fabs((n2->x + n2->width) - right0) < 0.6f &&
+             std::fabs(n2->y - ln->y) < 0.01f);
+        r.release(51, 60);
+
+        // 最小尺寸钳制：把右边往左拖过头（右边界随之前的拖动变过，按当前的取）
+        const float rightNow = n2->x + n2->width;
+        r.press(rightNow - 1, 60);
+        r.setHover(-300, 60);
+        const auto* n3 = IssueNode(r, idAll);
+        TEST("resize: 最小尺寸钳到 8px", n3 && std::fabs(n3->width - BinUIRenderer::kResizeMinSize) < 0.01f);
+        r.release(-300, 60);
+
+        // 运行时开关：setResizeMask 关掉就没有热区
+        TEST("resize: 运行期关掉热区", r.setResizeMask(idH, 0) && r.resizeMaskOf(idH) == 0 &&
+             r.cursorAt(21, 160) == CK::Arrow);
+
+        // 左上角：x/y 与宽高同时变（往左上拉大）
+        const auto* t0 = IssueNode(r, idTl);
+        TEST("resize: 对角拖拽前矩形正确",
+             t0 && std::fabs(t0->x - 20) < 0.01f && std::fabs(t0->width - 120) < 0.01f);
+        r.press(21, 221);
+        r.setHover(-21, 199);
+        const auto* t1 = IssueNode(r, idTl);
+        TEST("resize: 拖左上角时 x/y 与宽高同时变",
+             t1 && std::fabs(t1->x - (-22)) < 0.6f && std::fabs(t1->width - 162) < 0.6f &&
+             std::fabs(t1->y - 198) < 0.6f && std::fabs(t1->height - 82) < 0.6f);
+        r.release(-21, 199);
+    }
+
     // ---- 剪贴板的文本层动作：selectedText / deleteSelection / selectAll ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

@@ -5,6 +5,50 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.12.11] - 2026-11-13
+
+本轮主题：**元素的边/角拖拽缩放**（CSS `resize`，【格式 v21】）—— 把"窗口改大小"
+搬进 UI：贴到元素开着的边上，光标变成系统 resize 形状，按住拖动直接改这个盒子。
+
+### 新增 — `resize` 属性（引擎接管拖拽，宿主只读尺寸）
+
+`resize: both`（四边 + 四角）/ `horizontal` / `vertical` / `left|right|top|bottom` /
+`top-left|top-right|bottom-left|bottom-right`，也接受 `left-resize` 这种拼法。
+边和角**分开记位**：只写两个角时，两条边的中间段不响应（比"有左边就自动有角"更贴近
+作者的意图）。
+
+| 引擎负责 | 宿主负责 |
+|---|---|
+| 热区判定（贴边 ±4px、四角 12×12、最上层优先、禁用节点/视口外不算） | 接一行 `app.setCursorFn`（9 个示例 + C ABI 都接了） |
+| 拖拽：快照原矩形 + 祖先滚动偏移，拖哪条边哪条动、对边不动，最小 8px | `takeResizeDirty()` 取"旧 ∪ 新"脏矩形做局部重绘 |
+| 4 种系统 resize 光标（`SizeWE/SizeNS/SizeNWSE/SizeNESW`） | 读回节点矩形（`appshow` 的尺寸读数） |
+| 不产生 `PRESS`/`CLICK`；滚动条优先 | 运行期锁死尺寸：`setResizeMask(id, 0)` |
+
+格式：`BinUIPaintNode` 追加 `resizeMask`（44 → 48 字节，含 3 字节预留）+
+`PAINT_RESIZE` 标志位，`BINUI_VERSION` 20 → 21 —— 旧二进制需重新编译。
+
+### 修复 — C++ 示例里光标形状从来没生效过
+
+`setCursorFn` 只有 C ABI 接了，9 个 C++ 示例一个都没接：输入框不变 I 型、按钮没有
+手型、滚动条没有上下箭头。这一版全部接上（`app.setCursorFn([&](x,y){ return
+(int)renderer.cursorAt(x,y); })`），`CursorKind` 同时扩了两种对角光标。
+
+### 已知边界（写进 README 与 docs）
+
+- **只改这一个盒子**：子节点不重排（没有运行时重排子树的接口），超出部分由 `overflow`
+  决定裁不裁；"内容跟着缩"需要宿主自己按新尺寸排子节点。
+- 可滚动容器的边上**滚动条优先**（`press()` 先判滚动条），想拖尺寸就开在没有滚动条的边上。
+- 脏矩形必须是"旧 ∪ 新"：只失效新矩形，缩小后会留一圈旧边框残影。
+
+### 验收
+
+0 warning；`pixels` 10/10、`pixels-vk` 17/17、`pixels-d3d11` 全过；四套测试全绿
+（`test_elements` 新增 26 条 resize 断言：位图解析 / 热区光标 / 四边与四角拖拽 /
+最小尺寸 / 脏矩形 / 运行期开关）；`check_examples` 16 个文件 0 问题；`appshow`
+自检脚本报「可缩放面板 540×258（拖动前 470×212）光标 右边缘=4 右下角=5 进入缩放态=1」；
+真实窗口里逐点查 `GetCursorInfo`：左右 `SIZEWE`、上下 `SIZENS`、左上/右下 `SIZENWSE`、
+右上/左下 `SIZENESW`，只开对角的卡片边中间是箭头、只开左右的卡片上边是箭头。
+
 ## [0.12.10] - 2026-11-12
 
 第 3 页在真实窗口里是**空的**（静态离屏图却正常）。根因是引擎的一个几何 bug：
