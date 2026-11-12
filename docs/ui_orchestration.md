@@ -275,6 +275,12 @@ renderer.clearBoundsOverride(id);           // 解除钉住：下次窗口重排
 
 ![拖完之后](img/appshow-resize-drag.png)
 
+再补一张**从左边缘往里压**的（470×212 → 340×212）。这张是专门拍的：0.12.11 还没有局部重排，
+拖左边缘时边框往右压、文字留在原地，看起来就像"文字被隐藏了"；0.12.12 起子节点跟着内容盒
+走，文字稳定停在 18px 内边距上：
+
+![拖左边缘](img/appshow-resize-shrink.png)
+
 光标是在真实窗口里逐点查的（`GetCursorInfo` + `LoadCursorW(IDC_*)` 对表）：
 左边/右边 `SIZEWE`、上边/下边 `SIZENS`、左上/右下 `SIZENWSE`、右上/左下 `SIZENESW`，
 只开对角的卡片边中间是箭头，只开左右的卡片上边是箭头。
