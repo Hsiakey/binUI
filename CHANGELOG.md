@@ -14,6 +14,12 @@
   **bin3d**（界面里嵌 3D 视口，先 CPU 软光栅 + `BINUI_3DVIEW` 节点、不动后端；撑不住再给
   `IBinUIGfx` 加 `drawMesh` + 深度目标）、**binGPU**（三个后端下面那层设备 / 交换链 / 管线 /
   呈现的抽象：先只做薄的固定管线，VK 作第一实现、D3D12 作第二实现，GL 明确**不迁**留作兜底）。
+- **语言分工（master 定）**：bin3d = C++、bin2d = C++、**binGPU = C**。bin2d/bin3d 跟 binUI 同为
+  C++17；只有最底层 binGPU 是 C11、导出 C ABI（定长 POD + `uint64_t` 句柄 + 扁平函数，无回调 /
+  无异常 / 不依赖 libstdc++）。理由记在文档里：它下面那三套 API 自己就是 C（`vulkan.h` / COM /
+  GL），它又是最可能被 Python/Go/Rust 直接绑的一层，形状上恰好只传数字和句柄。
+- 也记了 C 的代价：`binui_vk.cpp` 的 2805 行 C++ 搬过去是"按 C 重写"而不是移文件（容器、fence
+  RAII、错误串都得自己来），销毁顺序由 C++ 侧的 RAII 壳收在一处，device lost 用显式轮询不搞回调。
 - **故意不写进 [`docs/README.md`](docs/README.md) 索引、也不在 README 提**：三条都还没有一行代码，
   属于方向性记录，不是承诺、没有日期。文档里同时写了"现在为什么不做的原因"和"什么条件才开工"，
   免得下次又从零讨论一遍。
