@@ -44,7 +44,9 @@ struct PaintBand {
     bool     round = false;
 };
 
-constexpr int kMaxPaintBands = 128;
+// 填充条带上限：渐变直边区按 **1px** 一条切（见 BuildFillBands 的说明），所以上限要跟着
+// 屏幕高度走；512 覆盖到 512px 高的元素，更高的退化为均分（仍然比原来的 24px 细）。
+constexpr int kMaxPaintBands = 512;
 // 边框条带上限：圆角边框按行贴弧，条带数 ≈ 4r+常数（与盒子高度无关），
 // 半径大的胶囊（比如 100px 高的按钮 r=50）也要装得下，所以比填充宽。
 constexpr int kMaxBorderBands = 512;
@@ -61,6 +63,32 @@ inline uint32_t PaintLerpArgb(uint32_t a, uint32_t b, float t) {
         return (uint32_t)(ca + (cb - ca) * t + 0.5f) & 0xFFu;
     };
     return (ch(24) << 24) | (ch(16) << 16) | (ch(8) << 8) | ch(0);
+}
+
+// 同 PaintLerpArgb，但把 R/G/B 的取整误差按 err 带到下一条 —— 1D 抖动。
+// 条带是**纯色矩形**，没法在像素级抖动；把条带切到 1px 之后按行累积误差，相邻行就会在
+// floor/ceil 之间交替，视觉上把"每 40px 一个色阶"揉成 1px 细噪点（浏览器处理深色渐变
+// 用的是同一招）。alpha 不抖动：半透明叠加上的抖动会变成可见的噪点。
+inline uint32_t PaintLerpArgbDither(uint32_t a, uint32_t b, float t,
+                                    float& errR, float& errG, float& errB) {
+    auto chq = [&](int shift) -> uint32_t {   // 不抖动（alpha）
+        const float ca = (float)((a >> shift) & 0xFF);
+        const float cb = (float)((b >> shift) & 0xFF);
+        return (uint32_t)(ca + (cb - ca) * t + 0.5f) & 0xFFu;
+    };
+    auto chd = [&](int shift, float& err) -> uint32_t {
+        const float ca = (float)((a >> shift) & 0xFF);
+        const float cb = (float)((b >> shift) & 0xFF);
+        const float v = ca + (cb - ca) * t + err;
+        float q = std::floor(v + 0.5f);
+        if (q < 0.0f) q = 0.0f;
+        if (q > 255.0f) q = 255.0f;
+        err = v - q;
+        if (err > 1.0f) err = 1.0f;
+        if (err < -1.0f) err = -1.0f;
+        return (uint32_t)q;
+    };
+    return (chq(24) << 24) | (chd(16, errR) << 16) | (chd(8, errG) << 8) | chd(0, errB);
 }
 
 // 圆角矩形在"距边 dy"处的水平内缩（dy 从边的中心算起，超过 radius 就没内缩）
@@ -105,16 +133,35 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
         const float mid0 = r, mid1 = span - r;
         if (mid1 > mid0 + 0.5f) {
             const int room = std::max(1, cap - ne + 1);
-            const int mb = std::max(1, std::min(room, (int)std::ceil((mid1 - mid0) / 32.0f)));
+            // 直边区的细分看"每个色阶占多少像素"：色阶台阶超过 ~6px 就会被看成一条条
+            // 明显的色带（深色渐变尤其明显）—— 这种切 1px 并配合下面的误差扩散抖动；
+            // 台阶本来就很细（颜色变化快）的渐变保持粗条带，省顶点/绘制次数。
+            const float midLen = mid1 - mid0;
+            auto delta = [&](int shift) {
+                return (float)std::abs((int)((p->gradFrom >> shift) & 0xFFu) -
+                                       (int)((p->gradTo >> shift) & 0xFFu));
+            };
+            const float dmax = std::max(delta(16), std::max(delta(8), delta(0)));
+            const float stepPx = dmax > 0.0f ? midLen / dmax : midLen;
+            const float bandPx = stepPx > 6.0f ? 1.0f : 32.0f;
+            const int mb = std::max(1, std::min(room, (int)std::ceil(midLen / bandPx)));
             for (int i = 1; i <= mb; i++)
-                edges[ne++] = mid0 + (mid1 - mid0) * (float)i / (float)mb;
+                edges[ne++] = mid0 + midLen * (float)i / (float)mb;
         }
         for (int i = 1; i <= rb; i++) {
             const float e = (span - r) + r * (float)i / (float)rb;
             if (e > edges[ne - 1] + 0.01f) edges[ne++] = e;
         }
     } else {
-        const int n = std::min(std::max((int)std::ceil(span / 24.0f), 2), cap);
+        // 无圆角：整条都是"直边"，细分口径与上面直边区一致（色阶台阶 > 6px 就切 1px）。
+        auto delta0 = [&](int shift) {
+            return (float)std::abs((int)((p->gradFrom >> shift) & 0xFFu) -
+                                   (int)((p->gradTo >> shift) & 0xFFu));
+        };
+        const float dmax0 = std::max(delta0(16), std::max(delta0(8), delta0(0)));
+        const float stepPx0 = dmax0 > 0.0f ? span / dmax0 : span;
+        const float bandPx0 = stepPx0 > 6.0f ? 1.0f : 24.0f;
+        const int n = std::min(std::max((int)std::ceil(span / bandPx0), 2), cap);
         for (int i = 1; i <= n; i++) edges[ne++] = span * (float)i / (float)n;
     }
     if (edges[ne - 1] < span - 0.01f) edges[ne++] = span;   // 防御：切点没走到末尾
@@ -128,12 +175,13 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
                              ((p->gradTo >> 24) & 0xFFu) != 0xFFu;
 
     int count = 0;
+    float dithR = 0.0f, dithG = 0.0f, dithB = 0.0f;   // 沿渐变方向的取整误差（1D 抖动）
     for (int i = 0; i + 1 < ne && count < cap; i++) {
         const float a = edges[i], b2 = edges[i + 1];
         if (b2 <= a + 0.001f) continue;
         const float t = (a + b2) * 0.5f / span;
         PaintBand bd;
-        bd.color = PaintLerpArgb(p->gradFrom, p->gradTo, t);
+        bd.color = PaintLerpArgbDither(p->gradFrom, p->gradTo, t, dithR, dithG, dithB);
         bd.round = false;
         bd.radius = 0;
         if (horizontal) {

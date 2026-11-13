@@ -2451,8 +2451,10 @@ int run() {
         for (int i = 0; i < 4; i++) { sq.borderW[i] = 2; sq.borderColor[i] = 0xFF000000u; }
         CHECK(BuildBorderBands(&sq, 0, 0, 100, 40, 0.0f, bb) == 4, "直角边框 = 四条");
 
-        // 半径大到装不下（cap 小）：退回直角四条，宁可方角也不能缺边
-        CHECK(BuildBorderBands(&p, 0, 0, 200, 200, 100.0f, bb, kMaxPaintBands) == 4,
+        // 半径大到装不下（cap 小）：退回直角四条，宁可方角也不能缺边。
+        // 这里显式给个小 cap（不是 kMaxPaintBands）—— 后者会随填充条带上限一起调大，
+        // 拿它当"装不下"的输入，这条断言就会随常量变化而失效。
+        CHECK(BuildBorderBands(&p, 0, 0, 200, 200, 100.0f, bb, 32) == 4,
               "半径超过条带上限时退回直角四条");
     }
 
