@@ -45,8 +45,9 @@ struct PaintBand {
 };
 
 // 填充条带上限：渐变直边区按 **1px** 一条切（见 BuildFillBands 的说明），所以上限要跟着
-// 屏幕高度走；512 覆盖到 512px 高的元素，更高的退化为均分（仍然比原来的 24px 细）。
-constexpr int kMaxPaintBands = 512;
+// 屏幕高度走；768 覆盖到 ~253px 高的半透明元素（半透明走逐行 + 四边部分覆盖，一条最多
+// 拆成 3 块），更高的退化为均分/硬边（仍然比原来的 24px 细）。
+constexpr int kMaxPaintBands = 768;
 // 边框条带上限：圆角边框按行贴弧，条带数 ≈ 4r+常数（与盒子高度无关），
 // 半径大的胶囊（比如 100px 高的按钮 r=50）也要装得下，所以比填充宽。
 constexpr int kMaxBorderBands = 512;
@@ -102,6 +103,62 @@ inline float PaintRoundInset(float dy, float radius) {
     const float dd = d * d;
     if (dd > rr) return 0.0f;
     return radius - std::sqrt(rr - dd);
+}
+
+// 按比例缩放颜色的 alpha（用于边缘部分覆盖：抗锯齿）
+inline uint32_t PaintScaleAlpha(uint32_t c, float k) {
+    if (k >= 0.999f) return c;
+    if (k <= 0.0f) return c & 0x00FFFFFFu;
+    uint32_t a = (uint32_t)((float)((c >> 24) & 0xFFu) * k + 0.5f);
+    if (a > 255u) a = 255u;
+    return (a << 24) | (c & 0x00FFFFFFu);
+}
+
+// 把一个（可能带小数的）矩形按"像素覆盖率"拆成最多 3×3 块：边界那一列/行用
+// alpha × 覆盖率发出去，中间整覆盖。这样矩形边缘也是**抗锯齿**的 —— 后端只有
+// fillRect（按像素中心一刀切），不这么做，填充边缘和解析式 AA 的描边就会各吸各的
+// 像素（亚像素动画时每隔一帧差 1px，实机看着就是"在抖"）。
+//
+// 整数坐标时：左右列覆盖率为 0 ⇒ 只发中间一块，且与不拆的写法逐像素相同。
+inline void PaintEmitAa(float x0, float x1, float y0, float y1, uint32_t color,
+                        PaintBand* out, int& count, int cap) {
+    if (x1 <= x0 || y1 <= y0 || count >= cap) return;
+    const float ix0 = std::floor(x0), ix1 = std::ceil(x1);
+    const float iy0 = std::floor(y0), iy1 = std::ceil(y1);
+    const float fl = (x0 > ix0) ? (ix0 + 1.0f - x0) : 0.0f;   // 左列覆盖率
+    const float fr = (x1 < ix1) ? (x1 - (ix1 - 1.0f)) : 0.0f; // 右列覆盖率
+    const float ft = (y0 > iy0) ? (iy0 + 1.0f - y0) : 0.0f;   // 上行覆盖率
+    const float fb = (y1 < iy1) ? (y1 - (iy1 - 1.0f)) : 0.0f; // 下行覆盖率
+    const float mx0 = ix0 + (fl > 0.0f ? 1.0f : 0.0f);
+    const float mx1 = ix1 - (fr > 0.0f ? 1.0f : 0.0f);
+    const float my0 = iy0 + (ft > 0.0f ? 1.0f : 0.0f);
+    const float my1 = iy1 - (fb > 0.0f ? 1.0f : 0.0f);
+
+    float cx[3][3];   // {起点, 终点, 覆盖率}
+    int nc = 0;
+    if (fl > 0.0f) { cx[nc][0] = ix0;        cx[nc][1] = ix0 + 1.0f; cx[nc][2] = fl; ++nc; }
+    if (mx1 > mx0) { cx[nc][0] = mx0;        cx[nc][1] = mx1;        cx[nc][2] = 1.0f; ++nc; }
+    if (fr > 0.0f) { cx[nc][0] = ix1 - 1.0f; cx[nc][1] = ix1;        cx[nc][2] = fr; ++nc; }
+    float cy[3][3];
+    int nr = 0;
+    if (ft > 0.0f) { cy[nr][0] = iy0;        cy[nr][1] = iy0 + 1.0f; cy[nr][2] = ft; ++nr; }
+    if (my1 > my0) { cy[nr][0] = my0;        cy[nr][1] = my1;        cy[nr][2] = 1.0f; ++nr; }
+    if (fb > 0.0f) { cy[nr][0] = iy1 - 1.0f; cy[nr][1] = iy1;        cy[nr][2] = fb; ++nr; }
+
+    for (int i = 0; i < nr; i++) {
+        for (int j = 0; j < nc && count < cap; j++) {
+            const float k = cx[j][2] * cy[i][2];
+            if (k <= 0.002f) continue;
+            PaintBand& b = out[count++];
+            b.x = cx[j][0];
+            b.y = cy[i][0];
+            b.w = cx[j][1] - cx[j][0];
+            b.h = cy[i][1] - cy[i][0];
+            b.color = PaintScaleAlpha(color, k);
+            b.radius = 0.0f;
+            b.round = false;
+        }
+    }
 }
 
 // 底色：单色（1 条，可带圆角）或渐变（多条，逐行内缩近似圆角）
@@ -182,8 +239,52 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
     // 泡泡往上飘时顶边会周期性地浮出一条 1px 的"半透明填充"（实测 x270..300 顶边：
     // 偶数帧 rim 分两行 39/60，奇数帧 rim 单行 + 上方多一行纯填充 18 级亮度差）。
     // 保留小数后两边都交给同一个光栅化规则，切点相邻 ⇒ 既不会双混合也不会错位。
+    //
+    // v0.16.3：光"不吸整像素"还不够 —— 条带边缘仍然是**硬边**（光栅化按像素中心一刀
+    // 切），描边是解析式 AA 的，亚像素位移时两者依旧差半个像素。所以半透明改走
+    // **逐行 + 四边部分覆盖**（见 PaintEmitAa）：上下边界各半行、左右边界各拆一条
+    // 部分列，填充边缘就和描边一样连续了。整数坐标时覆盖率恒为 1 ⇒ 发出去的矩形
+    // 与旧的逐像素相同（`pixels` 金标不受影响）。
     int count = 0;
     float dithR = 0.0f, dithG = 0.0f, dithB = 0.0f;   // 沿渐变方向的取整误差（1D 抖动）
+    if (translucent) {
+        // 逐行光栅化：一行一条，颜色取**像素中心**处的渐变值，行覆盖率按形状边界算
+        const int rows = (int)std::ceil(span) + 1;
+        if (3 * rows + 8 <= cap) {
+            const float along0 = horizontal ? x : y;          // 渐变轴起点
+            const float cross0 = horizontal ? y : x;          // 交叉轴起点
+            const float crossLen = horizontal ? h : w;
+            const int first = (int)std::floor(along0);
+            const int last = (int)std::ceil(along0 + span);
+            for (int rr = first; rr < last; ++rr) {
+                const float ra = (float)rr;
+                float cov = 1.0f;
+                if (ra < along0) cov = ra + 1.0f - along0;                  // 首行露出的部分
+                if (ra + 1.0f > along0 + span)
+                    cov = std::min(cov, along0 + span - ra);                // 末行露出的部分
+                if (cov <= 0.002f) continue;
+                float aF = ra - along0;                                     // 该行对应的条带起点
+                if (aF < 0.0f) aF = 0.0f;
+                if (aF > span - 1.0f) aF = span - 1.0f;
+                const float t = (aF + 0.5f) / span;
+                uint32_t col = PaintLerpArgbDither(p->gradFrom, p->gradTo, t, dithR, dithG, dithB);
+                if (cov < 0.998f) col = PaintScaleAlpha(col, cov);
+                float cA = cross0, cLen = crossLen;
+                if (r > 0.5f) {                                             // 圆角区逐行内缩
+                    const float dt = PaintRoundInset(std::min(aF, r), r);
+                    const float db = PaintRoundInset(std::min(span - aF - 1.0f, r), r);
+                    const float in = std::max(dt, db);
+                    cA = cross0 + in;
+                    cLen = crossLen - 2.0f * in;
+                }
+                if (cLen <= 0.0f) continue;
+                if (horizontal) PaintEmitAa(ra, ra + 1.0f, cA, cA + cLen, col, out, count, cap);
+                else            PaintEmitAa(cA, cA + cLen, ra, ra + 1.0f, col, out, count, cap);
+            }
+            return count;
+        }
+        // 行数太多（超高元素）→ 退回硬边条带，宁可没有 AA 也不截断
+    }
     for (int i = 0; i + 1 < ne && count < cap; i++) {
         const float a = edges[i], b2 = edges[i + 1];
         if (b2 <= a + 0.001f) continue;
