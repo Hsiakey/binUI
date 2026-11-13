@@ -157,6 +157,29 @@ Python 用户不会撞上经典的 `OSError: [WinError 126] 找不到指定模�
 - 两种形态：**独立顶层窗**（`binui_app_open` + `binui_pump`）和**子窗口/控件**
   （`binui_app_open_child` + `binui_render`）。后者见下一节。
 
+## 动画事件（v0.13.1 / C ABI v2）
+
+引擎里 `stepAnimations()` 只会告诉你"这一帧哪些节点变了"，**不告诉你动画结束没结束**——
+于是编排（串下一段动画、动画完了再切页）只能自己按 `durationMs` 定时，等于把引擎的时间轴
+再实现一遍，`delay` / `iteration` / `direction` 一变就对不上。
+
+现在每帧 `takeAnimEvents()` 取一次，三种事件：
+
+| 引擎 | C ABI | 含义 |
+|---|---|---|
+| `AnimEventKind::ANIM_END` | `BINUI_EV_ANIM_END` | 关键帧动画整体结束（`iteration` = 次数；`infinite` 不报） |
+| `AnimEventKind::ANIM_ITERATION` | `BINUI_EV_ANIM_ITER` | 迭代边界（`iteration` = 已完成的第几次，1 起） |
+| `AnimEventKind::TRANSITION_END` | `BINUI_EV_TRANS_END` | 某属性过渡结束（`prop` = `ANIM_*`：缩放/透明度/颜色/圆角/平移） |
+
+要点：
+
+- **是"取"不是"回调"**。事件在 `stepAnimations()` 内部产生，而宿主常在同一条路径上改样式/
+  删节点，回调会就地重入 —— 和 `takeResizeDirty()` 同一个理由。C 侧不用管：库把它们排进
+  同一个队列，照旧 `binui_poll_event` 轮询。
+- **同一帧跨多次迭代只报一次**（带当前次数），不会因为卡顿刷屏。
+- **`restartAnimations()` 会丢掉排队中的旧事件**（旧时间轴上的"结束"已经没有意义）。
+- `fill-mode` 不影响事件：`forwards` 与否，结束都报；报完仍按既有规则保持终值。
+
 ## 键盘与中文输入
 
 文本框的编辑**由库内部处理**：WASD 移动焦点、方向键滚页面、输入框上 Enter 进入编辑、

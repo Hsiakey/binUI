@@ -236,6 +236,8 @@ renderer.loadResources(resources);
 renderer.setText(4, "Hello World!");     // 改文本
 renderer.setVisible(5, false);           // 显隐
 renderer.setEventCallback([](const binui::Event& ev) { /* 点击/输入/尺寸事件 */ });
+// 动画事件（animationend / animationiteration / transitionend）是"取"的：
+for (const auto& ae : renderer.takeAnimEvents()) { /* ae.nodeId / kind / prop / iteration */ }
 
 // 3.5 运行时创建/查找节点（配合 HTML 里的 id）
 uint16_t chartBox = renderer.findNodeByName("barChart");       // id 属性 -> 节点

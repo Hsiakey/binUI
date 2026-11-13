@@ -244,6 +244,19 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
     // ---- 每帧：推进动画 / 视频时钟，只重绘变化的节点 ----
     sh.setUpdateFn([a](float) {
         for (uint16_t id : a->renderer.stepAnimations()) InvalidateNode(a, id);
+        // 动画事件（animationend / animationiteration / transitionend）：引擎是"取"的，
+        // 这里统一排进同一个事件队列 —— C 宿主仍然只认 binui_poll_event。
+        for (const auto& ae : a->renderer.takeAnimEvents()) {
+            BinUIEvent e = MakeEvent(ae.kind == binui::BinUIRenderer::AnimEventKind::ANIM_END
+                                         ? BINUI_EV_ANIM_END
+                                     : ae.kind == binui::BinUIRenderer::AnimEventKind::ANIM_ITERATION
+                                         ? BINUI_EV_ANIM_ITER
+                                         : BINUI_EV_TRANS_END);
+            e.node_id = static_cast<int32_t>(ae.nodeId);
+            e.prop = static_cast<int32_t>(ae.prop);
+            e.iteration = static_cast<int32_t>(ae.iteration);
+            PushEvent(a, e);
+        }
     });
 
     // ---- 渲染器自身的事件（点击 / 文本变化）→ 事件队列 ----
@@ -430,7 +443,7 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
 
 extern "C" {
 
-const char* BINUI_C_CALL binui_version(void) { return "0.13.0"; }
+const char* BINUI_C_CALL binui_version(void) { return "0.13.1"; }
 
 int32_t BINUI_C_CALL binui_abi_version(void) { return BINUI_C_ABI_VERSION; }
 

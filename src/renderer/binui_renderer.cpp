@@ -194,7 +194,7 @@ void BinUIRenderer::shutdown() {
     transitions_.clear();
     animState_.clear();
     animResult_.clear();
-    animExtent_.clear();
+    pendingAnimEvents_.clear();
     animChanged_.clear();
     animTimeInit_ = false;
 }
@@ -3335,6 +3335,28 @@ void BinUIRenderer::computeAnimResult(uint16_t nodeId) {
         if (overlay.kSet)      { res.kSet = true; res.kx = overlay.kx; res.ky = overlay.ky; }
         if (overlay.rotSet)    { res.rotSet = true; res.rot = overlay.rot; }
         if (overlay.active) res.active = true;
+
+        // ---- 动画事件（v23）：迭代边界 / 整体结束 ----
+        // 判据只用"时钟 ÷ 单次时长"，与 EvalKeyFrameAnim 里的分段计算同源；不依赖 fill
+        // （fill 决定结束之后还画不画，事件该报就得报）。
+        const double dur = ka.def->durationMs / 1000.0;
+        if (dur > 0.0 && !ka.ended) {
+            double el = animNow_ - ka.start;
+            if (el < 0.0) el = 0.0;
+            const bool finite = !ka.infinite && ka.def->iteration > 0;
+            const uint32_t total = finite ? ka.def->iteration : 0;
+            uint32_t done = static_cast<uint32_t>(el / dur);
+            if (finite && done > total) done = total;
+            // 一次迭代边界报一条；卡顿跨过多次时只报当前值，不刷屏
+            if (done > ka.iterDone && !(finite && done >= total)) {
+                ka.iterDone = done;
+                pendingAnimEvents_.push_back(AnimEvent{nodeId, AnimEventKind::ANIM_ITERATION, 0, done});
+            }
+            if (finite && done >= total) {
+                ka.ended = true;
+                pendingAnimEvents_.push_back(AnimEvent{nodeId, AnimEventKind::ANIM_END, 0, total});
+            }
+        }
     }
 
     // 过渡（完成即移除；目标已写入 targets，drawX 回落到目标值）
@@ -3345,7 +3367,12 @@ void BinUIRenderer::computeAnimResult(uint16_t nodeId) {
         if (now < t->start) {
             p = 0.0f; ++t;
         } else {
-            if (now >= t->end) { t = rt.trans.erase(t); continue; }
+            if (now >= t->end) {
+                // 过渡结束：报一条 transitionend（prop 带上结束的属性号）
+                pendingAnimEvents_.push_back(AnimEvent{nodeId, AnimEventKind::TRANSITION_END, t->prop, 0});
+                t = rt.trans.erase(t);
+                continue;
+            }
             p = (float)((now - t->start) / (t->end - t->start));
             p = EaseTime(t->easing, p, &t->e0x);
             ++t;
@@ -3437,8 +3464,7 @@ std::vector<uint16_t> BinUIRenderer::stepAnimations() {
     return animChanged_;
 }
 
-void BinUIRenderer::clippingAncestors(uint16_t nodeId, std::vector<uint16_t>& out) const {
-    out.clear();
+void BinUIRenderer::clippingAncestors(uint16_t nodeId, std::vector<uint16_t>& out) const {    out.clear();
     // 每个节点都要走一次这条链：用 nodeIndexOf（稠密 id 走数组直读）而不是哈希表，
     // 否则每一步都是一次 unordered_map 探测。
     size_t cur = nodeIndexOf(nodeId);
@@ -3458,6 +3484,7 @@ void BinUIRenderer::clippingAncestors(uint16_t nodeId, std::vector<uint16_t>& ou
 
 void BinUIRenderer::restartAnimations() {
     animT0_ = AnimNow();
+    pendingAnimEvents_.clear();   // 旧时间轴上的结束事件已经无意义
     animNow_ = animT0_;
     for (auto& kv : animState_) {
         kv.second.anims.clear();
@@ -3470,6 +3497,14 @@ void BinUIRenderer::restartAnimations() {
         computeAnimResult(kv.first);
         animChanged_.push_back(kv.first);
     }
+}
+
+// 取走这一帧产生的动画事件（animationend / animationiteration / transitionend）。
+// 重播/重启会清空动画实例，已经排队的旧事件也一起丢掉 —— 否则宿主会收到"早就被顶掉"的结束。
+std::vector<BinUIRenderer::AnimEvent> BinUIRenderer::takeAnimEvents() {
+    std::vector<AnimEvent> out;
+    out.swap(pendingAnimEvents_);
+    return out;
 }
 
 void BinUIRenderer::setStyleFloat(uint16_t nodeId, uint16_t prop, float value) {
@@ -3759,3 +3794,4 @@ bool BinUIRenderer::invalidRect(uint16_t nodeId, float& x, float& y, float& w, f
 }
 
 } // namespace binui
+

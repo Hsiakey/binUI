@@ -5,6 +5,40 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.13.1] - 2026-11-13
+
+本轮主题：**动画完成事件**（`animationend` / `animationiteration` / `transitionend`）。这是
+"事件相比浏览器还差什么"里最碍事的一条：`stepAnimations()` 只说"这帧哪些节点变了"，
+**没人告诉你动画结束了**，所以宿主要串下一段编排只能自己按 `durationMs` 定时 —— 等于把
+引擎的时间轴重写一遍，`delay`/`iteration`/`direction` 一变就对不上。
+
+### 新增 — 动画事件
+
+```cpp
+for (const auto& e : renderer.takeAnimEvents()) {   // 每帧 stepAnimations() 之后取一次
+    // e.nodeId / e.kind（ANIM_END · ANIM_ITERATION · TRANSITION_END）/ e.prop / e.iteration
+}
+```
+
+- **是"取"不是"回调"**：事件在 `stepAnimations()` 内部产生，宿主常在同一条路径上改样式/
+  删节点，回调会就地重入 —— 和 `takeResizeDirty()` 同一个理由。
+- 迭代事件同一帧跨多次只报一条（带当前次数），卡顿不刷屏；`infinite` 不报结束；
+  `fill-mode` 不影响事件；`restartAnimations()` 丢掉排队中的旧事件。
+- 判据是"时钟 ÷ 单次时长"，与 `EvalKeyFrameAnim` 同源，所以 delay / 有限迭代都算得准。
+
+### 改动 — C ABI 升到 v2
+
+`BinUIEvent` 尾部追加 `prop` / `iteration`，新增 `BINUI_EV_ANIM_END` / `BINUI_EV_ANIM_ITER` /
+`BINUI_EV_TRANS_END`。结构体变大就是 ABI 破坏，所以 `BINUI_C_ABI_VERSION` 1 → 2：**宿主必须
+按新头文件重编**（旧头文件 + 新 DLL 会被写出界）。C 侧用法不变 —— 库把这三类事件排进同一个
+队列，照旧 `binui_poll_event` 轮询。
+
+### 测试
+
+`tests/test_elements.cpp` 动画段新增 6 条：1 次迭代的关键帧报 `ANIM_END`（`iteration == 1`）、
+`infinite` 动画永不报结束但报迭代、hover 的 `transform` / `background-color` 两条过渡各报
+`TRANSITION_END`、以及与 `prop` 对得上、**结束事件只报一次**。
+
 ## [0.13.0] - 2026-11-13
 
 本轮主题：**flex 的属性补齐**。上一版查"flex 子项为什么不换行"时发现三件事：`flex:1`

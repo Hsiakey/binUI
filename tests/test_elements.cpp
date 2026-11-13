@@ -2413,6 +2413,44 @@ button { transition: background-color 0.3s ease, transform 0.2s ease; }
     CHECK(WaitFor([&] { r.stepAnimations(); return nearColor(r.drawColor((uint16_t)btnId), c0, 4); }, 1000),
           "hover color restores");
 
+    // v23：动画事件（animationend / animationiteration / transitionend）—— 宿主不用自己按
+    // durationMs 定时，也不用猜"这一帧到底有没有结束"。
+    {
+        // hover 的 transform 0.2s / background-color 0.3s 要走完才会报 transitionend
+        std::this_thread::sleep_for(std::chrono::milliseconds(360));
+        r.stepAnimations();
+        // 事件是"攒到取的时候"，所以两种结束（关键帧 / 过渡）都在同一批里
+        bool cardEnd = false, infEnded = false, scaleEnd = false, colorEnd = false;
+        uint32_t infIters = 0;
+        for (const auto& e : r.takeAnimEvents()) {
+            if (e.kind == BinUIRenderer::AnimEventKind::ANIM_END &&
+                e.nodeId == (uint16_t)cardId && e.iteration == 1)
+                cardEnd = true;
+            if (e.nodeId == (uint16_t)btnId) {
+                if (e.kind == BinUIRenderer::AnimEventKind::ANIM_END) infEnded = true;
+                if (e.kind == BinUIRenderer::AnimEventKind::ANIM_ITERATION) infIters++;
+                if (e.kind == BinUIRenderer::AnimEventKind::TRANSITION_END) {
+                    if (e.prop == ANIM_SCALE) scaleEnd = true;
+                    if (e.prop == ANIM_BG_COLOR) colorEnd = true;
+                }
+            }
+        }
+        CHECK(cardEnd, "animationend for the 1-iteration keyframe");
+        CHECK(!infEnded, "infinite animation never reports animationend");
+        CHECK(infIters >= 1, "infinite animation reports animationiteration");
+        CHECK(scaleEnd, "transitionend for hover scale");
+        CHECK(colorEnd, "transitionend for hover background-color");
+
+        // 只报一次：再来一帧不能再冒一条 animationend
+        std::this_thread::sleep_for(std::chrono::milliseconds(40));
+        r.stepAnimations();
+        bool dup = false;
+        for (const auto& e : r.takeAnimEvents())
+            if (e.kind == BinUIRenderer::AnimEventKind::ANIM_END && e.nodeId == (uint16_t)cardId)
+                dup = true;
+        CHECK(!dup, "animationend fires once");
+    }
+
     // 运行时样式 API：setStyleFloat 触发 opacity 过渡
     r.setStyleFloat((uint16_t)btn2Id, ANIM_OPACITY, 0.5f);
     CHECK(WaitFor([&] { r.stepAnimations(); return r.drawOpacity((uint16_t)btn2Id) < 0.9f; }, 2000),

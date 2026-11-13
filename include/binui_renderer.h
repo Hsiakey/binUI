@@ -477,6 +477,24 @@ public:
     // 重置关键帧动画时钟（所有动画从当前时刻重新开始），用于“重播”按钮等交互
     void restartAnimations();
 
+    // ============ 动画事件（v23：animationend / animationiteration / transitionend）============
+    // 为什么是"取"而不是事件回调：这些事件在 stepAnimations() 内部产生，而宿主常在这条
+    // 路径上改样式/删节点，回调会就地重入 —— 和 takeResizeDirty() 同一个理由。
+    // 用法：每帧 stepAnimations() 之后取一次（取完清空），拿 "哪个节点的什么动画结束了"
+    // 去做下一步编排，不用再自己按 durationMs 定时（那是重复实现引擎的时间轴）。
+    enum class AnimEventKind : uint8_t {
+        ANIM_END,        // 关键帧动画整体结束（infinite 与 iteration 未定的不报）
+        ANIM_ITERATION,  // 迭代边界：第 iteration 次结束、下一次开始（同一帧跨多次只报一次）
+        TRANSITION_END,  // 某个属性的过渡结束（prop = ANIM_*；被新过渡取代的不报）
+    };
+    struct AnimEvent {
+        uint16_t nodeId = 0;
+        AnimEventKind kind = AnimEventKind::ANIM_END;
+        uint16_t prop = 0;       // 仅 TRANSITION_END 有效
+        uint32_t iteration = 0;  // ANIM_ITERATION / ANIM_END：已完成的迭代次数（1 起）
+    };
+    std::vector<AnimEvent> takeAnimEvents();
+
     // 绘制查询：节点当前应显示的颜色（含 hover/按下 tint、过渡与关键帧动画）
     uint32_t drawColor(uint16_t nodeId) const;
     float drawOpacity(uint16_t nodeId) const;   // 1 = 不透明
@@ -668,6 +686,9 @@ private:
             double start;      // 绝对时钟（含 delay）
             double total;      // 全部迭代时长（秒；infinite = 很大值）
             bool    infinite;
+            // 动画事件去重：已报过的迭代次数 / 是否已报过结束（v23）
+            uint32_t iterDone = 0;
+            bool     ended = false;
         };
         std::vector<KF> anims;
         struct TR {            // 过渡实例（完成/被取代后移除）
@@ -716,6 +737,7 @@ private:
     double animNow_ = 0;         // 最近一次步进时钟
     bool   animTimeInit_ = false;
     std::vector<uint16_t> animChanged_; // stepAnimations 输出缓存
+    std::vector<AnimEvent> pendingAnimEvents_; // 待取的动画事件（takeAnimEvents 取走并清空）
 
     void refreshNodeStyle(int nodeId); // hover/按下/焦点变化后重算颜色/缩放/圆角目标
     void commitFocus(int newId, bool showRing = true); // 键盘焦点变更（同时刷新两端的 :focus 状态样式）

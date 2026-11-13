@@ -74,8 +74,12 @@ extern "C" {
  * 本次（运行期能力：scroll_to / set_node_bounds / add_node 等）为**增量新增**：
  * 只加函数、不动任何既有结构体与函数签名，所以 BINUI_C_ABI_VERSION 保持 1。
  * 旧宿主链新 DLL 照常工作；新宿主连旧 DLL 时找不到符号（链接/加载期报错），
- * 不会读错内存。 */
-#define BINUI_C_ABI_VERSION 1
+ * 不会读错内存。
+ *
+ * v2（0.13.0）：`BinUIEvent` 尾部追加 `prop` / `iteration`（动画事件用），并新增
+ * BINUI_EV_ANIM_END / ANIM_ITER / TRANS_END 三个事件类型 —— 结构体变大，所以
+ * ABI 版本升到 2；宿主必须按新头文件重编（旧头文件 + 新 DLL 会被写出界）。 */
+#define BINUI_C_ABI_VERSION 2
 
 BINUI_C_API const char* BINUI_C_CALL binui_version(void);      /* 库版本串（静态，勿释放） */
 BINUI_C_API int32_t     BINUI_C_CALL binui_abi_version(void);  /* = BINUI_C_ABI_VERSION */
@@ -112,7 +116,12 @@ typedef enum BinUIEventType {
     BINUI_EV_KEY    = 5,  /* 按键：key = 虚拟键码（见 binui_c.h 底部 BINUI_KEY_*） */
     BINUI_EV_CHAR   = 6,  /* 输入字符：text（UTF-8，可能是多个字节） */
     BINUI_EV_WHEEL  = 7,  /* 滚轮：x/y 光标位置，dy 增量（正 = 向上） */
-    BINUI_EV_CLOSE  = 8   /* 窗口关闭（用户按 Alt+F4 / 宿主调用 request_exit） */
+    BINUI_EV_CLOSE  = 8,  /* 窗口关闭（用户按 Alt+F4 / 宿主调用 request_exit） */
+    /* v2 追加：动画事件。引擎侧是"取"的（takeAnimEvents），C 侧统一排进同一个队列，
+     * 用法不变 —— 每帧 pump 之后照常 poll，不需要另外的接口。 */
+    BINUI_EV_ANIM_END  = 9,   /* 关键帧动画整体结束：node_id + iteration（infinite 不报）*/
+    BINUI_EV_ANIM_ITER = 10,  /* 关键帧动画迭代边界：node_id + iteration（1 起）*/
+    BINUI_EV_TRANS_END = 11   /* 属性过渡结束：node_id + prop（= BinUIAnimProp 数值）*/
 } BinUIEventType;
 
 typedef struct BinUIEvent {
@@ -126,6 +135,8 @@ typedef struct BinUIEvent {
                             * 之前有效**（要留就当场拷走） */
     int32_t     text_len;  /* text 的字节数（不含结尾 NUL） */
     int32_t     width, height; /* RESIZE */
+    int32_t     prop;          /* TRANS_END：过渡的属性号（binui_renderer.h 的 ANIM_*）*/
+    int32_t     iteration;     /* ANIM_END / ANIM_ITER：已完成的迭代次数 */
 } BinUIEvent;
 
 /* ============================ 节点 ============================ */
