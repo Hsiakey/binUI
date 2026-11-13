@@ -173,8 +173,15 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
     // v0.12.8：**半透明**渐变不能用"每条多 0.5px"去补缝。
     // 条带是 alpha 混合的：同一条像素行被相邻两条各盖一次 = 混合两次，于是
     // 每两条之间浮出一条横纹。深色底上（泡泡池的薄膜）能一眼看出横向条纹。
-    // 半透明时把切点吸到整像素、条带首尾相接不重叠；不透明的老路径逐像素不变
-    // （`pixels` 金标就是靠这条保证的）。
+    // 半透明时条带首尾相接、**边缘保留小数**（切点相邻但不重叠）；不透明的老路径
+    // 逐像素不变（`pixels` 金标就是靠这条保证的）。
+    //
+    // v0.16.2：半透明的切点**不能再吸整像素**。以前这里 std::round 把每条的上/下边
+    // 取整，静态图看不出问题，但一动画就露馅：填充的上边界被吸到 round(y)，而边框
+    // 是九宫格按小数 y 光栅化的（它自己按像素中心规则取整），两者每隔一帧就差 1px ——
+    // 泡泡往上飘时顶边会周期性地浮出一条 1px 的"半透明填充"（实测 x270..300 顶边：
+    // 偶数帧 rim 分两行 39/60，奇数帧 rim 单行 + 上方多一行纯填充 18 级亮度差）。
+    // 保留小数后两边都交给同一个光栅化规则，切点相邻 ⇒ 既不会双混合也不会错位。
     int count = 0;
     float dithR = 0.0f, dithG = 0.0f, dithB = 0.0f;   // 沿渐变方向的取整误差（1D 抖动）
     for (int i = 0; i + 1 < ne && count < cap; i++) {
@@ -187,7 +194,6 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
         bd.radius = 0;
         if (horizontal) {
             float e0 = x + a, e1 = x + b2;
-            if (translucent) { e0 = std::round(e0); e1 = std::round(e1); }
             bd.x = e0;
             bd.y = y;
             bd.w = translucent ? (e1 - e0) : (b2 - a) + 0.5f;   // 不透明：轻微重叠，取整后不露缝
@@ -202,7 +208,6 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
             }
         } else {
             float e0 = y + a, e1 = y + b2;
-            if (translucent) { e0 = std::round(e0); e1 = std::round(e1); }
             bd.x = x;
             bd.y = e0;
             bd.w = w;
@@ -216,7 +221,7 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
                 if (bd.w <= 0.0f) bd.w = 0.5f;
             }
         }
-        if (bd.w <= 0.0f || bd.h <= 0.0f) continue;   // 吸整像素后可能整段落在同一行
+        if (bd.w <= 0.0f || bd.h <= 0.0f) continue;   // 退化段（切点重合）直接丢
         out[count++] = bd;
     }
     return count;

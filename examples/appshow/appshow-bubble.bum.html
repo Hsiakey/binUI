@@ -17,7 +17,7 @@
   alpha 0.3 的两块叠起来不是"更亮"，而是"后面的透过来 70%"。
   所以本体只保留一层带 alpha 的渐变 + 一圈描边，别的装饰越少越好。
 
-  不写自己的 @keyframes：漂移/呼吸/色相/戳破全由宿主逐帧设值
+  不写自己的 @keyframes：漂移/淡入淡出/色相/戳破全由宿主逐帧设值
   （每块的周期和相位都不同，写进全局 keyframes 会串味，见 docs/ui_orchestration.md）。
 -->
 <div id="{{bid=b0}}" style="position:absolute; left:{{x=0}}; top:{{y=0}}; width:{{w=160}}; height:{{h=110}}">

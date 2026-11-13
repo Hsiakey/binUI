@@ -92,7 +92,7 @@ struct Bubble {
     float x = 0.0f, y = 0.0f;                    // 当前左上角（窗口坐标）
     float px = 0.0f, py = 0.0f;                  // 上一帧（脏矩形取新旧并集）
     float vx = 0.0f, vy = 0.0f;                  // px/s（vy < 0 = 上浮）
-    float phase = 0.0f, breath = 0.03f, hz = 0.3f;
+    float phase = 0.0f;                          // 漂移正弦的相位（每颗不同）
     float op = 0.9f;
     float hue = 0.0f, hueSpd = 12.0f;            // 色相漂移（度/秒）
     float popT = -1.0f;                          // <0 = 活着；>=0 = 戳破后经过的时间
@@ -299,8 +299,6 @@ struct Shell {
             b.vx = rndRange(-9.0f, 9.0f);
             b.vy = -rndRange(10.0f, 30.0f);
             b.phase = rndRange(0.0f, 6.2831853f);
-            b.breath = rndRange(0.018f, 0.045f);
-            b.hz = rndRange(0.16f, 0.40f);
             b.op = rndRange(0.74f, 1.0f);
             b.hue = rndRange(0.0f, 360.0f);
             b.hueSpd = rndRange(8.0f, 24.0f) * (rnd() < 0.5f ? -1.0f : 1.0f);
@@ -396,13 +394,20 @@ struct Shell {
     // translate/scale 不向后代继承，所以必须逐层设值（这就是 binUI 当前的成本）。
     void applyBubble(Bubble& b, float t) {
         const float k = b.popT >= 0.0f ? std::min(1.0f, b.popT / b.popDur) : 0.0f;
-        float s = 1.0f + b.breath * std::sin(t * b.hz * 6.2831853f + b.phase);
+        // 只保留"爆开"那一下的缩放：**平时不呼吸**。呼吸是连续的尺寸变化，而这块组件的
+        // 填充是硬边纯色条带（没有抗锯齿）、描边是解析式 AA —— 尺寸带小数时两者又会
+        // 每隔一帧差 1px（顶边亮边在 85 和 109 之间跳）。爆开只有 0.24s，一闪而过看不出来。
+        float s = 1.0f;
         float op = b.op * (0.94f + 0.06f * std::sin(t * 1.9f + b.phase * 1.7f));
         if (b.popT >= 0.0f) {
             s += 0.65f * EaseOut(k);      // 爆开：先胀再淡出
             op *= (1.0f - k);
         }
-        const float dx = b.x - b.baseX, dy = b.y - b.baseY;
+        // 位移按整像素取整：这块是**半透明渐变 + 1px 描边 + 文字**，填充边缘没有抗锯齿
+        // （渐变是一行一条的纯色矩形），边框是解析式 AA 的。亚像素位移时两者会各按各的
+        // 规则吸像素 —— 顶边每隔一帧就浮出/收进 1px，看着像在抖。整块一起取整就只剩
+        // "整块按整像素走"，内部不再互相错位（文字本来也只能整像素落位）。
+        const float dx = std::round(b.x - b.baseX), dy = std::round(b.y - b.baseY);
         auto set = [&](uint16_t id, float o) {
             if (!id) return;
             r.setStyleFloat(id, ANIM_TRANSLATE_X, dx);
@@ -427,8 +432,6 @@ struct Shell {
         b.vx = rndRange(-9.0f, 9.0f);
         b.vy = -rndRange(10.0f, 30.0f);
         b.phase = rndRange(0.0f, 6.2831853f);
-        b.hz = rndRange(0.16f, 0.40f);
-        b.breath = rndRange(0.018f, 0.045f);
         b.hue = rndRange(0.0f, 360.0f);
         b.popT = -1.0f;
     }
