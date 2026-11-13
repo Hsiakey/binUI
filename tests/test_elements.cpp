@@ -1618,6 +1618,13 @@ int run() {
                  lastOf(EventType::CONTEXT_MENU)->nodeId == b1 &&
                  lastOf(EventType::CONTEXT_MENU)->pointer.button == 1);
             TEST("事件: 右键不产生 PRESS", countOf(EventType::PRESS) == 0);
+            // 右键的命中口径是"光标下最上层节点"，不是"可交互节点"：
+            // 普通 div（没有 :hover/:active 状态样式）上右键也必须报出它，否则菜单永远不弹。
+            evs.clear();
+            r.press(250, 20, 1);   // rz 卡片内部（普通 div，无状态样式）
+            TEST("事件: 普通 div 上右键也报 CONTEXT_MENU",
+                 countOf(EventType::CONTEXT_MENU) == 1 &&
+                 lastOf(EventType::CONTEXT_MENU)->nodeId == rz);
 
             // FOCUS：键盘焦点变化（以前 Tab/WASD/点击换焦点都没有事件）
             r.setKeyboardFocus(-1);   // 先清空，确保下面这次是"从无到有"

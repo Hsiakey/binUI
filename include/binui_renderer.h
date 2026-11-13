@@ -240,6 +240,10 @@ public:
     int hitTest(float x, float y) const;
     // 扩展命中：allowStyled 时把"声明了 state 状态样式"的普通节点也当作命中目标
     int hitTestEx(float x, float y, bool allowStyled, uint8_t state) const;
+    // "光标底下是哪个节点"——不限可交互/带状态样式，纯按绘制顺序取最上层可见节点。
+    // 右键菜单要的是"点到了谁"而不是"点到了哪个能点的东西"（DOM 的 contextmenu 同理：
+    // 普通 div 上也会触发），所以 CONTEXT_MENU 走这个口径。
+    int hitTestAny(float x, float y) const;
 
     void setEventCallback(EventCallback cb);
     // 点击分发：命中 INPUT 节点自动聚焦，其余情况失焦；返回命中节点 id（-1 未命中）

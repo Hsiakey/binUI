@@ -1420,6 +1420,23 @@ int BinUIRenderer::hitTest(float x, float y) const {
     return hitTestEx(x, y, false, 0);
 }
 
+// "光标底下是哪个节点"：不要求 BINUI_INTERACTIVE / 状态样式，纯按绘制顺序从顶到底
+// 找第一个可见、未禁用、矩形包含该点的节点。右键菜单用它（= DOM contextmenu 的
+// target 语义：普通 div 上也会触发）。裁剪链不参与：右键点在视口外本来也点不到。
+int BinUIRenderer::hitTestAny(float x, float y) const {
+    const std::vector<uint32_t> order = drawOrder();
+    for (size_t oi = order.size(); oi-- > 0;) {
+        const auto& node = nodes_[order[oi]];
+        if (!(node.flags & BINUI_VISIBLE)) continue;
+        if (node.flags & BINUI_DISABLED) continue;
+        if (x < node.x || x > node.x + node.width) continue;
+        if (y < node.y || y > node.y + node.height) continue;
+        if (!isNodeVisible(node.id)) continue;
+        return static_cast<int>(node.id);
+    }
+    return -1;
+}
+
 // 命中测试的扩展：除 BINUI_INTERACTIVE 节点外，还命中"声明了该状态样式"的普通节点
 // （CSS 里 :hover/:active 对任何元素都有效，不限于控件）
 int BinUIRenderer::hitTestEx(float x, float y, bool allowStyled, uint8_t state) const {
@@ -2132,9 +2149,11 @@ void BinUIRenderer::dragScroll(float px, float py) {
 }
 
 int BinUIRenderer::press(float x, float y, int button) {
-    // 右键：不进按下态、不抢焦点，直接派发 CONTEXT_MENU（宿主自己做菜单）
+    // 右键：不进按下态、不抢焦点，直接派发 CONTEXT_MENU（宿主自己做菜单）。
+    // 命中口径用 hitTestAny —— 普通 div / 文本上右键也要报（DOM 的 contextmenu 就是这样），
+    // 用命中"可交互节点"的那套会让空白区域右键什么都收不到。
     if (button == 1) {
-        const int cid = hitTestEx(x, y, true, BINUI_ST_ACTIVE);
+        const int cid = hitTestAny(x, y);
         Event ev{};
         ev.type = EventType::CONTEXT_MENU;
         ev.nodeId = cid < 0 ? 0xFFFF : static_cast<uint16_t>(cid);

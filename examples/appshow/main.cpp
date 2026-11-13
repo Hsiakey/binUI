@@ -1221,12 +1221,20 @@ int main(int argc, char* argv[]) {
         if (ev.type == EventType::CLICK)
             std::printf("[appshow] click node=%u (%.1f, %.1f)\n", (unsigned)ev.nodeId,
                         (double)ev.click.x, (double)ev.click.y);
-        // 右键菜单：引擎派发 CONTEXT_MENU（带节点 id），宿主用现成的弹窗把"点到了谁"显示出来
-        if (ev.type == EventType::CONTEXT_MENU && ev.nodeId != 0xFFFF) {
+        // 右键菜单：引擎派发 CONTEXT_MENU（带节点 id；普通 div 也算，命中口径是"光标下
+        // 最上层节点"）。宿主用现成的弹窗把"点到了谁"显示出来 —— 空白处也报，免得
+        // 看起来像"右键没反应"。
+        if (ev.type == EventType::CONTEXT_MENU) {
+            const bool blank = (ev.nodeId == 0xFFFF);
+            std::printf("[appshow] contextmenu node=%s (%.1f, %.1f)\n",
+                        blank ? "-" : std::to_string(ev.nodeId).c_str(),
+                        (double)ev.pointer.x, (double)ev.pointer.y);
             sh.openDialog("右键菜单（CONTEXT_MENU 事件）",
-                          "节点 #" + std::to_string(ev.nodeId) + "：" + sh.describe(ev.nodeId) +
-                              "\n引擎只报「右键 + 节点」，菜单长什么样归宿主 —— 和浏览器里 "
-                              "contextmenu 的约定一致。",
+                          blank ? "空白处右键：光标下没有节点。\n"
+                                  "引擎仍会报一条 CONTEXT_MENU（nodeId = 0），菜单长什么样归宿主。"
+                                : "节点 #" + std::to_string(ev.nodeId) + "：" + sh.describe(ev.nodeId) +
+                                  "\n\n引擎只报「右键 + 节点」，菜单长什么样归宿主 —— 和浏览器里 "
+                                  "contextmenu 的约定一致。",
                           false);
         }
     });
