@@ -7,18 +7,24 @@
 
 ## [Unreleased]
 
-### 文档 — 记下两个**未公开、未实现**的未来计划：bin2d / bin3d
+### 文档 — 记下三个**未公开、未实现**的未来计划：bin2d / bin3d / binGPU
 
 - 新增 `docs/future.md`：**bin2d**（把 `include/binui_path.h` / `include/binui_paint.h` 那层
   光栅数学抽成独立 2D 库 —— 场景图 / 图层 / 离屏合成 / 滤镜 / 导出，binUI 转为它的消费者）、
   **bin3d**（界面里嵌 3D 视口，先 CPU 软光栅 + `BINUI_3DVIEW` 节点、不动后端；撑不住再给
-  `IBinUIGfx` 加 `drawMesh` + 深度目标）。
-- **故意不写进 [`docs/README.md`](docs/README.md) 索引、也不在 README 提**：两条都还没有一行代码，
+  `IBinUIGfx` 加 `drawMesh` + 深度目标）、**binGPU**（三个后端下面那层设备 / 交换链 / 管线 /
+  呈现的抽象：先只做薄的固定管线，VK 作第一实现、D3D12 作第二实现，GL 明确**不迁**留作兜底）。
+- **故意不写进 [`docs/README.md`](docs/README.md) 索引、也不在 README 提**：三条都还没有一行代码，
   属于方向性记录，不是承诺、没有日期。文档里同时写了"现在为什么不做的原因"和"什么条件才开工"，
   免得下次又从零讨论一遍。
-- 顺带记下了两个后面一定会踩的坑：3D 的像素基准不能沿用"0 diff"（浮点光栅化顺序不同，z 缓冲
+- 顺带记下了几个后面一定会踩的坑：3D 的像素基准不能沿用"0 diff"（浮点光栅化顺序不同，z 缓冲
   边缘必然差 1px，容差规则要改写成覆盖率/轮廓容差）；bin2d 的复杂度成本主要在场景图的缓存
-  生命周期，而 binUI 现在**故意**没有这份状态。
+  生命周期，而 binUI 现在**故意**没有这份状态；binGPU 的收益是"少写第四份实现"、代价是所有
+  像素 bug 多一层要排查 —— 所以在没有第四份后端之前是纯亏。
+- binGPU 的现状数字也一起记了（同一件事写三遍的证据）：GL 1327 / D3D11 1340 / VK 2805 行；
+  `wglCreateContext` 9 处、`vkCreateSwapchainKHR` 5 处、`CreateSwapChainForHwnd` 2 处；
+  `glCreateProgram` 4 / `vkCreateGraphicsPipelines` 4 / `D3DCompile` 3；着色器源码三套
+  （GLSL 内联 / `binui_vk_shaders.h` 的 SPIR-V 常量 / HLSL 内联）。
 
 ## [0.16.6] - 2026-11-14
 
