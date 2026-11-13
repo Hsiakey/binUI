@@ -277,7 +277,7 @@ renderer.clearBoundsOverride(id);           // 解除钉住：下次窗口重排
 | 未声明宽度（`auto` / 块级填满） | `SPEC_AUTO_W` | `父内容宽 − margin` |
 | `min/max-width/height` | `ClampSize` | 百分比/弹性分配之后钳制（与编译器同口径） |
 | 流式（没有 `top`） | 父容器流光标 | 上一个兄弟变高 → 后面的整体下移 |
-| `display:flex` | 主/次轴重算 | 固定项先占位，`flex:N` 分剩余空间，`gap`/`justify`/`align` 都参与 |
+| `display:flex` | 主/次轴重算 | 一份实现（`include/binui_flex_layout.h`），编译期与运行期共用；属性表见下 |
 | **文字换行** | `autoTextHeight()` + 绘制侧折行 | 宽度变了就按行数重算高度（`heightAuto` 且没写 `height` 的 LABEL/LIST/BUTTON）；绘制侧 `drawTextWrapped` 按同一份估算折行 |
 | 容器自动高度 | `growContainer()` | 流式内容超出时容器自己长高（滚动容器除外） |
 
@@ -288,6 +288,39 @@ renderer.clearBoundsOverride(id);           // 解除钉住：下次窗口重排
 
 flex 子项**不套用**文字自然高度：它的高度由父容器分配（`flex:1` 撑满剩余），文字高度只是
 `flex-basis` 的参考，反过来盖掉分配结果就会把整列压塌。
+
+### flex 一族（v22 补齐，`BINUI_VERSION` 22）
+
+算法只有一份：`include/binui_flex_layout.h`（header-only）。编译期布局和运行期
+`setSize` / `relayoutSubtree` 都调它 —— 以前两边各写一份，加特性必然改出"编译期和运行期
+不一样"，而且 `flex:1` 之所以"永远不换行、能一路缩到 0"，正是那两份实现都只做了"按权重
+切主轴余量"这一步。
+
+| 属性 | 参与方式 |
+|---|---|
+| `flex:<grow> [<shrink>] [<basis>]` / `auto` / `none` / `initial` | 基准尺寸（basis）+ 主轴余量权重 + 收缩因子。basis 可写像素 / 百分比 / `auto` / `content`；binUI 全线允许无单位长度，`flex:1 1 120` = basis 120px |
+| `flex-grow` / `flex-shrink` / `flex-basis` | 长写，与简写等价；`flex-shrink` 默认 1 |
+| `flex-wrap: nowrap / wrap / wrap-reverse` | 按**假设主轴尺寸**贪心装行，每行独立按 `justify-content` 排 |
+| `align-items` / `align-self` | 交叉轴 start / center / end / stretch（`stretch` 把"没写交叉轴尺寸"的项拉满整行） |
+| `align-content` | 多行时的行间分配：start / center / end / between / around / evenly / stretch |
+| `order` | 主轴排序键（同值保持文档顺序），**不改节点树顺序** |
+| `justify-content` | 主轴余量 start / end / center / between / around / evenly |
+
+两条容易踩的规则：
+
+1. **溢出时收缩，而不是硬顶**。主轴余量为负时按 CSS 的"缩放收缩因子"（`shrink × basis`）
+   加权扣宽，扣到 `min-width` 为止。不写 `flex-shrink:0` 的话，两个 150 挤进 200 的容器
+   会各缩到 100（以前固定宽项根本不缩、直接溢出）；想"绝不缩"就显式写 `flex-shrink:0`。
+   注意 `flex:1`（basis 0）的空项还是会被切到 0 —— 那是 CSS 语义（`min-width:auto` 在
+   没有内容时就是 0），要底线就写 `min-width`。
+2. **折行会改容器高度，流式兄弟必须跟着让位**。容器没声明 `height` 时 auto 高 = 各行
+   交叉轴之和 + 行间距；但流式父级的光标在 flex 之前就按旧高度推进过了，所以编/运两端都
+   要在算完 auto 高之后把差值补回父级光标（`pc.cursorY += newH - oldH`）。漏了这一步，
+   折出来的第二行就会盖住后面的兄弟 —— 看起来就像"文字压在一起"。
+
+三处明确偏离 CSS（都为不破坏既有布局）：`align-items` 默认 `flex-start`（CSS 是 stretch）；
+row 里"宽和 flex 都没写"的子项按 `flex:1` 处理；`align-items/align-self: baseline` 按
+flex-start 处理（引擎没有字体基线度量）。
 
 ### 子页面：内容太多就单开一页，从右边切入
 
@@ -311,10 +344,14 @@ r.scrollTo(idViewport, 0.0f,    0.0f);   // 出
 
 ![子页面](img/appshow-subpage.png)
 
-把 ① 拖小（640×296 → 380×231）：正文折成三行、节点自动变高，四个 `flex:1` 色块从 142 收到 78，
-两条百分比色条跟着窄——三件事在同一帧里发生：
+把 ① 拖小（640×296 → 380×296）：正文折成三行、节点自动变高，四个 `flex:1 1 120` 色块
+**从 1 行折成 2 行**（142 → 165 一个），容器 auto 高跟着长高，下面那行读数变成
+`flex 2 行`，两条百分比色条整体下移——五件事在同一帧里发生：
 
 ![拖小之后](img/appshow-subpage-drag.png)
+
+> v22 之前这四块是 `flex:1`（basis 0），拖到什么宽度都只会一路变窄、永不折行；
+> 现在给了 `flex:1 1 120; min-width:56`，装不下就先折行、真挤到 56 才停止收缩。
 
 两个容易踩的点：
 

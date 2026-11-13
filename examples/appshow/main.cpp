@@ -350,6 +350,34 @@ struct Shell {
             if (r.invalidRect(rows[i].card, bx, by, bw, bh, 4.0f))
                 app.invalidateRect((int)ScreenX(bx), (int)ScreenY(by), (int)bw, (int)bh);
         }
+
+        // ① 的 flex 行：数一下子项排成了几行（同一 y 算一行）+ 第一个子项的宽。
+        // 拖窄卡片时 flex-wrap 会折行、容器 auto 高跟着长，下面那行读数就是证据。
+        static uint16_t flexBox = 0, flexLabel = 0;
+        static std::string flexCache;
+        if (!flexBox) { flexBox = nid("pg-chips"); flexLabel = nid("pg-flex"); }
+        if (flexBox && flexLabel) {
+            float lineY[16];
+            int lines = 0;
+            float w0 = -1.0f;
+            for (const auto& k : r.getNodes()) {
+                if (k.parentId != flexBox) continue;
+                bool seen = false;
+                for (int j = 0; j < lines; j++)
+                    if (std::fabs(lineY[j] - k.y) < 2.0f) seen = true;
+                if (!seen && lines < 16) lineY[lines++] = k.y;
+                if (w0 < 0.0f) w0 = k.width;
+            }
+            char buf[64];
+            std::snprintf(buf, sizeof(buf), "flex %d 行 · 子项宽 %.0f", lines, (double)w0);
+            if (flexCache != buf) {
+                flexCache = buf;
+                r.setText(flexLabel, flexCache);
+                float fx, fy, fw, fh;
+                if (r.invalidRect(flexBox, fx, fy, fw, fh, 6.0f))
+                    app.invalidateRect((int)ScreenX(fx), (int)ScreenY(fy), (int)fw, (int)fh);
+            }
+        }
     }
 
     void touchBubble(const Bubble& b) {

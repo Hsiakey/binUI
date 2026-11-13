@@ -250,15 +250,16 @@
         <span class="h2" style="position:absolute; left:136; top:46; width:900; height:16">拖卡片的边/角：文字折行、flex 重新分配、百分比与 min·max 钳制都在同一帧里重算</span>
 
         <div id="pg-card" class="rs" style="position:absolute; left:24; top:84; width:640; height:296; overflow:hidden; resize:both; padding:20">
-            <span class="rs-t" style="width:100%; height:20">① 流式 + 文字折行 + flex</span>
+            <span class="rs-t" style="width:100%; height:20">① 流式 + 折行 + flex-wrap</span>
             <span id="pg-sz" class="rs-v" style="width:100%; height:26">640 × 296</span>
             <span id="pg-para" class="rs-d" style="width:100%; font-size:12">这段正文没有写 height：卡片一变窄它就折行、节点跟着变高，下面那行 flex 子项和两条百分比色条一起重排。四边四角都能拖，拖左边时右边界不动。</span>
-            <div id="pg-chips" style="width:100%; height:34; display:flex; gap:10; margin-top:10">
-                <div class="rs-chip" style="flex:1; height:34"></div>
-                <div class="rs-chip" style="flex:1; height:34"></div>
-                <div class="rs-chip" style="flex:1; height:34"></div>
-                <div class="rs-chip" style="flex:1; height:34"></div>
+            <div id="pg-chips" style="width:100%; display:flex; flex-wrap:wrap; gap:10; margin-top:10">
+                <div class="rs-chip" style="flex:1 1 120; min-width:56; height:34"></div>
+                <div class="rs-chip" style="flex:1 1 120; min-width:56; height:34"></div>
+                <div class="rs-chip" style="flex:1 1 120; min-width:56; height:34"></div>
+                <div class="rs-chip" style="flex:1 1 120; min-width:56; height:34"></div>
             </div>
+            <span id="pg-flex" class="rs-d" style="width:100%; height:16; font-size:12; margin-top:8">flex 1 行</span>
             <div class="rs-bar" style="width:72%; height:10; margin-top:12"></div>
             <div class="rs-bar" style="width:44%; height:10; margin-top:8"></div>
         </div>
@@ -304,5 +305,6 @@
 </body>
 </html>
 </app_window>
+
 
 

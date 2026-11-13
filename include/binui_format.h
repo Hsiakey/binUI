@@ -19,7 +19,9 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v19: 路径边缘抗锯齿开关（shape-rendering=auto/optimizeQuality → PATH_AA）
 // v20: 无格式变化（渲染器内部：非等比缩放的脏矩形按外接圆算）
 // v21: 扩展绘制段追加 resizeMask（CSS resize 的边/角位图），BinUIPaintNode 44 -> 48 字节
-constexpr uint32_t BINUI_VERSION    = 21;
+// v22: flex 属性补齐（flex 简写/flex-shrink/flex-basis/order/align-self/flex-wrap/align-content），
+//      BinUISpecNode 72 -> 84 字节；BinUISpecFlex 的两个 reserve 变成 wrap / alignContent（尺寸不变）
+constexpr uint32_t BINUI_VERSION    = 22;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -103,6 +105,12 @@ enum BinUISpecFlag : uint16_t {
     // 等比缩放**——自身尺寸按窗口拉伸/缩放，后代保持原有形状（统一按纵向比例缩放 + 贴边/居中），
     // 用来保住"标题栏三颗控制按钮"这类必须是正方形的 chrome。旧布局这一位恒为 0，不升格式版本。
     SPEC_FIXED_SCALE = 1 << 11,
+    // v22：flex 子项的交叉轴尺寸是"作者没写、由默认盒高补的"（可被 align-items/align-self
+    // 的 stretch 拉伸占满整行）。作者显式写了宽高时该位为 0，stretch 不会盖掉声明值。
+    SPEC_CROSS_AUTO  = 1 << 12,
+    // v22：该子项的主轴基准尺寸是"内容估算出来的"（width:content / flex-basis:content）。
+    // 运行期换文本后可以按同一口径重算，不用把编译期的估算值锁死。
+    SPEC_BASIS_CONTENT = 1 << 13,
 };
 
 #pragma pack(push, 1)
@@ -125,18 +133,26 @@ struct BinUISpecNode {
     float    ml, mr, mt, mb;         // 流式 margin（SPEC_FLOW_Y / SPEC_AUTO_W 时有效）
     float    minW, maxW, minH, maxH; // 尺寸约束（v6，min/max-width/height）；-1 = 未指定，SPEC_*_PCT 时按父内容盒百分比解析
     float    relW, relH;             // v6：显式像素宽/高声明值（未钳制前）；auto/%/flex 尺寸为 -1（运行时重排基准）
+    // ---- v22：flex 子项属性（SPEC_IN_FLEX 时有效，算法见 include/binui_flex_layout.h）----
+    uint8_t  flexShrink;   // 收缩因子（CSS 默认 1）：主轴溢出时按 shrink×basis 加权收缩
+    uint8_t  alignSelf;    // 交叉轴对齐：0=start 1=center 2=end 3=stretch 0xFF=跟随容器
+    uint8_t  flexOrder;    // order：主轴排序键（同值保持文档顺序）
+    uint8_t  basisKind;    // flexBasis 的含义：0=无（基准 0）1=像素 2=百分比（0..1，相对主轴内容盒）
+    float    flexBasis;    // 主轴基准尺寸（flex-basis 解析后的值）
+    float    flexCross;    // 交叉轴基准尺寸（像素；作者的声明值或元素默认盒高）
 };
 #pragma pack(pop)
-static_assert(sizeof(BinUISpecNode) == 72, "BinUISpecNode must be 72 bytes");
+static_assert(sizeof(BinUISpecNode) == 84, "BinUISpecNode must be 84 bytes");
 
 #pragma pack(push, 1)
 struct BinUISpecFlex {
     uint16_t nodeId;   // flex 容器节点 id
     uint8_t  dir;      // 0=row 1=column
-    uint8_t  justify;  // 0=flex-start 1=flex-end 2=center 3=space-between 4=space-around
-    uint8_t  align;    // 0=flex-start 1=center 2=flex-end
+    uint8_t  justify;  // 0=flex-start 1=flex-end 2=center 3=space-between 4=space-around 5=space-evenly
+    uint8_t  align;    // 0=flex-start 1=center 2=flex-end 3=stretch（交叉轴，默认 flex-start）
     uint8_t  autoH;    // 1=容器高度由内容决定（未声明 height）
-    uint8_t  reserve[2];
+    uint8_t  wrap;       // v22：0=nowrap 1=wrap 2=wrap-reverse
+    uint8_t  alignContent; // v22：多行时行间分配 0=start 1=center 2=end 3=between 4=around 5=evenly 6=stretch
     float    gap;
 };
 #pragma pack(pop)

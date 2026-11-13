@@ -6,6 +6,7 @@
 #include "binui_srcmap.h"
 #include "binui_path.h"            // SVG 路径几何：d 解析 / 细分 / 包围盒（与运行期同一份数学）
 #include "binui_text_estimate.h"   // 文本尺寸粗估：与渲染器运行期 setText 重算共用同一口径
+#include "binui_flex_layout.h"     // flex 布局：与渲染器运行期重排共用同一份实现
 
 #include <fstream>
 #include <sstream>
@@ -18,6 +19,7 @@
 #include <array>
 #include <filesystem>
 #include <functional>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -2413,6 +2415,9 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "display", "position", "left", "top", "overflow", "opacity", "align",
         "resize",
         "flex", "flex-direction", "justify-content", "align-items", "gap",
+        // v22：flex 属性补齐（简写/收缩/基准/换行/逐项对齐/排序）
+        "flex-wrap", "flex-shrink", "flex-grow", "flex-basis",
+        "align-content", "align-self", "order",
         "animation", "transition", "transform", "white-space",
         "aspect", "resizable", "window_resize", "transparent", "ui_scale",
         "volume", "autoplay", "loop", "muted", "controls",
@@ -4442,15 +4447,30 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (p < elems.size()) childrenOf[p].push_back(i);
     }
 
-    // flex 布局（编译期）：容器内容盒 (ox,oy,cw,ch)，子项坐标相对内容盒写入 out
-    // 返回容器内容盒所需高度（auto 高度时用于扩展容器）；weights 输出各子项弹性权重
+    // flex 子项属性（v22）：CSS 解析结果 + 规格段回写需要的基准值
+    struct FlexRec {
+        float   grow      = 0.0f;
+        float   shrink    = 1.0f;
+        uint8_t alignSelf = 0xFF;   // 0xFF = 跟随容器
+        uint8_t order     = 0;
+        uint8_t basisKind = 0;      // 0=无 1=像素 2=百分比（0..1）
+        float   basisVal  = 0.0f;   // 主轴基准（按 basisKind 解释）
+        float   crossPx   = 0.0f;   // 交叉轴基准尺寸（像素）
+        bool    crossAuto = false;  // 交叉轴尺寸是默认值（可被 stretch 拉伸）
+        bool    content   = false;  // 主轴基准是内容估算
+    };
+
+    // flex 布局（编译期）：容器内容盒 (ox,oy,cw,ch)，子项坐标相对内容盒写入 out。
+    // 算法本身在 include/binui_flex_layout.h —— 运行期重排用的是同一份，别在这里另写一遍。
+    // 返回容器内容盒所需的**交叉轴长度**（容器没声明高度/宽度时拿它撑开自己）。
     auto layoutFlex = [&](const std::vector<size_t>& kids,
                           float cw, float ch,
                           const std::string& dir, const std::string& justify,
-                          const std::string& align, float gap,
+                          const std::string& align, const std::string& alignContent,
+                          uint8_t wrap, float gap, bool crossDefinite,
                           std::unordered_map<size_t, float[4]>& out,
-                          std::unordered_map<size_t, float>& weights) -> float {
-        bool row = (dir != "column");
+                          std::unordered_map<size_t, FlexRec>& recs) -> float {
+        const bool row = (dir != "column");
         // 只收集会生成节点的子项：跳过 display:none 与 head/meta/script 等非可视元素
         std::vector<size_t> active;
         for (size_t k : kids) {
@@ -4464,20 +4484,56 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             active.push_back(k);
         }
         size_t n = active.size();
-        float totalGap = (n > 1 ? (float)(n - 1) : 0) * gap;
+        std::vector<binui_flex::Item> items(n);
 
-        // ---- 主轴尺寸分配 ----
-        // row（主轴=宽）：声明宽/百分比宽 = 固定尺寸；flex:N 或未声明宽度 = 弹性分配
-        // column（主轴=高）：声明高/百分比高 = 固定尺寸；flex:N = 弹性分配；未声明宽度 = 拉伸到内容盒
-        // fixedSum 必须把百分比尺寸也算进去 —— 否则弹性项会把百分比兄弟占的位置再吃一遍（重叠溢出）
-        std::vector<float> w(n), h(n), weight(n, 0);
-        std::vector<float> mnw(n, -1), mxw(n, -1), mnh(n, -1), mxh(n, -1);
-        std::vector<uint8_t> mnwp(n, 0), mxwp(n, 0), mnhp(n, 0), mxhp(n, 0);
-        float weightSum = 0, fixedSum = 0;
+        // ---- CSS 取值小工具 ----
+        auto alignCode = [](const std::string& v) -> uint8_t {
+            if (v == "center")  return binui_flex::AL_CENTER;
+            if (v == "flex-end" || v == "end") return binui_flex::AL_END;
+            if (v == "stretch") return binui_flex::AL_STRETCH;
+            return binui_flex::AL_START;   // flex-start / baseline / 其它
+        };
+        // 纯数字 token（flex-grow / flex-shrink / order）
+        auto numTok = [](const std::string& v, float def) -> float {
+            const std::string t = TrimCopy(v);
+            if (t.empty()) return def;
+            char* end = nullptr;
+            const float r = std::strtof(t.c_str(), &end);
+            if (end == t.c_str() || !std::isfinite(r)) return def;
+            while (*end == ' ' || *end == '\t') end++;
+            if (*end != '\0') return def;
+            return r;
+        };
+        // flex-basis 取值：auto / content / px / %（kind：0=auto 1=像素 2=百分比 3=content）
+        auto basisTok = [&](const std::string& raw, int& kind, float& val) {
+            const std::string t = LowerCopy(TrimCopy(raw));
+            kind = 0; val = 0.0f;
+            if (t.empty() || t == "auto") return;
+            if (t == "content") { kind = 3; return; }
+            auto p = ParseLenPct(t, 0, curCtx, "flex-basis");
+            if (p.pct) { kind = 2; val = p.value / 100.0f; }
+            else { kind = 1; val = p.value; }
+        };
+
+        const uint8_t containerAlign = alignCode(align);
+        const int jc = (justify == "flex-end") ? binui_flex::J_END
+                     : (justify == "center") ? binui_flex::J_CENTER
+                     : (justify == "space-between") ? binui_flex::J_BETWEEN
+                     : (justify == "space-around") ? binui_flex::J_AROUND
+                     : (justify == "space-evenly") ? binui_flex::J_EVENLY : binui_flex::J_START;
+        const int ac = (alignContent == "center") ? binui_flex::AC_CENTER
+                     : (alignContent == "flex-end" || alignContent == "end") ? binui_flex::AC_END
+                     : (alignContent == "space-between") ? binui_flex::AC_BETWEEN
+                     : (alignContent == "space-around") ? binui_flex::AC_AROUND
+                     : (alignContent == "space-evenly") ? binui_flex::AC_EVENLY
+                     : (alignContent == "stretch") ? binui_flex::AC_STRETCH : binui_flex::AC_START;
+
         for (size_t i = 0; i < n; i++) {
             size_t k = active[i];
             const auto& e = elems[k];
             auto st = styleOf(e, k);
+            const uint8_t ktype = tagToType(e.tag);
+
             // 子项字号（本项 em 的换算基准）
             {
                 const float dfltFs = DefaultFontSizeOf(e.tag);
@@ -4489,121 +4545,205 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                     if (fp.ok && fp.value > 0) curCtx.fontSize = fp.value;
                 }
             }
+
             std::string sw = pick(e.attrs, st, "w", "width", "");
             if (sw.empty()) sw = pick(e.attrs, st, "width", "width", "");
+            std::string sh = pick(e.attrs, st, "h", "height", "");
+            if (sh.empty()) sh = pick(e.attrs, st, "height", "height", "");
+            if (lowerStr(sw) == "auto") sw.clear();
+            if (lowerStr(sh) == "auto") sh.clear();
             // width:content = 按文字宽度排（flex 里没有"宽度自适应"，光靠固定像素
             // 要么留一条大缝、要么把字裁掉）。用编译器自己的字宽估算，与换行同一套度量。
             const bool wContent = lowerStr(sw) == "content";
             if (wContent) sw.clear();
-            auto sp = ParseLenPct(sw, 0, curCtx, "flex 子项 width");
-            auto fit = st.find("flex");
-            float fw = fit != st.end() ? parseLen(fit->second, 0, "flex 权重") : 0;
-            weights[k] = 0;
+            const float contentPx = estTextWidth(e.text, curCtx.fontSize) * 1.08f + 4.0f;
 
-            // 交叉轴先按声明值算（主轴那一个稍后被弹性分配覆盖）
-            w[i] = sp.pct ? sp.value / 100.0f * cw : sp.value;
-            std::string sh = pick(e.attrs, st, "h", "height", "");
-            if (sh.empty()) sh = pick(e.attrs, st, "height", "height", "");
-            auto hp = ParseLenPct(sh, 0, curCtx, "flex 子项 height");
-            if (hp.pct) h[i] = hp.value / 100.0f * ch;
-            else h[i] = !sh.empty() ? hp.value : defaultHeight(e.tag, tagToType(e.tag));
-
-            if (row) {
-                if (wContent) {                                   // 文字宽 = 固定宽
-                    // 估算偏小会把字裁掉（偏大只是多几像素间隙），所以往上留 8% + 4px
-                    w[i] = estTextWidth(e.text, curCtx.fontSize) * 1.08f + 4.0f;
-                    fixedSum += w[i];
+            // ---- flex 简写 / 长写属性 ----
+            FlexRec rec;
+            float grow = 0.0f, shrink = 1.0f;
+            bool  flexGiven = false, basisGiven = false;
+            int   bkind = 0;
+            float bval = 0.0f;
+            if (auto fit = st.find("flex"); fit != st.end()) {
+                flexGiven = true;
+                const auto toks = splitCssTokens(fit->second);
+                const std::string first = toks.empty() ? std::string() : lowerStr(toks[0]);
+                if (first == "none")         { grow = 0.0f; shrink = 0.0f; }
+                else if (first == "auto")    { grow = 1.0f; shrink = 1.0f; }
+                else if (first == "initial") { grow = 0.0f; shrink = 1.0f; }
+                else {
+                    // 带单位的 token = 主轴基准；纯数字按顺序是 grow、shrink
+                    int numSeen = 0;
+                    for (const auto& tok : toks) {
+                        const std::string t = lowerStr(tok);
+                        const float num = numTok(t, std::numeric_limits<float>::quiet_NaN());
+                        if (std::isfinite(num)) {
+                            if (numSeen == 0) grow = num;
+                            else if (numSeen == 1) shrink = num;
+                            else if (!basisGiven) {
+                                // 第三个数字当主轴基准（CSS 要求带单位；binUI 全线允许无单位长度，
+                                // 这里同样宽松：`flex:1 1 120` 就是 basis 120px）
+                                bkind = 1; bval = num; basisGiven = true;
+                            }
+                            numSeen++;
+                        } else {
+                            basisTok(t, bkind, bval);
+                            basisGiven = true;
+                        }
+                    }
+                    // CSS 的 flex:<number>：主轴基准取 0（不是 auto）
+                    if (numSeen > 0 && !basisGiven) { bkind = 1; bval = 0.0f; basisGiven = true; }
                 }
-                else if (sp.pct) fixedSum += w[i];                // 百分比宽 = 固定比例（占位）
-                else if (fw > 0) { weights[k] = fw; weightSum += fw; }
-                else if (!sw.empty() && sp.value > 0) fixedSum += w[i];
-                else { weights[k] = 1.0f; weightSum += 1.0f; }  // 未声明宽 = 弹性
-            } else {
-                if (fw > 0) { weights[k] = fw; weightSum += fw; }
-                else fixedSum += h[i];
-                if (wContent) w[i] = estTextWidth(e.text, curCtx.fontSize) * 1.08f + 4.0f;
-                else if (sw.empty()) w[i] = cw;                  // 交叉轴拉伸（CSS stretch 默认）
+            }
+            if (auto lt = st.find("flex-grow"); lt != st.end())   { flexGiven = true; grow = numTok(lt->second, grow); }
+            if (auto lt = st.find("flex-shrink"); lt != st.end()) { flexGiven = true; shrink = numTok(lt->second, shrink); }
+            if (auto lt = st.find("flex-basis"); lt != st.end()) {
+                flexGiven = true;
+                basisTok(lt->second, bkind, bval);
+                basisGiven = true;
             }
 
-            // 子项 min/max 尺寸约束
-            auto con = [&](const std::string& key, float& out, uint8_t& pct) {
+            // ---- 主轴基准 / 交叉轴尺寸 ----
+            // row：主轴 = 宽、交叉 = 高；column：主轴 = 高、交叉 = 宽
+            auto resolveLen = [&](const std::string& decl, float ref, const char* what,
+                                  float& px, float& pctVal) -> bool {
+                px = 0.0f; pctVal = -1.0f;
+                if (decl.empty()) return false;
+                auto p = ParseLenPct(decl, 0, curCtx, what);
+                if (p.pct) { pctVal = p.value / 100.0f; px = pctVal * ref; }
+                else px = p.value;
+                return true;
+            };
+
+            float cmp = 0.0f, cpct = -1.0f;
+            bool crossDeclared = false;
+            if (row) {
+                crossDeclared = resolveLen(sh, ch, "flex 子项 height", cmp, cpct);
+                if (!crossDeclared) cmp = defaultHeight(e.tag, ktype);
+            } else if (wContent) {
+                crossDeclared = true;              // width:content → 交叉轴按内容宽
+                cmp = contentPx;
+            } else {
+                crossDeclared = resolveLen(sw, cw, "flex 子项 width", cmp, cpct);
+                if (!crossDeclared) cmp = cw;      // 未声明宽 = 拉伸到内容盒（既有行为）
+            }
+
+            float mmp = 0.0f, mpct = -1.0f;
+            const bool mainDeclared = row
+                ? resolveLen(sw, cw, "flex 子项 width", mmp, mpct)
+                : resolveLen(sh, ch, "flex 子项 height", mmp, mpct);
+
+            float basisPx = 0.0f;
+            uint8_t specKind = 0;
+            float   specVal  = 0.0f;
+            const float mainRef = row ? cw : ch;
+            auto useDeclared = [&]() {
+                if (mpct >= 0.0f) { specKind = 2; specVal = mpct; basisPx = mmp; }
+                else { specKind = 1; specVal = mmp; basisPx = mmp; }
+            };
+            auto useContent = [&]() {
+                specKind = 1; specVal = contentPx; basisPx = contentPx; rec.content = true;
+            };
+            if (basisGiven) {
+                if (bkind == 1)      { specKind = 1; specVal = bval; basisPx = bval; }
+                else if (bkind == 2) { specKind = 2; specVal = bval; basisPx = bval * mainRef; }
+                else if (bkind == 3) { useContent(); }
+                else if (mainDeclared) { useDeclared(); }
+                else if (!e.text.empty()) { useContent(); }
+            } else if (mainDeclared) {
+                useDeclared();
+            } else if (row && wContent) {
+                useContent();
+            } else if (row) {
+                // 只写了 flex 长写属性（grow/shrink）而没给基准：有文字就按内容宽当基准
+                // （CSS 的 flex-basis:auto，`flex-shrink:0` 这种写法才有意义）。
+                // 什么都没写的子项走 binUI 的便利行为 flex:1 —— 既有布局全依赖它。
+                if (flexGiven && !e.text.empty()) useContent();
+                else if (grow <= 0.0f) grow = 1.0f;
+            } else {
+                // column：没写高度的按默认盒高，不参与主轴伸缩
+                specKind = 1; specVal = defaultHeight(e.tag, ktype); basisPx = specVal;
+            }
+
+            // 尺寸约束：row 的主轴约束是 width 那组，column 的主轴约束是 height 那组
+            auto con = [&](const std::string& key, float& o, uint8_t& pct) {
                 std::string v = pick(e.attrs, st, key, key, "");
                 if (lowerStr(v) == "auto") v.clear();
-                if (v.empty()) { out = -1; return; }
+                if (v.empty()) { o = -1; return; }
                 auto p = ParseLenPct(v, 0, curCtx, key.c_str());
-                if (p.pct) { out = p.value / 100.0f; pct = 1; }
-                else out = p.value;
+                if (p.pct) { o = p.value / 100.0f; pct = 1; }
+                else o = p.value;
             };
-            con("min-width",  mnw[i], mnwp[i]);
-            con("max-width",  mxw[i], mxwp[i]);
-            con("min-height", mnh[i], mnhp[i]);
-            con("max-height", mxh[i], mxhp[i]);
+            float mnw = -1, mxw = -1, mnh = -1, mxh = -1;
+            uint8_t mnwp = 0, mxwp = 0, mnhp = 0, mxhp = 0;
+            con("min-width",  mnw, mnwp);
+            con("max-width",  mxw, mxwp);
+            con("min-height", mnh, mnhp);
+            con("max-height", mxh, mxhp);
+            const float crossRef = row ? ch : cw;
+            auto pxOf = [](float v, uint8_t pct, float ref) -> float {
+                if (v < 0.0f) return -1.0f;
+                return pct ? v * ref : v;
+            };
+            binui_flex::Item& it = items[i];
+            it.basis    = basisPx;
+            it.cross    = cmp;
+            it.minMain  = row ? pxOf(mnw, mnwp, mainRef)  : pxOf(mnh, mnhp, mainRef);
+            it.maxMain  = row ? pxOf(mxw, mxwp, mainRef)  : pxOf(mxh, mxhp, mainRef);
+            it.minCross = row ? pxOf(mnh, mnhp, crossRef) : pxOf(mnw, mnwp, crossRef);
+            it.maxCross = row ? pxOf(mxh, mxhp, crossRef) : pxOf(mxw, mxwp, crossRef);
+            it.grow     = grow;
+            it.shrink   = shrink;
+
+            // align-self / order
+            uint8_t alignSelf = 0xFF;
+            if (auto lt = st.find("align-self"); lt != st.end()) {
+                const std::string v = lowerStr(TrimCopy(lt->second));
+                if (v != "auto") alignSelf = alignCode(v);
+            }
+            uint8_t order = 0;
+            if (auto lt = st.find("order"); lt != st.end())
+                order = (uint8_t)std::lround(std::clamp(numTok(lt->second, 0.0f), 0.0f, 255.0f));
+            it.alignSelf = alignSelf;
+            it.order     = order;
+            // 交叉轴拉伸：作者写了 stretch；或者 column 里压根没写宽度（既有行为）。
+            // 声明了交叉轴尺寸的项不会被拉伸（CSS 也一样）。
+            it.stretch = !crossDeclared &&
+                         (alignSelf == binui_flex::AL_STRETCH ||
+                          containerAlign == binui_flex::AL_STRETCH || !row);
+
+            rec.grow = grow; rec.shrink = shrink;
+            rec.alignSelf = alignSelf; rec.order = order;
+            rec.basisKind = specKind; rec.basisVal = specVal;
+            rec.crossPx = cmp; rec.crossAuto = !crossDeclared;
+            recs[k] = rec;
         }
 
-        // 主轴剩余长度按权重分配（row 分宽，column 分高）
-        const float mainLen = row ? cw : ch;
-        float remain = mainLen - fixedSum - totalGap;
-        if (remain < 0) remain = 0;
-        float extra = weightSum > 0 ? remain / weightSum : 0;
+        binui_flex::Cfg cfg;
+        cfg.row          = row;
+        cfg.wrap         = wrap;
+        cfg.justify      = (uint8_t)jc;
+        cfg.align        = containerAlign;
+        cfg.alignContent = (uint8_t)ac;
+        cfg.gap          = gap;
+        cfg.mainLen      = row ? cw : ch;
+        cfg.crossLen     = row ? ch : cw;
+        cfg.crossDefinite = crossDefinite;
+
+        std::vector<binui_flex::Rect> rects(n);
+        const float need = binui_flex::Layout(cfg, items.data(), n, rects.data());
         for (size_t i = 0; i < n; i++) {
-            if (weights[active[i]] <= 0) continue;
-            const float v = extra * weights[active[i]];
-            if (row) w[i] = v; else h[i] = v;
+            out[active[i]][0] = rects[i].x;
+            out[active[i]][1] = rects[i].y;
+            out[active[i]][2] = rects[i].w;
+            out[active[i]][3] = rects[i].h;
         }
-
-        // 弹性分配后按 min/max 约束钳制（% 相对父内容盒）
-        for (size_t i = 0; i < n; i++) {
-            float mn = mnw[i] >= 0 ? (mnwp[i] ? mnw[i] * cw : mnw[i]) : -1;
-            float mx = mxw[i] >= 0 ? (mxwp[i] ? mxw[i] * cw : mxw[i]) : -1;
-            float mh = mnh[i] >= 0 ? (mnhp[i] ? mnh[i] * ch : mnh[i]) : -1;
-            float xh = mxh[i] >= 0 ? (mxhp[i] ? mxh[i] * ch : mxh[i]) : -1;
-            if (mn >= 0 && w[i] < mn) w[i] = mn;
-            if (mx >= 0 && w[i] > mx) w[i] = mx;
-            if (mh >= 0 && h[i] < mh) h[i] = mh;
-            if (xh >= 0 && h[i] > xh) h[i] = xh;
-        }
-
-        float mainTotal = 0;
-        for (size_t i = 0; i < n; i++) mainTotal += row ? w[i] : h[i];
-        float cross = row ? ch : cw;
-        float main = row ? cw : ch; // 主轴可用长度
-
-        // 自由空间：溢出时按 CSS 处理为 0（否则 space-between/-around 会算出负间距，
-        // 让子项往回堆叠甚至出现负坐标）
-        float freeMain = main - mainTotal - totalGap;
-        if (freeMain < 0) freeMain = 0;
-
-        // justify-content：首/尾/项间额外间距（沿主轴）
-        float leading = 0, gap2 = 0;
-        if (justify == "flex-end") leading = freeMain;
-        else if (justify == "center") leading = freeMain / 2.0f;
-        else if (justify == "space-between")
-            gap2 = n > 1 ? freeMain / (float)(n - 1) : 0;
-        else if (justify == "space-around") {
-            // CSS：每项两侧各占一半，首尾只剩半个间隔
-            leading = n > 0 ? freeMain / (2.0f * (float)n) : 0;
-            gap2 = n > 0 ? freeMain / (float)n : 0;
-        }
-        float pos = leading;
-        float maxCross = 0;
-        for (size_t i = 0; i < n; i++) {
-            size_t k = active[i];
-            float c = 0; // 交叉轴
-            if (align == "center") c = (cross - (row ? h[i] : w[i])) / 2;
-            else if (align == "flex-end") c = cross - (row ? h[i] : w[i]);
-            out[k][0] = row ? pos : c;
-            out[k][1] = row ? c : pos;
-            out[k][2] = w[i];
-            out[k][3] = h[i];
-            maxCross = std::max(maxCross, row ? h[i] : w[i]);
-            pos += (row ? w[i] : h[i]) + gap + gap2;
-        }
-        return row ? maxCross : mainTotal + totalGap;
+        return need;
     };
 
-    // 容器元素索引 -> 已计算的 flex 子项位置（elemIdx -> x/y/w/h）与弹性权重
+    // 容器元素索引 -> 已计算的 flex 子项位置（elemIdx -> x/y/w/h）与子项属性
     std::unordered_map<size_t, std::unordered_map<size_t, float[4]>> flexLayouts;
-    std::unordered_map<size_t, std::unordered_map<size_t, float>> flexWeights;
+    std::unordered_map<size_t, std::unordered_map<size_t, FlexRec>> flexProps;
     // column 方向的 flex 容器（元素索引）。用来判断"本元素的主轴尺寸是不是被 flex 定死的"：
     // column 下的 flex:N 子项，高度由剩余空间决定，不能再被"未声明高度 → 按内容撑开"改写。
     std::unordered_set<size_t> columnFlexParents;
@@ -4752,8 +4892,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         {
             static const char* kIgnoredCss[] = {
                 "box-shadow", "text-shadow", "letter-spacing",
-                "word-break", "visibility", "float", "flex-wrap",
-                "flex-shrink", "align-self", "align-content", "order", "outline",
+                "word-break", "visibility", "float",
+                "outline",
                 "cursor", "grid-template-columns", "text-overflow", "object-fit",
                 "right", "bottom", "inset", "transform", "filter", "aspect-ratio",
             };
@@ -6218,11 +6358,21 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             sp.flags |= SPEC_IN_FLEX;
             // 未声明宽度：column flex 下运行时按交叉轴拉伸到内容盒（SPEC_AUTO_W 供重排使用）
             if (!hasW) sp.flags |= SPEC_AUTO_W;
-            auto wIt = flexWeights.find(e.parentIdx);
-            if (wIt != flexWeights.end()) {
+            auto wIt = flexProps.find(e.parentIdx);
+            if (wIt != flexProps.end()) {
                 auto cIt = wIt->second.find(ei);
-                if (cIt != wIt->second.end())
-                    sp.flexWeight = (uint8_t)std::lround(std::clamp(cIt->second, 0.0f, 255.0f));
+                if (cIt != wIt->second.end()) {
+                    const FlexRec& fr = cIt->second;
+                    sp.flexWeight = (uint8_t)std::lround(std::clamp(fr.grow, 0.0f, 255.0f));
+                    sp.flexShrink = (uint8_t)std::lround(std::clamp(fr.shrink, 0.0f, 255.0f));
+                    sp.alignSelf  = fr.alignSelf;
+                    sp.flexOrder  = fr.order;
+                    sp.basisKind  = fr.basisKind;
+                    sp.flexBasis  = fr.basisVal;
+                    sp.flexCross  = fr.crossPx;
+                    if (fr.crossAuto) sp.flags |= SPEC_CROSS_AUTO;
+                    if (fr.content)   sp.flags |= SPEC_BASIS_CONTENT;
+                }
             }
         } else {
             if (!hasY) sp.flags |= SPEC_FLOW_Y;
@@ -6261,6 +6411,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             std::string dir  = lowerStr(style.count("flex-direction") ? style.at("flex-direction") : "row");
             std::string just = lowerStr(style.count("justify-content") ? style.at("justify-content") : "flex-start");
             std::string algn = lowerStr(style.count("align-items") ? style.at("align-items") : "flex-start");
+            std::string algnC = lowerStr(style.count("align-content") ? style.at("align-content") : "flex-start");
+            std::string wrp  = lowerStr(style.count("flex-wrap") ? style.at("flex-wrap") : "nowrap");
+            uint8_t wrap = (wrp == "wrap" || wrp == "wrap-reverse") ? 1 : 0;
+            if (wrp == "wrap-reverse") wrap = 2;
             float gap = 0;
             auto git = style.find("gap");
             if (git != style.end()) gap = parseLen(git->second, 0);
@@ -6268,24 +6422,28 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             // 本元素是不是"column 父级里带 flex:N 的主轴项"——是的话高度已由父级分配，
             // 这里不能再用内容高度盖掉（见下面 auto 高度那段注释）。
             bool flexedMainAxis = false;
-            if (auto pw = flexWeights.find(e.parentIdx); pw != flexWeights.end()) {
+            if (auto pw = flexProps.find(e.parentIdx); pw != flexProps.end()) {
                 auto wi = pw->second.find(ei);
-                flexedMainAxis = (wi != pw->second.end() && wi->second > 0 &&
+                flexedMainAxis = (wi != pw->second.end() && wi->second.grow > 0 &&
                                   columnFlexParents.count(e.parentIdx) > 0);
             }
 
-            std::unordered_map<size_t, float> wts;
+            std::unordered_map<size_t, FlexRec> recs;
             std::unordered_map<size_t, float[4]> pos;
+            // 行容器的交叉轴（高）是不是"确定"的：没写 height 且高度没被父级 flex 分配时，
+            // 高度是这个容器自己按内容撑出来的 —— 单行对齐不能按它算（见 binui_flex_layout.h）
+            const bool containerAutoH = sh.empty() && !flexedMainAxis;
+            const bool crossDefinite = (dir == "column") ? true : !containerAutoH;
             float need = layoutFlex(childrenOf[ei], w - 2 * pad, lh - 2 * pad,
-                                    dir, just, algn, gap, pos, wts);
+                                    dir, just, algn, algnC, wrap, gap, crossDefinite, pos, recs);
             flexLayouts[ei] = std::move(pos);
-            flexWeights[ei] = std::move(wts);
+            flexProps[ei] = std::move(recs);
 
             // column 方向要记下来：它的 flex:N 子项高度是父级剩余空间定死的
             if (dir == "column") columnFlexParents.insert(ei);
 
-            // auto 高度（未声明 height）：内容盒高度 = flex 主轴需求。
-            // 但**column 下的弹性子项例外**：它的主轴高度已经由父级 flexWeights 分配好
+            // auto 高度（未声明 height）：内容盒高度 = flex 交叉轴需求。
+            // 但**column 下的弹性子项例外**：它的主轴高度已经由父级 flexProps 分配好
             // （就是上面 lh），这里再按内容撑一次会把 600 改成内容高（比如 40），
             // 而父级/兄弟的位置仍按 600 排 —— 表现为"撑满剩余高度的容器塌成一条、
             // 后面的兄弟压上来"，`flex:1` + `overflow:auto` 的滚动视口更是直接消失。
@@ -6295,15 +6453,24 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 // auto 高同样受 min/max-height 约束钳制
                 if (effMnH >= 0 && cn.height < effMnH) cn.height = effMnH;
                 if (effMxH >= 0 && cn.height > effMxH) cn.height = effMxH;
+                // 流式父级的**光标早就在前面按旧高度推进过了**（那时还不知道 flex 要折几行）。
+                // 这里不补差值，后面的兄弟就会压到换行后的第二行上 —— flex-wrap 的经典表现。
+                if (!hasY) pc.cursorY += cn.height - lh;
             }
 
             BinUISpecFlex fs = {};
             fs.nodeId = n.id;
             fs.dir = dir == "column" ? 1 : 0;
             fs.justify = just == "flex-end" ? 1 : just == "center" ? 2
-                       : just == "space-between" ? 3 : just == "space-around" ? 4 : 0;
-            fs.align = algn == "center" ? 1 : algn == "flex-end" ? 2 : 0;
-            fs.autoH = (sh.empty() && !flexedMainAxis) ? 1 : 0;
+                       : just == "space-between" ? 3 : just == "space-around" ? 4
+                       : just == "space-evenly" ? 5 : 0;
+            fs.align = algn == "center" ? 1 : (algn == "flex-end" || algn == "end") ? 2
+                     : algn == "stretch" ? 3 : 0;
+            fs.autoH = containerAutoH ? 1 : 0;
+            fs.wrap = wrap;
+            fs.alignContent = algnC == "center" ? 1 : (algnC == "flex-end" || algnC == "end") ? 2
+                            : algnC == "space-between" ? 3 : algnC == "space-around" ? 4
+                            : algnC == "space-evenly" ? 5 : algnC == "stretch" ? 6 : 0;
             fs.gap = gap;
             specFlex.push_back(fs);
         }

@@ -1,6 +1,7 @@
 #include "binui_renderer.h"
 #include "binui_path.h"        // v17 精确命中：PointInPathNorm
 #include "binui_text_estimate.h"
+#include "binui_flex_layout.h"   // flex 布局：与编译器共用同一份实现
 #include <cstring>
 #include <cmath>
 #include <chrono>
@@ -1253,7 +1254,7 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
             continue;   // 线段没有子节点，不参与容器压栈/flex
         }
 
-        // ---- flex 容器：重算子项位置/尺寸（与编译器 layoutFlex 一致） ----
+        // ---- flex 容器：重算子项位置/尺寸（与编译器共用 include/binui_flex_layout.h）----
         auto fit = flexOf_.find(node.id);
         if (fit != flexOf_.end()) {
             const BinUISpecFlex& f = *fit->second;
@@ -1261,7 +1262,7 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
             float ch = h - 2 * node.padding;
             if (cw < 0) cw = 0;
             if (ch < 0) ch = 0;
-            bool row = f.dir == 0;
+            const bool row = f.dir == 0;
 
             std::vector<size_t> kids; // 子节点下标（id 序）
             for (size_t k = i + 1; k < nodes_.size(); k++) {
@@ -1270,94 +1271,84 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
                 if (!ks || !(ks->flags & SPEC_IN_FLEX)) continue;
                 kids.push_back(k);
             }
-            size_t n = kids.size();
-            std::vector<float> wv(n, 0), hv(n, 0), wt(n, 0);
-            float weightSum = 0, fixedSum = 0;
-            for (size_t k = 0; k < n; k++) {
-                const BinUISpecNode* ks = specOf_[kids[k]];
-                if (!ks) continue;
-                // 交叉轴先按声明值（百分比跟随新内容盒，其余保持编译期尺寸）
-                if (ks->flags & SPEC_PCT_W) wv[k] = ks->pctW * cw;
-                else if (!row && (ks->flags & SPEC_AUTO_W)) wv[k] = cw;   // column：未声明宽 = 拉伸
-                else wv[k] = nodes_[kids[k]].width;
-                hv[k] = (ks->flags & SPEC_PCT_H) ? ks->pctH * ch : nodes_[kids[k]].height;
+            const size_t n = kids.size();
+            const float mainRef  = row ? cw : ch;
+            const float crossRef = row ? ch : cw;
 
-                // 主轴：row 分宽、column 分高；固定尺寸（含百分比）计入 fixedSum
-                if (row) {
-                    if (ks->flags & SPEC_PCT_W) { fixedSum += wv[k]; }
-                    else if (ks->flexWeight > 0) { wt[k] = ks->flexWeight; weightSum += wt[k]; }
-                    else fixedSum += wv[k];
+            // 规格里的 min/max（百分比按父内容盒解析）；-1 = 无约束
+            auto minMaxOf = [](const BinUISpecNode* s, float ref, bool isW, float& mn, float& mx) {
+                if (isW) {
+                    mn = (s->minW >= 0) ? ((s->flags & SPEC_MINW_PCT) ? s->minW * ref : s->minW) : -1.0f;
+                    mx = (s->maxW >= 0) ? ((s->flags & SPEC_MAXW_PCT) ? s->maxW * ref : s->maxW) : -1.0f;
                 } else {
-                    if (ks->flexWeight > 0) { wt[k] = ks->flexWeight; weightSum += wt[k]; }
-                    else fixedSum += hv[k];
+                    mn = (s->minH >= 0) ? ((s->flags & SPEC_MINH_PCT) ? s->minH * ref : s->minH) : -1.0f;
+                    mx = (s->maxH >= 0) ? ((s->flags & SPEC_MAXH_PCT) ? s->maxH * ref : s->maxH) : -1.0f;
                 }
-            }
-            float totalGap = (n > 1 ? (float)(n - 1) : 0) * f.gap;
-            const float mainLen = row ? cw : ch;
-            float remain = mainLen - fixedSum - totalGap;
-            if (remain < 0) remain = 0;
-            float extra = weightSum > 0 ? remain / weightSum : 0;
-            for (size_t k = 0; k < n; k++) {
-                if (wt[k] <= 0) continue;
-                const float v = extra * wt[k];
-                if (row) wv[k] = v; else hv[k] = v;
-            }
+            };
 
-            // 弹性分配后按子项 min/max 约束钳制（与编译器 layoutFlex 一致）
+            std::vector<binui_flex::Item> items(n);
             for (size_t k = 0; k < n; k++) {
                 const BinUISpecNode* ks = specOf_[kids[k]];
                 if (!ks) continue;
-                wv[k] = ClampSize(wv[k], ks, cw, SPEC_MINW_PCT, SPEC_MAXW_PCT, ks->minW, ks->maxW);
-                hv[k] = ClampSize(hv[k], ks, ch, SPEC_MINH_PCT, SPEC_MAXH_PCT, ks->minH, ks->maxH);
+                binui_flex::Item& it = items[k];
+                // 主轴基准：编译期写进来的 flex-basis（像素 / 百分比 / 0）
+                it.basis = (ks->basisKind == 2) ? ks->flexBasis * mainRef
+                         : (ks->basisKind == 1) ? ks->flexBasis : 0.0f;
+                // 交叉轴：row 看 height 那组、column 看 width 那组；column 未声明宽 = 拉伸
+                it.cross = row ? ((ks->flags & SPEC_PCT_H) ? ks->pctH * ch : ks->flexCross)
+                               : ((ks->flags & SPEC_AUTO_W) ? cw
+                                  : (ks->flags & SPEC_PCT_W) ? ks->pctW * cw : ks->flexCross);
+                float mn = -1.0f, mx = -1.0f;
+                minMaxOf(ks, mainRef, row, mn, mx);
+                it.minMain = mn; it.maxMain = mx;
+                minMaxOf(ks, crossRef, !row, mn, mx);
+                it.minCross = mn; it.maxCross = mx;
+                it.grow      = ks->flexWeight;
+                it.shrink    = ks->flexShrink;
+                it.alignSelf = ks->alignSelf;
+                it.order     = ks->flexOrder;
+                // 交叉轴拉伸：作者写了 stretch，或者 column 里压根没写宽度（既有行为）
+                it.stretch = (ks->flags & SPEC_CROSS_AUTO) &&
+                             (ks->alignSelf == binui_flex::AL_STRETCH ||
+                              f.align == binui_flex::AL_STRETCH || !row);
             }
 
-            float mainTotal = 0;
-            for (size_t k = 0; k < n; k++) mainTotal += row ? wv[k] : hv[k];
-            float cross = row ? ch : cw;
-            float main = row ? cw : ch; // 主轴可用长度
+            binui_flex::Cfg cfg;
+            cfg.row          = row;
+            cfg.wrap         = f.wrap;
+            cfg.justify      = f.justify;
+            cfg.align        = f.align;
+            cfg.alignContent = f.alignContent;
+            cfg.gap          = f.gap;
+            cfg.mainLen      = mainRef;
+            cfg.crossLen     = crossRef;
+            cfg.crossDefinite = row ? (f.autoH == 0) : true;
 
-            // 自由空间：溢出钳到 0（与编译器一致，避免负间距/反向堆叠）
-            float freeMain = main - mainTotal - totalGap;
-            if (freeMain < 0) freeMain = 0;
-
-            float leading = 0, gap2 = 0;
-            switch (f.justify) {
-                case 1: leading = freeMain; break;
-                case 2: leading = freeMain / 2.0f; break;
-                case 3: gap2 = n > 1 ? freeMain / (float)(n - 1) : 0; break;
-                case 4: {
-                    leading = n > 0 ? freeMain / (2.0f * (float)n) : 0;
-                    gap2 = n > 0 ? freeMain / (float)n : 0;
-                    break;
-                }
-                default: break;
-            }
-            float pos = leading;
-            float maxCross = 0;
+            std::vector<binui_flex::Rect> rects(n);
+            const float crossNeed = binui_flex::Layout(cfg, items.data(), n, rects.data());
             for (size_t k = 0; k < n; k++) {
-                size_t kidIdx = kids[k];
-                float cpos = 0;
-                if (f.align == 1) cpos = (cross - (row ? hv[k] : wv[k])) / 2;
-                else if (f.align == 2) cpos = cross - (row ? hv[k] : wv[k]);
-                flexPos[nodes_[kidIdx].id][0] = row ? pos : cpos;
-                flexPos[nodes_[kidIdx].id][1] = row ? cpos : pos;
-                flexPos[nodes_[kidIdx].id][2] = wv[k];
-                flexPos[nodes_[kidIdx].id][3] = hv[k];
-                maxCross = std::max(maxCross, row ? hv[k] : wv[k]);
-                pos += (row ? wv[k] : hv[k]) + f.gap + gap2;
+                const uint16_t kidId = nodes_[kids[k]].id;
+                flexPos[kidId][0] = rects[k].x;
+                flexPos[kidId][1] = rects[k].y;
+                flexPos[kidId][2] = rects[k].w;
+                flexPos[kidId][3] = rects[k].h;
             }
-            if (f.autoH) {
+
+            if (f.autoH && !ov) {
                 // 与编译器同口径：column 父级里的 flex:N 子项高度已由父级分配，
                 // 不能再按内容撑（否则"撑满剩余高度"的容器会塌成内容高，兄弟错位）。
                 bool parentFixesMainAxis = false;
                 if (auto pit = flexOf_.find(node.parentId); pit != flexOf_.end())
                     parentFixesMainAxis = (pit->second->dir == 1 && spec && spec->flexWeight > 0);
                 if (!parentFixesMainAxis) {
-                    float need = row ? maxCross : mainTotal + totalGap;
-                    node.height = need + 2 * node.padding;
+                    const float oldH = node.height;
+                    node.height = crossNeed + 2 * node.padding;
                     if (spec) // auto 高同样受 min/max-height 约束钳制
                         node.height = ClampSize(node.height, spec, c.ch, SPEC_MINH_PCT, SPEC_MAXH_PCT,
                                                 spec->minH, spec->maxH);
+                    // 流式父级的光标在 flex 之前就按旧高度推进过了：补差值，
+                    // 否则折行后第二行的位置会盖住后面的兄弟（编译期同一条修正）
+                    if (spec && (spec->flags & SPEC_FLOW_Y)) c.cursorY += node.height - oldH;
                 }
             }
         }

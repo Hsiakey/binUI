@@ -5,6 +5,55 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.13.0] - 2026-11-13
+
+本轮主题：**flex 的属性补齐**。上一版查"flex 子项为什么不换行"时发现三件事：`flex:1`
+是"纯切分、不看内容"（CSS 正确），但 `flex-wrap`/`flex-shrink`/`align-self`/`align-content`/
+`order` 全都落在"接受但无效"的清单里，而且 **`flex` 简写只读第一个数字**——`flex:0 0 120px`
+被静默当成 `flex:1` 等分。这一版把这一族属性全部做完。
+
+### 新增 — flex 属性（`BINUI_VERSION` 21 → 22）
+
+| 属性 | 之前 | 现在 |
+|---|---|---|
+| `flex` 简写 | 只读第一个数，`flex:0 0 120px` → 等分（静默错） | `grow [shrink] [basis]` + `auto`/`none`/`initial` |
+| `flex-grow` / `flex-shrink` / `flex-basis` | 不支持（只认简写） | 支持；`flex-shrink` 真参与收缩计算 |
+| `flex-wrap` | 忽略 | `nowrap` / `wrap` / `wrap-reverse` |
+| `align-content` | 忽略 | 多行时按 start/center/end/between/around/evenly/stretch 分行间距 |
+| `align-self` | 忽略 | 逐项覆盖 `align-items` |
+| `order` | 忽略 | 主轴排序（同值保持文档顺序） |
+| `justify-content: space-evenly` | 不支持 | 支持 |
+| `align-items: stretch` | 不支持 | 支持（未声明交叉轴尺寸的项拉伸占满整行） |
+
+- **一份实现**：`include/binui_flex_layout.h`（header-only）。编译期布局与运行期
+  `setSize`/`relayoutSubtree` 从此调同一个函数 —— 原来两边各写一份，加特性必然改出
+  "编译期和运行期不一样"。
+- **溢出收缩**：按 CSS 的缩放收缩因子（`shrink × basis`）加权，`flex-shrink` 默认 1。
+  两个 150 挤 200 的容器现在各缩到 100（以前固定宽项根本不缩、直接溢出）。
+- **折行 + auto 高**：`wrap` 时按假设主轴尺寸贪心装行；容器没声明 `height` 时 auto 高 =
+  各行交叉轴之和 + 行间距，并且**把流式父级的光标补上差值**（编/运两端各一处）——
+  不补的话折出来的第二行会压住后面的兄弟。
+- **拖拽优先**：宿主用 `resizeNodeBounds` 钉住的盒子不再被 flex 的 auto 高覆盖。
+- 三处明确偏离 CSS（都为了不破坏既有布局，写进 README）：`align-items` 默认 `flex-start`、
+  row 里"宽和 flex 都没写"按 `flex:1`、`baseline` 按 `flex-start`。
+
+### 改动 — 示例与文档
+
+- `examples/appshow` 子页面 ①：四个 `flex:1` 色块改成 `flex:1 1 120; min-width:56` +
+  容器 `flex-wrap:wrap`，并加一行读数（`flex N 行 · 子项宽 N`）。拖窄卡片时能直接看到
+  "基准 120 装不下就换行，容器 auto 高变高，下面的百分比色条跟着下移"。
+- `docs/ui_orchestration.md` §10 补 flex 属性表与折行/收缩的规则；README 的 flexbox 条目重写。
+- 截图更新：`docs/img/appshow-subpage.png`（640 宽，1 行）、`appshow-subpage-drag.png`
+  （380 宽，2 行）。
+
+### 测试
+
+- `tests/test_elements.cpp` 新增 18 条：flex 简写（`flex:0 0 120px` 固定 120 不复现旧 bug、
+  余量归 `flex:1`）、`flex-shrink` 默认 1 与 `:0`、`flex-wrap` 折行 + auto 高 70 +
+  **运行期改窄重新折行**（编译期/运行期一致）、`align-self`、`order`、`align-content`、
+  `flex-basis` 长写、`flex:0 0 auto` 按内容宽。
+- `tests/test_css.cpp` 的"flex overflow 不许负间距"改为断言新语义（400 挤 300 → 各 150）。
+
 ## [0.12.14] - 2026-11-13
 
 本轮主题：**把"布局与重排"做成子页面（从右边切入）** —— 四块演示塞在概览页里太挤，

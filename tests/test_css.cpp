@@ -902,7 +902,10 @@ int run() {
         uint16_t o2 = r.findNodeByName("o2");
         for (const auto& nd : r.getNodes()) {
             if (nd.id != o2) continue;
-            TEST("flex overflow: no negative spacing (o2.x == 200)", std::fabs(nd.x - 200.0f) < 0.5f);
+            // v22：flex-shrink 生效（CSS 默认 1）。两项各 200、容器只有 300 → 各让 50 收缩到 150，
+            // 而不是像以前那样"固定宽不缩、直接溢出"。目的仍是"不许出现负间距"。
+            TEST("flex overflow: shrink instead of negative spacing (o2.x == 150)",
+                 std::fabs(nd.x - 150.0f) < 0.5f);
         }
     }
     {

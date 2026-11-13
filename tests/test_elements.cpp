@@ -1397,6 +1397,151 @@ int run() {
             TEST("align center x", std::fabs(r2.getNodes()[2].x - (200 - 40) / 2) < 0.01f);
         }
 
+        // ---- v22：flex 属性补齐（简写 / shrink / basis / wrap / align-self / order / align-content）----
+        {
+            auto nodeById = [](const BinUIRenderer& rr, uint16_t id) -> const BinUIRenderer::NodeInfo* {
+                for (const auto& nd : rr.getNodes()) if (nd.id == id) return &nd;
+                return nullptr;
+            };
+
+            // 1) flex 简写：`flex:0 0 120px` = 不伸不缩、固定 120。以前整条被当成一个权重
+            //    （"不支持单位 0 120px"）回退成 flex:1 —— 写了固定宽的项静默变成等分。
+            auto f1 = CompileHTML(
+                "<html width=\"600\" height=\"80\" bg=\"#000000\"><body>"
+                "<div style=\"display:flex; height:40\">"
+                "<button id=\"k1\" style=\"flex:0 0 120px; height:30\">A</button>"
+                "<button id=\"k2\" style=\"flex:1; height:30\">B</button>"
+                "</div></body></html>");
+            BinUIRenderer r1;
+            TEST("flex 简写: loads", r1.loadLayout(f1.data(), f1.size()));
+            const auto* k1 = nodeById(r1, r1.findNodeByName("k1"));
+            const auto* k2 = nodeById(r1, r1.findNodeByName("k2"));
+            TEST("flex 简写: flex:0 0 120px 固定 120 宽", k1 && k2 &&
+                 std::fabs(k1->width - 120.0f) < 0.6f && std::fabs(k1->x) < 0.01f);
+            TEST("flex 简写: 剩下的 480 全给 flex:1", k1 && k2 &&
+                 std::fabs(k2->x - 120.0f) < 0.6f && std::fabs(k2->width - 480.0f) < 0.6f);
+
+            // 2) flex-shrink：溢出时按 shrink×基准 加权收缩（CSS 默认 shrink:1）。
+            //    两个 150 挤 200 → 各让 50 变 100。
+            auto f2 = CompileHTML(
+                "<html width=\"200\" height=\"80\" bg=\"#000000\"><body>"
+                "<div style=\"display:flex; height:40\">"
+                "<button id=\"s1\" style=\"width:150; height:30\">A</button>"
+                "<button id=\"s2\" style=\"width:150; height:30\">B</button>"
+                "</div></body></html>");
+            BinUIRenderer r2;
+            TEST("flex-shrink: loads", r2.loadLayout(f2.data(), f2.size()));
+            const auto* s1 = nodeById(r2, r2.findNodeByName("s1"));
+            const auto* s2 = nodeById(r2, r2.findNodeByName("s2"));
+            TEST("flex-shrink: 默认 1，两个 150 收缩到 100", s1 && s2 &&
+                 std::fabs(s1->width - 100.0f) < 0.6f && std::fabs(s2->width - 100.0f) < 0.6f &&
+                 std::fabs(s2->x - 100.0f) < 0.6f);
+
+            auto f3 = CompileHTML(
+                "<html width=\"200\" height=\"80\" bg=\"#000000\"><body>"
+                "<div style=\"display:flex; height:40\">"
+                "<button id=\"t1\" style=\"width:150; height:30; flex-shrink:0\">A</button>"
+                "<button id=\"t2\" style=\"width:150; height:30\">B</button>"
+                "</div></body></html>");
+            BinUIRenderer r3;
+            TEST("flex-shrink:0 loads", r3.loadLayout(f3.data(), f3.size()));
+            const auto* t1 = nodeById(r3, r3.findNodeByName("t1"));
+            const auto* t2 = nodeById(r3, r3.findNodeByName("t2"));
+            TEST("flex-shrink:0 不缩（150 保持，另一个让到 50）", t1 && t2 &&
+                 std::fabs(t1->width - 150.0f) < 0.6f && std::fabs(t2->width - 50.0f) < 0.6f);
+
+            // 3) flex-wrap：300 宽里放 4 个 120（gap 10）→ 一行两个、折成两行；
+            //    容器没写 height，auto 高 = 两行交叉轴 + 行间距 = 30 + 10 + 30。
+            auto f4 = CompileHTML(
+                "<html width=\"300\" height=\"200\" bg=\"#000000\"><body>"
+                "<div id=\"wrapbox\" style=\"display:flex; flex-wrap:wrap; gap:10\">"
+                "<div id=\"w1\" style=\"width:120; height:30\"></div>"
+                "<div id=\"w2\" style=\"width:120; height:30\"></div>"
+                "<div id=\"w3\" style=\"width:120; height:30\"></div>"
+                "<div id=\"w4\" style=\"width:120; height:30\"></div>"
+                "</div></body></html>");
+            BinUIRenderer r4;
+            TEST("flex-wrap: loads", r4.loadLayout(f4.data(), f4.size()));
+            const auto* wb = nodeById(r4, r4.findNodeByName("wrapbox"));
+            const auto* w1 = nodeById(r4, r4.findNodeByName("w1"));
+            const auto* w2 = nodeById(r4, r4.findNodeByName("w2"));
+            const auto* w3 = nodeById(r4, r4.findNodeByName("w3"));
+            TEST("flex-wrap: 第三个换到下一行", w1 && w2 && w3 &&
+                 std::fabs(w2->y - w1->y) < 0.01f && std::fabs(w3->y - w1->y - 40.0f) < 0.6f);
+            TEST("flex-wrap: 容器 auto 高 = 两行 (70)", wb && std::fabs(wb->height - 70.0f) < 0.6f);
+            // 运行期重排（窗口拉窄到 240）必须同样折行：编译期/运行期是同一份算法
+            r4.setSize(240, 200);
+            const auto* w3r = nodeById(r4, r4.findNodeByName("w3"));
+            const auto* wbr = nodeById(r4, r4.findNodeByName("wrapbox"));
+            TEST("flex-wrap: 运行期改窄后重新折行（4 行 = 30*4+10*3）", w3r && wbr &&
+                 std::fabs(w3r->y - 80.0f) < 1.0f && std::fabs(wbr->height - 150.0f) < 1.0f);
+
+            // 4) align-self：逐项覆盖容器的 align-items
+            auto f5 = CompileHTML(
+                "<html width=\"200\" height=\"120\" bg=\"#000000\"><body>"
+                "<div style=\"display:flex; align-items:flex-start; height:100\">"
+                "<button id=\"a1\" style=\"width:40; height:20\">A</button>"
+                "<button id=\"a2\" style=\"width:40; height:20; align-self:flex-end\">B</button>"
+                "<button id=\"a3\" style=\"width:40; height:20; align-self:center\">C</button>"
+                "</div></body></html>");
+            BinUIRenderer r5;
+            TEST("align-self: loads", r5.loadLayout(f5.data(), f5.size()));
+            const auto* a2 = nodeById(r5, r5.findNodeByName("a2"));
+            const auto* a3 = nodeById(r5, r5.findNodeByName("a3"));
+            TEST("align-self:flex-end 贴底 (y = 80)", a2 && std::fabs(a2->y - 80.0f) < 0.6f);
+            TEST("align-self:center 居中 (y = 40)", a3 && std::fabs(a3->y - 40.0f) < 0.6f);
+
+            // 5) order：主轴顺序重排，但不改文档顺序
+            auto f6 = CompileHTML(
+                "<html width=\"300\" height=\"80\" bg=\"#000000\"><body>"
+                "<div style=\"display:flex; height:40\">"
+                "<button id=\"o1\" style=\"flex:1; height:30; order:2\">1</button>"
+                "<button id=\"o2\" style=\"flex:1; height:30; order:0\">2</button>"
+                "<button id=\"o3\" style=\"flex:1; height:30; order:1\">3</button>"
+                "</div></body></html>");
+            BinUIRenderer r6;
+            TEST("order: loads", r6.loadLayout(f6.data(), f6.size()));
+            const auto* o1 = nodeById(r6, r6.findNodeByName("o1"));
+            const auto* o2 = nodeById(r6, r6.findNodeByName("o2"));
+            const auto* o3 = nodeById(r6, r6.findNodeByName("o3"));
+            TEST("order: x 顺序是 0,1,2", o1 && o2 && o3 &&
+                 std::fabs(o2->x) < 0.6f && std::fabs(o3->x - 100.0f) < 0.6f &&
+                 std::fabs(o1->x - 200.0f) < 0.6f);
+
+            // 6) align-content：多行在固定高度里 space-between
+            auto f7 = CompileHTML(
+                "<html width=\"300\" height=\"200\" bg=\"#000000\"><body>"
+                "<div style=\"display:flex; flex-wrap:wrap; align-content:space-between;"
+                " height:170\">"
+                "<div id=\"c1\" style=\"width:120; height:30\"></div>"
+                "<div id=\"c2\" style=\"width:120; height:30\"></div>"
+                "<div id=\"c3\" style=\"width:120; height:30\"></div>"
+                "<div id=\"c4\" style=\"width:120; height:30\"></div>"
+                "</div></body></html>");
+            BinUIRenderer r7;
+            TEST("align-content: loads", r7.loadLayout(f7.data(), f7.size()));
+            const auto* c1 = nodeById(r7, r7.findNodeByName("c1"));
+            const auto* c3 = nodeById(r7, r7.findNodeByName("c3"));
+            // 两行各 30，剩 170-60 = 110 全给行间距：第二行 y = 140
+            TEST("align-content:space-between 首尾贴边", c1 && c3 &&
+                 std::fabs(c1->y) < 0.6f && std::fabs(c3->y - 140.0f) < 0.6f);
+
+            // 7) flex-basis 长写 / flex:0 0 auto（基准 = 内容宽，不再被当成等分）
+            auto f8 = CompileHTML(
+                "<html width=\"400\" height=\"80\" bg=\"#000000\"><body>"
+                "<div style=\"display:flex; height:40\">"
+                "<span id=\"b1\" style=\"flex:0 0 auto; height:20\">AB</span>"
+                "<div id=\"b2\" style=\"flex-basis:100px; height:20\"></div>"
+                "</div></body></html>");
+            BinUIRenderer r8;
+            TEST("flex-basis: loads", r8.loadLayout(f8.data(), f8.size()));
+            const auto* b1 = nodeById(r8, r8.findNodeByName("b1"));
+            const auto* b2 = nodeById(r8, r8.findNodeByName("b2"));
+            TEST("flex-basis:100px 固定 100", b2 && std::fabs(b2->width - 100.0f) < 0.6f);
+            TEST("flex:0 0 auto 按内容宽（小于 100，不是等分）", b1 && b2 &&
+                 b1->width > 0.0f && b1->width < 100.0f && std::fabs(b2->x - b1->width) < 0.6f);
+        }
+
         // 滚动容器：overflow:auto 标志 + 命中测试偏移 + 滚动事件
         auto sc = CompileHTML(
             "<html width=\"200\" height=\"200\" bg=\"#000000\">"
