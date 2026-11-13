@@ -145,6 +145,23 @@ inline int DisplayRefreshHzFor(HWND hwnd) {
     return hz;
 }
 
+// 实际用来算帧预算的频率：**默认封顶 60Hz**，`BINUI_FPS=<n>` 可改（0 = 跟显示器）。
+//
+// 为什么封顶：120/144Hz 屏上"每帧都出"意味着 present 每帧都要等一次垂直同步，
+// 实测 120Hz 下 20 块半透明组件的池子页要花掉 ~40% 一个核，其中大头是呈现等待，
+// 画面本身的 update+draw 只有 0.3ms。UI 没有"必须 120fps"的场景，60 已经够顺
+// （动画本身是亚像素抗锯齿的），砍一半刷新就是砍一半开销。
+inline int FrameHzFor(HWND hwnd) {
+    const char* e = std::getenv("BINUI_FPS");
+    if (e && *e) {
+        const int v = std::atoi(e);
+        if (v > 0 && v <= 360) return v;
+        if (v == 0) return DisplayRefreshHzFor(hwnd);
+    }
+    const int hz = DisplayRefreshHzFor(hwnd);
+    return hz > 60 ? 60 : hz;
+}
+
 
 // UTF-8 → UTF-16（光标定位与 IME 组字坐标都按 UTF-16 单位算，与 Win32 一致）
 inline std::wstring Utf8ToWide(const std::string& s) {
@@ -1166,7 +1183,12 @@ inline void BinUIAppT<Gfx>::syncImeContext() {
 template <class Gfx>
 inline int BinUIAppT<Gfx>::run() {
     if (!open()) return 1;
-    while (running_) pump(1);
+    // 空闲时的醒来间隔 = 一个帧预算（以前固定 1ms）。输入本来就会立刻唤醒
+    // MsgWaitForMultipleObjectsEx，1ms 纯属"每秒空转 1000 次"——稳态每帧的 update_
+    // 都要跑一遍（宿主在 update_ 里才能决定脏区），于是后台闲着也烧 0.6% 一个核。
+    // 用帧预算当上限：动画粒度不变（120Hz 屏 8ms、60Hz 屏 16ms），空转换醒少 8~16 倍。
+    const int idleMs = static_cast<int>(frameBudget_.count() / 1000) + 1;
+    while (running_) pump(idleMs);
     close();
     return 0;
 }
@@ -1273,7 +1295,7 @@ inline bool BinUIAppT<Gfx>::open() {
 
     lastTime_ = std::chrono::steady_clock::now();
     {
-        const int hz = DisplayRefreshHzFor(hwnd);
+        const int hz = FrameHzFor(hwnd);
         frameBudget_ = std::chrono::microseconds(1000000 / hz);
         if (Perf().on) {
             std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
@@ -1335,7 +1357,7 @@ inline bool BinUIAppT<Gfx>::openChild(void* parent, int x, int y, int width, int
 
     lastTime_ = std::chrono::steady_clock::now();
     {
-        const int hz = DisplayRefreshHzFor(hwnd);
+        const int hz = FrameHzFor(hwnd);
         frameBudget_ = std::chrono::microseconds(1000000 / hz);
         if (Perf().on) {
             std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
@@ -1378,6 +1400,22 @@ inline void BinUIAppT<Gfx>::renderFrame() {
         return;
     }
     const auto now = std::chrono::steady_clock::now();
+    // 最小化：窗口根本不可见，不推进 update_、也不画。必须同时清脏区和 lastDrew_，
+    // 否则 pump 认为"还有活"→ present 又不阻塞（窗口不可见）→ 空转吃满一个核。
+    if (hwnd_ && IsIconic(static_cast<HWND>(hwnd_))) {
+        lastTime_ = now;
+        dirty_ = false;
+        lastDrew_ = false;
+        return;
+    }
+    // 节拍闸门：**宿主时钟也按帧跑**，别被 pump 的空转带着跑。
+    // 以前 renderFrame 第一件事就是 update_(dt)，而 run() 是 while (pump(1)) ——
+    // 闲着的时候宿主每秒被推进 1000 次（每次都算一遍漂移/重排判定），任务管理器里
+    // "放后台还占 0.6~7%" 就是这么来的。现在：有脏区立刻跑，否则最多每帧预算一次。
+    if (!dirty_ && pendingW_ <= 0 && now - lastTime_ < frameBudget_) {
+        lastDrew_ = false;   // 这一拍照样没活：必须清掉，否则 pump 一直认为"还有活"→ 自旋
+        return;
+    }
     float dt = std::chrono::duration<float>(now - lastTime_).count();
     lastTime_ = now;
     if (dt > 0.1f) dt = 1.0f / 60.0f;
@@ -1408,13 +1446,14 @@ inline void BinUIAppT<Gfx>::renderFrame() {
         return;
     }
     renderOnce();
-    if (paced) {
-        nextFrameTime_ = std::chrono::steady_clock::now();   // 下一拍由 present 决定
-    } else {
-        nextFrameTime_ += frameBudget_;
-        const auto after = std::chrono::steady_clock::now();
-        if (nextFrameTime_ < after - frameBudget_ * 2) nextFrameTime_ = after + frameBudget_;
-    }
+    // 下一拍的时间点：present 自己等到垂直同步时，它只等到"下一次刷新"；帧预算被
+    // BINUI_FPS 封顶（或显示器比预算快）时，还差一截要外壳自己补 —— 所以这里统一
+    // 按 `now + 预算` 定下一拍，pump 用高精度定时器等到它（输入会提前唤醒）。
+    // 预算 == 刷新且 present 真的阻塞了整拍时，这个时刻已经过去，pump 立刻返回，
+    // 不会双重等待。
+    // 下一拍的时间点 = **本拍开始时刻 + 预算**（不是"画完之后 + 预算" —— present
+    // 自己已经等了半个刷新，从画完算起会把周期拖成 8.3+16.7≈25ms，帧率掉到 40fps）。
+    nextFrameTime_ = now + frameBudget_;
 }
 
 // 这一帧是否由 present() 的垂直同步阻塞来决定节拍（只用于启动时打一行诊断）
@@ -1507,12 +1546,11 @@ inline int BinUIAppT<Gfx>::pump(int timeoutMs) {
     } else if (dirty_ || lastDrew_) {
         // 有脏区，或者上一拍刚画过（动画通常每拍都会产生脏区，但那要等 update_ 跑完
         // 才知道 —— 用 lastDrew_ 提前判断，免得在帧点前先睡掉一整拍）。
-        if (!paced) {
-            const auto now = std::chrono::steady_clock::now();
-            waitForFrame(nextFrameTime_ > now ? nextFrameTime_ : now);
-        }
-        // paced：不睡。present 里的 DwmFlush 已经在合成边界上等过了，
-        // 这里再按自己的网格睡一次就是双重等待 → 相位互相漂 → 周期性丢拍。
+        // 统一精确等到下一拍：present 能阻塞时它只等到"下一次刷新"，帧预算被
+        // BINUI_FPS 封顶后还差半拍要外壳补；预算 == 刷新时这个时刻已经过去，
+        // pump 立刻返回，不会双重等待（输入会提前唤醒）。
+        const auto now = std::chrono::steady_clock::now();
+        waitForFrame(nextFrameTime_ > now ? nextFrameTime_ : now);
     } else if (timeoutMs > 0) {
         // 完全没活：睡到输入。paced 模式下用毫秒粗睡即可（OS 会合并到 15.6ms 节拍，
         // 省电优先）；非 paced 模式仍睡到帧点，保证动画不会掉回 64fps。
