@@ -1422,7 +1422,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // 句柄就是 Tex*（unordered_map 的节点地址稳定，图集代不会被搬走）。
     void* createTex(int tw, int th) override {
         Tex* t = new Tex();
-        if (!createTexImage(*t, tw, th, false)) {
+        // LINEAR：动画节点的文字按亚像素落位（见 GlyphAtlas::snapText）。整像素位置下
+        // 1:1 采样点正好落在纹素中心，与 NEAREST 逐像素相同，静态页面不受影响。
+        if (!createTexImage(*t, tw, th, true)) {
             freeTex(*t);
             delete t;
             return nullptr;
@@ -2697,6 +2699,11 @@ float BinUIVK::textWidth(float size, int weight, const std::string& utf8, bool i
 
 void BinUIVK::fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic) {
     impl_->atlas.fontMetrics(size, weight, ascent, lineHeight, italic);
+}
+
+void BinUIVK::setTextSubpixel(bool on) {
+    // 图集纹理本身已经是 LINEAR（见 Impl::createTex），这里只切"要不要取整"
+    if (impl_) impl_->atlas.snapText = !on;
 }
 
 // ---------- 图片 ----------

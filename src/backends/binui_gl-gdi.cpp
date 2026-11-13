@@ -241,7 +241,9 @@ struct GLGlyphTexHost : binui::IGlyphTexHost {
         // 必须给零缓冲：图集里的"空格子"（空格/控符）会被当真字形画，
         // 未初始化的显存会把这些位置画成垃圾像素
         std::vector<uint8_t> zeros(static_cast<size_t>(w) * h * 4, 0);
-        const GLuint t = CreateTexture2D(w, h, zeros.data(), false);
+        // LINEAR：动画节点的文字按亚像素落位（见 GlyphAtlas::snapText）。整像素位置下
+        // 1:1 采样点正好落在纹素中心，与 NEAREST 逐像素相同，所以静态页面不受影响。
+        const GLuint t = CreateTexture2D(w, h, zeros.data(), true);
         return reinterpret_cast<void*>(static_cast<uintptr_t>(t));
     }
     void updateTex(void* tex, int x, int y, int w, int h, const uint8_t* bgra) override {
@@ -1211,6 +1213,11 @@ void BinUIGLGdi::strokeRounded(float x, float y, float w, float h, float radius,
                             q[i].u0, q[i].v0, q[i].u1, q[i].v1, color);
     }
     impl_->curTex = impl_->whiteTex;
+}
+
+void BinUIGLGdi::setTextSubpixel(bool on) {
+    // 图集纹理本身已经是 LINEAR（见 GLGlyphTexHost::createTex），这里只切"要不要取整"
+    if (impl_) impl_->atlas.snapText = !on;
 }
 
 float BinUIGLGdi::textWidth(float size, int weight, const std::string& utf8, bool italic) {

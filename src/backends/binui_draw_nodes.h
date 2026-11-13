@@ -373,6 +373,9 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         if (opacity < 1.0f) dc = GfxScaleAlpha(dc, opacity);
         // 几何：有平移/缩放时用浮点（亚像素），否则沿用整型截断（像素中性）
         const bool animGeo = (dx != 0.0f || dy != 0.0f || scale != 1.0f);
+        // 文字：静态节点按整像素落位（最锐利），有动画时保留小数 + LINEAR 采样。
+        // 不这样的话，文字每 2 帧跳 1px —— 填充/描边都在连续滑，只有字在跳，很显眼。
+        gfx.setTextSubpixel(animGeo);
         // v20：旋转 / 非等比缩放走**仿射**路径（旋转的矩形不是轴对齐的，画不了九宫格直块）。
         // 仿射只作用在"底/边框"上：文字与图片不参与（字形要对齐像素，旋转只会糊）。
         const bool affine = st.needsAffine();

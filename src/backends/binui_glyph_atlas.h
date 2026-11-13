@@ -218,6 +218,12 @@ public:
     void setHost(IGlyphTexHost* host) { host_ = host; }
     bool hasHost() const { return host_ != nullptr; }
 
+    // 文字是否按**整像素**落位（默认 true：字形位图 1:1，整像素最锐利）。
+    // 有动画的节点要设成 false —— 位置保留小数、图集按 LINEAR 采样，文字才能跟着
+    // 亚像素位移连续滑；否则每 2 帧跳 1px，肉眼就是"字在抖"（见 CHANGELOG 0.16.4）。
+    // 整数位置下 LINEAR 采样与 NEAREST 逐像素相同，静态页面不受影响。
+    bool snapText = true;
+
     // 纹理/字体变动即让整形缓存失效（见 GlyphRun 注释）
     void bumpAtlasGen() {
         ++atlasGen_;
@@ -329,7 +335,8 @@ public:
             run = &it->second;
             if (centerH) x -= run->advance / 2;
             if (centerV) y -= run->lineH / 2.0f;
-            EmitRun(*run, std::floor(x + 0.5f), std::floor(y + 0.5f), premult, emit);
+            EmitRun(*run, snapText ? std::floor(x + 0.5f) : x,
+                    snapText ? std::floor(y + 0.5f) : y, premult, emit);
             return;
         }
 
@@ -338,10 +345,11 @@ public:
         int ascent = 0, lineH = 0;
         fontMetrics(size, weight, ascent, lineH, italic);
         if (centerV) y -= lineH / 2.0f;
-        // 像素对齐：字形位图天生是整数像素设计，落在半像素上会被过滤糊一层。
+        // 像素对齐（snapText）：字形位图天生是整数像素设计，落在半像素上会被过滤糊一层。
         // advance 本身是整数，所以只要把起点/基线取整，整行字形就都在整数像素上。
-        float baseline = std::floor(y + 0.5f);
-        x = std::floor(x + 0.5f);
+        // 动画节点（snapText=false）保留小数：图集是 LINEAR 采样，亚像素位置是连续的。
+        float baseline = snapText ? std::floor(y + 0.5f) : y;
+        x = snapText ? std::floor(x + 0.5f) : x;
 
         const std::vector<uint32_t> cps = Utf8ToCodepoints(utf8);
         color = premult;

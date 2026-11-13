@@ -148,6 +148,7 @@ struct BinUID3D::Impl {
     int scissor[4] = { 0, 0, 0, 0 };
     int scissorDepth = 0;
     uint8_t curLinear = 0;
+    uint8_t subpixelText = 0;   // setTextSubpixel(true)：字形批次走 LINEAR 采样
     ID3D11ShaderResourceView* curSrv = nullptr;
 
 
@@ -1231,13 +1232,21 @@ void BinUID3D::fontMetrics(float size, int weight, int& ascent, int& lineHeight,
     impl_->atlas.fontMetrics(size, weight, ascent, lineHeight, italic);
 }
 
+// 文字亚像素定位：D3D11 的采样器是**按批次**选的（见 flush 里的 samLinear/samPoint），
+// 所以这里同时记一个标志，drawText 里把它写进 curLinear。
+void BinUID3D::setTextSubpixel(bool on) {
+    if (!impl_) return;
+    impl_->atlas.snapText = !on;
+    impl_->subpixelText = on ? 1 : 0;
+}
+
 // 文本排版/光栅化/图集全在 binui::GlyphAtlas 里（与 GL / Vulkan 后端同一份代码），
 // 这里只把回调给出的字形四边形丢进本后端的顶点批次 —— 三端文本因此是同一份像素。
 void BinUID3D::drawText(float x, float y, float size, int weight,
                         const std::string& utf8, uint32_t color,
                         bool centerH, bool centerV, bool italic) {
     if (!impl_->ready || utf8.empty()) return;
-    impl_->curLinear = 0;
+    impl_->curLinear = impl_->subpixelText;
     impl_->curSrv = impl_->whiteSrv;
     impl_->atlas.drawText(x, y, size, weight, utf8, color, centerH, centerV, italic,
                           [this](const GlyphQuad& q) {
@@ -1252,7 +1261,7 @@ void BinUID3D::drawTextWrapped(float x, float y, float maxW, float size, int wei
                                const std::string& utf8, uint32_t color, int align,
                                bool italic) {
     if (!impl_->ready || utf8.empty()) return;
-    impl_->curLinear = 0;
+    impl_->curLinear = impl_->subpixelText;
     impl_->curSrv = impl_->whiteSrv;
     impl_->atlas.drawTextWrapped(x, y, maxW, size, weight, utf8, color, align, italic,
                                  [this](const GlyphQuad& q) {

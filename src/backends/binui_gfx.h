@@ -76,6 +76,10 @@ public:
                             bool italic = false) = 0;
     virtual void fontMetrics(float size, int weight, int& ascent, int& lineHeight,
                              bool italic = false) = 0;
+    // 文字亚像素定位（v0.16.4）：默认 false = 字形按整像素落位（位图 1:1，最锐利）。
+    // 有动画的节点传 true —— 位置保留小数、字形按 LINEAR 采样，文字才能跟着亚像素
+    // 位移连续滑（否则每 2 帧跳 1px，肉眼像在抖）。整数位置下两者逐像素相同。
+    virtual void setTextSubpixel(bool on) { (void)on; }
 
     // ---- 图片（generation 变化时重新上传）----
     virtual bool prepareImage(uint16_t index, const uint8_t* data, size_t size,
