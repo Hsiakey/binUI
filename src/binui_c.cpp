@@ -259,21 +259,85 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
         }
     });
 
-    // ---- 渲染器自身的事件（点击 / 文本变化）→ 事件队列 ----
+    // ---- 渲染器自身的事件（点击 / 文本变化 / 焦点 / 指针 / 滚动 / 元素拖拽）→ 事件队列 ----
     r.setEventCallback([a](const binui::Event& ev) {
+        auto basic = [&](int type) {
+            BinUIEvent e = MakeEvent(type);
+            e.node_id = static_cast<int32_t>(ev.nodeId);
+            return e;
+        };
         switch (ev.type) {
             case binui::EventType::CLICK: {
-                BinUIEvent e = MakeEvent(BINUI_EV_CLICK);
-                e.node_id = static_cast<int32_t>(ev.nodeId);
+                BinUIEvent e = basic(BINUI_EV_CLICK);
+                e.x = ev.click.x; e.y = ev.click.y;
                 PushEvent(a, e);
                 InvalidateNode(a, ev.nodeId);
                 break;
             }
-            case binui::EventType::INPUT: {
+            case binui::EventType::INPUT:
+            case binui::EventType::CHANGE: {
                 const std::string text = ev.input.text ? ev.input.text : "";
-                BinUIEvent e = MakeEvent(BINUI_EV_INPUT);
-                e.node_id = static_cast<int32_t>(ev.nodeId);
+                BinUIEvent e = basic(ev.type == binui::EventType::INPUT ? BINUI_EV_INPUT
+                                                                        : BINUI_EV_CHANGE);
                 PushEvent(a, e, text);
+                break;
+            }
+            case binui::EventType::PRESS:
+            case binui::EventType::RELEASE:
+            case binui::EventType::DBL_CLICK:
+            case binui::EventType::CONTEXT_MENU:
+            case binui::EventType::MOVE: {
+                BinUIEvent e = MakeEvent(ev.type == binui::EventType::PRESS ? BINUI_EV_PRESS
+                                     : ev.type == binui::EventType::RELEASE ? BINUI_EV_RELEASE
+                                     : ev.type == binui::EventType::DBL_CLICK ? BINUI_EV_DBL_CLICK
+                                     : ev.type == binui::EventType::CONTEXT_MENU
+                                         ? BINUI_EV_CONTEXT_MENU : BINUI_EV_MOVE);
+                e.node_id = ev.nodeId == 0xFFFF ? -1 : static_cast<int32_t>(ev.nodeId);
+                e.x = ev.pointer.x;
+                e.y = ev.pointer.y;
+                e.button = ev.pointer.button;
+                PushEvent(a, e);
+                break;
+            }
+            case binui::EventType::HOVER_LEAVE: {
+                BinUIEvent e = basic(BINUI_EV_HOVER_LEAVE);
+                PushEvent(a, e);
+                break;
+            }
+            case binui::EventType::FOCUS: {
+                BinUIEvent e = basic(BINUI_EV_FOCUS);
+                e.focused = ev.focus.focused ? 1 : 0;
+                e.prev_id = ev.focus.prevId == 0xFFFF ? -1 : static_cast<int32_t>(ev.focus.prevId);
+                PushEvent(a, e);
+                break;
+            }
+            case binui::EventType::EDIT: {
+                BinUIEvent e = basic(BINUI_EV_EDIT);
+                e.editing = ev.edit.editing ? 1 : 0;
+                PushEvent(a, e);
+                break;
+            }
+            case binui::EventType::SCROLL: {
+                BinUIEvent e = basic(BINUI_EV_SCROLL);
+                e.x = ev.scroll.x; e.y = ev.scroll.y;
+                e.dx = ev.scroll.dx; e.dy = ev.scroll.dy;
+                PushEvent(a, e);
+                break;
+            }
+            case binui::EventType::RESIZE_START: {
+                PushEvent(a, basic(BINUI_EV_RESIZE_START));
+                break;
+            }
+            case binui::EventType::RESIZE_END: {
+                BinUIEvent e = basic(BINUI_EV_RESIZE_END);
+                e.x = ev.rect.x; e.y = ev.rect.y;
+                e.width = static_cast<int32_t>(ev.rect.w);
+                e.height = static_cast<int32_t>(ev.rect.h);
+                PushEvent(a, e);
+                break;
+            }
+            case binui::EventType::LOAD: {
+                PushEvent(a, basic(BINUI_EV_LOAD));
                 break;
             }
             default:
@@ -443,7 +507,7 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
 
 extern "C" {
 
-const char* BINUI_C_CALL binui_version(void) { return "0.13.1"; }
+const char* BINUI_C_CALL binui_version(void) { return "0.14.0"; }
 
 int32_t BINUI_C_CALL binui_abi_version(void) { return BINUI_C_ABI_VERSION; }
 

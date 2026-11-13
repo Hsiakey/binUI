@@ -248,6 +248,9 @@ public:
     using CursorFn  = std::function<int(float x, float y)>;
     // 双击：宿主拿到的是客户区坐标（双击选词用）
     using DoubleClickFn = std::function<void(float x, float y)>;
+    // 右/中键（left 仍走 setPressFn / setReleaseFn）：引擎要 nodeId 才能派发 CONTEXT_MENU，
+    // 所以外壳把按键号一起交出去，宿主转手 renderer.press(x,y,button) / release(x,y,button)。
+    using ButtonFn = std::function<void(float x, float y, int button, bool down)>;
     // IME：返回光标在客户区的位置与行高（用于把输入法候选窗摆到光标下方）。
     // 返回 false = 当前没有正在编辑的输入框。
     using ImeCaretFn = std::function<bool(int& x, int& y, int& lineH)>;
@@ -280,6 +283,7 @@ public:
     void setFocusFn(FocusFn fn)     { focus_ = std::move(fn); }
     void setCursorFn(CursorFn fn)   { cursor_ = std::move(fn); }
     void setDoubleClickFn(DoubleClickFn fn) { dblclick_ = std::move(fn); }
+    void setButtonFn(ButtonFn fn)   { btn_ = std::move(fn); }
     void setImeCaretFn(ImeCaretFn fn) { imeCaret_ = std::move(fn); }
     void setImeActiveFn(ImeActiveFn fn) { imeActive_ = std::move(fn); }
 
@@ -387,6 +391,7 @@ private:
     FocusFn focus_;
     CursorFn cursor_;
     DoubleClickFn dblclick_;
+    ButtonFn btn_;
     ImeCaretFn imeCaret_;
     ImeActiveFn imeActive_;        // 宿主说"现在要不要输入法"
     bool imeAttached_ = true;      // 当前 IME 上下文是否挂在窗口上
@@ -832,6 +837,17 @@ inline LRESULT CALLBACK BinUIAppT<Gfx>::wndProc(HWND hwnd, UINT msg, WPARAM wPar
             app->handleMouseRelease(static_cast<float>(LOWORD(lParam)),
                                     static_cast<float>(HIWORD(lParam)));
             return 0;
+        case WM_RBUTTONDOWN:
+        case WM_MBUTTONDOWN:
+        case WM_RBUTTONUP:
+        case WM_MBUTTONUP: {
+            const int btn = (msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP) ? 1 : 2;
+            const bool down = (msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN);
+            if (down) SetFocus(hwnd);
+            if (app->btn_) app->btn_(static_cast<float>(LOWORD(lParam)),
+                                     static_cast<float>(HIWORD(lParam)), btn, down);
+            return 0;
+        }
         case WM_MOUSELEAVE:
             app->trackingLeave_ = false;
             app->handleMouseLeave();

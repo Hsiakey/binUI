@@ -157,6 +157,37 @@ Python 用户不会撞上经典的 `OSError: [WinError 126] 找不到指定模�
 - 两种形态：**独立顶层窗**（`binui_app_open` + `binui_pump`）和**子窗口/控件**
   （`binui_app_open_child` + `binui_render`）。后者见下一节。
 
+## 事件表（C ABI v3 / v0.14.0）
+
+所有事件走同一个队列：每帧 `binui_pump` 之后 `while (binui_poll_event(app, &ev)) { … }`。
+v3 把引擎侧补齐的事件全部映射过来了（字段含义见 `binui_c.h` 的 `BinUIEvent`）：
+
+| `type` | 字段 | 什么时候来 |
+|---|---|---|
+| `BINUI_EV_CLICK` | `node_id` `x` `y` | 点击/键盘激活 |
+| `BINUI_EV_DBL_CLICK` | `node_id` `x` `y` | 同节点 400ms 内第二次点击 |
+| `BINUI_EV_PRESS` / `BINUI_EV_RELEASE` | `node_id` `x` `y` `button` | 按下 / 松开（`RELEASE` 的 `node_id` = 按下时命中的节点）|
+| `BINUI_EV_MOVE` | `node_id` `x` `y` | 每次移动（`node_id = -1` 表示空白处）|
+| `BINUI_EV_CONTEXT_MENU` | `node_id` `x` `y` | 右键按下 |
+| `BINUI_EV_HOVER` / `BINUI_EV_HOVER_LEAVE` | `node_id` | 进入 / 离开节点（离开含移出窗口）|
+| `BINUI_EV_FOCUS` | `node_id` `focused` `prev_id` | **键盘焦点**变化（0=失去，1=获得）|
+| `BINUI_EV_EDIT` | `node_id` `editing` | 进入 / 退出文本编辑 |
+| `BINUI_EV_INPUT` | `node_id` `text` | 编辑中逐字（含 IME 上屏）|
+| `BINUI_EV_CHANGE` | `node_id` `text` | 提交（失焦或 Enter 退出且有改动）|
+| `BINUI_EV_SCROLL` | `node_id` `x` `y` `dx` `dy` | 滚动位置变化（新位置 + 本次增量）|
+| `BINUI_EV_WHEEL` | `node_id` `x` `y` `dy` | 滚轮 |
+| `BINUI_EV_RESIZE_START` / `BINUI_EV_RESIZE_END` | `node_id`；END 另带 `x/y/width/height` | 拖元素尺寸开始 / 结束（最终矩形）|
+| `BINUI_EV_RESIZE` | `width` `height` | 窗口尺寸 |
+| `BINUI_EV_KEY` / `BINUI_EV_CHAR` | `key` / `text` | 按键 / 字符 |
+| `BINUI_EV_CLOSE` | — | 窗口关闭 |
+| `BINUI_EV_ANIM_END` / `_ITER` / `BINUI_EV_TRANS_END` | `node_id` `iteration` / `prop` | 动画结束 / 迭代 / 过渡结束 |
+| `BINUI_EV_LOAD` | — | 布局加载完成 |
+
+> 右键/中键需要外壳把按键号交出来：`binui_app_open` 那套外壳已经处理
+> `WM_RBUTTONDOWN/UP`、`WM_MBUTTONDOWN/UP`，宿主在 `setButtonFn` 里转手
+> `renderer.press(x, y, button)` / `release(x, y, button)` 即可（引擎据此派发
+> `CONTEXT_MENU`）。左键仍走原来的 `setPressFn` / `setReleaseFn`。
+
 ## 动画事件（v0.13.1 / C ABI v2）
 
 引擎里 `stepAnimations()` 只会告诉你"这一帧哪些节点变了"，**不告诉你动画结束没结束**——

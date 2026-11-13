@@ -304,6 +304,35 @@ with binui.App(layout) as app:
 `set_text` 对"没写 height、由引擎估算撑开"的文本节点会**自动重算高度**。详见
 [docs/bindings.md](docs/bindings.md) 的「运行期能力」一节。
 
+## 事件
+
+引擎只有一条事件出口：`renderer.setEventCallback`。v0.14 起把"浏览器里有、这里没有"的那些
+补齐了（冒泡/委托/`Event` 对象仍然**不做** —— binUI 不是浏览器，组件↔宿主靠属性 +
+`setText` + 宿主编排）：
+
+| 事件 | 载荷 | 说明 |
+|---|---|---|
+| `CLICK` / `DBL_CLICK` | `nodeId` + `click.x/y` | 双击由引擎判（同节点 400ms 内、位移 < 4px），宿主不用接 `WM_LBUTTONDBLCLK` |
+| `PRESS` / `RELEASE` | `nodeId` + `pointer.x/y/button` | `button`：0=左 1=右 2=中；`RELEASE` 的 `nodeId` = 按下时命中的节点 |
+| `MOVE` | `nodeId` + `click.x/y` | 每次移动都报（`nodeId` = 当前命中节点，`0xFFFF` = 空白），拖控件/跟随光标用它 |
+| `CONTEXT_MENU` | `nodeId` + `pointer.x/y` | 右键按下；不进按下态、不抢焦点（`press(x,y,1)`） |
+| `HOVER` / `HOVER_LEAVE` | `nodeId` | 进入/离开节点，含鼠标移出窗口 |
+| `FOCUS` | `nodeId` + `focus.focused` + `focus.prevId` | **键盘焦点**变化（Tab/WASD/点击/API），`focused=false` 时 `nodeId` = 失去焦点的节点 |
+| `EDIT` | `nodeId` + `edit.editing` | 进入/退出文本编辑 |
+| `INPUT` | `nodeId` + `input.text` | 编辑中逐字（含 IME 上屏） |
+| `CHANGE` | `nodeId` + `input.text` | 提交（失焦或 Enter 退出且有改动）—— 与 `INPUT` 分开，宿主才分得清"还在打"和"打完了" |
+| `SCROLL` | `nodeId` + `scroll.x/y`（新位置）+ `dx/dy`（本次增量） | 滚动位置变化 |
+| `WHEEL` | `nodeId` + `wheel.x/y` + `dy` | 滚轮（`scrollAt` 内部派发） |
+| `RESIZE_START` / `RESIZE_END` | `nodeId`；END 另带 `rect` | 拖元素尺寸（CSS `resize`）开始 / 结束，END 是最终矩形 |
+| `RESIZE` | `resize.width/height` | 窗口尺寸 |
+| `LOAD` | `nodeId = 0` | 布局解析完成（回调要在 `loadLayout` 之前设好） |
+| `VIDEO_PLAY/PAUSE/SEEK/ENDED` | `nodeId` | 视频播放状态 |
+| 动画事件 | 见 `takeAnimEvents()` | `animationend` / `animationiteration` / `transitionend`，走"取"的通道（下面有例子） |
+
+按键不走事件：`renderer.handleKey(vk, mods)` 直接返回 `KeyResult`（`handled` = 库消费掉了 +
+`changed` = 要重绘的节点），宿主拿"未消费"的键做快捷键即可。C ABI 侧这些都映射成
+`binui_poll_event` 的队列（`BINUI_EV_*`，见 [docs/bindings.md](docs/bindings.md)）。
+
 ## UI 描述格式
 
 两种源码格式，编译为统一的 binUI 二进制布局：

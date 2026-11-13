@@ -1542,6 +1542,134 @@ int run() {
                  b1->width > 0.0f && b1->width < 100.0f && std::fabs(b2->x - b1->width) < 0.6f);
         }
 
+        // ---- v23：事件全家桶（指针 / 焦点 / 编辑 / 滚动 / 滚轮 / 拖拽 / 加载）----
+        {
+            auto evHtml = CompileHTML(
+                "<html width=\"300\" height=\"200\" bg=\"#000000\"><body>"
+                "<button id=\"b1\" style=\"position:absolute; left:10; top:10; width:100; height:30\">A</button>"
+                "<div id=\"sc\" style=\"position:absolute; left:10; top:60; width:200; height:80; overflow:auto\">"
+                "<div style=\"width:400; height:300\"></div></div>"
+                "<input id=\"tx\" style=\"position:absolute; left:10; top:150; width:150; height:24\"/>"
+                "<div id=\"rz\" style=\"position:absolute; left:220; top:10; width:60; height:40;"
+                " background:#333333; resize:both\"></div>"
+                "</body></html>");
+            BinUIRenderer r;
+            std::vector<Event> evs;
+            r.setEventCallback([&](const Event& e) { evs.push_back(e); });
+            // LOAD：回调先设好，加载完就该报一条（宿主据此做首帧后的事）
+            TEST("事件: loadLayout 成功", r.loadLayout(evHtml.data(), evHtml.size()));
+            TEST("事件: LOAD 事件", !evs.empty() && evs[0].type == EventType::LOAD);
+            const uint16_t b1 = r.findNodeByName("b1");
+            const uint16_t tx = r.findNodeByName("tx");
+            const uint16_t rz = r.findNodeByName("rz");
+
+            auto countOf = [&](EventType t) {
+                int n = 0;
+                for (const auto& e : evs) if (e.type == t) n++;
+                return n;
+            };
+            auto lastOf = [&](EventType t) -> const Event* {
+                for (size_t i = evs.size(); i-- > 0;) if (evs[i].type == t) return &evs[i];
+                return nullptr;
+            };
+
+            // MOVE / HOVER / HOVER_LEAVE
+            evs.clear();
+            r.setHover(50, 25);
+            TEST("事件: MOVE 带命中节点", countOf(EventType::MOVE) == 1 &&
+                 lastOf(EventType::MOVE)->nodeId == b1 && lastOf(EventType::MOVE)->click.x == 50);
+            TEST("事件: HOVER 进入", countOf(EventType::HOVER) == 1 &&
+                 lastOf(EventType::HOVER)->nodeId == b1);
+            evs.clear();
+            r.setHover(250, 190);   // 空白处
+            TEST("事件: HOVER_LEAVE 离开", countOf(EventType::HOVER_LEAVE) == 1 &&
+                 lastOf(EventType::HOVER_LEAVE)->nodeId == b1);
+            TEST("事件: MOVE 到空白 nodeId = 0xFFFF",
+                 lastOf(EventType::MOVE) && lastOf(EventType::MOVE)->nodeId == 0xFFFF);
+
+            // PRESS / RELEASE / CLICK / DBL_CLICK（引擎自己判双击，不用宿主接 WM_LBUTTONDBLCLK）
+            evs.clear();
+            r.press(50, 25);
+            r.release(50, 25);
+            {   // 中间可能夹着 FOCUS（点击会换键盘焦点）：只断言三者的相对顺序
+                int ip = -1, ir = -1, ic = -1;
+                for (size_t i = 0; i < evs.size(); i++) {
+                    if (evs[i].type == EventType::PRESS && ip < 0) ip = (int)i;
+                    else if (evs[i].type == EventType::RELEASE && ir < 0) ir = (int)i;
+                    else if (evs[i].type == EventType::CLICK && ic < 0) ic = (int)i;
+                }
+                TEST("事件: PRESS → RELEASE → CLICK 顺序", ip >= 0 && ip < ir && ir < ic);
+            }
+            TEST("事件: 三个事件的节点/按键一致", evs[0].nodeId == b1 && evs[1].nodeId == b1 &&
+                 evs[2].nodeId == b1 && evs[0].pointer.button == 0);
+            TEST("事件: 单击不报双击", countOf(EventType::DBL_CLICK) == 0);
+            r.press(50, 25);
+            r.release(50, 25);
+            TEST("事件: 400ms 内第二次点击 → DBL_CLICK", countOf(EventType::DBL_CLICK) == 1 &&
+                 lastOf(EventType::DBL_CLICK)->nodeId == b1);
+            r.press(50, 25);
+            r.release(50, 25);
+            TEST("事件: 三连击不再报双击", countOf(EventType::DBL_CLICK) == 1);
+
+            // CONTEXT_MENU（右键：不进按下态、不抢焦点）
+            evs.clear();
+            r.press(50, 25, 1);
+            TEST("事件: 右键 → CONTEXT_MENU", countOf(EventType::CONTEXT_MENU) == 1 &&
+                 lastOf(EventType::CONTEXT_MENU)->nodeId == b1 &&
+                 lastOf(EventType::CONTEXT_MENU)->pointer.button == 1);
+            TEST("事件: 右键不产生 PRESS", countOf(EventType::PRESS) == 0);
+
+            // FOCUS：键盘焦点变化（以前 Tab/WASD/点击换焦点都没有事件）
+            r.setKeyboardFocus(-1);   // 先清空，确保下面这次是"从无到有"
+            evs.clear();
+            r.setKeyboardFocus(b1);
+            TEST("事件: 键盘焦点 → FOCUS(focused)", countOf(EventType::FOCUS) == 1 &&
+                 lastOf(EventType::FOCUS)->nodeId == b1 && lastOf(EventType::FOCUS)->focus.focused);
+            evs.clear();
+            r.setKeyboardFocus(-1);
+            TEST("事件: 焦点清空 → FOCUS(失焦)", countOf(EventType::FOCUS) == 1 &&
+                 lastOf(EventType::FOCUS)->nodeId == b1 && !lastOf(EventType::FOCUS)->focus.focused);
+
+            // EDIT / INPUT / CHANGE：编辑进入-逐字-提交三段分开
+            evs.clear();
+            r.focus(tx, true);
+            TEST("事件: 进入编辑 → EDIT(editing)", countOf(EventType::EDIT) == 1 &&
+                 lastOf(EventType::EDIT)->edit.editing);
+            r.dispatchInput(tx, "ab");
+            TEST("事件: 逐字 → INPUT", countOf(EventType::INPUT) == 1 &&
+                 std::string(lastOf(EventType::INPUT)->input.text) == "ab");
+            r.blur();
+            TEST("事件: 提交 → CHANGE（与 INPUT 分开）", countOf(EventType::CHANGE) == 1 &&
+                 lastOf(EventType::CHANGE)->nodeId == tx);
+            TEST("事件: 退出编辑 → EDIT(!editing)", !lastOf(EventType::EDIT)->edit.editing);
+
+            // WHEEL / SCROLL：载荷（位置 + 增量）
+            evs.clear();
+            const int scId = r.scrollAt(100, 100, -120.0f);
+            TEST("事件: 滚轮命中滚动容器", scId == (int)r.findNodeByName("sc"));
+            TEST("事件: WHEEL 带增量", countOf(EventType::WHEEL) == 1 &&
+                 lastOf(EventType::WHEEL)->wheel.dy == -120.0f);
+            TEST("事件: SCROLL 带位置与增量", countOf(EventType::SCROLL) == 1 &&
+                 lastOf(EventType::SCROLL)->scroll.dy > 0.0f &&
+                 lastOf(EventType::SCROLL)->scroll.y > 0.0f);
+
+            // RESIZE_START / RESIZE_END（拖元素尺寸，宿主能拿到开始与最终矩形）
+            evs.clear();
+            const auto* rzNode = r.getNodes().data();
+            float rw0 = 0;
+            for (const auto& n : r.getNodes()) if (n.id == rz) rw0 = n.width;
+            TEST("事件: 缩放热区按下", r.press(278, 48) == (int)rz);
+            TEST("事件: RESIZE_START", countOf(EventType::RESIZE_START) == 1 &&
+                 lastOf(EventType::RESIZE_START)->nodeId == rz);
+            r.setHover(258, 48);      // 拖到左边 20px
+            r.release(258, 48);
+            const Event* re = lastOf(EventType::RESIZE_END);
+            TEST("事件: RESIZE_END 带最终矩形", re && re->nodeId == rz &&
+                 re->rect.w < rw0 - 10.0f && std::fabs(re->rect.w - (rw0 - 20.0f)) < 1.5f);
+            (void)rzNode;
+        }
+
+        // 滚动容器：overflow:auto 标志 + 命中测试偏移 + 滚动事件
         // 滚动容器：overflow:auto 标志 + 命中测试偏移 + 滚动事件
         auto sc = CompileHTML(
             "<html width=\"200\" height=\"200\" bg=\"#000000\">"

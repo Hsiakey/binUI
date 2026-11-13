@@ -5,6 +5,49 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.14.0] - 2026-11-13
+
+本轮主题：**把事件补齐**（上一版补了动画完成事件，这一版补指针/焦点/编辑/滚动/拖拽/加载）。
+判定标准是"宿主不轮询、不猜时间、不重复实现引擎已经知道的事"——凡是要宿主自己算一遍的，
+都算缺口。**冒泡 / 事件委托 / `Event` 对象 / `CustomEvent` 仍然不做**：binUI 不是浏览器，
+组件↔宿主靠属性 + `setText` + 宿主编排（真要组件通信应该是具名事件通道，不是复制 DOM）。
+
+### 新增 — 事件（引擎 `EventType` 从 11 种到 25 种）
+
+| 事件 | 之前 | 现在 |
+|---|---|---|
+| 指针 | 只有 `PRESS` | `PRESS` / `RELEASE` / `MOVE` / `DBL_CLICK` / `CONTEXT_MENU`，都带 `button` 与坐标 |
+| 悬停 | 只有进入（`HOVER`） | 加 `HOVER_LEAVE`（含鼠标移出窗口） |
+| 焦点 | `FOCUS` 一个类型两义（进入/退出编辑），**键盘焦点变化完全没有事件** | `FOCUS`（键盘焦点，带 `focused` + `prevId`）+ `EDIT`（进入/退出编辑）分离；Tab/WASD/点击/API 换焦点都会报 |
+| 文本 | `INPUT` 同时是"逐字"和"提交" | `INPUT` = 逐字（含 IME 上屏），`CHANGE` = 提交（失焦或 Enter 退出且有改动） |
+| 滚动 | `SCROLL` 只有 `nodeId` | `SCROLL` 带新位置 + 本次增量；新增 `WHEEL`（光标位置 + 增量） |
+| 元素拖拽 | 只能轮询 `isResizing()` / `takeResizeDirty()` | `RESIZE_START` / `RESIZE_END`（END 带最终矩形） |
+| 加载 | 只有 `loadLayout` 的 bool 返回值 | `LOAD` 事件（回调需在 `loadLayout` 之前设好） |
+
+要点：
+
+- **双击由引擎判**（同节点、400ms 内、位移 < 4px），不依赖 `WM_LBUTTONDBLCLK`——自绘窗口里
+  那条路常因 `SetCapture`/焦点变化丢事件；三连击不会再报一次双击。
+- **`RELEASE` 只在"确实按下过"时报**，`nodeId` 用按下时命中的节点（鼠标可能已经移开），
+  宿主据此收按住态不会漏。
+- **右键不抢焦点、不进按下态**：`press(x,y,1)` 直接派发 `CONTEXT_MENU`，菜单长什么样归宿主。
+- 想要节点 id 就需要把按键号传到引擎：外壳新增 `setButtonFn`（`WM_RBUTTONDOWN/UP`、
+  `WM_MBUTTONDOWN/UP`），appshow 已接上（右键任意控件 → 弹窗显示"点到了谁"）。
+
+### 改动 — C ABI 升到 v3
+
+`BinUIEvent` 追加 `dx` / `button` / `focused` / `editing` / `prev_id`；新增
+`BINUI_EV_PRESS/RELEASE/MOVE/DBL_CLICK/CONTEXT_MENU/HOVER_LEAVE/FOCUS/EDIT/CHANGE/SCROLL/RESIZE_START/RESIZE_END/LOAD`。
+结构体又变大一次，`BINUI_C_ABI_VERSION` 2 → 3，**宿主必须按新头文件重编**。C 侧用法不变，
+仍是同一个 `binui_poll_event` 队列。
+
+### 测试
+
+`tests/test_elements.cpp` 新增 24 条事件断言：LOAD、`MOVE` 的命中节点、`HOVER`/`HOVER_LEAVE`、
+`PRESS→RELEASE→CLICK` 顺序与 `button`、双击判定与"三连击不再报"、右键只发 `CONTEXT_MENU`、
+键盘焦点获得/失去、`EDIT` 进入与退出、`INPUT`↔`CHANGE` 分离、`WHEEL`/`SCROLL` 载荷、
+`RESIZE_START` 与 `RESIZE_END` 的最终矩形实测值。
+
 ## [0.13.1] - 2026-11-13
 
 本轮主题：**动画完成事件**（`animationend` / `animationiteration` / `transitionend`）。这是

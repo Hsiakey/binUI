@@ -734,6 +734,8 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         std::fprintf(stderr, "[binui] Loaded layout: %u nodes, %u bytes of strings%s\n",
                      header->nodeCount, header->stringSize, extra.c_str());
     }
+    // 加载完成事件：回调必须在 loadLayout 之前设好（宿主通常先 setEventCallback 再 load）
+    emitEvent(EventType::LOAD, 0);
     return true;
 }
 
@@ -1640,6 +1642,16 @@ int BinUIRenderer::scrollAt(float x, float y, float dy) {
         }
     }
     scrollBy(static_cast<uint16_t>(id), 0, -dy);
+    // 滚轮事件在"真的找到容器"之后报（宿主做滚动联动/惯性用；坐标是光标位置）
+    {
+        Event ev{};
+        ev.type = EventType::WHEEL;
+        ev.nodeId = static_cast<uint16_t>(id);
+        ev.wheel.x = x;
+        ev.wheel.y = y;
+        ev.wheel.dy = dy;
+        emit(ev);
+    }
     return id;
 }
 
@@ -1663,14 +1675,17 @@ void BinUIRenderer::scrollTo(uint16_t nodeId, float x, float y) {
     float nx = std::min(std::max(x, 0.0f), maxX);
     float ny = std::min(std::max(y, 0.0f), maxY);
     if (nx == s.x && ny == s.y) return;
+    const float dx = nx - s.x, dy = ny - s.y;
     s.x = nx;
     s.y = ny;
 
-    if (eventCallback_) {
-        Event ev;
+    {
+        Event ev{};
         ev.type = EventType::SCROLL;
         ev.nodeId = nodeId;
-        eventCallback_(ev);
+        ev.scroll.x = s.x; ev.scroll.y = s.y;
+        ev.scroll.dx = dx; ev.scroll.dy = dy;
+        emit(ev);
     }
 }
 
@@ -1909,6 +1924,7 @@ void BinUIRenderer::beginResize(uint16_t nodeId, uint8_t handle, float px, float
     resizeOffX_ = ox;
     resizeOffY_ = oy;
     resizeDirtyOn_ = false;
+    emitEvent(EventType::RESIZE_START, nodeId);
 }
 
 void BinUIRenderer::dragResize(float px, float py) {
@@ -2065,16 +2081,29 @@ void BinUIRenderer::setHover(float x, float y) {
         return;
     }
     int id = hitTestEx(x, y, true, BINUI_ST_HOVER);
+    // MOVE 每帧都报：宿主要做拖控件/跟随光标就得有连续坐标（不关心就当空实现）
+    {
+        Event ev{};
+        ev.type = EventType::MOVE;
+        ev.nodeId = id < 0 ? 0xFFFF : static_cast<uint16_t>(id);
+        ev.click.x = x;
+        ev.click.y = y;
+        emit(ev);
+    }
     if (id == hoverId_) return;
     int old = hoverId_;
     hoverId_ = id;
     refreshNodeStyle(old);
     refreshNodeStyle(id);
-    if (id >= 0 && eventCallback_) {
-        Event ev;
+    // 离开 → 进入（顺序与 DOM 的 mouseleave / mouseenter 一致）
+    if (old >= 0) emitEvent(EventType::HOVER_LEAVE, static_cast<uint16_t>(old));
+    if (id >= 0) {
+        Event ev{};
         ev.type = EventType::HOVER;
         ev.nodeId = static_cast<uint16_t>(id);
-        eventCallback_(ev);
+        ev.click.x = x;
+        ev.click.y = y;
+        emit(ev);
     }
 }
 
@@ -2082,6 +2111,7 @@ void BinUIRenderer::clearHover() {
     int old = hoverId_;
     hoverId_ = -1;
     refreshNodeStyle(old);
+    if (old >= 0) emitEvent(EventType::HOVER_LEAVE, static_cast<uint16_t>(old));
 }
 
 void BinUIRenderer::dragScroll(float px, float py) {
@@ -2101,7 +2131,17 @@ void BinUIRenderer::dragScroll(float px, float py) {
     scrollTo(n.id, scrollDragVert_ ? (s ? s->x : 0) : v, scrollDragVert_ ? v : (s ? s->y : 0));
 }
 
-int BinUIRenderer::press(float x, float y) {
+int BinUIRenderer::press(float x, float y, int button) {
+    // 右键：不进按下态、不抢焦点，直接派发 CONTEXT_MENU（宿主自己做菜单）
+    if (button == 1) {
+        const int cid = hitTestEx(x, y, true, BINUI_ST_ACTIVE);
+        Event ev{};
+        ev.type = EventType::CONTEXT_MENU;
+        ev.nodeId = cid < 0 ? 0xFFFF : static_cast<uint16_t>(cid);
+        ev.pointer.x = x; ev.pointer.y = y; ev.pointer.button = 1;
+        emit(ev);
+        return cid;
+    }
     // 滚动条拖动优先于节点按下
     scrollDragNode_ = -1;
     resizeNode_ = -1;          // 上一次缩放拖拽（没收到 release 的脏路径）就此收尾
@@ -2151,22 +2191,34 @@ int BinUIRenderer::press(float x, float y) {
             interactive = (nodes_[nit->second].flags & BINUI_INTERACTIVE) != 0;
     }
     if (id >= 0 && !interactive) return -1;
-    if (id >= 0 && eventCallback_) {
-        Event ev;
+    if (id >= 0) {
+        Event ev{};
         ev.type = EventType::PRESS;
         ev.nodeId = static_cast<uint16_t>(id);
-        ev.click.x = x;
-        ev.click.y = y;
-        eventCallback_(ev);
+        ev.pointer.x = x;
+        ev.pointer.y = y;
+        ev.pointer.button = button;
+        emit(ev);
     }
     return id;
 }
 
-int BinUIRenderer::release(float x, float y) {
+int BinUIRenderer::release(float x, float y, int button) {
     if (resizeNode_ >= 0) {
+        // 缩放结束：报最终矩形（宿主据此持久化 / 重排）
+        const uint16_t rid = static_cast<uint16_t>(resizeNode_);
         resizeNode_ = -1;   // 缩放结束：不产生点击
         resizeHandle_ = 0;
         pressedId_ = -1;
+        if (auto nit = nodeIndexById_.find(rid); nit != nodeIndexById_.end()) {
+            const NodeInfo& n = nodes_[nit->second];
+            Event ev{};
+            ev.type = EventType::RESIZE_END;
+            ev.nodeId = rid;
+            ev.rect.x = n.x; ev.rect.y = n.y;
+            ev.rect.w = n.width; ev.rect.h = n.height;
+            emit(ev);
+        }
         return -1;
     }
     if (scrollDragNode_ >= 0) {
@@ -2181,6 +2233,16 @@ int BinUIRenderer::release(float x, float y) {
     pressedId_ = -1;
     refreshNodeStyle(id);
     if (id < 0) return -1;
+    // 松开事件：只在"确实按下过"时报（nodeId = 按下时命中的节点，鼠标可能已经移开）
+    {
+        Event ev{};
+        ev.type = EventType::RELEASE;
+        ev.nodeId = static_cast<uint16_t>(id);
+        ev.pointer.x = x;
+        ev.pointer.y = y;
+        ev.pointer.button = button;
+        emit(ev);
+    }
     // 口径必须和 press() 一致：press 用 hitTestEx(allowStyled=true, ACTIVE)，
     // 普通 hitTest 只命中 BINUI_INTERACTIVE —— 两者不一致时，"声明了 :hover/:active
     // 的普通元素"按下去有反馈、松开却永远不产生 CLICK（点击被静默吞掉）。
@@ -2190,13 +2252,36 @@ int BinUIRenderer::release(float x, float y) {
         std::fprintf(stderr, "[binui] Click on node #%d at (%.0f,%.0f)\n", id, x, y);
 
 
-    if (eventCallback_) {
-        Event ev;
+    {
+        Event ev{};
         ev.type = EventType::CLICK;
         ev.nodeId = static_cast<uint16_t>(id);
         ev.click.x = x;
         ev.click.y = y;
-        eventCallback_(ev);
+        emit(ev);
+    }
+    // 双击：同节点、400ms 内、位移 < 4px。报了双击就清掉基准，三连击不会再报一次。
+    {
+        const double now = AnimNow();
+        const bool dbl = lastClickId_ == static_cast<uint16_t>(id) &&
+                         now - lastClickT_ <= 0.4 &&
+                         std::fabs(x - lastClickX_) < 4.0f &&
+                         std::fabs(y - lastClickY_) < 4.0f;
+        if (dbl) {
+            Event ev{};
+            ev.type = EventType::DBL_CLICK;
+            ev.nodeId = static_cast<uint16_t>(id);
+            ev.click.x = x;
+            ev.click.y = y;
+            emit(ev);
+            lastClickT_ = 0.0;
+            lastClickId_ = 0xFFFF;
+        } else {
+            lastClickT_ = now;
+            lastClickId_ = static_cast<uint16_t>(id);
+            lastClickX_ = x;
+            lastClickY_ = y;
+        }
     }
     commitFocus(id, false);  // 点击过的节点成为键盘焦点（:focus 状态样式随之切换）；鼠标不点亮焦点环
     focusRing_ = false;      // 改用鼠标了：把键盘导航留下的焦点环收掉
@@ -2226,6 +2311,23 @@ void BinUIRenderer::commitFocus(int newId, bool showRing) {
     if (old == newId) return;
     refreshNodeStyle(old);
     refreshNodeStyle(newId);
+    // 键盘焦点变化（Tab / WASD / 点击 / API）——顺序与 DOM 一致：先失焦再获焦
+    if (old >= 0) {
+        Event ev{};
+        ev.type = EventType::FOCUS;
+        ev.nodeId = static_cast<uint16_t>(old);
+        ev.focus.focused = false;
+        ev.focus.prevId = newId < 0 ? 0xFFFF : static_cast<uint16_t>(newId);
+        emit(ev);
+    }
+    if (newId >= 0) {
+        Event ev{};
+        ev.type = EventType::FOCUS;
+        ev.nodeId = static_cast<uint16_t>(newId);
+        ev.focus.focused = true;
+        ev.focus.prevId = old < 0 ? 0xFFFF : static_cast<uint16_t>(old);
+        emit(ev);
+    }
 }
 
 // 焦点环（:focus-visible 语义）：键盘导航点亮，鼠标点击不点亮；2 秒无操作自动熄灭
@@ -2373,13 +2475,13 @@ bool BinUIRenderer::activateKeyboardFocus() {
         return true;
     }
 
-    if (eventCallback_) {
-        Event ev;
+    {
+        Event ev{};
         ev.type = EventType::CLICK;
         ev.nodeId = n.id;
         ev.click.x = n.x + n.width / 2.0f;
         ev.click.y = n.y + n.height / 2.0f;
-        eventCallback_(ev);
+        emit(ev);
     }
     return true;
 }
@@ -2824,11 +2926,12 @@ void BinUIRenderer::focus(uint16_t nodeId, bool viaKeyboard) {
     editRing_ = viaKeyboard;                      // 鼠标点进来的不画蓝环（键盘 Enter 进来的才画）
     refreshNodeStyle(static_cast<int>(nodeId));   // :focus 状态样式（正在编辑也算聚焦）
 
-    if (eventCallback_) {
-        Event ev;
-        ev.type = EventType::FOCUS;
+    {
+        Event ev{};
+        ev.type = EventType::EDIT;
         ev.nodeId = nodeId;
-        eventCallback_(ev);
+        ev.edit.editing = true;
+        emit(ev);
     }
 }
 
@@ -2863,18 +2966,20 @@ void BinUIRenderer::blur() {
         }
     }
 
-    if (changed && eventCallback_) {
-        Event ev;
-        ev.type = EventType::INPUT;
+    // 提交：CHANGE（与编辑中的逐字 INPUT 分开，宿主才分得清"还在打"和"打完了"）
+    if (changed) {
+        Event ev{};
+        ev.type = EventType::CHANGE;
         ev.nodeId = nodeId;
         ev.input.text = finalValue.c_str();
-        eventCallback_(ev);
+        emit(ev);
     }
-    if (eventCallback_) {
-        Event ev;
-        ev.type = EventType::FOCUS;
+    {
+        Event ev{};
+        ev.type = EventType::EDIT;
         ev.nodeId = nodeId;
-        eventCallback_(ev);
+        ev.edit.editing = false;
+        emit(ev);
     }
 }
 

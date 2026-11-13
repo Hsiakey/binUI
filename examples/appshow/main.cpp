@@ -1221,6 +1221,20 @@ int main(int argc, char* argv[]) {
         if (ev.type == EventType::CLICK)
             std::printf("[appshow] click node=%u (%.1f, %.1f)\n", (unsigned)ev.nodeId,
                         (double)ev.click.x, (double)ev.click.y);
+        // 右键菜单：引擎派发 CONTEXT_MENU（带节点 id），宿主用现成的弹窗把"点到了谁"显示出来
+        if (ev.type == EventType::CONTEXT_MENU && ev.nodeId != 0xFFFF) {
+            sh.openDialog("右键菜单（CONTEXT_MENU 事件）",
+                          "节点 #" + std::to_string(ev.nodeId) + "：" + sh.describe(ev.nodeId) +
+                              "\n引擎只报「右键 + 节点」，菜单长什么样归宿主 —— 和浏览器里 "
+                              "contextmenu 的约定一致。",
+                          false);
+        }
+    });
+
+    // 中键/右键：外壳把按键号一起交出来，宿主转手 press/release(button)
+    app.setButtonFn([&](float x, float y, int button, bool down) {
+        if (down) renderer.press(x, y, button);
+        else      renderer.release(x, y, button);
     });
 
     std::printf("[appshow] binUI 应用壳演示：4 页 / %d 节点\n", (int)renderer.getNodes().size());

@@ -76,10 +76,13 @@ extern "C" {
  * 旧宿主链新 DLL 照常工作；新宿主连旧 DLL 时找不到符号（链接/加载期报错），
  * 不会读错内存。
  *
+ * v3（0.14.0）：`BinUIEvent` 再追加 `dx` / `button` / `focused` / `editing` / `prev_id`，
+ * 新增指针（PRESS/RELEASE/MOVE/DBL_CLICK/CONTEXT_MENU/HOVER_LEAVE）、焦点与编辑
+ * （FOCUS/EDIT/CHANGE）、SCROLL、元素拖拽（RESIZE_START/END）、LOAD 事件。
  * v2（0.13.0）：`BinUIEvent` 尾部追加 `prop` / `iteration`（动画事件用），并新增
  * BINUI_EV_ANIM_END / ANIM_ITER / TRANS_END 三个事件类型 —— 结构体变大，所以
  * ABI 版本升到 2；宿主必须按新头文件重编（旧头文件 + 新 DLL 会被写出界）。 */
-#define BINUI_C_ABI_VERSION 2
+#define BINUI_C_ABI_VERSION 3
 
 BINUI_C_API const char* BINUI_C_CALL binui_version(void);      /* 库版本串（静态，勿释放） */
 BINUI_C_API int32_t     BINUI_C_CALL binui_abi_version(void);  /* = BINUI_C_ABI_VERSION */
@@ -121,7 +124,21 @@ typedef enum BinUIEventType {
      * 用法不变 —— 每帧 pump 之后照常 poll，不需要另外的接口。 */
     BINUI_EV_ANIM_END  = 9,   /* 关键帧动画整体结束：node_id + iteration（infinite 不报）*/
     BINUI_EV_ANIM_ITER = 10,  /* 关键帧动画迭代边界：node_id + iteration（1 起）*/
-    BINUI_EV_TRANS_END = 11   /* 属性过渡结束：node_id + prop（= BinUIAnimProp 数值）*/
+    BINUI_EV_TRANS_END = 11,  /* 属性过渡结束：node_id + prop（= BinUIAnimProp 数值）*/
+    /* v3 追加：指针/焦点/编辑/滚动/拖拽/加载 —— 与引擎 EventType 一一对应 */
+    BINUI_EV_PRESS       = 12, /* 按下：node_id + x/y + button */
+    BINUI_EV_RELEASE     = 13, /* 松开：node_id（按下时命中的节点）+ x/y + button */
+    BINUI_EV_MOVE        = 14, /* 鼠标移动：node_id（-1 = 空白）+ x/y */
+    BINUI_EV_DBL_CLICK   = 15, /* 双击：node_id + x/y */
+    BINUI_EV_CONTEXT_MENU= 16, /* 右键按下：node_id + x/y */
+    BINUI_EV_HOVER_LEAVE = 17, /* 离开节点：node_id */
+    BINUI_EV_FOCUS       = 18, /* 键盘焦点变化：node_id + focused（0/1）+ prev_id */
+    BINUI_EV_EDIT        = 19, /* 进入/退出文本编辑：node_id + editing（0/1）*/
+    BINUI_EV_CHANGE      = 20, /* 文本框提交：node_id + text */
+    BINUI_EV_SCROLL      = 21, /* 滚动位置变化：node_id + x/y（新位置）+ dx/dy（本次增量）*/
+    BINUI_EV_RESIZE_START= 22, /* 开始拖元素尺寸：node_id */
+    BINUI_EV_RESIZE_END  = 23, /* 拖完：node_id + x/y/width/height（最终矩形）*/
+    BINUI_EV_LOAD        = 24  /* 布局加载完成：node_id = 0 */
 } BinUIEventType;
 
 typedef struct BinUIEvent {
@@ -137,6 +154,11 @@ typedef struct BinUIEvent {
     int32_t     width, height; /* RESIZE */
     int32_t     prop;          /* TRANS_END：过渡的属性号（binui_renderer.h 的 ANIM_*）*/
     int32_t     iteration;     /* ANIM_END / ANIM_ITER：已完成的迭代次数 */
+    float       dx;            /* SCROLL：本次水平增量；WHEEL 时为 0 */
+    int32_t     button;        /* PRESS / RELEASE：0=左 1=右 2=中 */
+    int32_t     focused;       /* FOCUS：1=获得 0=失去 */
+    int32_t     editing;       /* EDIT：1=进入编辑 0=退出 */
+    int32_t     prev_id;       /* FOCUS：上一个焦点节点（无则 -1）*/
 } BinUIEvent;
 
 /* ============================ 节点 ============================ */

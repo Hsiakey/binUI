@@ -16,12 +16,23 @@ namespace binui {
 
 enum class EventType {
     CLICK,
-    INPUT,
-    RESIZE,
-    HOVER,
-    FOCUS,
+    DBL_CLICK, // v23：同一节点 400ms 内第二次点击（引擎自己判，不用宿主再接 WM_LBUTTONDBLCLK）
     PRESS,
-    SCROLL,
+    RELEASE,      // v23：松开（nodeId = 按下时命中的节点；鼠标可能已经移开）
+    MOVE,         // v23：鼠标移动（nodeId = 当前命中的最上层节点，-1 = 空白）
+    CONTEXT_MENU, // v23：右键按下（press(x,y,1) / WM_RBUTTONDOWN）
+    HOVER,        // 进入某节点
+    HOVER_LEAVE,  // v23：离开某节点（含鼠标移出窗口）
+    FOCUS,        // v23：键盘焦点变化：focus.focused（false 时 nodeId = 失去焦点的节点）
+    EDIT,         // v23：进入/退出文本编辑：edit.editing
+    INPUT,        // 编辑中逐字（含输入法上屏）
+    CHANGE,       // v23：提交（失焦或 Enter 退出且有改动）—— 与 INPUT 分开，宿主才分得清"还在打"和"打完了"
+    RESIZE,       // 窗口尺寸
+    RESIZE_START, // v23：开始拖元素尺寸（nodeId）
+    RESIZE_END,   // v23：拖完（nodeId + rect = 最终矩形）
+    WHEEL,        // v23：滚轮（位置 + 增量 + 被滚动的容器）
+    SCROLL,       // 滚动位置变化（scroll.x/y = 新位置，dx/dy = 本次增量）
+    LOAD,         // v23：布局解析完成（回调必须在 loadLayout 之前设好）
     VIDEO_PLAY,   // <video> 开始播放（点击切换/键盘/API 触发）
     VIDEO_PAUSE,  // <video> 暂停
     VIDEO_SEEK,   // <video> 进度跳转（控制条点击/拖动；引擎内部校正不触发）
@@ -32,9 +43,15 @@ struct Event {
     EventType type;
     uint16_t  nodeId;
     union {
-        struct { float x, y; } click;
-        struct { const char* text; } input;
-        struct { int width, height; } resize;
+        struct { float x, y; } click;              // CLICK / DBL_CLICK / PRESS / RELEASE / MOVE / CONTEXT_MENU
+        struct { float x, y; int button; } pointer; // 同上，带按下的键（0=左 1=右 2=中）
+        struct { const char* text; } input;        // INPUT / CHANGE
+        struct { int width, height; } resize;      // RESIZE（窗口）
+        struct { float x, y, w, h; } rect;         // RESIZE_END（元素）
+        struct { float x, y, dx, dy; } scroll;     // SCROLL
+        struct { float x, y, dy; } wheel;          // WHEEL
+        struct { bool focused; uint16_t prevId; } focus;  // FOCUS
+        struct { bool editing; } edit;             // EDIT
     };
 };
 
@@ -235,10 +252,13 @@ public:
     bool isHovered(uint16_t nodeId) const { return hoverId_ == (int)nodeId; }
     bool isPressed(uint16_t nodeId) const { return pressedId_ == (int)nodeId; }
 
-    void setHover(float x, float y);  // 鼠标移动：更新悬停节点（进入时触发 HOVER 事件）
-    void clearHover();                // 鼠标离开窗口
-    int press(float x, float y);      // 按下：记录按下节点（INPUT 聚焦），触发 PRESS 事件
-    int release(float x, float y);    // 松开：仍在原节点上则触发 CLICK；返回点击节点 id（-1 无）
+    void setHover(float x, float y);  // 鼠标移动：更新悬停节点（触发 MOVE / HOVER / HOVER_LEAVE）
+    void clearHover();                // 鼠标离开窗口（触发 HOVER_LEAVE）
+    // button：0=左 1=右（→ CONTEXT_MENU）2=中
+    int press(float x, float y, int button = 0);
+    // 松开：仍在原节点上则触发 CLICK（400ms 内同节点第二次 → DBL_CLICK）；
+    // 返回点击节点 id（-1 无）
+    int release(float x, float y, int button = 0);
     void cancelPress();               // 取消按下（如窗口失焦），不触发点击
 
     // ============ 键盘导航（焦点） ============
@@ -610,10 +630,23 @@ private:
     std::vector<uint32_t> imageGen_; // 与 imageOrder_ 平行的换图版本号
     std::unordered_map<std::string, FontResource> fonts_;
     EventCallback eventCallback_;
+    // 事件出口：所有事件都从这里走（宿主没设回调时静默丢弃）
+    void emit(const Event& ev) { if (eventCallback_) eventCallback_(ev); }
+    void emitEvent(EventType t, uint16_t nodeId) {
+        Event ev{};
+        ev.type = t;
+        ev.nodeId = nodeId;
+        emit(ev);
+    }
     EditState edit_;
     WindowDesc winDesc_;
     int hoverId_ = -1;
     int pressedId_ = -1;
+    // 双击判定（v23）：同节点 + 400ms 内 + 位移 < 4px。引擎自己判，宿主不用再接
+    // WM_LBUTTONDBLCLK（那条路在自绘窗口里经常因为 SetCapture/焦点变化收不到）。
+    double   lastClickT_ = 0.0;
+    uint16_t lastClickId_ = 0xFFFF;
+    float    lastClickX_ = 0.0f, lastClickY_ = 0.0f;
     int keyboardId_ = -1;
     bool   focusRing_ = false;         // 焦点环是否点亮（2 秒无操作自动熄灭）
     double focusRingHideAt_ = 0;       // 自动熄灭时刻（AnimNow 时钟）
