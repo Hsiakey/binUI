@@ -115,42 +115,16 @@
         <button id="btn-toast" class="btn-s" style="position:absolute; left:156; top:368; width:120; height:32">弹个提示</button>
         <span class="h2" style="position:absolute; left:292; top:376; width:600; height:16">弹窗 = 遮罩 + 面板两层，面板比遮罩晚 40ms 进场</span>
 
-        <!-- 可缩放元素：`resize` 属性能拖的边/角由作者点名，拖拽本身在引擎里
-             （光标、热区、最小尺寸都归引擎），宿主只读回尺寸画读数。
-             子节点是**流式 + 百分比**：拖完引擎会局部重排这棵子树，内容跟着新盒子走。 -->
-        <span class="h2" style="position:absolute; left:24; top:402; width:980; height:16">可缩放元素（resize）：鼠标贴到开着的边/角上是系统 resize 光标，拖动改盒子；里面的子节点按百分比/流式跟着重排</span>
-
-        <div id="rs-all" class="rs" style="position:absolute; left:24; top:424; width:470; height:212; overflow:hidden; resize:both; padding:18">
-            <span class="rs-t" style="width:100%; height:18">resize: both —— 四边 + 四角</span>
-            <span id="rs-sz" class="rs-v" style="width:100%; height:26">470 × 212</span>
-            <span id="rs-para" class="rs-d" style="width:100%">这段正文没有写 height：盒子一变窄它就自然折行、节点跟着变高，下面那行 flex 子项和三条百分比色条就全被顶下去。</span>
-            <div id="rs-chips" style="width:100%; height:26; display:flex; gap:8; margin-top:8">
-                <div class="rs-chip" style="flex:1; height:26"></div>
-                <div class="rs-chip" style="flex:1; height:26"></div>
-                <div class="rs-chip" style="flex:1; height:26"></div>
-            </div>
-            <div class="rs-bar" style="width:62%; height:8; margin-top:10"></div>
-            <div class="rs-bar" style="width:40%; height:8; margin-top:6"></div>
-            <div class="rs-bar" style="width:52%; height:8; margin-top:6"></div>
+        <!-- 布局与重排：内容太多，概览里塞不下 → 干脆做成子页面，按钮触发、从右边切入。
+             子页面 = 视口横向滚动 1058px（竖页带整条滑出去，子页面从右边顶进来）。 -->
+        <div id="rs-entry" class="rs" style="position:absolute; left:24; top:424; width:1010; height:196; padding:22">
+            <span class="rs-t" style="width:100%; height:22">布局与重排 · 子页面</span>
+            <span class="rs-d" style="width:100%; font-size:12">拖卡片的边/角 → 引擎按新内容盒重排：文字折行、flex 重新分配、百分比 / auto / min·max 一起走。</span>
+            <span class="rs-d" style="width:100%; font-size:12; margin-top:6">子页面里有四块，空间够了：① 流式+折行+flex ② min/max 钳制 ③ 百分比/auto ④ 只开对角。从右边滑进来。</span>
+            <button id="btn-sub" class="btn-p" style="width:180; height:34; margin-top:16">进入 → 布局与重排</button>
         </div>
 
-        <div id="rs-corner" class="rs" style="position:absolute; left:510; top:424; width:250; height:212; overflow:hidden; resize:top-left bottom-right; padding:16">
-            <span class="rs-t" style="width:100%; height:18">只开两个对角</span>
-            <span id="rs-sz2" class="rs-v" style="width:100%; height:26">250 × 212</span>
-            <span class="rs-d" style="width:100%; height:16">边中间不响应（位图里只开了 TL / BR）</span>
-            <div class="rs-bar" style="width:78%; height:8; margin-top:12"></div>
-            <div class="rs-bar" style="width:44%; height:8; margin-top:7"></div>
-        </div>
-
-        <div id="rs-h" class="rs" style="position:absolute; left:776; top:424; width:258; height:212; overflow:hidden; resize:horizontal; padding:16">
-            <span class="rs-t" style="width:100%; height:18">只有左右两条边</span>
-            <span id="rs-sz3" class="rs-v" style="width:100%; height:26">258 × 212</span>
-            <span class="rs-d" style="width:100%; height:16">高度锁死，光标只在这两条边变 ↔</span>
-            <div class="rs-bar" style="width:70%; height:8; margin-top:12"></div>
-            <div class="rs-bar" style="width:36%; height:8; margin-top:7"></div>
-        </div>
-
-        <span class="h2" style="position:absolute; left:24; top:650; width:1010; height:16">引擎只改这一个盒子 + 局部重排它的子树：绝对定位的子节点不动，流式/百分比的子节点跟着走；最小 8px。</span>
+        <span class="h2" style="position:absolute; left:24; top:650; width:1010; height:16">子页面用视口 X 滚动切入（和上下切页同一个 scrollTo，只是轴不同）；返回按钮滑回去。</span>
     </div>
 
     <!-- ============ 页面：数据 ============ -->
@@ -265,6 +239,54 @@
         <div class="rule" style="position:absolute; left:24; top:330; width:1010; height:1"></div>
         <button id="btn-danger" class="btn-d" style="position:absolute; left:24; top:352; width:150; height:34">清空全部数据</button>
         <span class="h2" style="position:absolute; left:190; top:360; width:600; height:16">会弹一个需要确认的弹窗（同样的组件，不同文案）</span>
+    </div>
+
+    <!-- ============ 子页面：布局与重排（从右边切入） ============ -->
+    <!-- 排在页带右边（left:1058）：视口 X 滚动 1058px 就把它从右边顶进来，
+         竖页带整条滑出去再换回来。和上下切页是同一个 scrollTo，只是轴不同。 -->
+    <div id="sub-page" style="position:absolute; left:1058; top:0; width:1058; height:676; background:#FFFFFF">
+        <button id="btn-back" class="btn-s" style="position:absolute; left:24; top:18; width:96; height:30">← 返回</button>
+        <span class="h1" style="position:absolute; left:136; top:16; width:500; height:26">布局与重排</span>
+        <span class="h2" style="position:absolute; left:136; top:46; width:900; height:16">拖卡片的边/角：文字折行、flex 重新分配、百分比与 min·max 钳制都在同一帧里重算</span>
+
+        <div id="pg-card" class="rs" style="position:absolute; left:24; top:84; width:640; height:296; overflow:hidden; resize:both; padding:20">
+            <span class="rs-t" style="width:100%; height:20">① 流式 + 文字折行 + flex</span>
+            <span id="pg-sz" class="rs-v" style="width:100%; height:26">640 × 296</span>
+            <span id="pg-para" class="rs-d" style="width:100%; font-size:12">这段正文没有写 height：卡片一变窄它就折行、节点跟着变高，下面那行 flex 子项和两条百分比色条一起重排。四边四角都能拖，拖左边时右边界不动。</span>
+            <div id="pg-chips" style="width:100%; height:34; display:flex; gap:10; margin-top:10">
+                <div class="rs-chip" style="flex:1; height:34"></div>
+                <div class="rs-chip" style="flex:1; height:34"></div>
+                <div class="rs-chip" style="flex:1; height:34"></div>
+                <div class="rs-chip" style="flex:1; height:34"></div>
+            </div>
+            <div class="rs-bar" style="width:72%; height:10; margin-top:12"></div>
+            <div class="rs-bar" style="width:44%; height:10; margin-top:8"></div>
+        </div>
+
+        <div id="pg-clamp" class="rs" style="position:absolute; left:690; top:84; width:344; height:296; overflow:hidden; resize:both; padding:18; min-width:220; max-width:420">
+            <span class="rs-t" style="width:100%; height:20">② min/max 钳制</span>
+            <span id="pg-sz2" class="rs-v" style="width:100%; height:26">344 × 296</span>
+            <span class="rs-d" style="width:100%; font-size:12">min-width:220 / max-width:420：往两边拖过头会被钳住，用的就是窗口 resize 那条 ClampSize。</span>
+            <div class="rs-bar" style="width:100%; height:10; margin-top:12"></div>
+        </div>
+
+        <div id="pg-pct" class="rs" style="position:absolute; left:24; top:400; width:640; height:240; overflow:hidden; resize:both; padding:18">
+            <span class="rs-t" style="width:100%; height:20">③ 百分比 / auto 宽度</span>
+            <span id="pg-sz3" class="rs-v" style="width:100%; height:26">640 × 240</span>
+            <span class="rs-d" style="width:100%; font-size:12">三条分别是 30% / 60% / 100%，拖宽拖窄都按内容盒重算。</span>
+            <div class="rs-bar" style="width:30%; height:10; margin-top:12"></div>
+            <div class="rs-bar" style="width:60%; height:10; margin-top:8"></div>
+            <div class="rs-bar" style="width:100%; height:10; margin-top:8"></div>
+        </div>
+
+        <div id="pg-corner" class="rs" style="position:absolute; left:690; top:400; width:344; height:240; overflow:hidden; resize:top-left bottom-right; padding:18">
+            <span class="rs-t" style="width:100%; height:20">④ 只开两个对角</span>
+            <span id="pg-sz4" class="rs-v" style="width:100%; height:26">344 × 240</span>
+            <span class="rs-d" style="width:100%; font-size:12">位图里只开了 top-left / bottom-right：两条边的中间段不响应。</span>
+            <div class="rs-bar" style="width:80%; height:10; margin-top:12"></div>
+        </div>
+
+        <span class="h2" style="position:absolute; left:24; top:652; width:1010; height:16">子页面 = 视口 X 滚动 1058px：竖页带滑出去，子页面从右边顶进来；返回按钮把它滑回去。</span>
     </div>
 
     </div><!-- /viewport -->

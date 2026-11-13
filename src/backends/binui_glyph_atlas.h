@@ -424,6 +424,22 @@ public:
         if (!built.quads.empty()) runs_.emplace(key, std::move(built));
     }
 
+    // 中文避头点：这些标点不能出现在行首（CSS line-break: normal 的常见规则）。
+    // 折行时多带一个字符（允许极轻微超出 maxW）比行首孤零零一个"。"自然得多。
+    static bool NoLineStart(uint32_t cp) {
+        switch (cp) {
+            case 0x3001: case 0x3002:                     // 、。
+            case 0xFF0C: case 0xFF1A: case 0xFF1B:        // ，：；
+            case 0xFF01: case 0xFF1F:                     // ！？
+            case 0x300B: case 0x300D: case 0x300F:        // 》」』
+            case 0x3011: case 0xFF09:                     // 】）
+            case 0x2026: case 0xFF5E:                     // …～
+                return true;
+            default:
+                return false;
+        }
+    }
+
     // 自动换行绘制。对齐：0=左 1=居中 2=右（相对 [x, x+maxW]）
     void drawTextWrapped(float x, float y, float maxW, float size, int weight,
                          const std::string& utf8, uint32_t color, int align, bool italic,
@@ -448,6 +464,9 @@ public:
                 end += m.len;
             }
             if (end == pos) end++;
+            // 避头点：行首那个字符不能是句读标点，把它并到本行末尾
+            if (end < cps.size() && cps[end] != '\n' && NoLineStart(cps[end]))
+                end++;
             const bool newline = end < cps.size() && cps[end] == '\n';
             const size_t segEnd = (end > pos && cps[pos] != '\n') ? end : pos;
             if (segEnd > pos) {

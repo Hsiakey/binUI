@@ -126,6 +126,11 @@ struct Shell {
     float  pageH = (float)kPageH;   // 一页高度（= 视口高度），自检打印用
     double scrollFrom = 0.0, scrollTo = 0.0, scrollT0 = 0.0, scrollDur = 0.0;
     bool scrolling = false;
+    // 子页面（布局与重排）：视口 **X** 滚动 0 ↔ kSubW，按钮触发、从右边切入
+    static constexpr float kSubW = 1058.0f;
+    uint16_t idSubPage = 0, idBtnSub = 0, idBtnBack = 0;
+    bool   subOpen = false, subSliding = false;
+    double subX = 0.0, subFrom = 0.0, subTo = 0.0, subT0 = 0.0, subDur = 0.0;
     bool modalOpen = false;
     bool confirmMode = false;
     bool sw[kSwitch] = {true, false, true, false};
@@ -316,6 +321,36 @@ struct Shell {
     // 组件的坐标是**布局**坐标（页带里第 3 页的那一段），屏幕坐标要减掉页带滚动量。
     // 宿主自己算脏矩形和命中时都必须换算，否则 ut 的不是同一套坐标。
     float ScreenY(float layoutY) const { return layoutY - static_cast<float>(scrollPos); }
+    float ScreenX(float layoutX) const { return layoutX - static_cast<float>(subX); }
+
+    // 子页面四张卡片的读数：引擎拖的是节点矩形，宿主每帧读回（不改任何状态）
+    void updateSubReadout() {
+        struct Row { uint16_t card; uint16_t label; };
+        static Row rows[4] = {};
+        if (!rows[0].card) {
+            rows[0] = { nid("pg-card"),   nid("pg-sz")  };
+            rows[1] = { nid("pg-clamp"),  nid("pg-sz2") };
+            rows[2] = { nid("pg-pct"),    nid("pg-sz3") };
+            rows[3] = { nid("pg-corner"), nid("pg-sz4") };
+        }
+        static std::string cache[4];
+        for (int i = 0; i < 4; i++) {
+            if (!rows[i].card || !rows[i].label) continue;
+            const BinUIRenderer::NodeInfo* n = nullptr;
+            for (const auto& k : r.getNodes())
+                if (k.id == rows[i].card) { n = &k; break; }
+            if (!n) continue;
+            char buf[48];
+            std::snprintf(buf, sizeof(buf), "%.0f × %.0f", (double)n->width, (double)n->height);
+            if (cache[i] == buf) continue;
+            cache[i] = buf;
+            r.setText(rows[i].label, cache[i]);
+            // 脏矩形在屏幕坐标：布局矩形 − 视口滚动偏移（子页面是 X=1058）
+            float bx, by, bw, bh;
+            if (r.invalidRect(rows[i].card, bx, by, bw, bh, 4.0f))
+                app.invalidateRect((int)ScreenX(bx), (int)ScreenY(by), (int)bw, (int)bh);
+        }
+    }
 
     void touchBubble(const Bubble& b) {
         const float pad = 26.0f;
@@ -469,6 +504,12 @@ struct Shell {
     // 跨几页就滚多久，中间那几页会在滚的过程中从眼前过去。
     void goPage(int next) {
         if (next < 0 || next >= kPages || next == curPage) return;
+        // 在子页面里点侧栏：先把横向偏移瞬间归零（切页优先），再走上下滚动
+        if (subOpen || subX != 0.0) {
+            subOpen = false;
+            subSliding = false;
+            subX = 0.0;
+        }
         const int prev = curPage;
         curPage = next;
 
@@ -496,6 +537,50 @@ struct Shell {
                   "ms（跨 " + std::to_string(std::abs(next - prev)) + " 页）");
     }
 
+    // ---- 子页面：视口横向滚动切入/退回 ----
+    // 和上下切页共用同一个 scrollTo：竖页带在 x 0..1058，子页面排在 x 1058..2116。
+    // 滚到 1058 时竖页带整条滑出去、子页面从右边顶进来；返回就滚回 0。
+    void openSub() {
+        if (subOpen) return;
+        subOpen = true;
+        curPage = 0;
+        subFrom = subX;
+        subTo = kSubW;
+        subT0 = now;
+        subDur = 0.30;
+        subSliding = true;
+        setStatus("子页面 · 布局与重排：视口 X 滚动 1058px（从右边切入）");
+    }
+    void closeSub() {
+        if (!subOpen) return;
+        subOpen = false;
+        subFrom = subX;
+        subTo = 0.0;
+        subT0 = now;
+        subDur = 0.26;
+        subSliding = true;
+        setStatus("返回概览（滑回 0）");
+    }
+    void stepSub() {
+        if (!subSliding || !idViewport) return;
+        const double k = subDur <= 0.0 ? 1.0 : std::min(1.0, (now - subT0) / subDur);
+        const float e = 1.0f - (1.0f - (float)k) * (1.0f - (float)k);   // ease-out
+        subX = subFrom + (subTo - subFrom) * e;
+        if (k >= 1.0) {
+            subSliding = false;
+            subX = subTo;
+        }
+        applyScroll();
+    }
+    // 视口滚动 = (subX, scrollPos)：两条轴各归各的动画管，写回时一起提交
+    void applyScroll() {
+        if (!idViewport) return;
+        r.scrollTo(idViewport, (float)subX, (float)scrollPos);
+        float bx, by, bw, bh;
+        if (r.invalidRect(idViewport, bx, by, bw, bh, 2.0f))
+            app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
+    }
+
     // 每帧推进滚动：只改引擎的滚动偏移，命中测试/裁剪/脏矩形都由引擎自己算
     void stepScroll() {
         if (!scrolling || !idViewport) return;
@@ -503,14 +588,11 @@ struct Shell {
                        : std::min(1.0, (now - scrollT0) / scrollDur);
         const float e = 1.0f - (1.0f - (float)k) * (1.0f - (float)k);   // ease-out
         scrollPos = scrollFrom + (scrollTo - scrollFrom) * e;
-        r.scrollTo(idViewport, 0.0f, (float)scrollPos);
-        float bx, by, bw, bh;
-        if (r.invalidRect(idViewport, bx, by, bw, bh, 2.0f))
-            app.invalidateRect((int)bx, (int)by, (int)bw, (int)bh);
         if (k >= 1.0) {
             scrolling = false;
             scrollPos = scrollTo;
         }
+        applyScroll();
     }
     void openDialog(const std::string& title, const std::string& body, bool confirm) {
         if (modalOpen) return;
@@ -702,6 +784,11 @@ int main(int argc, char* argv[]) {
     addTarget(sh.nid("win-min"));
     addTarget(sh.nid("win-max"));
     addTarget(sh.nid("win-close"));
+    // 子页面入口 / 返回（都排在视口里，命中走引擎）
+    sh.idBtnSub = sh.nid("btn-sub");
+    sh.idBtnBack = sh.nid("btn-back");
+    addTarget(sh.idBtnSub);
+    addTarget(sh.idBtnBack);
 
     auto patch = [&](uint16_t id) -> const BinUIRenderer::NodeInfo* {
         for (const auto& n : renderer.getNodes())
@@ -710,11 +797,6 @@ int main(int argc, char* argv[]) {
     };
 
     app.setDrawFn([&](IBinUIGfx& gfx, const void* clip) { drawUi(gfx, renderer, clip); });
-
-    // 可缩放面板（第 1 页）：拖拽在引擎里，宿主只把节点矩形读回来当读数
-    const uint16_t rsIds[3] = { sh.nid("rs-all"), sh.nid("rs-corner"), sh.nid("rs-h") };
-    const uint16_t rsTxt[3] = { sh.nid("rs-sz"), sh.nid("rs-sz2"), sh.nid("rs-sz3") };
-    std::string rsLast[3];
 
     app.setMoveFn([&](float x, float y) {
         const int old = renderer.hoveredNode();
@@ -802,6 +884,9 @@ int main(int argc, char* argv[]) {
                              (sh.sw[i] ? "开" : "关") + "（状态存在宿主，引擎只给 setVisible）");
                 return;
             }
+        // 子页面：进入 / 返回（从右边切入、滑回去）
+        if (id == sh.idBtnSub) { sh.openSub(); return; }
+        if (id == sh.idBtnBack) { sh.closeSub(); return; }
         // 页面里的按钮
         if (id == sh.nid("btn-open")) {
             sh.openDialog("多级组件弹窗",
@@ -920,11 +1005,12 @@ int main(int argc, char* argv[]) {
     const char* pendingReport = nullptr;
     auto demoReport = [&](const char* tag) {
         // 滚动偏移直接问引擎（scrollState 是遍历/命中用的同一份状态）
-        double sy = 0.0;
-        if (const auto* ss = renderer.scrollState(sh.idViewport)) sy = ss->y;
+        double sy = 0.0, sx = 0.0;
+        if (const auto* ss = renderer.scrollState(sh.idViewport)) { sy = ss->y; sx = ss->x; }
         const int shown = (int)std::lround(sy / kPageH);
-        std::printf("[demo] %-11s t=%.2f 滚动=%.0f（看第%d页）veil=%.2f rows=",
-                    tag, demoT, sy, shown + 1, (double)renderer.drawOpacity(idVeil));
+        std::printf("[demo] %-11s t=%.2f 滚动=(%.0f,%.0f)（看第%d页/子页 %s）veil=%.2f rows=",
+                    tag, demoT, sx, sy, shown + 1, sh.subOpen ? "开" : "关",
+                    (double)renderer.drawOpacity(idVeil));
         for (int i = 0; i < kRows; i++) std::printf("%.2f ", (double)renderer.drawOpacity(sh.rowIds[i]));
         std::printf("\n");
         if (!sh.bubs.empty()) {
@@ -947,13 +1033,13 @@ int main(int argc, char* argv[]) {
             }
         }
         if (sh.rsCursorCorner > 0) {
-            const auto* n = patch(sh.nid("rs-all"));
-            const auto* para = patch(sh.nid("rs-para"));
+            const auto* n = patch(sh.nid("pg-card"));
+            const auto* para = patch(sh.nid("pg-para"));
             float chip = 0.0f;
             for (const auto& k : renderer.getNodes())
-                if (k.parentId == sh.nid("rs-chips")) { chip = k.width; break; }
+                if (k.parentId == sh.nid("pg-chips")) { chip = k.width; break; }
             // 光标 kind 与 BinUIRenderer::CursorKind 同值：3=上下 4=左右 5=⤡ 6=⤢
-            std::printf("[demo] %-11s 可缩放面板 %.0f×%.0f（拖动前 470×212）"
+            std::printf("[demo] %-11s 子页面卡片 %.0f×%.0f（拖动前 640×296）"
                         "光标 右边缘=%d 右下角=%d 进入缩放态=%d 脏矩形宽=%.0f\n",
                         "", n ? (double)n->width : 0.0, n ? (double)n->height : 0.0,
                         sh.rsCursorEdge, sh.rsCursorCorner, (int)sh.rsWasResizing, (double)sh.rsDirty);
@@ -995,8 +1081,13 @@ int main(int argc, char* argv[]) {
                 {4.40, 2,    0.0f,    0.0f, "bub-pop"},    // 点一块组件（坐标由宿主现算）
                 {4.52, 1,    0.0f,    0.0f, "bub-pop-mid"},
                 {5.10, 1,    0.0f,    0.0f, "bub-respawn"},
-                {5.30, 0,   50.0f,  139.0f, "nav-0-back"},  // 回第 1 页（可缩放面板）
-                {5.75, 3,    0.0f,    0.0f, "rs-drag"},     // 拖 rs-all 的右下角（引擎接管）
+                {5.30, 0,   50.0f,  139.0f, "nav-0-back"},  // 回第 1 页（"布局与重排"入口）
+                {5.70, 4,    0.0f,    0.0f, "sub-open"},    // 点"进入"→ 子页面从右边切入
+                {6.10, 1,    0.0f,    0.0f, "sub-in"},
+                {6.40, 5,    0.0f,    0.0f, "sub-drag"},    // 拖子页面第一张卡的右下角
+                {6.55, 1,    0.0f,    0.0f, "sub-drag-done"},
+                {6.95, 6,    0.0f,    0.0f, "sub-back"},    // 点"返回"→ 滑回去
+                {7.25, 1,    0.0f,    0.0f, "back-in"},
             };
             const int n = (int)(sizeof(steps) / sizeof(steps[0]));
             if (demoStep < n && demoT > steps[demoStep].at) {
@@ -1036,6 +1127,39 @@ int main(int argc, char* argv[]) {
                         onRelease(ex - 210.0f, ey - 50.0f);
                     }
                 }
+                if (s.kind == 4) {
+                    // 点"进入布局与重排"（入口按钮中心按名字现算）
+                    const auto* b = patch(sh.nid("btn-sub"));
+                    if (b) autoClick(b->x + b->width * 0.5f, b->y + b->height * 0.5f);
+                }
+                if (s.kind == 5) {
+                    // 子页面第一张卡片的右下角：拖拽走引擎，脏矩形/局部重排全自动
+                    // 屏幕坐标 = 布局坐标 − 视口滚动(subX, scrollPos)
+                    const auto* n = patch(sh.nid("pg-card"));
+                    const auto* para = patch(sh.nid("pg-para"));
+                    if (n) {
+                        sh.rsParaBefore = para ? para->height : 0.0f;
+                        for (const auto& k : renderer.getNodes())
+                            if (k.parentId == sh.nid("pg-chips")) { sh.rsChipBefore = k.width; break; }
+                        const float ex = sh.ScreenX(n->x + n->width - 1.0f);
+                        const float ey = sh.ScreenY(n->y + n->height - 1.0f);
+                        sh.rsCursorEdge   = (int)renderer.cursorAt(ex, sh.ScreenY(n->y + n->height * 0.5f));
+                        sh.rsCursorCorner = (int)renderer.cursorAt(ex, ey);
+                        renderer.setHover(ex, ey);
+                        onPress(ex, ey);
+                        sh.rsWasResizing = renderer.isResizing();
+                        renderer.setHover(ex - 260.0f, ey - 60.0f);
+                        float dx = 0, dy = 0, dw = 0, dh = 0;
+                        sh.rsDirty = renderer.takeResizeDirty(dx, dy, dw, dh) ? dw : 0.0f;
+                        onRelease(ex - 260.0f, ey - 60.0f);
+                    }
+                }
+                if (s.kind == 6) {
+                    // 点"返回"（在子页面里：屏幕坐标要减 subX）
+                    const auto* b = patch(sh.nid("btn-back"));
+                    if (b) autoClick(sh.ScreenX(b->x + b->width * 0.5f),
+                                     sh.ScreenY(b->y + b->height * 0.5f));
+                }
                 pendingReport = s.tag;
                 demoStep++;
             } else if (demoStep >= n && demoT > steps[n - 1].at + 0.30) {
@@ -1047,19 +1171,9 @@ int main(int argc, char* argv[]) {
         // 宿主的编排时钟是上面的 sh.now，两者互不干扰。
         sh.frameMs = sh.frameMs * 0.9f + dt * 1000.0f * 0.1f;
         sh.stepScroll();
-        // 第 1 页的三块可缩放面板：读数跟着节点矩形走（引擎拖、宿主只读，不反向写尺寸）
-        if (sh.curPage == 0) {
-            for (int i = 0; i < 3; i++) {
-                const auto* n = patch(rsIds[i]);
-                if (!n) continue;
-                char buf[48];
-                std::snprintf(buf, sizeof(buf), "%.0f × %.0f", (double)n->width, (double)n->height);
-                if (rsLast[i] == buf) continue;
-                rsLast[i] = buf;
-                renderer.setText(rsTxt[i], rsLast[i]);
-                sh.touch(rsTxt[i]);
-            }
-        }
+        sh.stepSub();
+        // 子页面四张卡片的尺寸读数（引擎拖、宿主只读，不反向写尺寸）
+        if (sh.subOpen && !sh.subSliding) sh.updateSubReadout();
         // 只在这一页、且页带没在滚的时候推进组件：
         //   · 不在这一页 → 省 ~600 次 setStyleFloat/帧
         //   · 正在滚 → 宿主算的脏矩形是"滚定后"的窗口坐标，滚动中会错位（引擎按滚动偏移
