@@ -56,7 +56,10 @@
         .set-d { font-size:11; color:#94A3B8; }
 
         /* ---- 半透明组件池：深色底（浅底上看不出 alpha 的合成差异） ---- */
-        .pool { background:linear-gradient(180deg, #0B1424, #17263F); border:1px solid #22314A;
+        /* 池子底板：抖动之后 24px 的色带台阶没了，渐变本身又只跨 12 个色阶（R），
+           看起来就像"底板不存在"。这里把渐变拉宽一点、边框提亮一档 —— 抖动负责平滑，
+           对比度负责"这块画布在"。 */
+        .pool { background:linear-gradient(180deg, #0A1220, #22375A); border:1px solid #34496C;
                 border-radius:16; }
         /* 组件里的文字：半透明组件的标题/副标题（也吃节点透明度，重叠时会被"透"过去） */
         .blob-t { font-size:13; font-weight:700; color:rgba(255,255,255,0.92); }

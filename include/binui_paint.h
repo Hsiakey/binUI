@@ -120,6 +120,10 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
     const bool horizontal = (p->gradDir == BINUI_GRAD_H);
     const float span = horizontal ? w : h;
     if (span <= 0.0f) return 0;
+    // 半透明渐变也要细分/抖动：alpha 0.2~0.3 的色块叠在深底上时，24px 一条的台阶
+    // 肉眼一样看得出来（"泡泡"的内层就是这种）。判定提前到这里，下面两处细分都要用。
+    const bool translucent = ((p->gradFrom >> 24) & 0xFFu) != 0xFFu ||
+                             ((p->gradTo >> 24) & 0xFFu) != 0xFFu;
     float r = radius > 0.5f ? std::min(radius, std::min(w, h) * 0.5f) : 0.0f;
     if (2.0f * r > span) r = span * 0.5f;
 
@@ -143,7 +147,7 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
             };
             const float dmax = std::max(delta(16), std::max(delta(8), delta(0)));
             const float stepPx = dmax > 0.0f ? midLen / dmax : midLen;
-            const float bandPx = stepPx > 6.0f ? 1.0f : 32.0f;
+            const float bandPx = (stepPx > 6.0f || translucent) ? 1.0f : 32.0f;
             const int mb = std::max(1, std::min(room, (int)std::ceil(midLen / bandPx)));
             for (int i = 1; i <= mb; i++)
                 edges[ne++] = mid0 + midLen * (float)i / (float)mb;
@@ -160,7 +164,7 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
         };
         const float dmax0 = std::max(delta0(16), std::max(delta0(8), delta0(0)));
         const float stepPx0 = dmax0 > 0.0f ? span / dmax0 : span;
-        const float bandPx0 = stepPx0 > 6.0f ? 1.0f : 24.0f;
+        const float bandPx0 = (stepPx0 > 6.0f || translucent) ? 1.0f : 24.0f;
         const int n = std::min(std::max((int)std::ceil(span / bandPx0), 2), cap);
         for (int i = 1; i <= n; i++) edges[ne++] = span * (float)i / (float)n;
     }
@@ -171,9 +175,6 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
     // 每两条之间浮出一条横纹。深色底上（泡泡池的薄膜）能一眼看出横向条纹。
     // 半透明时把切点吸到整像素、条带首尾相接不重叠；不透明的老路径逐像素不变
     // （`pixels` 金标就是靠这条保证的）。
-    const bool translucent = ((p->gradFrom >> 24) & 0xFFu) != 0xFFu ||
-                             ((p->gradTo >> 24) & 0xFFu) != 0xFFu;
-
     int count = 0;
     float dithR = 0.0f, dithG = 0.0f, dithB = 0.0f;   // 沿渐变方向的取整误差（1D 抖动）
     for (int i = 0; i + 1 < ne && count < cap; i++) {
