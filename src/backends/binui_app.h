@@ -145,21 +145,19 @@ inline int DisplayRefreshHzFor(HWND hwnd) {
     return hz;
 }
 
-// 实际用来算帧预算的频率：**默认封顶 60Hz**，`BINUI_FPS=<n>` 可改（0 = 跟显示器）。
+// 实际用来算帧预算的频率：**默认跟显示器刷新率**，`BINUI_FPS=<n>` 可封顶（0 = 跟显示器）。
 //
-// 为什么封顶：120/144Hz 屏上"每帧都出"意味着 present 每帧都要等一次垂直同步，
-// 实测 120Hz 下 20 块半透明组件的池子页要花掉 ~40% 一个核，其中大头是呈现等待，
-// 画面本身的 update+draw 只有 0.3ms。UI 没有"必须 120fps"的场景，60 已经够顺
-// （动画本身是亚像素抗锯齿的），砍一半刷新就是砍一半开销。
+// 曾经想把默认值封顶到 60Hz（省一半呈现开销），但**页切换那种整页横移的动画立刻变糙**：
+// 1058px 的滑动在 200ms 里走完，120Hz 是 2.6px/帧、60Hz 是 5.3px/帧，肉眼差得很明显。
+// 交互正在发生的时候值得给满刷新率 —— 真正的省电收益在"没动画/后台/最小化"那几条
+// （见 renderFrame 的节拍闸门与 IsIconic 短路），不在砍活跃帧率。
 inline int FrameHzFor(HWND hwnd) {
     const char* e = std::getenv("BINUI_FPS");
     if (e && *e) {
         const int v = std::atoi(e);
         if (v > 0 && v <= 360) return v;
-        if (v == 0) return DisplayRefreshHzFor(hwnd);
     }
-    const int hz = DisplayRefreshHzFor(hwnd);
-    return hz > 60 ? 60 : hz;
+    return DisplayRefreshHzFor(hwnd);
 }
 
 
