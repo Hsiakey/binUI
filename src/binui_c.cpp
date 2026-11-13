@@ -286,12 +286,15 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
             case binui::EventType::RELEASE:
             case binui::EventType::DBL_CLICK:
             case binui::EventType::CONTEXT_MENU:
+            case binui::EventType::AUX_CLICK:
             case binui::EventType::MOVE: {
                 BinUIEvent e = MakeEvent(ev.type == binui::EventType::PRESS ? BINUI_EV_PRESS
                                      : ev.type == binui::EventType::RELEASE ? BINUI_EV_RELEASE
                                      : ev.type == binui::EventType::DBL_CLICK ? BINUI_EV_DBL_CLICK
                                      : ev.type == binui::EventType::CONTEXT_MENU
-                                         ? BINUI_EV_CONTEXT_MENU : BINUI_EV_MOVE);
+                                         ? BINUI_EV_CONTEXT_MENU
+                                     : ev.type == binui::EventType::AUX_CLICK
+                                         ? BINUI_EV_AUX_CLICK : BINUI_EV_MOVE);
                 e.node_id = ev.nodeId == 0xFFFF ? -1 : static_cast<int32_t>(ev.nodeId);
                 e.x = ev.pointer.x;
                 e.y = ev.pointer.y;
@@ -507,7 +510,7 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
 
 extern "C" {
 
-const char* BINUI_C_CALL binui_version(void) { return "0.14.1"; }
+const char* BINUI_C_CALL binui_version(void) { return "0.15.0"; }
 
 int32_t BINUI_C_CALL binui_abi_version(void) { return BINUI_C_ABI_VERSION; }
 

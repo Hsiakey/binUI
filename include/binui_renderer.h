@@ -20,7 +20,8 @@ enum class EventType {
     PRESS,
     RELEASE,      // v23：松开（nodeId = 按下时命中的节点；鼠标可能已经移开）
     MOVE,         // v23：鼠标移动（nodeId = 当前命中的最上层节点，-1 = 空白）
-    CONTEXT_MENU, // v23：右键按下（press(x,y,1) / WM_RBUTTONDOWN）
+    CONTEXT_MENU, // 右键按下（press(x,y,2) / WM_RBUTTONDOWN）：菜单请求，不进按下态
+    AUX_CLICK,    // v24：非主按钮的点击（中键 press(x,y,1) → release），对应 DOM 的 auxclick
     HOVER,        // 进入某节点
     HOVER_LEAVE,  // v23：离开某节点（含鼠标移出窗口）
     FOCUS,        // v23：键盘焦点变化：focus.focused（false 时 nodeId = 失去焦点的节点）
@@ -258,10 +259,12 @@ public:
 
     void setHover(float x, float y);  // 鼠标移动：更新悬停节点（触发 MOVE / HOVER / HOVER_LEAVE）
     void clearHover();                // 鼠标离开窗口（触发 HOVER_LEAVE）
-    // button：0=左 1=右（→ CONTEXT_MENU）2=中
+    // button 与 DOM 的 MouseEvent.button 同号：0=左 1=中 2=右。
+    // 右键（2）只派发 CONTEXT_MENU：不进按下态、不抢焦点、不产生 CLICK；
+    // 中键（1）走正常按下流程（PRESS/RELEASE），松开时派发 AUX_CLICK 而不是 CLICK。
     int press(float x, float y, int button = 0);
-    // 松开：仍在原节点上则触发 CLICK（400ms 内同节点第二次 → DBL_CLICK）；
-    // 返回点击节点 id（-1 无）
+    // 松开：主按钮仍在原节点上则触发 CLICK（400ms 内同节点第二次 → DBL_CLICK）；
+    // 非主按钮触发 AUX_CLICK。返回点击节点 id（-1 无）
     int release(float x, float y, int button = 0);
     void cancelPress();               // 取消按下（如窗口失焦），不触发点击
 

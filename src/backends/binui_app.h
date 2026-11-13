@@ -248,8 +248,9 @@ public:
     using CursorFn  = std::function<int(float x, float y)>;
     // 双击：宿主拿到的是客户区坐标（双击选词用）
     using DoubleClickFn = std::function<void(float x, float y)>;
-    // 右/中键（left 仍走 setPressFn / setReleaseFn）：引擎要 nodeId 才能派发 CONTEXT_MENU，
-    // 所以外壳把按键号一起交出去，宿主转手 renderer.press(x,y,button) / release(x,y,button)。
+    // 右/中键（left 仍走 setPressFn / setReleaseFn）：引擎要节点才能派发 CONTEXT_MENU /
+    // AUX_CLICK，所以外壳把按键号一起交出去（0=左 1=中 2=右，与 DOM 同号），
+    // 宿主转手 renderer.press(x,y,button) / release(x,y,button)。
     using ButtonFn = std::function<void(float x, float y, int button, bool down)>;
     // IME：返回光标在客户区的位置与行高（用于把输入法候选窗摆到光标下方）。
     // 返回 false = 当前没有正在编辑的输入框。
@@ -841,7 +842,8 @@ inline LRESULT CALLBACK BinUIAppT<Gfx>::wndProc(HWND hwnd, UINT msg, WPARAM wPar
         case WM_MBUTTONDOWN:
         case WM_RBUTTONUP:
         case WM_MBUTTONUP: {
-            const int btn = (msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP) ? 1 : 2;
+            // 与 DOM MouseEvent.button 同号：0=左 1=中 2=右
+            const int btn = (msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP) ? 2 : 1;
             const bool down = (msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN);
             if (down) SetFocus(hwnd);
             if (app->btn_) app->btn_(static_cast<float>(LOWORD(lParam)),

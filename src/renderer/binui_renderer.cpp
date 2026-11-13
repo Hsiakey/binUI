@@ -2149,15 +2149,15 @@ void BinUIRenderer::dragScroll(float px, float py) {
 }
 
 int BinUIRenderer::press(float x, float y, int button) {
-    // 右键：不进按下态、不抢焦点，直接派发 CONTEXT_MENU（宿主自己做菜单）。
+    // 右键（DOM 编号 2）：不进按下态、不抢焦点，直接派发 CONTEXT_MENU（宿主自己做菜单）。
     // 命中口径用 hitTestAny —— 普通 div / 文本上右键也要报（DOM 的 contextmenu 就是这样），
     // 用命中"可交互节点"的那套会让空白区域右键什么都收不到。
-    if (button == 1) {
+    if (button == 2) {
         const int cid = hitTestAny(x, y);
         Event ev{};
         ev.type = EventType::CONTEXT_MENU;
         ev.nodeId = cid < 0 ? 0xFFFF : static_cast<uint16_t>(cid);
-        ev.pointer.x = x; ev.pointer.y = y; ev.pointer.button = 1;
+        ev.pointer.x = x; ev.pointer.y = y; ev.pointer.button = 2;
         emit(ev);
         return cid;
     }
@@ -2190,9 +2190,12 @@ int BinUIRenderer::press(float x, float y, int button) {
         }
     }
 
-    int id = hitTestEx(x, y, true, BINUI_ST_ACTIVE);
+    // 命中口径：主按钮只认"可交互 / 带状态样式"的节点（既有行为，避免全页面都变成可点），
+    // 非主按钮（中键）跟右键一样"点到哪报哪"—— DOM 的 mousedown/auxclick 对普通元素也触发。
+    const int id = (button == 0) ? hitTestEx(x, y, true, BINUI_ST_ACTIVE) : hitTestAny(x, y);
     pressedId_ = id;
-    applyFocus(id);
+    // 只有主按钮抢焦点（DOM：中键按下不聚焦）
+    if (button == 0) applyFocus(id);
     refreshNodeStyle(id);
 
     // 视频节点：记录控制条按下区域（按钮/进度条/画面体）
@@ -2209,7 +2212,7 @@ int BinUIRenderer::press(float x, float y, int button) {
         if (nit != nodeIndexById_.end())
             interactive = (nodes_[nit->second].flags & BINUI_INTERACTIVE) != 0;
     }
-    if (id >= 0 && !interactive) return -1;
+    if (button == 0 && id >= 0 && !interactive) return -1;
     if (id >= 0) {
         Event ev{};
         ev.type = EventType::PRESS;
@@ -2262,14 +2265,26 @@ int BinUIRenderer::release(float x, float y, int button) {
         ev.pointer.button = button;
         emit(ev);
     }
-    // 口径必须和 press() 一致：press 用 hitTestEx(allowStyled=true, ACTIVE)，
-    // 普通 hitTest 只命中 BINUI_INTERACTIVE —— 两者不一致时，"声明了 :hover/:active
-    // 的普通元素"按下去有反馈、松开却永远不产生 CLICK（点击被静默吞掉）。
-    if (hitTestEx(x, y, true, BINUI_ST_ACTIVE) != id) return -1;
+    // 口径必须和 press() 完全一致（主按钮 hitTestEx(allowStyled=true, ACTIVE)、
+    // 中键 hitTestAny）：不一致时"按下去有反馈、松开却永远不产生事件"（点击被静默吞掉）。
+    const int hitNow = (button == 0) ? hitTestEx(x, y, true, BINUI_ST_ACTIVE) : hitTestAny(x, y);
+    if (hitNow != id) return -1;
 
     if (VerboseOn())
         std::fprintf(stderr, "[binui] Click on node #%d at (%.0f,%.0f)\n", id, x, y);
 
+    // 非主按钮（中键）：派发 AUX_CLICK（DOM 的 auxclick），不产生 CLICK、不参与双击判定、
+    // 也不改键盘焦点 —— 中键点击在浏览器里就是"旁路点击"。
+    if (button != 0) {
+        Event ev{};
+        ev.type = EventType::AUX_CLICK;
+        ev.nodeId = static_cast<uint16_t>(id);
+        ev.pointer.x = x;
+        ev.pointer.y = y;
+        ev.pointer.button = button;
+        emit(ev);
+        return id;
+    }
 
     {
         Event ev{};

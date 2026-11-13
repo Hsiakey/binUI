@@ -1221,12 +1221,22 @@ int main(int argc, char* argv[]) {
         if (ev.type == EventType::CLICK)
             std::printf("[appshow] click node=%u (%.1f, %.1f)\n", (unsigned)ev.nodeId,
                         (double)ev.click.x, (double)ev.click.y);
+        // 中键：AUX_CLICK（DOM 的 auxclick）—— 不进 CLICK、不参与双击、不改焦点
+        if (ev.type == EventType::AUX_CLICK) {
+            std::fprintf(stderr, "[appshow] auxclick node=%u (%.1f, %.1f)\n", (unsigned)ev.nodeId,
+                        (double)ev.pointer.x, (double)ev.pointer.y);
+            sh.openDialog("中键点击（AUX_CLICK 事件）",
+                          "节点 #" + std::to_string(ev.nodeId) + "：" + sh.describe(ev.nodeId) +
+                              "\n\n中键走 AUX_CLICK，不产生 CLICK、不改键盘焦点 —— 与 DOM 的 "
+                              "auxclick 一致（右键是 CONTEXT_MENU，另一条路）。",
+                          false);
+        }
         // 右键菜单：引擎派发 CONTEXT_MENU（带节点 id；普通 div 也算，命中口径是"光标下
         // 最上层节点"）。宿主用现成的弹窗把"点到了谁"显示出来 —— 空白处也报，免得
         // 看起来像"右键没反应"。
         if (ev.type == EventType::CONTEXT_MENU) {
             const bool blank = (ev.nodeId == 0xFFFF);
-            std::printf("[appshow] contextmenu node=%s (%.1f, %.1f)\n",
+            std::fprintf(stderr, "[appshow] contextmenu node=%s (%.1f, %.1f)\n",
                         blank ? "-" : std::to_string(ev.nodeId).c_str(),
                         (double)ev.pointer.x, (double)ev.pointer.y);
             sh.openDialog("右键菜单（CONTEXT_MENU 事件）",
@@ -1241,6 +1251,9 @@ int main(int argc, char* argv[]) {
 
     // 中键/右键：外壳把按键号一起交出来，宿主转手 press/release(button)
     app.setButtonFn([&](float x, float y, int button, bool down) {
+        // stderr（无缓冲）：GUI 子系统程序的 stdout 是块缓冲的，被 kill 时打印会丢
+        std::fprintf(stderr, "[appshow] button %d %s (%.0f,%.0f)\n", button,
+                     down ? "down" : "up", (double)x, (double)y);
         if (down) renderer.press(x, y, button);
         else      renderer.release(x, y, button);
     });

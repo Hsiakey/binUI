@@ -157,7 +157,7 @@ Python 用户不会撞上经典的 `OSError: [WinError 126] 找不到指定模�
 - 两种形态：**独立顶层窗**（`binui_app_open` + `binui_pump`）和**子窗口/控件**
   （`binui_app_open_child` + `binui_render`）。后者见下一节。
 
-## 事件表（C ABI v3 / v0.14.0）
+## 事件表（C ABI v4 / v0.15.0）
 
 所有事件走同一个队列：每帧 `binui_pump` 之后 `while (binui_poll_event(app, &ev)) { … }`。
 v3 把引擎侧补齐的事件全部映射过来了（字段含义见 `binui_c.h` 的 `BinUIEvent`）：
@@ -166,9 +166,10 @@ v3 把引擎侧补齐的事件全部映射过来了（字段含义见 `binui_c.h
 |---|---|---|
 | `BINUI_EV_CLICK` | `node_id` `x` `y` | 点击/键盘激活 |
 | `BINUI_EV_DBL_CLICK` | `node_id` `x` `y` | 同节点 400ms 内第二次点击 |
-| `BINUI_EV_PRESS` / `BINUI_EV_RELEASE` | `node_id` `x` `y` `button` | 按下 / 松开（`RELEASE` 的 `node_id` = 按下时命中的节点）|
+| `BINUI_EV_PRESS` / `BINUI_EV_RELEASE` | `node_id` `x` `y` `button` | 按下 / 松开（`RELEASE` 的 `node_id` = 按下时命中的节点）；`button` 0=左 1=中 2=右（同 DOM）|
+| `BINUI_EV_AUX_CLICK` | `node_id` `x` `y` `button` | 中键点击（DOM 的 `auxclick`）：不产生 CLICK、不进双击、不改焦点 |
 | `BINUI_EV_MOVE` | `node_id` `x` `y` | 每次移动（`node_id = -1` 表示空白处）|
-| `BINUI_EV_CONTEXT_MENU` | `node_id` `x` `y` | 右键按下 |
+| `BINUI_EV_CONTEXT_MENU` | `node_id` `x` `y` `button` | 右键按下（`button = 2`），`node_id` = 光标下最上层节点 |
 | `BINUI_EV_HOVER` / `BINUI_EV_HOVER_LEAVE` | `node_id` | 进入 / 离开节点（离开含移出窗口）|
 | `BINUI_EV_FOCUS` | `node_id` `focused` `prev_id` | **键盘焦点**变化（0=失去，1=获得）|
 | `BINUI_EV_EDIT` | `node_id` `editing` | 进入 / 退出文本编辑 |

@@ -5,6 +5,36 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.15.0] - 2026-11-13
+
+本轮主题：**中键**（以及把按键编号换成 DOM 的约定）。上一版只有 `PRESS`/`RELEASE`/`CONTEXT_MENU`，
+中键按下去会被当成左键走到 `CLICK`，而 `pointer.button` 又是 `1=右 2=中` 这套自创编号 —— 从 Web
+迁过来的人一定会把中键当右键。
+
+### 新增 — `AUX_CLICK`（中键）
+
+- `EventType::AUX_CLICK` / `BINUI_EV_AUX_CLICK`：非主按钮的点击，对应 DOM 的 `auxclick`。
+  触发出 `PRESS` → `RELEASE` → `AUX_CLICK`；**不产生 `CLICK`、不参与双击判定、不改键盘焦点**
+  （浏览器里中键点击就是"旁路点击"）。
+- 右键仍走 `CONTEXT_MENU`（菜单请求，`hitTestAny` 命中口径，不进按下态）。
+- **非主按钮的命中口径跟右键一致**（`hitTestAny`：点到哪报哪，普通 div / 文字也算）——主按钮
+  仍只认"可交互 / 带状态样式"的节点，否则整页元素都会变成可点。刚开始漏了这条，中键点在
+  概览标题的文字上什么都收不到（实机验证时才发现）。
+
+### 改动 — `button` 编号与 DOM 对齐（**语义变更**）
+
+0=左 1=中 2=右（原来 1=右 2=中）。涉及 `renderer.press/release` 的 `button` 参数、`Event::pointer.button`、
+外壳的 `setButtonFn`、C ABI 的 `BinUIEvent::button`。`BINUI_C_ABI_VERSION` 3 → 4：结构体没变，
+但字段语义变了 —— 旧宿主会把中键当右键，所以同样要重编。
+
+映射表：`WM_LBUTTON*` → 0、`WM_MBUTTON*` → 1、`WM_RBUTTON*` → 2。
+
+### 示例 / 测试 / 文档
+
+- appshow：中键任意控件 → 弹窗显示"中键走 AUX_CLICK"，与右键的 `CONTEXT_MENU` 弹窗对照。
+- 测试：中键三段事件、`AUX_CLICK` 的 `button == 1`、"中键不进双击判定"；右键断言改为 `button == 2`。
+- 文档：README 事件表 + bindings.md 事件表补 `AUX_CLICK` 与编号约定。
+
 ## [0.14.1] - 2026-11-13
 
 修一个"右键没反应"的实机问题：`CONTEXT_MENU` 原来用 `hitTestEx(allowStyled=true)` 取节点，

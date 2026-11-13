@@ -1613,15 +1613,34 @@ int run() {
 
             // CONTEXT_MENU（右键：不进按下态、不抢焦点）
             evs.clear();
-            r.press(50, 25, 1);
+            r.press(50, 25, 2);   // DOM 编号：0=左 1=中 2=右
+            // 命中口径是"光标下最上层节点"（按钮的文字子节点也算），不是"可交互节点"
+            const int ctxNode = r.hitTestAny(50, 25);
             TEST("事件: 右键 → CONTEXT_MENU", countOf(EventType::CONTEXT_MENU) == 1 &&
-                 lastOf(EventType::CONTEXT_MENU)->nodeId == b1 &&
-                 lastOf(EventType::CONTEXT_MENU)->pointer.button == 1);
+                 ctxNode >= 0 && lastOf(EventType::CONTEXT_MENU)->nodeId == (uint16_t)ctxNode &&
+                 lastOf(EventType::CONTEXT_MENU)->pointer.button == 2);
             TEST("事件: 右键不产生 PRESS", countOf(EventType::PRESS) == 0);
+
+            // 中键：走正常按下流程，松开派发 AUX_CLICK（不产生 CLICK、不算双击）
+            evs.clear();
+            r.press(50, 25, 1);
+            r.release(50, 25, 1);
+            TEST("事件: 中键 → PRESS/RELEASE/AUX_CLICK",
+                 countOf(EventType::PRESS) == 1 && countOf(EventType::RELEASE) == 1 &&
+                 countOf(EventType::AUX_CLICK) == 1 && countOf(EventType::CLICK) == 0);
+            TEST("事件: AUX_CLICK 带中键与节点", lastOf(EventType::AUX_CLICK)->nodeId == b1 &&
+                 lastOf(EventType::AUX_CLICK)->pointer.button == 1);
+            TEST("事件: 中键不进双击判定", countOf(EventType::DBL_CLICK) == 0);
+            // 非主按钮的命中口径跟右键一样"点到哪报哪"：普通 div 上中键也要报 AUX_CLICK
+            evs.clear();
+            r.press(250, 20, 1);
+            r.release(250, 20, 1);
+            TEST("事件: 普通 div 上中键也报 AUX_CLICK", countOf(EventType::AUX_CLICK) == 1 &&
+                 lastOf(EventType::AUX_CLICK)->nodeId == rz);
             // 右键的命中口径是"光标下最上层节点"，不是"可交互节点"：
             // 普通 div（没有 :hover/:active 状态样式）上右键也必须报出它，否则菜单永远不弹。
             evs.clear();
-            r.press(250, 20, 1);   // rz 卡片内部（普通 div，无状态样式）
+            r.press(250, 20, 2);   // rz 卡片内部（普通 div，无状态样式）
             TEST("事件: 普通 div 上右键也报 CONTEXT_MENU",
                  countOf(EventType::CONTEXT_MENU) == 1 &&
                  lastOf(EventType::CONTEXT_MENU)->nodeId == rz);

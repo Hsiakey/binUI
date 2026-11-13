@@ -313,9 +313,10 @@ with binui.App(layout) as app:
 | 事件 | 载荷 | 说明 |
 |---|---|---|
 | `CLICK` / `DBL_CLICK` | `nodeId` + `click.x/y` | 双击由引擎判（同节点 400ms 内、位移 < 4px），宿主不用接 `WM_LBUTTONDBLCLK` |
-| `PRESS` / `RELEASE` | `nodeId` + `pointer.x/y/button` | `button`：0=左 1=右 2=中；`RELEASE` 的 `nodeId` = 按下时命中的节点 |
+| `PRESS` / `RELEASE` | `nodeId` + `pointer.x/y/button` | `button` 与 DOM 同号：**0=左 1=中 2=右**；`RELEASE` 的 `nodeId` = 按下时命中的节点 |
+| `AUX_CLICK` | `nodeId` + `pointer.x/y/button` | 非主按钮点击（中键，`button = 1`），对应 DOM 的 `auxclick`；命中口径同右键（`hitTestAny`，普通 div 也报）；不产生 `CLICK`、不参与双击、不改焦点 |
 | `MOVE` | `nodeId` + `click.x/y` | 每次移动都报（`nodeId` = 当前命中节点，`0xFFFF` = 空白），拖控件/跟随光标用它 |
-| `CONTEXT_MENU` | `nodeId` + `pointer.x/y` | 右键按下；`nodeId` = **光标下最上层节点**（普通 div 也算，`hitTestAny`），不进按下态、不抢焦点（`press(x,y,1)`） |
+| `CONTEXT_MENU` | `nodeId` + `pointer.x/y/button` | 右键按下（`button = 2`）；`nodeId` = **光标下最上层节点**（普通 div 也算，`hitTestAny`），不进按下态、不抢焦点 |
 | `HOVER` / `HOVER_LEAVE` | `nodeId` | 进入/离开节点，含鼠标移出窗口 |
 | `FOCUS` | `nodeId` + `focus.focused` + `focus.prevId` | **键盘焦点**变化（Tab/WASD/点击/API），`focused=false` 时 `nodeId` = 失去焦点的节点 |
 | `EDIT` | `nodeId` + `edit.editing` | 进入/退出文本编辑 |
