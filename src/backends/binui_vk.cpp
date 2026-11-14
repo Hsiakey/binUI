@@ -610,7 +610,10 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     std::vector<LayerTarget> layers;
     struct LayerFrame {
         int idx = -1;
-        int l = 0, t = 0, r = 0, b = 0;          // 层框（与进入时的裁剪求交）
+        // 元素框 / 层框（浮点）：合成四边形用它，才能在**小数边界**上拿到主目标 4x MSAA 的
+        // 覆盖率抗锯齿（取整后再合成就是 1px 台阶）
+        float x = 0, y = 0, w = 0, h = 0;
+        int l = 0, t = 0, r = 0, b = 0;          // 层框（元素框 ∩ 进入时的裁剪，取整）
         int pl = 0, pt = 0, pr = 0, pb = 0;      // 进入前的裁剪，退出时还原
         float alpha = 1.0f;
     };
@@ -2369,6 +2372,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         LayerFrame f;
         f.idx = idx;
         f.alpha = alpha;
+        f.x = x; f.y = y; f.w = lw; f.h = lh;   // 浮点框：合成四边形用（见 LayerFrame）
         f.pl = clipL; f.pt = clipT; f.pr = clipR; f.pb = clipB;
         // 层框 = 元素框 ∩ 当前裁剪（层外的东西本来也不该显示）
         f.l = std::max(f.pl, static_cast<int>(std::floor(x)));
@@ -2396,9 +2400,13 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         if (layerStack.empty()) beginMainPass(true);
         else beginLayerPass(layerStack.back().idx, true, layerStack.back());
         clipL = f.pl; clipT = f.pt; clipR = f.pr; clipB = f.pb;
-        // 合成：整窗四边形 + UV 0..1。层图与主目标像素一一对应，整窗映射就是 1:1 采样
-        //（层框是整数像素与否都不影响），层框外的层图内容是未定义的，所以 scissor 必须
-        // 卡在层框上 —— 省填充率，也让"层内被 popClipTo 放宽的裁剪"不会漏到层外。
+        // 合成：四边形就取**层框**本身，UV 用像素坐标除以窗口尺寸。
+        // 这样两个性质同时成立（GL/D3D11 同一套写法）：
+        //   · 采样是严格 1:1 的 —— 屏幕像素中心 i+0.5 折算过去正好是纹素中心 i+0.5，
+        //     所以层框落在非整数坐标也不会把内容糊掉；
+        //   · 层框的小数边界由**主目标的 4x MSAA 覆盖率**做抗锯齿（整窗四边形就没有这个
+        //     边缘了，组边界会变成 1px 台阶 —— v0.16.12 第一版就是这么错的，
+        //     用 translate(10.5px) 的动画用例比出来的）。
         const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
         // 诊断开关：BINUI_VK_LAYER_OPAQUE=1 时合成按 alpha=1 画，用来直接看"层里到底存了什么"
         //（判断"层内容是空的"还是"合成算错了"，比猜快得多）
@@ -2408,12 +2416,12 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         // 着色器算 (t.rgb * vcol.rgb, t.a * vcol.a)：层里存的是预乘色，
         // 顶点色不预乘的话 rgb 会被整块加进去（和 GL/D3D11 同一个坑）。
         Premult(col);
-        const int sl = clipL, st = clipT, sr = clipR, sb = clipB;
-        clipL = f.l; clipT = f.t; clipR = f.r; clipB = f.b;
-        emitQuad(0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 0.0f, 1.0f, 1.0f,
-                 col, &layers[f.idx].tex);
+        const float fx = f.x, fy = f.y;
+        const float fw = f.w, fh = f.h;
+        emitQuad(fx, fy, fx + fw, fy + fh, fx / static_cast<float>(w), fy / static_cast<float>(h),
+                 (fx + fw) / static_cast<float>(w), (fy + fh) / static_cast<float>(h), col,
+                 &layers[f.idx].tex);
         flush();
-        clipL = sl; clipT = st; clipR = sr; clipB = sb;
         layers[f.idx].inUse = false;
         switchBatch(&white);           // 把当前纹理换回纯白（flush 已清空 cur）
     }
