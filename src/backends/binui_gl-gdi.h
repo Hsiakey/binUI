@@ -75,6 +75,9 @@ public:
     void fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic = false);
     // 文字亚像素定位：true = 位置保留小数（图集 LINEAR 采样），动画节点用
     void setTextSubpixel(bool on);
+    // v0.16.9：组透明度的离屏合成（见 binui_gfx.h 的 pushLayer 注释）
+    bool pushLayer(float x, float y, float w, float h, float alpha);
+    void popLayer();
     // 图片：解码缓存 + 拉伸绘制（generation 换图版本号：不一致时重新上传纹理）
     bool prepareImage(uint16_t index, const uint8_t* data, size_t size, uint32_t generation);
     // 原始 RGBA 像素直传纹理（RGBA 字节序，无解码）

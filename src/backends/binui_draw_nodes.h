@@ -290,9 +290,98 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     // 裁剪链缓存：每个节点复用，避免逐节点分配
     std::vector<uint16_t> clipAncs;
     const std::vector<uint32_t> order = renderer.drawOrder();
+
+    // ---- 组透明度（v0.16.9）：把半透明祖先的子树包进离屏图层 ----
+    // CSS 的 opacity 是"组"语义：整棵子树先合成、再整体乘一次 alpha。0.16.8 用"逐元素乘"
+    // 近似（子元素重叠处会叠深），这里在有能力的后端上换成真正的离屏合成：
+    //   · 只对**绘制顺序连续**的子树建层（父先于子、同 z 连续 —— 普通布局都满足）；
+    //     被 z-index 打散的子树退回逐元素乘法，只是近似，不会画错顺序；
+    //   · 层数受后端限制（GL 池子 4 层），pushLayer 返回 false 就退回逐元素模式；
+    //   · 进了层就把这些祖先的 alpha 从子节点颜色里"除回来"（层在 pop 时整体乘一次）。
+    struct LayerNode { size_t idx; int lastPos; float op; };
+    std::vector<LayerNode> layerStack;
+    float layerAccum = 1.0f;          // 已经由图层承受掉的 alpha 乘积
+    // 每个节点的"自己"的 opacity（静态 × 动画），以及父下标
+    std::vector<float> ownOp;
+    std::vector<int32_t> pIdx;
+    std::unordered_map<size_t, std::pair<int, int>> ownerSpan;   // 层候选：首/末位置
+    std::unordered_map<size_t, int> ownerCount;                  // 层候选：子树里画了几个节点
+    {
+        ownOp.resize(nodeCount, 1.0f);
+        pIdx.assign(nodeCount, -1);
+        bool anyOp = false;
+        for (size_t i = 0; i < nodeCount; i++) {
+            ownOp[i] = renderer.ownOpacity(nodes[i].id);
+            if (ownOp[i] < 0.999f) anyOp = true;
+            const uint16_t pid = nodes[i].parentId;
+            if (pid != 0xFFFF && pid != nodes[i].id) {
+                const size_t pi = indexOf(pid);
+                if (pi != static_cast<size_t>(-1)) pIdx[i] = static_cast<int32_t>(pi);
+            }
+        }
+        if (anyOp) {
+            // 一次遍历统计每个半透明祖先覆盖的绘制位置（首、末、个数）
+            for (size_t pos = 0; pos < order.size(); pos++) {
+                const size_t i = order[pos];
+                if (!(nodes[i].flags & BINUI_VISIBLE) || hidden[i]) continue;
+                int32_t a = pIdx[i];
+                for (int guard = 0; a >= 0 && guard < 512; guard++) {
+                    const size_t ai = static_cast<size_t>(a);
+                    if (ownOp[ai] < 0.999f) {
+                        auto it = ownerSpan.find(ai);
+                        if (it == ownerSpan.end()) ownerSpan[ai] = { static_cast<int>(pos), static_cast<int>(pos) };
+                        else it->second.second = static_cast<int>(pos);
+                        ownerCount[ai]++;
+                    }
+                    a = pIdx[ai];
+                }
+            }
+            // 只保留"连续"的候选（跨度长度 == 覆盖的节点数），并且至少覆盖 2 个节点 ——
+            // 一个孤零零的半透明叶子不需要图层（逐元素乘 alpha 就是精确值），建层反而要多一次 flush。
+            std::unordered_map<size_t, std::pair<int, int>> contig;
+            for (const auto& kv : ownerSpan) {
+                const int first = kv.second.first, last = kv.second.second;
+                const int cnt = ownerCount[kv.first];
+                if (cnt >= 2 && last - first + 1 == cnt) contig[kv.first] = kv.second;
+            }
+            ownerSpan.swap(contig);
+        }
+    }
+    // 一个节点该不该在"进层/出层"的边界上（按位置索引）
+
     for (size_t oi = 0; oi < order.size(); oi++) {
         const size_t i = order[oi];
         const auto& node = nodes[i];
+        // 层边界先处理（放在所有 continue 之前，保证顺序不依赖本节点画不画）
+        while (!layerStack.empty() && static_cast<int>(oi) > layerStack.back().lastPos) {
+            gfx.popLayer();
+            layerAccum = (layerStack.back().op > 0.0001f) ? layerAccum / layerStack.back().op : 1.0f;
+            layerStack.pop_back();
+        }
+        for (const auto& kv : ownerSpan) {
+            if (kv.second.first != static_cast<int>(oi)) continue;
+            // 最外层先 push：按祖先链深度排序
+            std::vector<size_t> chain;
+            {
+                int32_t a = pIdx[i];
+                for (int g = 0; a >= 0 && g < 512; g++) {
+                    if (ownerSpan.count(static_cast<size_t>(a))) chain.push_back(static_cast<size_t>(a));
+                    a = pIdx[static_cast<size_t>(a)];
+                }
+            }
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                const size_t oi2 = *it;
+                if (layerStack.size() && layerStack.back().idx == oi2) continue;
+                const auto& on = nodes[oi2];
+                const auto s2 = renderer.drawState(on.id);
+                const float bx = on.x - offX[oi2] + s2.offX;
+                const float by = on.y - offY[oi2] + s2.offY;
+                if (gfx.pushLayer(bx, by, on.width, on.height, ownOp[oi2])) {
+                    layerStack.push_back({ oi2, ownerSpan[oi2].second, ownOp[oi2] });
+                    layerAccum *= ownOp[oi2];
+                }
+            }
+        }
         if (!(node.flags & BINUI_VISIBLE) || hidden[i]) continue;
         if (node.type == BINUI_ROOT) continue;
 
@@ -323,6 +412,11 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             const BinUIRenderer::DrawState st = renderer.drawState(node.id);
             uint32_t dc = st.color;
             float op = st.opacity;
+            // 进了图层的祖先 alpha 由层在 pop 时整体乘，这里除回来（否则乘两次）
+            if (layerAccum > 0.0001f && layerAccum < 0.999f) {
+                op /= layerAccum;
+                if (op > 1.0f) op = 1.0f;
+            }
             float ddx = st.offX, ddy = st.offY;
             x1 += ddx; y1 += ddy; x2 += ddx; y2 += ddy;
             if (op < 1.0f) dc = GfxScaleAlpha(dc, op);
@@ -364,6 +458,11 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         const bool hasBorder = pt && (pt->flags & PAINT_BORDER);
         const bool hasGrad = pt && (pt->flags & PAINT_GRADIENT);
         float opacity = st.opacity;
+        // 进了图层的祖先 alpha 由层在 pop 时整体乘，这里除回来（否则乘两次）
+        if (layerAccum > 0.0001f && layerAccum < 0.999f) {
+            opacity /= layerAccum;
+            if (opacity > 1.0f) opacity = 1.0f;
+        }
         // v14 禁用：整块压到 55%（颜色/文字/图片一起淡，不引入额外合成通道）
         if (st.disabled) opacity *= 0.55f;
         float dx = st.offX;
@@ -926,6 +1025,11 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         }
 
         gfx.popClipTo(savedDepth);
+    }
+    // 收尾：图层必须成对弹出（正常不会剩下，防御性兜底）
+    while (!layerStack.empty()) {
+        gfx.popLayer();
+        layerStack.pop_back();
     }
 
     // 滚动条（轨道 + 滑块）：同样裁剪到本次重绘范围，避免滚动条整条重涂

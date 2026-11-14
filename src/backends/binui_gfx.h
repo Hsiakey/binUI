@@ -81,6 +81,17 @@ public:
     // 位移连续滑（否则每 2 帧跳 1px，肉眼像在抖）。整数位置下两者逐像素相同。
     virtual void setTextSubpixel(bool on) { (void)on; }
 
+    // ---- 图层 / 组透明度（v0.16.9）----
+    // push 之后的所有绘制先落到一块离屏图层（框 = x,y,w,h），pop 时按 alpha 整体合成回来。
+    // 语义对齐 CSS 的组透明度：子元素互相重叠时重叠区不会被叠深两次。
+    // 返回 false = 这个后端（或这个调用）不支持 → 调用方退回"逐元素乘 alpha"（0.16.8 行为），
+    // 所以没实现的后端在像素上不会有任何变化。
+    virtual bool pushLayer(float x, float y, float w, float h, float alpha) {
+        (void)x; (void)y; (void)w; (void)h; (void)alpha;
+        return false;
+    }
+    virtual void popLayer() {}
+
     // ---- 图片（generation 变化时重新上传）----
     virtual bool prepareImage(uint16_t index, const uint8_t* data, size_t size,
                               uint32_t generation) = 0;

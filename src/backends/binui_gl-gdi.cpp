@@ -303,6 +303,90 @@ struct BinUIGLGdi::Impl {
     int scissorDepth = 0;
     GLuint curTex = 0;
 
+    // ---- 图层（v0.16.9）：组透明度的离屏合成 ----
+    // 每层一块**窗口大小**的 RGBA 纹理 + FBO：坐标不用换算、UV 直接是像素坐标 ÷ 窗口尺寸，
+    // 代价是每层一张整窗纹理（1280×720 ≈ 3.7 MB），所以池子限 4 层，超了就让调用方退回
+    // 逐元素乘 alpha。底色/边框/文字/图片都走同一套 quad，所以这一层不改任何绘制代码。
+    struct LayerTarget { GLuint tex = 0, fbo = 0; bool inUse = false; };
+    struct LayerFrame { int idx = -1; float x = 0, y = 0, w = 0, h = 0, alpha = 1; GLint prevFbo = 0; };
+    std::vector<LayerTarget> layers;
+    std::vector<LayerFrame> layerStack;
+    static constexpr int kMaxLayers = 4;
+
+    static void warnLayerLimit() {
+        static bool warned = false;
+        if (warned) return;
+        warned = true;
+        std::fprintf(stderr, "[gl] 图层超过 %d 层，多出来的退回逐元素乘 alpha（减少嵌套即可）\n",
+                     kMaxLayers);
+    }
+
+    int acquireLayer() {
+        for (size_t i = 0; i < layers.size(); i++)
+            if (!layers[i].inUse) return static_cast<int>(i);
+        if (static_cast<int>(layers.size()) >= kMaxLayers) return -1;
+        LayerTarget t;
+        t.tex = CreateTexture2D(winW, winH, nullptr, true);
+        if (!t.tex) return -1;
+        glGenFramebuffersP(1, &t.fbo);
+        glBindFramebufferP(GL_FRAMEBUFFER, t.fbo);
+        glFramebufferTexture2DP(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
+        layers.push_back(t);
+        return static_cast<int>(layers.size() - 1);
+    }
+
+    bool pushLayer(float x, float y, float w, float h, float alpha) {
+        if (!ready || w <= 0.0f || h <= 0.0f || alpha >= 0.999f) return false;
+        if (static_cast<int>(layerStack.size()) >= kMaxLayers) { warnLayerLimit(); return false; }
+        // 顺序很重要：先把"当前目标"和手头的图元收拾干净，再去碰层缓冲 ——
+        // acquireLayer 会顺手把新 FBO 绑上，先 flush 的话那些图元会画进空层里再被清掉。
+        GLint prevFbo = 0;
+        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+        flushAll();
+        const int idx = acquireLayer();
+        if (idx < 0) { warnLayerLimit(); return false; }
+        LayerTarget& t = layers[idx];
+        t.inUse = true;
+        LayerFrame f;
+        f.idx = idx; f.x = x; f.y = y; f.w = w; f.h = h; f.alpha = alpha;
+        f.prevFbo = prevFbo;
+        glBindFramebufferP(GL_FRAMEBUFFER, t.fbo);
+        glDisable(GL_SCISSOR_TEST);
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        glEnable(GL_SCISSOR_TEST);
+        layerStack.push_back(f);
+        return true;
+    }
+
+    void popLayer() {
+        if (layerStack.empty()) return;
+        flushAll();                       // 层内容落盘（flushAll 会按层框裁剪）
+        const LayerFrame f = layerStack.back();
+        layerStack.pop_back();
+        LayerTarget& t = layers[f.idx];
+        glBindFramebufferP(GL_FRAMEBUFFER, static_cast<GLuint>(f.prevFbo));
+        // 合成：把层纹理按 alpha 画回父目标。层里存的是**预乘**颜色（混合是 ONE/ONE_MINUS_SRC_ALPHA），
+        // 着色器输出 t.rgb*vcol.rgb / t.a*vcol.a，所以 vcol 全给 alpha 就是"整组乘一次"。
+        const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
+        const uint32_t av = static_cast<uint32_t>(a * 255.0f + 0.5f);
+        uint32_t col = (av << 24) | 0x00FFFFFFu;
+        // 着色器算的是 frag = (t.rgb * vcol.rgb, t.a * vcol.a)：不预乘的话 rgb 会被整块加进去
+        // （蓝通道直接爆到 255），所以顶点色必须走和 fillRect 一样的预乘。
+        Premult(col);
+        curTex = t.tex;
+        // V 轴要翻转：把同一套投影渲染进 FBO 时，纹理在内存里是"上下颠倒"的（GL 的纹理原点在
+        // 左下，而屏幕坐标是 y 向下）。不翻的话层内容会整体倒过来。
+        const float u0 = f.x / static_cast<float>(winW);
+        const float u1 = (f.x + f.w) / static_cast<float>(winW);
+        const float v0 = 1.0f - f.y / static_cast<float>(winH);              // 顶边
+        const float v1 = 1.0f - (f.y + f.h) / static_cast<float>(winH);       // 底边
+        emitQuad(f.x, f.y, f.x + f.w, f.y + f.h, u0, v0, u1, v1, col);
+        curTex = whiteTex;
+        flushAll();
+        t.inUse = false;
+    }
+
     // 字形图集 + 文本排版：整份逻辑在 backends/binui_glyph_atlas.h（与 Vulkan 后端共用）。
     // 后端只提供纹理宿主与四边形发射 —— 两个 GPU 后端的文字因此是同一份像素。
     GLGlyphTexHost glyphHost;
@@ -778,9 +862,17 @@ struct BinUIGLGdi::Impl {
         if (vcount == 0 || !vb) return;
         glBufferDataP(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vcount * sizeof(GLVertex)),
                       verts.data(), GL_DYNAMIC_DRAW);
+        // 正在画进图层时，每条批次再和层框求交（层外的内容不该出现在层里）
+        const LayerFrame* lf = layerStack.empty() ? nullptr : &layerStack.back();
         for (const auto& b : batches) {
             if (b.count == 0) continue;
             int l = b.sx, t = b.sy, r = b.sx + b.sw, bot = b.sy + b.sh;
+            if (lf) {
+                l = std::max(l, static_cast<int>(std::floor(lf->x)));
+                t = std::max(t, static_cast<int>(std::floor(lf->y)));
+                r = std::min(r, static_cast<int>(std::ceil(lf->x + lf->w)));
+                bot = std::min(bot, static_cast<int>(std::ceil(lf->y + lf->h)));
+            }
             if (r <= l || bot <= t) continue;
             // GL scissor 原点在左下：换算为从底部计
             glScissor(l, winH - bot, r - l, bot - t);
@@ -790,6 +882,11 @@ struct BinUIGLGdi::Impl {
         // 本帧真正用完了，淘汰的模板现在可以删（见 roundFor 里的淘汰注释）
         for (GLuint t : pendingTexDelete) glDeleteTextures(1, &t);
         pendingTexDelete.clear();
+        // 图层（v0.16.9）：flush 之后必须清零，否则 present 会把同一批图元再画一遍 ——
+        // 空层里那次没事，但"合成四边形"会被重复画到主目标上，表现为组透明度失效（全不透明）。
+        vcount = 0;
+        batches.clear();
+        curBatch = static_cast<size_t>(-1);
     }
 
     void shutdown() {
@@ -1235,6 +1332,14 @@ void BinUIGLGdi::strokeRounded(float x, float y, float w, float h, float radius,
 void BinUIGLGdi::setTextSubpixel(bool on) {
     // 图集纹理本身已经是 LINEAR（见 GLGlyphTexHost::createTex），这里只切"要不要取整"
     if (impl_) impl_->atlas.snapText = !on;
+}
+
+bool BinUIGLGdi::pushLayer(float x, float y, float w, float h, float alpha) {
+    return impl_ ? impl_->pushLayer(x, y, w, h, alpha) : false;
+}
+
+void BinUIGLGdi::popLayer() {
+    if (impl_) impl_->popLayer();
 }
 
 float BinUIGLGdi::textWidth(float size, int weight, const std::string& utf8, bool italic) {
