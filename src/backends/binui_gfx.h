@@ -116,6 +116,9 @@ public:
     // 调用方必须退回"只转盒子、文字/图片保持轴对齐"的旧行为，这样老页面的像素一位不变。
     //
     // 注意：fillRoundedXf 自带矩阵，**不受**这个状态影响（否则圆角底会被变换两次）。
+    //
+    // v0.16.21：xf 由绘制层**沿祖先链复合**而来（M[局部] = M[父] ∘ 平移 ∘ 自身变换），
+    // 所以一次 setAffine 就覆盖了整棵子树——后端不需要知道自己转的是"第几层"。
     virtual bool setAffine(const float xf[6]) { (void)xf; return false; }
 
     // ---- 文字阴影（v24：CSS text-shadow）----

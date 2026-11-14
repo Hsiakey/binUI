@@ -1,6 +1,6 @@
 <!DOCTYPE html>
-<app_window width="640" height="380" resizable="false">
-<html width="640" height="380">
+<app_window width="640" height="400" resizable="false">
+<html width="640" height="400">
 <head>
 <style>
     body { background: #EEF2F7; color: #16202C; }
@@ -8,6 +8,9 @@
     @keyframes rot20  { from { transform: rotate(20deg); } to { transform: rotate(20deg); } }
     @keyframes rotm12 { from { transform: rotate(-12deg); } to { transform: rotate(-12deg); } }
     @keyframes sq14   { from { transform: scale(1.4, 0.7); } to { transform: scale(1.4, 0.7); } }
+    /* v0.16.21：嵌套变换（父 -8° / 子 +12°）—— 检查矩阵复合 */
+    @keyframes rotm8  { from { transform: rotate(-8deg); } to { transform: rotate(-8deg); } }
+    @keyframes rotp12 { from { transform: rotate(12deg); } to { transform: rotate(12deg); } }
 </style>
 </head>
 <body>
@@ -32,7 +35,7 @@
         <img src="image-round-img.png" style="position:absolute; left:14; top:66; width:32; height:32; border-radius:16" />
     </div>
 
-    <!-- 非等比缩放：文字被横向拉宽 -->
+    <!-- 非等比缩放：整棵子树一起被拉伸（文字/图片同样） -->
     <div animation="sq14 4s linear 0s infinite" style="position:absolute; left:24; top:170; width:200; height:100; background:#FFFFFF; border-radius:14; border:1px solid #C9D3E0">
         <span style="position:absolute; left:14; top:12; width:170; height:24; font-size:16px; color:#8B3A9E">scale(1.4, 0.7)</span>
         <span style="position:absolute; left:14; top:42; width:170; height:20; font-size:13px; color:#5A6B80">文字横向拉宽</span>
@@ -45,8 +48,17 @@
         <span style="position:absolute; left:10; top:44; width:310; height:18; font-size:12px; color:#7A8798">28px 粗体 / 12px 小字</span>
     </div>
 
-    <span style="position:absolute; left:24; top:300; width:592; height:20; font-size:13px; color:#7A8798">v0.16.18：setAffine 状态下文字/图片/边框/阴影全部过同一矩阵（GL / VK / D3D11 逐像素相同）</span>
-    <span style="position:absolute; left:24; top:326; width:592; height:20; font-size:13px; color:#7A8798">GDI 不支持任意四边形 → 只转盒子（本页在 GDI 上没有参考价值）</span>
+    <!-- 嵌套变换（v0.16.21）：父转 -8°，子（badge）再自己转 12° —— 矩阵要**乘起来**，
+         不是各自绕自己的屏幕中心转（那样子元素会浮到父盒子外面）。 -->
+    <div animation="rotm8 4s linear 0s infinite" style="position:absolute; left:24; top:290; width:250; height:76; background:#FFFFFF; border-radius:12; border:1px solid #C9D3E0">
+        <span style="position:absolute; left:12; top:10; width:200; height:20; font-size:13px; color:#16202C">嵌套变换：父 -8°</span>
+        <div animation="rotp12 4s linear 0s infinite" style="position:absolute; left:24; top:38; width:96; height:26; background:#0B5FA5; border-radius:7">
+            <span style="position:absolute; left:0; top:4; width:96; height:18; font-size:12px; color:#FFFFFF" align="center">子 +12°</span>
+        </div>
+    </div>
+
+    <span style="position:absolute; left:300; top:308; width:316; height:20; font-size:12px; color:#7A8798">v0.16.21：仿射**级联**，子元素/文字一起转</span>
+    <span style="position:absolute; left:24; top:374; width:592; height:20; font-size:12px; color:#7A8798">GL / VK / D3D11 逐像素相同；GDI 是遗留后端（OLD），只转盒子</span>
 </body>
 </html>
 </app_window>

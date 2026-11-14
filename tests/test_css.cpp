@@ -506,6 +506,61 @@ static void TestIssueRegressions() {
         TEST("16.20: 退化输入返回空", empty.empty() && bad.empty());
     }
 
+    // ---- 16.21：仿射级联的矩阵工具（transform 作用于整棵子树） ----
+    {
+        auto mapX = [](const float m[6], float x, float y) { return m[0] * x + m[1] * y + m[2]; };
+        auto mapY = [](const float m[6], float x, float y) { return m[3] * x + m[4] * y + m[5]; };
+        auto near = [](float a, float b) { return std::fabs(a - b) < 1e-4f; };
+        const float id[6] = {1, 0, 0, 0, 1, 0};
+
+        // 单位元：复合后不变
+        float r1[6], r2[6];
+        binui::AffineMul(id, id, r1);
+        TEST("16.21: I∘I = I", near(r1[0], 1) && near(r1[1], 0) && near(r1[2], 0) &&
+                               near(r1[3], 0) && near(r1[4], 1) && near(r1[5], 0));
+
+        // 平移 ∘ 绕原点 90°：(1,0) → 转 (0,1) → 平移 (10,0) → (10,1)
+        float rot[6], tr[6];
+        binui::AffineRotScaleAbout(0.0f, 0.0f, 90.0f, 1.0f, 1.0f, rot);
+        const float t10[6] = {1, 0, 10, 0, 1, 0};
+        (void)tr;
+        binui::AffineMul(t10, rot, r2);
+        TEST("16.21: 平移∘旋转：点 (1,0) → (10,1)",
+             near(mapX(r2, 1, 0), 10.0f) && near(mapY(r2, 1, 0), 1.0f));
+
+        // 顺序不可交换：旋转 ∘ 平移 → (1,0)+10 → (11,0) → 转 90° → (0,11)
+        binui::AffineMul(rot, t10, r2);
+        TEST("16.21: 旋转∘平移 与上一条不同（顺序有意义）",
+             near(mapX(r2, 1, 0), 0.0f) && near(mapY(r2, 1, 0), 11.0f));
+
+        // 绕中心旋转：中心是不动点；右边的点转到下方
+        float about[6];
+        binui::AffineRotScaleAbout(50.0f, 20.0f, 90.0f, 1.0f, 1.0f, about);
+        TEST("16.21: 绕 (50,20) 转 90°：中心不动",
+             near(mapX(about, 50, 20), 50.0f) && near(mapY(about, 50, 20), 20.0f));
+        TEST("16.21: 绕 (50,20) 转 90°：(60,20) → (50,30)",
+             near(mapX(about, 60, 20), 50.0f) && near(mapY(about, 60, 20), 30.0f));
+
+        // 非等比缩放：x 拉伸 2 倍、y 不动，中心不动
+        float sq[6];
+        binui::AffineRotScaleAbout(0.0f, 0.0f, 0.0f, 2.0f, 1.0f, sq);
+        TEST("16.21: scale(2,1)：(5,7) → (10,7)",
+             near(mapX(sq, 5, 7), 10.0f) && near(mapY(sq, 5, 7), 7.0f));
+
+        // 级联 = 父矩阵 ∘ 平移(子原点) ：子原点在父局部里 (5,0)，父转 90° → 屏幕 (0,5)
+        float child[6];
+        const float t5[6] = {1, 0, 5, 0, 1, 0};
+        binui::AffineMul(rot, t5, child);
+        TEST("16.21: 父转 90° + 子偏移 5px → 子原点在 (0,5)",
+             near(mapX(child, 0, 0), 0.0f) && near(mapY(child, 0, 0), 5.0f));
+
+        // 别名安全：out 与 m0/m1 同一个数组
+        float ali[6] = {1, 0, 10, 0, 1, 0};
+        binui::AffineMul(ali, rot, ali);
+        TEST("16.21: 复合允许输出与输入同一数组",
+             near(mapX(ali, 1, 0), 10.0f) && near(mapY(ali, 1, 0), 1.0f));
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

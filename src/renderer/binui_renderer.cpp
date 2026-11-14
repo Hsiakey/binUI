@@ -3888,6 +3888,19 @@ BinUIRenderer::DrawState BinUIRenderer::drawState(uint16_t nodeId) const {
     return st;
 }
 
+// v0.16.21：整页有没有"旋转 / 非等比缩放"的动画。仿射级联（drawNodesBinUI 里沿祖先链
+// 复合矩阵）只在真有变换时才有意义 —— 静态页面两张表都是空的，这里 0 次哈希探测。
+bool BinUIRenderer::anyTransformAnim() const {
+    for (const auto& kv : animResult_)
+        if (kv.second.rotSet || kv.second.kSet) return true;
+    for (const auto& kv : animState_) {
+        const auto& ft = kv.second.floatTargets;
+        if (ft.count(ANIM_ROTATE) || ft.count(ANIM_SCALE_X) || ft.count(ANIM_SCALE_Y))
+            return true;
+    }
+    return false;
+}
+
 uint32_t BinUIRenderer::drawColor(uint16_t nodeId) const {
     auto ar = animResult_.find(nodeId);
     if (ar != animResult_.end() && ar->second.colorSet) return ar->second.color;

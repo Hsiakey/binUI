@@ -152,6 +152,8 @@ GPU 后端绘制原语（`fillRect`/`fillRounded`/`fillLine`/`strokeRounded`/`dr
 
 **仿射状态（v0.16.18）：文字/图片也能跟着卡片转。** 以前旋转/斜切只作用在"底/边框"上（`fillRoundedXf` 自带矩阵），文字和图片必须按整像素对齐，只能保持竖直 —— 旋转卡片里的字就是"盒子转了、字没转"。现在多了一个**状态**而不是新原语：`IBinUIGfx::setAffine(xf)` 一开，**接下来所有原语的四边形**都过同一个 2×3 矩阵（三个 GPU 后端各改一处 `emitQuad`，复用已有的任意四边形+每角 UV 通路），`drawNodes` 在仿射节点里整段改用**节点局部坐标**，于是文字、图片、边框、阴影、渐变条带全部一起变换；`setAffine` 返回 `false` 的后端（GDI，没有任意四边形）退回"只转盒子"的老行为，像素一位不变。代价是字形是**位图旋转**（双线性采样），大角度下边缘略软 —— 真"矢量旋转"要 GPU 栅格化字形，那是 bin2d/binGPU 的事。
 
+**仿射级联（v0.16.21）：一整个元素，不是元素自己。** 上面那版只转"节点自己画的东西"，子元素还是正的 —— 和浏览器不一致（`transform` 是**换坐标系**，后代全在同一个矩阵里）。现在绘制前按 `M[i] = M[父] ∘ 平移(子原点) ∘ 自身旋转/缩放` 沿祖先链复合（矩阵工具在 `include/binui_paint.h` 并单测），一次 `setAffine(M[i])` 管住整棵子树，嵌套 `transform` 也相乘；`<line>` 分隔线同样跟随。编号很小但**不改二进制格式**（纯绘制期），老页面像素逐位不变；`renderer.anyTransformAnim()` 做快速开关，没有变换的页面零开销。
+
 D3D11 后端要点：
 - 文字渲染委托 `binui_font_renderer`（FreeType + HarfBuzz），与 Windows GDI/DirectWrite 完全解耦——同一份字体服务可直接用于 Linux/macOS/OpenGL 后端。
 - 文本：`FT_Get_Char_Index` + `FT_Load_Glyph` + `FT_Render_Glyph(FT_RENDER_MODE_NORMAL)` 把字形光栅化为 8bit alpha，白字黑底 → 预乘 alpha 进图集纹理，着色器顶点色染色。**渲染质量三件事**：

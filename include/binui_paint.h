@@ -1780,4 +1780,37 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
     }
 }
 
+// ============ v0.16.21：仿射矩阵工具（级联用） ============
+// 2×3 仿射，存储顺序与后端 setAffine / fillRoundedXf 一致：[a c e; b d f]，
+// 即 p' = (a·x + c·y + e, b·x + d·y + f)。
+// 单独抽出来是因为"矩阵复合"是最容易写错的一步：转一个卡片时子元素的矩阵是
+// 父矩阵 ∘ 平移 ∘ 自身旋转/缩放，少乘一项就是"整页内容全挤到左上角"。
+inline void AffineMul(const float m1[6], const float m0[6], float out[6]) {
+    // out = m1 ∘ m0（先作用 m0，再作用 m1）
+    const float a1 = m1[0], c1 = m1[1], e1 = m1[2];
+    const float b1 = m1[3], d1 = m1[4], f1 = m1[5];
+    const float a0 = m0[0], c0 = m0[1], e0 = m0[2];
+    const float b0 = m0[3], d0 = m0[4], f0 = m0[5];
+    const float r0 = a1 * a0 + c1 * b0;
+    const float r1 = a1 * c0 + c1 * d0;
+    const float r2 = a1 * e0 + c1 * f0 + e1;
+    const float r3 = b1 * a0 + d1 * b0;
+    const float r4 = b1 * c0 + d1 * d0;
+    const float r5 = b1 * e0 + d1 * f0 + f1;
+    out[0] = r0; out[1] = r1; out[2] = r2;
+    out[3] = r3; out[4] = r4; out[5] = r5;
+}
+
+// 绕 (cx,cy) 旋转 rotateDeg 度 + 非等比缩放 (kx,ky)（CSS transform 的 rotate∘scale，
+// 顺时针为正，y 轴朝下）。中心点是不动点。
+inline void AffineRotScaleAbout(float cx, float cy, float rotateDeg, float kx, float ky,
+                                float out[6]) {
+    const float rad = rotateDeg * 3.14159265358979323846f / 180.0f;
+    const float cs = std::cos(rad), sn = std::sin(rad);
+    const float a = cs * kx, b = sn * kx;
+    const float c = -sn * ky, d = cs * ky;
+    out[0] = a; out[1] = c; out[2] = cx - (a * cx + c * cy);
+    out[3] = b; out[4] = d; out[5] = cy - (b * cx + d * cy);
+}
+
 } // namespace binui

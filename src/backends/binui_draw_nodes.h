@@ -448,6 +448,61 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             ownerSpan.swap(contig);
         }
     }
+
+    // ---- v0.16.21：仿射**级联**（CSS transform 语义：变换作用于整棵子树） ----
+    // 浏览器给元素加 transform 时，是在元素边界处**换一套坐标系**：后代照旧在局部坐标里
+    // 布局，然后整棵子树由同一个矩阵落到屏幕 —— 所以转一张卡片，里面的文字、图标、子元素
+    // 全跟着转。v0.16.18 只把"节点自己画的东西"过矩阵，子节点还是正的，和浏览器不一样，
+    // 肉眼一眼能看出来（报的问题就是这个）。
+    //
+    // 这里预计算每个节点的 M[局部 → 屏幕]：
+    //     M[i] = M[父] ∘ 平移(子原点在父局部坐标系里) ∘ 自身旋转/缩放（绕自身中心，含动画平移）
+    // 局部原点 = 节点盒子左上角（未变换），于是绘制期把几何整体挪到 (0,0,lw,lh) 后，
+    // 一次 setAffine(M) 就同时管住自己的底色/边框/文字/图片/阴影和**所有后代**。
+    // 没有变换的页面 affHas 全 0 → 后面走的还是老路径，像素一个都不变。
+    std::vector<float> affM(nodes.size() * 6);
+    std::vector<uint8_t> affHas(nodes.size(), 0);
+    for (size_t i = 0; i < nodes.size(); i++) {
+        float* m = &affM[i * 6];
+        m[0] = 1.0f; m[1] = 0.0f; m[2] = 0.0f;
+        m[3] = 0.0f; m[4] = 1.0f; m[5] = 0.0f;
+    }
+    if (renderer.anyTransformAnim()) {
+        for (size_t i = 0; i < nodes.size(); i++) {
+            const BinUIRenderer::DrawState s2 = renderer.drawState(nodes[i].id);
+            const int32_t pi = pIdx[i];
+            const bool inh = (pi >= 0) && affHas[static_cast<size_t>(pi)] != 0;
+            const bool own = s2.needsAffine();
+            if (!own && !inh) continue;
+            // 自身矩阵：绕**局部**中心（含动画平移）—— 与 v20 的 xf 同一个式子
+            float m[6] = {1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f};
+            if (own) {
+                binui::AffineRotScaleAbout(static_cast<float>(nodes[i].width) * 0.5f + s2.offX,
+                                           static_cast<float>(nodes[i].height) * 0.5f + s2.offY,
+                                           s2.rotateDeg, s2.scaleX, s2.scaleY, m);
+            }
+            // 节点局部原点 → 父局部（根节点 → 屏幕）。布局给的是**绝对**坐标，
+            // 各减自己的滚动偏移就是盒子左上角；再减父盒子的同一个值 = 在父局部里的原点。
+            float tx = nodes[i].x - offX[i];
+            float ty = nodes[i].y - offY[i];
+            const size_t ps = (pi >= 0) ? static_cast<size_t>(pi) : static_cast<size_t>(-1);
+            if (inh) {
+                tx -= nodes[ps].x - offX[ps];
+                ty -= nodes[ps].y - offY[ps];
+            }
+            m[2] += tx; m[5] += ty;
+            if (inh) {
+                // M[父] ∘ 平移(子原点在父局部) ∘ 自身矩阵
+                float out[6];
+                binui::AffineMul(&affM[ps * 6], m, out);
+                for (int k = 0; k < 6; k++) m[k] = out[k];
+            }
+            float* dst = &affM[i * 6];
+            for (int k = 0; k < 6; k++) dst[k] = m[k];
+            affHas[i] = 1;
+        }
+    }
+
     // 一个节点该不该在"进层/出层"的边界上（按位置索引）
 
     for (size_t oi = 0; oi < order.size(); oi++) {
@@ -507,6 +562,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         // 这就是"像阶梯、不丝滑"的直接原因（帧率再高也没用，精度先被扔掉了）。
         // 静态路径保持整型截断是为了像素门禁：一像素都不许变。
         // BINUI_LINE：x,y = 起点；width,height = 终点；radius = 线宽
+        const bool affineLine = affHas[i] != 0;   // v0.16.21：自己或祖先有变换
         if (node.type == BINUI_LINE) {
             float x1 = node.x - offX[i], y1 = node.y - offY[i];
             float x2 = node.width - offX[i], y2 = node.height - offY[i];
@@ -521,14 +577,38 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             float ddx = st.offX, ddy = st.offY;
             x1 += ddx; y1 += ddy; x2 += ddx; y2 += ddy;
             if (op < 1.0f) dc = GfxScaleAlpha(dc, op);
-            float mnx = std::min(x1, x2), mny = std::min(y1, y2);
-            float mxx = std::max(x1, x2), mxy = std::max(y1, y2);
+            // v0.16.21：分隔线也吃仿射级联（旋转卡片里的分隔线要跟着转）。
+            // 局部原点 = 节点盒子左上角 = 起点 (x,y)，所以本地点就是 (0,0) → (w-x, h-y)。
+            bool lineAff = false;
+            if (affineLine) {
+                lineAff = gfx.setAffine(&affM[i * 6]);
+                if (lineAff) {
+                    x2 = static_cast<float>(node.width - node.x);
+                    y2 = static_cast<float>(node.height - node.y);
+                    x1 = 0.0f; y1 = 0.0f;
+                }
+            }
+            float sx1 = x1, sy1 = y1, sx2 = x2, sy2 = y2;
+            if (lineAff) {
+                const float* m = &affM[i * 6];
+                sx1 = m[0] * x1 + m[1] * y1 + m[2]; sy1 = m[3] * x1 + m[4] * y1 + m[5];
+                sx2 = m[0] * x2 + m[1] * y2 + m[2]; sy2 = m[3] * x2 + m[4] * y2 + m[5];
+            }
+            float mnx = std::min(sx1, sx2), mny = std::min(sy1, sy2);
+            float mxx = std::max(sx1, sx2), mxy = std::max(sy1, sy2);
             // 线宽扩展：水平/垂直线某维跨度为 0，若按零面积 clip 会在 flush 时被
             // 批次的 scissor 检查（r<=l || bot<=t）整批丢弃——必须外扩线宽保证非零面积
             float lw = (float)node.radius;
+            if (affineLine) lw *= std::hypot(affM[i * 6 + 0], affM[i * 6 + 3]) + 1.0f;
             mnx -= lw; mny -= lw; mxx += lw; mxy += lw;
-            if (mxx <= clipL || mnx >= clipR || mxy <= clipT || mny >= clipB) continue;
-            if (hasVp[i] && (mxx <= vpL[i] || mnx >= vpR[i] || mxy <= vpT[i] || mny >= vpB[i])) continue;
+            if (mxx <= clipL || mnx >= clipR || mxy <= clipT || mny >= clipB) {
+                if (lineAff) gfx.setAffine(nullptr);
+                continue;
+            }
+            if (hasVp[i] && (mxx <= vpL[i] || mnx >= vpR[i] || mxy <= vpT[i] || mny >= vpB[i])) {
+                if (lineAff) gfx.setAffine(nullptr);
+                continue;
+            }
             int savedDepth = gfx.pushClip(mnx, mny, mxx - mnx, mxy - mny);
             gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
                          static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
@@ -546,6 +626,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             gfx.pushClip(par.x - offX[ai], par.y - offY[ai], par.width, par.height);
             }
             if (draw) gfx.fillLine(x1, y1, x2, y2, (float)node.radius, dc);
+            if (lineAff) gfx.setAffine(nullptr);
             gfx.popClipTo(savedDepth);
             continue;
         }
@@ -577,26 +658,18 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         // 不这样的话，文字每 2 帧跳 1px —— 填充/描边都在连续滑，只有字在跳，很显眼。
         gfx.setTextSubpixel(animGeo);
         // v20：旋转 / 非等比缩放走**仿射**路径（旋转的矩形不是轴对齐的，画不了九宫格直块）。
-        // 仿射只作用在"底/边框"上：文字与图片不参与（字形要对齐像素，旋转只会糊）。
-        const bool affine = st.needsAffine();
+        // v0.16.21：仿射**级联** —— 祖先有变换时本节点也走这条路（矩阵已复合过祖先）。
+        const bool affine = affHas[i] != 0;
         float x, y, nw, nh;                 // 轴对齐几何（仿射时 = 变换后的 AABB）
         float xf[6] = {1, 0, 0, 0, 1, 0};   // 局部 → 屏幕：[a c e; b d f]
         float lw = 0.0f, lh = 0.0f, lr = 0.0f;   // 仿射路径下的局部尺寸/圆角
         const float effRadius0 = animRadius >= 0 ? animRadius : static_cast<float>(node.radius);
         if (affine) {
+            // v0.16.21：矩阵来自预计算（自己 + 祖先复合），几何一律用**节点局部坐标**。
             lw = static_cast<float>(node.width);
             lh = static_cast<float>(node.height);
             lr = effRadius0;   // 圆角跟着矩阵一起拉伸 = CSS 的语义，不再单独乘缩放
-            const float bx = static_cast<float>(static_cast<int>(node.x) - static_cast<int>(offX[i]));
-            const float by = static_cast<float>(static_cast<int>(node.y) - static_cast<int>(offY[i]));
-            const float cx = bx + lw * 0.5f + dx;
-            const float cy = by + lh * 0.5f + dy;
-            const float rad = st.rotateDeg * 3.14159265358979323846f / 180.0f;
-            const float cs = std::cos(rad), sn = std::sin(rad);
-            const float kx = st.scaleX, ky = st.scaleY;
-            const float a = cs * kx, b = sn * kx, c = -sn * ky, d = cs * ky;
-            xf[0] = a; xf[1] = c; xf[2] = cx - (a * lw * 0.5f + c * lh * 0.5f);
-            xf[3] = b; xf[4] = d; xf[5] = cy - (b * lw * 0.5f + d * lh * 0.5f);
+            for (int k = 0; k < 6; k++) xf[k] = affM[i * 6 + static_cast<size_t>(k)];
             // 变换后四角的 AABB（给剔除、裁剪、文字定位用）
             float mnx = 1e30f, mny = 1e30f, mxx = -1e30f, mxy = -1e30f;
             const float lx[4] = {0.0f, lw, 0.0f, lw};
