@@ -3945,7 +3945,18 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 
 
     // 渐变底色：linear-gradient(方向, 起色, 止色[, ...])  只取首尾两色
-    struct GradSpec { bool ok = false; uint32_t from = 0, to = 0; uint8_t dir = BINUI_GRAD_V; };
+    //
+    // v0.16.13：方向**真的按角度解析**了。以前只认 `to right/bottom` 这类关键字，
+    // 数字角度（`135deg` / `0.5turn` / `1.57rad`）一律当默认（= 垂直），于是
+    // `linear-gradient(135deg,…)` 会被画成上下渐变 —— 一眼能看出是假的（P1-6）。
+    // 编码：`angle` ∈ [0,180) 度，写入 paint.reserve[1] = angle + 1（0 = 未声明）；
+    // 轴对齐的 0/90 度仍走老三方向（V/H），这样历史页面的像素一位都不变。
+    struct GradSpec {
+        bool ok = false;
+        uint32_t from = 0, to = 0;
+        uint8_t dir = BINUI_GRAD_V;
+        int angle = -1;   // <0 = 未声明；否则 [0,180) 度（from 在渐变线起点一侧）
+    };
     auto parseLinearGradient = [&](const std::string& raw) -> GradSpec {
         GradSpec gs;
         std::string s = TrimCopy(raw);
@@ -3988,19 +3999,42 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 
         // 首项若是方向/角度就吃掉
         size_t cs = 0;
+        float gdeg = 180.0f;   // CSS 角度：0 = to top，顺时针为正；默认 to bottom
         {
             const std::string first = LowerCopy(parts[0]);
             const bool looksDir = first.rfind("to ", 0) == 0 || first.find("deg") != std::string::npos ||
                                   first.find("turn") != std::string::npos ||
-                                  first.find("rad") != std::string::npos;
+                                  first.find("rad") != std::string::npos ||
+                                  first.find("grad") != std::string::npos;
             if (looksDir) {
                 cs = 1;
-                if (first.find("right") != std::string::npos && first.find("bottom") != std::string::npos)
-                    gs.dir = BINUI_GRAD_D;
-                else if (first.find("right") != std::string::npos) gs.dir = BINUI_GRAD_H;
-                else if (first.find("top") != std::string::npos)   gs.dir = BINUI_GRAD_V;
-                else if (first.find("left") != std::string::npos)  gs.dir = BINUI_GRAD_H;
-                else gs.dir = BINUI_GRAD_V;
+                if (first.rfind("to ", 0) == 0) {
+                    // 关键字 → 角度。`right bottom` 与 `bottom right` 同义，都按位判。
+                    const bool r = first.find("right") != std::string::npos;
+                    const bool l = first.find("left") != std::string::npos;
+                    const bool b = first.find("bottom") != std::string::npos;
+                    const bool t = first.find("top") != std::string::npos;
+                    if (r && b) gdeg = 135.0f;
+                    else if (r && t) gdeg = 45.0f;
+                    else if (l && b) gdeg = 225.0f;
+                    else if (l && t) gdeg = 315.0f;
+                    else if (r) gdeg = 90.0f;
+                    else if (l) gdeg = 270.0f;
+                    else if (t) gdeg = 0.0f;
+                    else gdeg = 180.0f;
+                } else {
+                    // 数字角度：strtod 吃掉数字，再按后缀换算（deg / turn / rad / grad）
+                    const char* s2 = first.c_str();
+                    char* end = nullptr;
+                    const double v = std::strtod(s2, &end);
+                    if (end && end != s2) {
+                        const std::string unit = TrimCopy(std::string(end));
+                        if (unit == "turn")      gdeg = (float)(v * 360.0);
+                        else if (unit == "rad")  gdeg = (float)(v * 180.0 / 3.14159265358979323846);
+                        else if (unit == "grad") gdeg = (float)(v * 0.9);
+                        else                     gdeg = (float)v;   // deg / 无单位
+                    }
+                }
             }
         }
         if (parts.size() - cs < 2) { Warn("CSS linear-gradient 至少需要两个颜色，已忽略"); return gs; }
@@ -4013,6 +4047,27 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         uint32_t c1 = 0, c2 = 0;
         if (!colorOf(parts[cs], &c1)) return gs;
         if (!colorOf(parts.back(), &c2)) return gs;
+
+        // 角度归一化到 [0,180)：θ 与 θ-180 只差"两端颜色互换"，线性渐变上完全等价。
+        float a = std::fmod(gdeg, 360.0f);
+        if (a < 0.0f) a += 360.0f;
+        bool swap = false;
+        if (a >= 180.0f) { a -= 180.0f; swap = true; }
+        if (swap) std::swap(c1, c2);          // 现在 c1 在渐变线起点（a 方向的反侧）
+        // 轴对齐的方向仍交给老三方向路径：历史页面（180deg 与 to right 占绝大多数）像素一位不变
+        if (a <= 0.5f) {                       // to top：老 V 是"from 在上"，再换一次色
+            gs.dir = BINUI_GRAD_V;
+            std::swap(c1, c2);
+        } else if (std::fabs(a - 90.0f) <= 0.5f) {
+            gs.dir = BINUI_GRAD_H;
+        } else {
+            // 其余角度（含 45/135 这类对角）走任意角度条带。gradDir 只记"最近的老方向"，
+            // 作为条带放不下时的降级近似（老 D 本身就是垂直近似）。
+            gs.angle = (int)std::lround(a);
+            if (gs.angle < 1) gs.angle = 1;
+            if (gs.angle > 179) gs.angle = 179;
+            gs.dir = (a < 45.0f) ? BINUI_GRAD_V : (a < 135.0f ? BINUI_GRAD_H : BINUI_GRAD_D);
+        }
         gs.from = c1; gs.to = c2; gs.ok = true;
         return gs;
     };
@@ -5896,6 +5951,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         else n.color = parseColorWith(bgRaw, defBg, "背景色");
         if (gs.ok) {
             paint.gradFrom = gs.from; paint.gradTo = gs.to; paint.gradDir = gs.dir;
+            // v0.16.13：任意角度写进 reserve[1]（角度+1，0 = 没声明 → 走老三方向）。
+            // PAINT_* 的 16 位已经用满（见 PAINT_OPACITY 的先例），而旧布局这一位恒为 0，
+            // 行为与以前完全一致，所以不升 BINUI_VERSION。
+            if (gs.angle > 0) paint.reserve[1] = static_cast<uint8_t>(gs.angle + 1);
             pflags |= PAINT_GRADIENT;
             n.color = gs.from;   // 不支持渐变的后端/旧布局退回起点色，不至于变黑
         }

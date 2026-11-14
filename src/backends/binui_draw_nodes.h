@@ -16,6 +16,7 @@
 #include <cstring>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "binui_gfx.h"
 #include "binui_paint.h"     // PaintBand / BuildFillBands（路径与渐变条带）
@@ -172,6 +173,102 @@ inline void DrawProfFlush() {
     p = DrawProf{};
 }
 
+// ============================================================
+// 任意角度渐变底色的条带缓存（v0.16.13）
+// ------------------------------------------------------------
+// 斜向渐变的条带是"逐行横向切段"来的，千级（180×140 的 135° 卡片约 2.3k 条、
+// 256×256 约 2.3k 条）。逐帧重算是纯浪费：静态页面上这些输入一个字节都没变。
+// 与路径条带缓存（renderer 里的 PathBandCacheEntry）同一个思路，只是键放在这里：
+//   id + 盒(4) + 圆角 + 两端色 + 角度
+// 任意一项变了就重算，所以不需要额外的失效入口。
+// 内存上限 2 MB，超了就淘汰最久没用的那条（正常页面就几条）。
+// ============================================================
+struct BgBandsCache {
+    struct Entry {
+        uint16_t nodeId = 0;
+        uint32_t sig = 0;
+        uint64_t usedFrame = 0;
+        std::vector<PaintBand> bands;
+    };
+    std::vector<Entry> items;
+    uint64_t frame = 0;
+    size_t bytes = 0;
+};
+
+inline BgBandsCache& BgBandsCacheState() {
+    static thread_local BgBandsCache c;
+    return c;
+}
+
+inline uint32_t BgBandsSig(float x, float y, float w, float h, float radius,
+                           uint32_t from, uint32_t to, int angle) {
+    auto mix = [](uint32_t hsh, uint32_t v) {
+        hsh ^= v + 0x9E3779B9u + (hsh << 6) + (hsh >> 2);
+        return hsh;
+    };
+    uint32_t s = 0x811C9DC5u;
+    const float vals[5] = { x, y, w, h, radius };
+    for (float f : vals) {
+        uint32_t b = 0;
+        std::memcpy(&b, &f, sizeof(b));
+        s = mix(s, b);
+    }
+    s = mix(s, from);
+    s = mix(s, to);
+    s = mix(s, static_cast<uint32_t>(angle));
+    return s;
+}
+
+// 取（或建）这个节点的条带。返回的指针在下次调用前有效。
+inline const std::vector<PaintBand>* BgBandsGet(uint16_t nodeId, uint32_t sig,
+                                                const BinUIPaintNode* p, float x, float y,
+                                                float w, float h, float radius) {
+    BgBandsCache& c = BgBandsCacheState();
+    constexpr size_t kMaxBytes = 2u << 20;
+    BgBandsCache::Entry* slot = nullptr;
+    for (BgBandsCache::Entry& e : c.items) {
+        if (e.nodeId == nodeId) { slot = &e; break; }
+    }
+    if (!slot) {
+        if (c.items.size() >= 64) {                    // 条目数也设个上限
+            size_t oldest = 0;
+            for (size_t i = 1; i < c.items.size(); i++)
+                if (c.items[i].usedFrame < c.items[oldest].usedFrame) oldest = i;
+            c.bytes -= c.items[oldest].bands.size() * sizeof(PaintBand);
+            c.items[oldest] = c.items.back();
+            c.items.pop_back();
+        }
+        c.items.emplace_back();
+        slot = &c.items.back();
+        slot->nodeId = nodeId;
+        slot->sig = 0;                                  // 强制重建
+    }
+    slot->usedFrame = c.frame;
+    if (slot->sig != sig || slot->bands.empty()) {
+        const int cap = kAngleGradBands;
+        c.bytes -= slot->bands.size() * sizeof(PaintBand);
+        slot->bands.resize(static_cast<size_t>(cap));
+        const int an = BuildFillBandsAngleGrad(p->gradFrom, p->gradTo,
+                                               static_cast<float>(p->reserve[1] - 1),
+                                               x, y, w, h, radius, slot->bands.data(), cap);
+        slot->bands.resize(an > 0 ? static_cast<size_t>(an) : 0);
+        c.bytes += slot->bands.size() * sizeof(PaintBand);
+        slot->sig = sig;
+        // 预算超了就整体丢一半最旧的条目（正常页面碰不到这条路径）
+        if (c.bytes > kMaxBytes && c.items.size() > 1) {
+            for (size_t i = 0; i < c.items.size();) {
+                if (&c.items[i] != slot && c.items[i].usedFrame + 1 < c.frame) {
+                    c.bytes -= c.items[i].bands.size() * sizeof(PaintBand);
+                    c.items.erase(c.items.begin() + static_cast<long>(i));
+                } else {
+                    i++;
+                }
+            }
+        }
+    }
+    return &slot->bands;
+}
+
 inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const void* clipRect,
                  const CanvasFn& canvas) {
     const auto& nodes = renderer.getNodes();
@@ -180,6 +277,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     const bool prof = DrawProfEnabled();
     DrawProf& pr = DrawProfState();
     const double tFrame0 = prof ? DrawProfNowUs() : 0.0;
+    ++BgBandsCacheState().frame;   // 背景条带缓存的"最近使用"时钟
 
     // ★ 环境变量**只查一次**：下面两处调试打印原本在每个节点身上调 std::getenv，
     // 而 UCRT 的 getenv 每次都要遍历环境表（≈0.5 µs/次）。一个几千节点的页面光这一项
@@ -614,11 +712,36 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                     return;
                 }
                 binui::PaintBand bands[binui::kMaxPaintBands];
-                const int bn = binui::BuildFillBands(ptGrad, static_cast<float>(x), static_cast<float>(y),
-                                                     static_cast<float>(nw), static_cast<float>(nh),
-                                                     radius, color, bands);
+                binui::PaintBand* bp = bands;
+                int bcap = binui::kMaxPaintBands;
+                const std::vector<binui::PaintBand>* cached = nullptr;
+                // 任意角度渐变（v0.16.13）：条带是千级，走"按节点缓存 + 堆缓冲"。
+                // 缓存键覆盖了影响条带的全部输入，所以坐标/颜色一变就自动重算。
+                if (ptGrad && (ptGrad->flags & binui::PAINT_GRADIENT) && ptGrad->reserve[1] != 0) {
+                    const uint32_t sig = binui::BgBandsSig(static_cast<float>(x), static_cast<float>(y),
+                                                           static_cast<float>(nw), static_cast<float>(nh),
+                                                           radius, ptGrad->gradFrom, ptGrad->gradTo,
+                                                           ptGrad->reserve[1] - 1);
+                    cached = binui::BgBandsGet(node.id, sig, ptGrad, static_cast<float>(x),
+                                               static_cast<float>(y), static_cast<float>(nw),
+                                               static_cast<float>(nh), radius);
+                    if (cached && !cached->empty()) { bp = nullptr; bcap = 0; }
+                }
+                int bn = 0;
+                if (cached && !cached->empty()) {
+                    bn = static_cast<int>(cached->size());
+                    for (int k = 0; k < bn; k++) {
+                        const binui::PaintBand& b = (*cached)[static_cast<size_t>(k)];
+                        if (b.w <= 0.0f || b.h <= 0.0f) continue;
+                        gfx.fillRect(b.x, b.y, b.w, b.h, b.color);
+                    }
+                    return;
+                }
+                bn = binui::BuildFillBands(ptGrad, static_cast<float>(x), static_cast<float>(y),
+                                           static_cast<float>(nw), static_cast<float>(nh),
+                                           radius, color, bp, bcap);
                 for (int k = 0; k < bn; k++) {
-                    const binui::PaintBand& b = bands[k];
+                    const binui::PaintBand& b = bp[k];
                     if (b.w <= 0.0f || b.h <= 0.0f) continue;
                     if (b.round && b.radius > 0.0f)
                         gfx.fillRounded(b.x, b.y, b.w, b.h, b.radius, b.color);

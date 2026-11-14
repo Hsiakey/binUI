@@ -885,8 +885,18 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         };
         auto fillNodeBg = [&](uint32_t color, float radius) {
             binui::PaintBand bands[binui::kMaxPaintBands];
-            const int bn = binui::BuildFillBands(pt, nfx, nfy, nfw, nfh, radius, color, bands);
-            FillPaintBands(hdc, bands, bn, underBg);
+            binui::PaintBand* bp = bands;
+            int bcap = binui::kMaxPaintBands;
+            // 任意角度渐变（v0.16.13）条带是千级（见 binui_paint.h 的 kAngleGradBands），
+            // 跟共享遍历 binui_draw_nodes.h 用同一套复用缓冲策略
+            if (pt && (pt->flags & PAINT_GRADIENT) && pt->reserve[1] != 0) {
+                static std::vector<binui::PaintBand> angleBands;
+                angleBands.resize(binui::kAngleGradBands);
+                bp = angleBands.data();
+                bcap = binui::kAngleGradBands;
+            }
+            const int bn = binui::BuildFillBands(pt, nfx, nfy, nfw, nfh, radius, color, bp, bcap);
+            FillPaintBands(hdc, bp, bn, underBg);
         };
         auto drawNodeBorder = [&]() {
             if (!hasBorder) return;

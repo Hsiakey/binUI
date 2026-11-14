@@ -9,6 +9,7 @@
 #include "binui_compiler.h"
 #include "binui_renderer.h"
 #include "binui_format.h"
+#include "binui_paint.h"     // BuildFillBands / PaintBand（渐变角度用例）
 #include "binui_srcmap.h"
 #include <cstdio>
 #include <cmath>
@@ -54,6 +55,79 @@ static const BinUIRenderer::NodeInfo* NodeById(BinUIRenderer& r, uint16_t id) {
 }
 
 static void TestIssueRegressions() {
+    // ---- 0.16.13：linear-gradient 的角度（P1-6）----
+    // 以前只认 `to right/bottom` 这类关键字，数字角度一律当默认（= 垂直），于是
+    // `linear-gradient(135deg,…)` 被画成上下渐变。这里钉住三件事：
+    //   1. 角度进布局（reserve[1] = 角度 + 1），轴对齐的仍走老三方向（像素不变）；
+    //   2. 条带生成真的沿渐变轴变（同一行内颜色不同 = 斜向）；
+    //   3. 单位换算（turn / rad）与 `to <corner>` 的映射。
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014">
+<body>
+  <div id="diag"   style="position:absolute; left:10; top:10;  width:200; height:120; background:linear-gradient(135deg, #FF0000, #0000FF)"></div>
+  <div id="right"  style="position:absolute; left:10; top:150; width:200; height:60;  background:linear-gradient(90deg, #FF0000, #0000FF)"></div>
+  <div id="down"   style="position:absolute; left:10; top:220; width:200; height:60;  background:linear-gradient(180deg, #FF0000, #0000FF)"></div>
+  <div id="corner" style="position:absolute; left:230; top:10; width:150; height:100; background:linear-gradient(to bottom right, #FF0000, #0000FF)"></div>
+  <div id="turn"   style="position:absolute; left:230; top:150; width:150; height:60; background:linear-gradient(0.5turn, #FF0000, #0000FF)"></div>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("16.13: 布局可解析", ParseInto(r, bin));
+        auto paintOfName = [&](const char* name) -> const BinUIPaintNode* {
+            const uint16_t id = r.findNodeByName(name);
+            return id ? r.paintOf(id) : nullptr;
+        };
+        const BinUIPaintNode* diag = paintOfName("diag");
+        TEST("16.13: 135deg 写进 reserve[1]", diag && diag->reserve[1] == 136);
+        TEST("16.13: 135deg 标记为渐变", diag && (diag->flags & PAINT_GRADIENT));
+        const BinUIPaintNode* right = paintOfName("right");
+        TEST("16.13: 90deg 走老的水平路径（reserve[1] == 0）",
+             right && right->reserve[1] == 0 && right->gradDir == BINUI_GRAD_H);
+        const BinUIPaintNode* down = paintOfName("down");
+        TEST("16.13: 180deg 走老的垂直路径（像素不变）",
+             down && down->reserve[1] == 0 && down->gradDir == BINUI_GRAD_V &&
+             down->gradFrom == 0xFFFF0000u && down->gradTo == 0xFF0000FFu);
+        const BinUIPaintNode* corner = paintOfName("corner");
+        TEST("16.13: to bottom right = 135deg", corner && corner->reserve[1] == 136);
+        const BinUIPaintNode* turn = paintOfName("turn");
+        // 0.5turn = 180deg：和 `180deg` 完全等价（归一化时"角度 -180° + 两端色互换"
+        // 走两步正好抵消），所以落到的还是老垂直路径、颜色顺序不变
+        TEST("16.13: 0.5turn = 180deg → 老垂直路径",
+             turn && turn->reserve[1] == 0 && turn->gradDir == BINUI_GRAD_V &&
+             turn->gradFrom == 0xFFFF0000u && turn->gradTo == 0xFF0000FFu);
+
+        // 条带：135deg 的同一行里颜色必须随 x 变（以前是整行一个色）
+        if (diag) {
+            PaintBand bands[kAngleGradBands];
+            const int n = BuildFillBands(diag, 10, 10, 200, 120, 0, diag->gradFrom, bands,
+                                         kAngleGradBands);
+            TEST("16.13: 对角渐变条带数合理", n > 100 && n <= kAngleGradBands);
+            bool rowHasHorizontalVariation = false;
+            for (int i = 0; i + 1 < n && i < 400; i++) {
+                const PaintBand& a = bands[i];
+                const PaintBand& b = bands[i + 1];
+                if (std::fabs(a.y - b.y) < 0.01f && a.x != b.x && a.color != b.color)
+                    rowHasHorizontalVariation = true;
+            }
+            TEST("16.13: 同一行内颜色随 x 变（真斜向）", rowHasHorizontalVariation);
+            // 左上角应接近起点色、右下角接近终点色
+            uint32_t topLeft = 0, botRight = 0;
+            float bestTL = 1e9f, bestBR = -1e9f;
+            for (int i = 0; i < n; i++) {
+                const PaintBand& b = bands[i];
+                const float score = b.x + b.y;
+                if (score < bestTL) { bestTL = score; topLeft = b.color; }
+                if (score > bestBR) { bestBR = score; botRight = b.color; }
+            }
+            const int rTL = (int)((topLeft >> 16) & 0xFF), bTL = (int)(topLeft & 0xFF);
+            const int rBR = (int)((botRight >> 16) & 0xFF), bBR = (int)(botRight & 0xFF);
+            TEST("16.13: 左上角偏红", rTL > 150 && bTL < 110);
+            TEST("16.13: 右下角偏蓝", bBR > 150 && rBR < 110);
+        }
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

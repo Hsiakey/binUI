@@ -20,8 +20,10 @@
 //   · 渐变用横条/竖条近似（条数够多肉眼看不出分界），这样不需要着色器，
 //     也不依赖后端的渐变画刷；半径 > 0 时按圆角收进每一行的左右内缩，
 //     所以圆角渐变卡片也是对的。
-//   · 对角渐变（135deg / to bottom right）按垂直渐变近似 —— 轴对齐条带
-//     画不出真正的斜向过渡，写出来反而更假。
+//   · 任意角度的渐变底色都按**真正的渐变轴**切条带（v0.16.13 起）：
+//     180°/90° 走逐行 / 逐列的老路（条带最少），其余角度走
+//     BuildFillBandsAngleGrad（逐行取圆角区间 + 沿 x 自适应切段 + 纵向合并）。
+//     0.16.12 及以前 `135deg` 是按垂直渐变近似画的。
 //   · 边框画在节点内侧，四边可不同宽；圆角盒子的边框按行贴着外圆弧走
 //     （1px 步进），直边段合并成一整条 —— 条带数只跟半径有关，与高度无关。
 //     半径大到装不下时退回直角四条（宁可方角，也不要缺边）。
@@ -48,6 +50,18 @@ struct PaintBand {
 // 屏幕高度走；768 覆盖到 ~253px 高的半透明元素（半透明走逐行 + 四边部分覆盖，一条最多
 // 拆成 3 块），更高的退化为均分/硬边（仍然比原来的 24px 细）。
 constexpr int kMaxPaintBands = 768;
+
+// 渐变条带的"色阶"口径（底色渐变与 SVG 路径渐变共用，所以放在这里）：
+//   每 ~2 设备像素一级（8~96 级），单行最多再切 96 段。
+// 任意角度的底色渐变（BuildFillBandsAngleGrad）也用同一套参数 —— 两个渐变实现
+// 的粗细/n 一致，同一张图里"路径渐变"和"底色渐变"才不会看着是两种质感。
+constexpr int kMaxGradSplits = 96;       // 单行条带内最多再切几段
+constexpr int kPathGradLevelsMin = 8;
+constexpr int kPathGradLevelsMax = 96;
+// 任意角度底色渐变（BuildFillBandsAngleGrad）的条带上限：斜向上"每行横向切段 + 纵向合并"
+// 之后的数量是千级（180×140 的 135° 卡片实测约 2.3k 条），所以单开一份更大的预算。
+// 调用方用堆上的复用缓冲（不要压在栈上），见 binui_draw_nodes.h 的 fillNodeBg。
+constexpr int kAngleGradBands = 4096;
 // 边框条带上限：圆角边框按行贴弧，条带数 ≈ 4r+常数（与盒子高度无关），
 // 半径大的胶囊（比如 100px 高的按钮 r=50）也要装得下，所以比填充宽。
 constexpr int kMaxBorderBands = 512;
@@ -161,6 +175,12 @@ inline void PaintEmitAa(float x0, float x1, float y0, float y1, uint32_t color,
     }
 }
 
+// 任意角度线性渐变的条带生成（定义在本文件下方，与 SVG 渐变同一套算法）。
+// 声明放在这里是因为 BuildFillBands 要先调它。
+inline int BuildFillBandsAngleGrad(uint32_t from, uint32_t to, float angleDeg,
+                                   float x, float y, float w, float h, float radius,
+                                   PaintBand* out, int cap);
+
 // 底色：单色（1 条，可带圆角）或渐变（多条，逐行内缩近似圆角）
 //
 // 条带切分不是均分的：圆角区域每条 1px（否则圆角会变成三四大块阶梯 —— 肉眼一眼能看出），
@@ -172,6 +192,21 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
     if (!p || !(p->flags & PAINT_GRADIENT)) {
         out[0] = { x, y, w, h, color, radius, radius > 0.0f };
         return 1;
+    }
+    if (p->flags & PAINT_GRAD_RADIAL) {
+        // 布局里的底色径向渐变（CSS radial-gradient）不支持：退回单色底，别把整块画歪
+        out[0] = { x, y, w, h, color, radius, radius > 0.0f };
+        return 1;
+    }
+
+    // v0.16.13：任意角度（reserve[1] = 角度+1）走二维条带；V/H 仍走下面那条
+    // 逐行/逐列的老路 —— 老路的条带更少、且逐像素与历史基准一致。
+    if (p->reserve[1] != 0) {
+        const int na = BuildFillBandsAngleGrad(p->gradFrom, p->gradTo,
+                                               (float)(p->reserve[1] - 1),
+                                               x, y, w, h, radius, out, cap);
+        if (na > 0) return na;
+        // 条带放不下（很大的元素）→ 落到下面的老三方向近似，宁可方向粗一点也不能少画
     }
 
     const bool horizontal = (p->gradDir == BINUI_GRAD_H);
@@ -326,6 +361,123 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
         out[count++] = bd;
     }
     return count;
+}
+
+// ============================================================
+// 任意角度线性渐变（v0.16.13，P1-6 落地）
+// ------------------------------------------------------------
+// 老实现只认 V/H/D 三个方向，而且 D（对角）也是按**垂直**画的：轴对齐条带在固定 y 上
+// 颜色恒定，画不出"颜色沿 x 也变"的过渡（0.16.12 及以前就是这么近似）。这里把它补上：
+//
+//   · 逐像素行取圆角矩形的横跨区间（圆角用 PaintRoundInset 解析式内缩，仍是连续弧）；
+//   · 按"沿 x 走一个色阶需要几个像素"把该行切成若干段，段内取段中心色；
+//   · 段的位置和颜色与上一行完全相同就合并成高条带。
+//
+// 这就是 SVG 渐变（BuildPathFillBands）的同一套算法，只是形状用解析式圆角矩形而不是
+// 折线路径。条带仍然是**轴对齐矩形**，所以后端契约不变（各端只画 fillRect），
+// 三端像素也仍然逐位相同。
+//
+// 返回条带数；返回 -1 表示这个尺寸下条带放不下（调用方退回老三方向近似）。
+// ============================================================
+inline int BuildFillBandsAngleGrad(uint32_t from, uint32_t to, float angleDeg,
+                                   float x, float y, float w, float h, float radius,
+                                   PaintBand* out, int cap) {
+    if (!out || cap <= 0 || w <= 0.0f || h <= 0.0f) return 0;
+    const float kPi = 3.14159265358979323846f;
+    const float th = angleDeg * (kPi / 180.0f);
+    const float dx = std::sin(th);
+    const float dy = -std::cos(th);              // CSS：0deg = to top，屏幕 y 向下
+    // CSS 规范：渐变线过盒中心，长度 = |w·dx| + |h·dy| —— 于是四个角正好投影到两端。
+    const float len = std::fabs(w * dx) + std::fabs(h * dy);
+    if (len <= 1e-4f) {                          // 退化：两端色直接铺平
+        out[0] = { x, y, w, h, PaintLerpArgb(from, to, 0.5f), 0.0f, false };
+        return 1;
+    }
+    const float sx = x + w * 0.5f - dx * len * 0.5f;
+    const float sy = y + h * 0.5f - dy * len * 0.5f;
+    const float r = radius > 0.5f ? std::min(radius, std::min(w, h) * 0.5f) : 0.0f;
+
+    // 色阶密度与 SVG 渐变同一口径（每 ~2 设备像素一级，8~96 级），横向切段据此推出来。
+    int levels = (int)std::lround(len * 0.5f);
+    levels = levels < kPathGradLevelsMin ? kPathGradLevelsMin
+                                         : (levels > kPathGradLevelsMax ? kPathGradLevelsMax : levels);
+    const float dtdx = std::fabs(dx) / len;      // 每设备像素 t 的变化量
+    const float stepPx = dtdx > 1e-9f ? 1.0f / ((float)levels * dtdx) : 1e9f;
+
+    struct OpenRun { float x0, w; float endY; int idx; };
+    enum { kMaxOpen = 96 };
+    OpenRun open[kMaxOpen];
+    int openN = 0;
+    int n = 0;
+
+    const int row0 = (int)std::floor(y);
+    const int row1 = (int)std::ceil(y + h);
+    for (int row = row0; row < row1; row++) {
+        float ry0 = std::max((float)row, y);
+        float ry1 = std::min((float)row + 1.0f, y + h);
+        if (ry1 <= ry0 + 0.002f) continue;
+        float cA = x, cLen = w;
+        if (r > 0.5f) {
+            // 用行中心算内缩：与老 V/H 渐变完全同一套口径，圆角才不会被切出台阶
+            const float dyTop = (ry0 + ry1) * 0.5f - y;
+            const float dyBot = (y + h) - (ry0 + ry1) * 0.5f;
+            const float in = std::max(PaintRoundInset(std::min(dyTop, r), r),
+                                      PaintRoundInset(std::min(dyBot, r), r));
+            cA = x + in;
+            cLen = w - 2.0f * in;
+        }
+        if (cLen <= 0.002f) continue;
+
+        int segs = 1;
+        if (dtdx > 1e-9f) {
+            const int k = (int)std::ceil(cLen / std::max(stepPx, 1.0f));
+            if (k > 1) segs = std::min(k, kMaxGradSplits);
+        }
+        for (int sg = 0; sg < segs; sg++) {
+            const float sx0 = cA + cLen * (float)sg / (float)segs;
+            const float sx1 = cA + cLen * (float)(sg + 1) / (float)segs;
+            if (sx1 <= sx0 + 0.002f) continue;
+            // 段中心处的 t（量化到级中心）
+            const float px = (sx0 + sx1) * 0.5f;
+            const float py = (ry0 + ry1) * 0.5f;
+            float t = ((px - sx) * dx + (py - sy) * dy) / len;
+            t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+            if (levels > 1) {
+                float q = (std::floor(t * (float)levels) + 0.5f) / (float)levels;
+                if (q > 1.0f) q = 1.0f;
+                t = q;
+            }
+            // ★ 这里**不做误差扩散抖动**（老 V/H 路径才抖）：抖动会让相邻行的颜色
+            // 永不相等，纵向合并直接失效 —— 实测 180×140 的 135° 卡片从 260 条涨到
+            // 7700+ 条、直接撞 cap 退回"垂直近似"（等于没修）。级内恒定的代价是
+            // 能看出色阶，这与 SVG 渐变（BuildPathFillBands）是同一条底线。
+            const uint32_t col = PaintLerpArgb(from, to, t);
+            // 与上一行同位置同色 → 直接加高（省一个 draw call）
+            bool merged = false;
+            for (int k = 0; k < openN; k++) {
+                if (open[k].x0 == sx0 && open[k].w == (sx1 - sx0) && open[k].endY == ry0 &&
+                    out[open[k].idx].color == col) {
+                    out[open[k].idx].h += (ry1 - ry0);
+                    open[k].endY = ry1;
+                    merged = true;
+                    break;
+                }
+            }
+            if (merged) continue;
+            if (n >= cap) return -1;             // 放不下：交给调用方降级
+            out[n] = { sx0, ry0, sx1 - sx0, ry1 - ry0, col, 0.0f, false };
+            if (openN < kMaxOpen) {
+                open[openN++] = { sx0, sx1 - sx0, ry1, n };
+            } else {
+                int oldest = 0;
+                for (int k = 1; k < openN; k++)
+                    if (open[k].endY < open[oldest].endY) oldest = k;
+                open[oldest] = { sx0, sx1 - sx0, ry1, n };
+            }
+            n++;
+        }
+    }
+    return n;
 }
 
 // 边框：直角 → 4 条矩形；圆角 → 沿圆弧逐行铺薄条的"环形边框"。
@@ -655,15 +807,14 @@ constexpr int kMaxOpenRuns = 96;         // 跨行合并的"正在延伸的条�
 //
 // 代价是**色阶可见**：levels 每级约 2 设备像素，放大到 400px 的高饱和度渐变能看出
 // 台阶。这与"不做抗锯齿、只用 fillRect"是同一条底线，不是这里偷懒。
-constexpr int kMaxGradSplits = 96;       // 单行条带内最多再切几段
+// （kMaxGradSplits / kPathGradLevelsMin / kPathGradLevelsMax 声明在本文件上方 ——
+//  任意角度渐变 BuildFillBandsAngleGrad 也要用同一套口径。）
 // 单节点缓存上限。**别按"够用"去调小**：条带数 ≈ 节点高度 × 1~3（AA 逐行），
 // 300×300 的图标实测 1173 条 —— 以前的 1024 让这种图标一张就"永不缓存、每帧重算 199 µs"，
 // 而 240×240（935 条）刚好能缓存，阈值卡在两个相邻尺寸之间，等于随机。
 // 现在单节点放宽到 16384 条（≈384 KB），全局预算由渲染器的 pathBandsBudget() 把关，
 // 超预算的节点退回"不缓存"，不会把内存吃穿。
 constexpr int kMaxCachedBands = 16384;
-constexpr int kPathGradLevelsMin = 8;
-constexpr int kPathGradLevelsMax = 96;
 
 // spreadMethod：把 t 折进 0..1（pad 夹紧 / repeat 取小数 / reflect 折返）
 inline float PathGradSpreadT(float t, uint8_t spread) {

@@ -76,7 +76,7 @@ $(BUILD_DIR)/binui_d3d11.o: $(SRC_DIR)/backends/binui_d3d11.cpp
 
 $(BUILD_DIR)/examples/app_win32.o: $(SRC_DIR)/platform/app_win32.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
+	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
 
 $(LIB_A): $(LIB_OBJS)
 	ar rcs $@ $^
@@ -392,9 +392,16 @@ $(BIN_DIR)/check_examples$(EXT): tools/check_examples.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A) $(GL_LIBS)
 
-$(BIN_DIR)/offscreen_render$(EXT): tools/offscreen_render.cpp $(SRC_DIR)/platform/app_win32.cpp $(LIB_A)
+# ★ 这条规则（以及下面 gl_shot/d3d11_shot 直接编译 .cpp 的几条）**没有头依赖**：
+#   改了 include/binui_paint.h、src/backends/binui_draw_nodes.h 这类共享头之后，
+#   这些 exe 不会重编，验出来的还是旧行为（本仓库在 §7.6.4 踩过一次，0.16.13 又踩了一次：
+#   改了渐变条带生成，offscreen_render 却跑的是旧二进制，白折腾半轮）。
+#   所以离屏工具改成"先编 .o（带 -MMD）再链接"。
+$(BUILD_DIR)/offscreen_render.o: tools/offscreen_render.cpp
+	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -I$(EXA_DIR) -Isrc -c $< -o $@
+$(BIN_DIR)/offscreen_render$(EXT): $(BUILD_DIR)/offscreen_render.o $(BUILD_DIR)/examples/app_win32.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -I$(EXA_DIR) -Isrc -o $@ $< $(SRC_DIR)/platform/app_win32.cpp \
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/offscreen_render.o $(BUILD_DIR)/examples/app_win32.o \
 	    $(LIB_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
 
 $(BIN_DIR)/window_capture$(EXT): tools/window_capture.cpp
@@ -470,7 +477,7 @@ tools: $(TOOL_BINS)
 #   mingw32-make SHELL=sh pixels           # 渲染 + 与 docs/pixels 基准图比对
 #   mingw32-make SHELL=sh pixels-update    # 改完绘制/布局后重新生成基准图
 # =============================================
-PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad svgjoin svgstroke svgfinish svgaa opacity
+PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad svgjoin svgstroke svgfinish svgaa opacity grad-angle
 PIXEL_OUT   := $(BUILD_DIR)/pixels
 PIXEL_GOLD  := docs/pixels
 PIXEL_TOL   ?= 0.5
