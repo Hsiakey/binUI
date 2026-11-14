@@ -543,6 +543,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         VkImageView view = VK_NULL_HANDLE;
         VkDescriptorSet ds = VK_NULL_HANDLE;
         int w = 0, h = 0;
+        uint32_t mips = 1;          // v0.16.15：图片有 mip 链（其余纹理是 1）
         bool linear = false;
         bool needClear = true;      // 新建图像内容未定义：第一次用之前必须清零
         // 已经**记录进命令缓冲**的布局（每帧一开始 cmd 重置，但上一帧提交时
@@ -565,6 +566,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         Tex* tex = nullptr;
         int x = 0, y = 0, w = 0, h = 0;
         int rowBytes = 0;
+        int mip = 0;            // v0.16.15：mip 链的第几级
         std::vector<uint8_t> data;
     };
     std::vector<PendingUpload> pendingUploads;
@@ -801,13 +803,14 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
 
     bool createImage2D(int iw, int ih, VkFormat fmt, VkImageUsageFlags usage,
                        VkSampleCountFlagBits sampleCount, VkImage& img,
-                       VkDeviceMemory& mem, VkImageAspectFlags aspect) {
+                       VkDeviceMemory& mem, VkImageAspectFlags aspect,
+                       uint32_t mipLevels = 1) {
         VkImageCreateInfo ci{};
         ci.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         ci.imageType = VK_IMAGE_TYPE_2D;
         ci.format = fmt;
         ci.extent = {static_cast<uint32_t>(iw), static_cast<uint32_t>(ih), 1};
-        ci.mipLevels = 1;
+        ci.mipLevels = mipLevels;
         ci.arrayLayers = 1;
         ci.samples = sampleCount;
         ci.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -845,14 +848,15 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         return true;
     }
 
-    VkImageView makeView(VkImage img, VkFormat fmt, VkImageAspectFlags aspect) {
+    VkImageView makeView(VkImage img, VkFormat fmt, VkImageAspectFlags aspect,
+                         uint32_t levelCount = 1) {
         VkImageViewCreateInfo vi{};
         vi.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
         vi.image = img;
         vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
         vi.format = fmt;
         vi.subresourceRange.aspectMask = aspect;
-        vi.subresourceRange.levelCount = 1;
+        vi.subresourceRange.levelCount = levelCount;
         vi.subresourceRange.layerCount = 1;
         VkImageView view = VK_NULL_HANDLE;
         if (g_vk.vkCreateImageView(device, &vi, nullptr, &view) != VK_SUCCESS) return VK_NULL_HANDLE;
@@ -861,7 +865,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
 
     void barrier(VkImage img, VkImageLayout from, VkImageLayout to,
                  VkAccessFlags srcAccess, VkAccessFlags dstAccess,
-                 VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage) {
+                 VkPipelineStageFlags srcStage, VkPipelineStageFlags dstStage,
+                 uint32_t levelCount = 1) {
         VkImageMemoryBarrier b{};
         b.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         b.oldLayout = from;
@@ -870,7 +875,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.image = img;
         b.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        b.subresourceRange.levelCount = 1;
+        b.subresourceRange.levelCount = levelCount;
         b.subresourceRange.layerCount = 1;
         b.srcAccessMask = srcAccess;
         b.dstAccessMask = dstAccess;
@@ -1452,18 +1457,21 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // ============================================================
 
     // 建纹理（图像 + view + descriptor set），不带数据
-    bool createTexImage(Tex& t, int tw, int th, bool linear) {
+    // mips > 1：图片用（见 prepareImage 里的 CPU 盒式滤波 mip 链）
+    bool createTexImage(Tex& t, int tw, int th, bool linear, uint32_t mips = 1) {
         if (!createImage2D(tw, th, kColorFormat,
                            VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
-                           VK_SAMPLE_COUNT_1_BIT, t.image, t.mem, VK_IMAGE_ASPECT_COLOR_BIT))
+                           VK_SAMPLE_COUNT_1_BIT, t.image, t.mem, VK_IMAGE_ASPECT_COLOR_BIT,
+                           mips))
             return false;
-        t.view = makeView(t.image, kColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+        t.view = makeView(t.image, kColorFormat, VK_IMAGE_ASPECT_COLOR_BIT, mips);
         if (!t.view) {
             std::fprintf(stderr, "[vk] createTexImage: vkCreateImageView 失败\n");
             return false;
         }
         t.w = tw;
         t.h = th;
+        t.mips = mips;
         t.linear = linear;
         t.needClear = true;
         t.layout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1601,12 +1609,13 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             default:
                 break;
         }
-        barrier(t.image, t.layout, dst, srcAccess, dstAccess, srcStage, dstStage);
+        barrier(t.image, t.layout, dst, srcAccess, dstAccess, srcStage, dstStage, t.mips);
         t.layout = dst;
     }
 
     // 把一块 BGRA 像素拷进纹理的 (x,y,w,h)：staging → vkCmdCopyBufferToImage
-    bool stageCopy(Tex& t, int x, int y, int w, int h, const void* src, int rowBytes) {
+    bool stageCopy(Tex& t, int x, int y, int w, int h, const void* src, int rowBytes,
+                   int mipLevel = 0) {
         if (!cmdOpen || !t.image || w <= 0 || h <= 0) return false;
         if (rowBytes <= 0) rowBytes = w * 4;
         const VkDeviceSize bytes = static_cast<VkDeviceSize>(rowBytes) * h;
@@ -1632,6 +1641,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         setTexLayout(t, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
         VkBufferImageCopy region{};
         region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        region.imageSubresource.mipLevel = static_cast<uint32_t>(mipLevel);
         region.imageSubresource.layerCount = 1;
         region.imageOffset = {x, y, 0};
         region.imageExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
@@ -1656,25 +1666,28 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         return stageCopy(t, 0, 0, t.w, t.h, zeros.data(), t.w * 4);
     }
 
-    bool stageUpload(Tex& t, int x, int y, int w, int h, const void* src, int rowBytes) {
-        if (t.needClear) {
+    bool stageUpload(Tex& t, int x, int y, int w, int h, const void* src, int rowBytes,
+                     int mipLevel = 0) {
+        if (t.needClear && mipLevel == 0) {
             t.needClear = false;
             // 整张覆盖的上传可以免掉清零
             if (!(x == 0 && y == 0 && w == t.w && h == t.h && rowBytes == t.w * 4))
                 if (!zeroTex(t)) return false;
         }
-        return stageCopy(t, x, y, w, h, src, rowBytes);
+        return stageCopy(t, x, y, w, h, src, rowBytes, mipLevel);
     }
 
     // 上传入口：帧内直接录，帧外排队（下一个 beginFrame 里补）
-    bool uploadRegion(Tex& t, int x, int y, int w, int h, const void* src, int rowBytes) {
+    bool uploadRegion(Tex& t, int x, int y, int w, int h, const void* src, int rowBytes,
+                      int mipLevel = 0) {
         if (!t.image || w <= 0 || h <= 0 || !src) return false;
         if (rowBytes <= 0) rowBytes = w * 4;
-        if (cmdOpen) return stageUpload(t, x, y, w, h, src, rowBytes);
+        if (cmdOpen) return stageUpload(t, x, y, w, h, src, rowBytes, mipLevel);
         PendingUpload pu;
         pu.tex = &t;
         pu.x = x; pu.y = y; pu.w = w; pu.h = h;
         pu.rowBytes = rowBytes;
+        pu.mip = mipLevel;
         const auto* p = static_cast<const uint8_t*>(src);
         pu.data.assign(p, p + static_cast<size_t>(rowBytes) * h);
         pendingUploads.push_back(std::move(pu));
@@ -1686,7 +1699,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         std::vector<PendingUpload> q;
         q.swap(pendingUploads);
         for (const PendingUpload& pu : q)
-            if (pu.tex) stageUpload(*pu.tex, pu.x, pu.y, pu.w, pu.h, pu.data.data(), pu.rowBytes);
+            if (pu.tex) stageUpload(*pu.tex, pu.x, pu.y, pu.w, pu.h, pu.data.data(), pu.rowBytes,
+                                    pu.mip);
     }
 
     // 一次性提交：初始化期（白纹理）没有帧，用它把像素/清零送上去。
@@ -1732,11 +1746,14 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
             si.magFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
             si.minFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
-            si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+            // v0.16.15：线性档走 mip 线性插值（三线性）+ 放开 LOD 上限。单级纹理
+            // （字形图集/圆角模板/视频帧）没有 mip 链，采样会被钳到第 0 级，行为不变。
+            si.mipmapMode = linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR
+                                  : VK_SAMPLER_MIPMAP_MODE_NEAREST;
             si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
             si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
             si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-            si.maxLod = 0.0f;
+            si.maxLod = linear ? VK_LOD_CLAMP_NONE : 0.0f;
             if (g_vk.vkCreateSampler(device, &si, nullptr, &out) != VK_SUCCESS) {
                 std::fprintf(stderr, "[vk] createSamplers: vkCreateSampler 失败 (linear=%d)\n",
                              (int)linear);
@@ -3228,13 +3245,49 @@ bool BinUIVK::prepareImage(uint16_t index, const uint8_t* data, size_t size,
         return false;
     }
     if (ti != d.images.end()) d.freeTex(ti->second);   // 换图：旧图像必须放掉
+    // v0.16.15（P1-8）：图片带完整 mip 链。链在 **CPU 上做盒式滤波**再逐级上传 ——
+    // GPU 侧生成要么 blit 链（要 TRANSFER_SRC + 逐级布局切换，跟这里的"一张图一个
+    // 布局状态"的记账模型别扭），要么 vkCmdBlit 对格式/线性滤波有要求，都不如
+    // "多传几张小图"干脆：一次性代价（图片只在换 generation 时上传），质量与 GPU
+    // 生成一致（2×2 平均）。视频帧/图集走 prepareImageRaw/atlas，**不做** mip。
+    uint32_t levels = 1;
+    {
+        int m = std::max(iw, ih);
+        while (m > 1 && levels < 16) { m >>= 1; levels++; }
+    }
+    if (levels < 2) levels = 1;                         // 1×1 之类的退化图
     Impl::Tex& t = d.images[index];
-    if (!d.createTexImage(t, iw, ih, true)) {
+    if (!d.createTexImage(t, iw, ih, true, levels)) {
         d.images.erase(index);
         return false;
     }
     t.needClear = false;   // 整张覆盖，不用先清零
-    const bool ok = d.uploadRegion(t, 0, 0, iw, ih, px.data(), iw * 4);
+    bool ok = d.uploadRegion(t, 0, 0, iw, ih, px.data(), iw * 4, 0);
+    // 逐级盒式滤波 + 上传（第 l 级 = 上一级 2×2 平均）
+    std::vector<uint8_t> cur = std::move(px);
+    int cw = iw, ch = ih;
+    for (uint32_t l = 1; l < levels && ok; l++) {
+        const int nw = std::max(1, cw / 2), nh = std::max(1, ch / 2);
+        std::vector<uint8_t> next(static_cast<size_t>(nw) * nh * 4);
+        for (int y = 0; y < nh; y++) {
+            const int y0 = std::min(ch - 1, y * 2), y1 = std::min(ch - 1, y * 2 + 1);
+            for (int x = 0; x < nw; x++) {
+                const int x0 = std::min(cw - 1, x * 2), x1 = std::min(cw - 1, x * 2 + 1);
+                for (int c = 0; c < 4; c++) {
+                    const uint32_t s = cur[(static_cast<size_t>(y0) * cw + x0) * 4 + c] +
+                                       cur[(static_cast<size_t>(y0) * cw + x1) * 4 + c] +
+                                       cur[(static_cast<size_t>(y1) * cw + x0) * 4 + c] +
+                                       cur[(static_cast<size_t>(y1) * cw + x1) * 4 + c];
+                    next[(static_cast<size_t>(y) * nw + x) * 4 + c] =
+                        static_cast<uint8_t>((s + 2) / 4);
+                }
+            }
+        }
+        ok = d.uploadRegion(t, 0, 0, nw, nh, next.data(), nw * 4, static_cast<int>(l));
+        cur.swap(next);
+        cw = nw;
+        ch = nh;
+    }
     d.imageGen[index] = generation;
     return ok;
 }
@@ -3268,12 +3321,13 @@ bool BinUIVK::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
     return ok;
 }
 
-void BinUIVK::drawImage(uint16_t index, float x, float y, float w, float h) {
+void BinUIVK::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
+                          float x, float y, float w, float h, uint32_t tint) {
     Impl& d = *impl_;
     if (!d.ready || w <= 0 || h <= 0) return;
     auto it = d.images.find(index);
     if (it == d.images.end() || !it->second.view) return;
-    d.emitQuad(x, y, x + w, y + h, 0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFF, &it->second);
+    d.emitQuad(x, y, x + w, y + h, u0, v0, u1, v1, tint, &it->second);
 }
 
 // ---- 组透明度：离屏图层（v0.16.12）----

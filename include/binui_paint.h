@@ -700,6 +700,81 @@ inline int BuildShadowRings(const BinUIShadow& s, float x, float y, float w, flo
     return n;
 }
 
+// ============================================================
+// 圆角图片（v0.16.15 P1-8）：把"圆角矩形内的图片"切成横向细条
+// ------------------------------------------------------------
+// 后端没有"圆角裁剪"：`fillRounded` 只能填色、`drawImage` 只能画轴对齐整图。
+// 但圆角矩形的横截面是**每行一个左右内缩**（`PaintRoundInset` 的解析式圆弧），
+// 所以把图片按行切成细条、每条只画该行的 [内缩, w-内缩] 区间，并取源图对应的一行
+// UV —— 形状就对了。条带仍是轴对齐矩形（后端只要支持 UV 子矩形 + 顶点色），
+// 边缘用后端的 MSAA 抗锯齿，不需要新原语、也不需要改着色器。
+//
+// 条带数：上下两个圆角区各 r 行（1px 一行），中间直边一条 —— 只跟半径有关，
+// 与图片高度无关（100px 高的头像 1 条，正圆头像 = 2r+1 条）。
+// 超过上限（超大圆形）时按比例放大行高，保证画完而不是画一半。
+// ============================================================
+struct PaintImageBand {
+    float x = 0, y = 0, w = 0, h = 0;      // 目标矩形（已按圆弧内缩）
+    float u0 = 0, v0 = 0, u1 = 1, v1 = 1;  // 源图归一化子矩形
+};
+
+constexpr int kMaxImageBands = 512;
+
+inline int BuildImageBands(float x, float y, float w, float h, float radius,
+                           PaintImageBand* out, int cap = kMaxImageBands) {
+    if (!out || cap <= 0 || w <= 0.0f || h <= 0.0f) return 0;
+    float r = radius;
+    if (r > 0.0f) r = std::min(r, std::min(w, h) * 0.5f);
+    if (r <= 0.5f || cap == 1) {                 // 直角：整图一条（像素中性）
+        out[0] = { x, y, w, h, 0.0f, 0.0f, 1.0f, 1.0f };
+        return 1;
+    }
+    const float rc = r;                          // 钳制后的半径
+    // 行数超上限时放大行高（宁可边缘粗一点，也不能只画一半）
+    const int rowsNeeded = static_cast<int>(2.0f * std::ceil(rc)) + 1;
+    const float step = (cap > 1 && rowsNeeded > cap) ? (2.0f * rc / static_cast<float>(cap - 1))
+                                                    : 1.0f;
+    int n = 0;
+    float cur = y;
+    const float bottom = y + h;
+    while (cur < bottom - 0.001f && n < cap) {
+        const float by0 = cur;
+        float ht = std::min(step, bottom - cur);
+        // 圆角区细分，直边区一条走到底
+        if (by0 >= y + rc - 0.001f && by0 + ht <= bottom - rc + 0.001f)
+            ht = bottom - rc - by0;
+        if (ht <= 0.001f) ht = std::min(step, bottom - cur);
+        const float by1 = by0 + ht;
+        // 用行中心算内缩（与渐变底色同一套口径，圆弧才不会切出台阶）
+        const float dyTop = (by0 + by1) * 0.5f - y;
+        const float dyBot = bottom - (by0 + by1) * 0.5f;
+        const float in = std::max(PaintRoundInset(std::min(dyTop, rc), rc),
+                                  PaintRoundInset(std::min(dyBot, rc), rc));
+        const float bx = x + in;
+        const float bw = w - 2.0f * in;
+        if (bw > 0.0f) {
+            PaintImageBand& b = out[n++];
+            b.x = bx;
+            b.y = by0;
+            b.w = bw;
+            b.h = by1 - by0;
+            // UV 跟着内缩走：图片仍然"按整个盒子缩放"，被圆角**裁掉**的是两侧那部分，
+            // 所以这一行要取源图 [in/w, 1-in/w] 这一段（CSS 的 border-radius 就是这个语义；
+            // 若这里恒取 0..1，圆角区的图片会被横向拉伸，看起来像"鱼眼"）。
+            b.u0 = in / w;
+            b.u1 = 1.0f - in / w;
+            b.v0 = (by0 - y) / h;
+            b.v1 = (by1 - y) / h;
+        }
+        cur = by1;
+    }
+    if (n == 0) {                                 // 防御：一条都没生成就画整图
+        out[0] = { x, y, w, h, 0.0f, 0.0f, 1.0f, 1.0f };
+        return 1;
+    }
+    return n;
+}
+
 // CSS font-weight 归一化到后端认识的"常规/粗体"两档
 inline int PaintWeightOf(const BinUIPaintNode* p) {
     return (p && (p->flags & PAINT_WEIGHT) && p->weight >= 6) ? 700 : 400;

@@ -1417,8 +1417,43 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                     if (bmp) {
                         Gdiplus::Graphics g(hdc);
                         g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
-                        g.DrawImage(bmp, (Gdiplus::REAL)x, (Gdiplus::REAL)y,
-                                    (Gdiplus::REAL)nw, (Gdiplus::REAL)nh);
+                        // v0.16.15（P1-8）：圆角图片用 GDI+ 的圆角路径裁剪（带解析 AA，
+                        // 与 GPU 端"横向细条"在视觉上一致；GDI 本来没有 MSAA，这里是
+                        // GDI+ 自己做的覆盖率），染色用 color matrix 乘一遍。
+                        Gdiplus::GraphicsPath clipPath;
+                        const int rad = (int)std::lround((float)node.radius *
+                                                         (nodeScale > 0.0f ? nodeScale : 1.0f));
+                        if (rad > 0) {
+                            const Gdiplus::REAL rr = (Gdiplus::REAL)rad;
+                            const Gdiplus::REAL gx = (Gdiplus::REAL)x, gy = (Gdiplus::REAL)y;
+                            const Gdiplus::REAL gw = (Gdiplus::REAL)nw, gh = (Gdiplus::REAL)nh;
+                            clipPath.AddArc(gx, gy, rr * 2, rr * 2, 180, 90);
+                            clipPath.AddArc(gx + gw - rr * 2, gy, rr * 2, rr * 2, 270, 90);
+                            clipPath.AddArc(gx + gw - rr * 2, gy + gh - rr * 2, rr * 2, rr * 2, 0, 90);
+                            clipPath.AddArc(gx, gy + gh - rr * 2, rr * 2, rr * 2, 90, 90);
+                            clipPath.CloseFigure();
+                            g.SetClip(&clipPath);
+                        }
+                        const uint8_t br = pt ? pt->reserve[2] : 0;
+                        if (br != 0 && br < 255) {
+                            const Gdiplus::REAL k = (Gdiplus::REAL)br / 255.0f;
+                            // GDI+ 的 ColorMatrix 在 mingw 头里是 m[5][5]（MS 的 SDK 是 m00..m44）：
+                            // 对角线前三维乘 RGB，**第四维（m[3][3]）必须置 1 否则 alpha 归零**。
+                            Gdiplus::ColorMatrix cm = {};
+                            cm.m[0][0] = k; cm.m[1][1] = k; cm.m[2][2] = k;
+                            cm.m[3][3] = 1.0f; cm.m[4][4] = 1.0f;
+                            Gdiplus::ImageAttributes ia;
+                            ia.SetColorMatrix(&cm);
+                            g.DrawImage(bmp,
+                                        Gdiplus::RectF((Gdiplus::REAL)x, (Gdiplus::REAL)y,
+                                                       (Gdiplus::REAL)nw, (Gdiplus::REAL)nh),
+                                        0.0f, 0.0f, (Gdiplus::REAL)bmp->GetWidth(),
+                                        (Gdiplus::REAL)bmp->GetHeight(),
+                                        Gdiplus::UnitPixel, &ia);
+                        } else {
+                            g.DrawImage(bmp, (Gdiplus::REAL)x, (Gdiplus::REAL)y,
+                                        (Gdiplus::REAL)nw, (Gdiplus::REAL)nh);
+                        }
                         delete bmp;
                         break;
                     }

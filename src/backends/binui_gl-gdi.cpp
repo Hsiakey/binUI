@@ -122,6 +122,7 @@ PFNGLDELETERENDERBUFFERS glDeleteRenderbuffersP = nullptr;
 PFNGLBINDRENDERBUFFER   glBindRenderbufferP   = nullptr;
 PFNGLRENDERBUFFERSTORAGEMULTISAMPLE glRenderbufferStorageMultisampleP = nullptr;
 PFNGLFRAMEBUFFERRENDERBUFFER glFramebufferRenderbufferP = nullptr;
+PFNGLGENERATEMIPMAPPROC glGenerateMipmapP = nullptr;   // v0.16.15：图片 mip
 
 void* GetGLProc(const char* name) {
     void* p = reinterpret_cast<void*>(wglGetProcAddress(name));
@@ -170,6 +171,7 @@ bool LoadGL() {
     LOAD_PROC(glBindRenderbufferP, "glBindRenderbuffer", PFNGLBINDRENDERBUFFER);
     LOAD_PROC(glRenderbufferStorageMultisampleP, "glRenderbufferStorageMultisample", PFNGLRENDERBUFFERSTORAGEMULTISAMPLE);
     LOAD_PROC(glFramebufferRenderbufferP, "glFramebufferRenderbuffer", PFNGLFRAMEBUFFERRENDERBUFFER);
+    LOAD_PROC(glGenerateMipmapP, "glGenerateMipmap", PFNGLGENERATEMIPMAPPROC);
 #undef LOAD_PROC
     return true;
 }
@@ -713,6 +715,14 @@ struct BinUIGLGdi::Impl {
         }
         if (it != images.end() && it->second) glDeleteTextures(1, &it->second);
         images[index] = CreateTexture2D(w, h, px.data(), true);
+        // v0.16.15（P1-8）：给图片生成 mip 链，并把缩小采样改成三线性。
+        // 只做双线性时"大图缩小"只取最近的 4 个纹素 —— 一像素的屏幕区域要代表上百个
+        // 源像素，远看会闪、摩尔纹；mip 让 GPU 自动挑合适的层级再插值。
+        if (images[index] && glGenerateMipmapP) {
+            glBindTexture(GL_TEXTURE_2D, images[index]);
+            glGenerateMipmapP(GL_TEXTURE_2D);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+        }
         imageGen[index] = generation;
         return images[index] != 0;
     }
@@ -726,6 +736,8 @@ struct BinUIGLGdi::Impl {
         if (w <= 0 || h <= 0 || !rgba) return false;
         if (it != images.end() && it->second) glDeleteTextures(1, &it->second);
         images[index] = CreateTexture2D(w, h, rgba, true, true);
+        // 视频帧/纹理会**每帧**换内容（generation 每次都变），gen mip 太贵；而且它们是
+        // 1:1 或放大显示，双线性就够 —— 这里不做 mip。
         imageGen[index] = generation;
         return images[index] != 0;
     }
@@ -1391,12 +1403,13 @@ bool BinUIGLGdi::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rg
     return impl_->uploadImageRaw(index, w, h, rgba, generation);
 }
 
-void BinUIGLGdi::drawImage(uint16_t index, float x, float y, float w, float h) {
+void BinUIGLGdi::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
+                             float x, float y, float w, float h, uint32_t tint) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
     auto it = impl_->images.find(index);
     if (it == impl_->images.end() || !it->second) return;
     impl_->curTex = it->second;
-    impl_->emitQuad(x, y, x + w, y + h, 0, 0, 1, 1, 0xFFFFFFFF);
+    impl_->emitQuad(x, y, x + w, y + h, u0, v0, u1, v1, tint);
     impl_->curTex = impl_->whiteTex;
 }
 

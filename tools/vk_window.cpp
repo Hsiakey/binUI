@@ -109,7 +109,7 @@ int main(int argc, char** argv) {
         const auto& paths = renderer.imagePaths();
         if (!paths.empty()) {
             auto imgs = binui::ex::LoadImages(binui::ex::DirOf(uiPath), paths, std::string());
-            if (!imgs.empty()) renderer.loadResources(imgs);
+            if (!imgs.empty()) { renderer.setImageOrder(paths); renderer.loadResources(imgs); }
         }
     }
 

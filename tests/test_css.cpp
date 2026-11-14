@@ -221,6 +221,73 @@ static void TestIssueRegressions() {
                                      rings[0].color >> 24 == 0x80);
     }
 
+    // ---- 0.16.15：图片能力（P1-8：圆角图片 / filter: brightness / mip 的几何部分）----
+    // 钉住：
+    //   1. `filter: brightness(0.5)` 落到 paint.reserve[2]（只乘暗，>1 忽略）；
+    //   2. 不认识的滤镜只告警、不影响其它绘制；
+    //   3. 圆角图片的横条几何：直角 1 条（像素中性）、圆角 2r+1 条、
+    //      每条的内缩与 UV 子矩形一致（圆角区取源图内侧那一段，**不是**拉伸）；
+    //   4. 条带在纵向无缝铺满（首尾相接、累计高度 = 图高）。
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014">
+<body>
+  <img id="imgA" src="a.png" style="position:absolute; left:10; top:10; width:96; height:96; border-radius:24" />
+  <img id="imgB" src="a.png" style="position:absolute; left:120; top:10; width:96; height:96; filter:brightness(0.5)" />
+  <img id="imgC" src="a.png" style="position:absolute; left:230; top:10; width:96; height:96; filter:brightness(180%)" />
+  <img id="imgD" src="a.png" style="position:absolute; left:10; top:120; width:96; height:96; filter:grayscale(1) brightness(0.25)" />
+</body></html>
+</app_window>)HTML";
+        auto res = CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("16.15: 图片布局可解析", ParseInto(r, res.layout));
+        auto paintOfName = [&](const char* name) -> const BinUIPaintNode* {
+            const uint16_t id = r.findNodeByName(name);
+            return id ? r.paintOf(id) : nullptr;
+        };
+        const BinUIPaintNode* pb = paintOfName("imgB");
+        TEST("16.15: brightness(0.5) 进 reserve[2] = 128", pb && pb->reserve[2] == 128);
+        const BinUIPaintNode* pc = paintOfName("imgC");
+        TEST("16.15: brightness(180%) 不提亮（reserve[2] 保持 0）", pc == nullptr || pc->reserve[2] == 0);
+        const BinUIPaintNode* pd = paintOfName("imgD");
+        TEST("16.15: grayscale 忽略但 brightness 仍生效", pd && pd->reserve[2] == 64);
+        // 只写了 filter 的节点也必须进扩展绘制段（否则渲染器读不到系数）
+        TEST("16.15: 只有 filter 也生成绘制条目", pb != nullptr);
+
+        // ---- 圆角图片的横条几何 ----
+        PaintImageBand bands[kMaxImageBands];
+        int n = BuildImageBands(0, 0, 96, 96, 0, bands);
+        TEST("16.15: 直角 = 一条整图", n == 1 && bands[0].u0 == 0.0f && bands[0].u1 == 1.0f &&
+                                        bands[0].v0 == 0.0f && bands[0].v1 == 1.0f);
+        n = BuildImageBands(10, 20, 96, 96, 24, bands);
+        TEST("16.15: 圆角条带数 = 2r+1", n == 49);
+        if (n > 1) {
+            TEST("16.15: 首条在下圆角区：有内缩 + UV 取内侧",
+                 bands[0].x > 10.0f && bands[0].w < 96.0f &&
+                 bands[0].u0 > 0.0f && std::fabs(bands[0].u1 - (1.0f - bands[0].u0)) < 1e-5f);
+            TEST("16.15: 首条从图顶开始", std::fabs(bands[0].y - 20.0f) < 1e-4f);
+            bool middleFull = false;      // 中间那条是整宽
+            for (int i = 0; i < n; i++)
+                if (std::fabs(bands[i].w - 96.0f) < 1e-4f && bands[i].u0 == 0.0f)
+                    middleFull = true;
+            TEST("16.15: 直边区一条整宽（u 0..1）", middleFull);
+            float sum = 0.0f, lastEnd = bands[0].y;
+            bool contiguous = true;
+            for (int i = 0; i < n; i++) {
+                if (std::fabs(bands[i].y - lastEnd) > 1e-4f) contiguous = false;
+                lastEnd = bands[i].y + bands[i].h;
+                sum += bands[i].h;
+            }
+            TEST("16.15: 纵向首尾相接", contiguous);
+            TEST("16.15: 纵向铺满整图高", std::fabs(sum - 96.0f) < 0.01f);
+        }
+        // 半径大到装不下时不能"只画一半"
+        n = BuildImageBands(0, 0, 40, 40, 200, bands);
+        float sum2 = 0.0f;
+        for (int i = 0; i < n; i++) sum2 += bands[i].h;
+        TEST("16.15: 超大半径仍铺满", n > 0 && n <= kMaxImageBands && std::fabs(sum2 - 40.0f) < 0.01f);
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

@@ -1079,20 +1079,44 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 case BINUI_IMAGE: {
                     const ImageResource* img = renderer.getImage(node.imageIndex);
                     bool drawn = false;
+                    // v0.16.15（P1-8）：染色 = CSS `filter: brightness(N)`，编译期存进
+                    // paint.reserve[2]（0 = 没声明）。三个 GPU 后端本来就是"纹理 × 顶点色"，
+                    // 传个灰度顶点色就是"乘一下"，不用改着色器。
+                    uint32_t tint = 0xFFFFFFFFu;
+                    if (pt && pt->reserve[2] != 0 && pt->reserve[2] < 255) {
+                        const uint32_t k = pt->reserve[2];
+                        tint = 0xFF000000u | (k << 16) | (k << 8) | k;
+                    }
+                    // 圆角图片 = 横向细条（见 binui_paint.h 的 BuildImageBands）；
+                    // 直角时一条整图，像素与旧版完全相同。
+                    auto drawImg = [&](float ix, float iy, float iw, float ih) {
+                        if (effRadius <= 0.5f) {
+                            gfx.drawImageEx(node.imageIndex, 0.0f, 0.0f, 1.0f, 1.0f,
+                                            ix, iy, iw, ih, tint);
+                            return;
+                        }
+                        binui::PaintImageBand bands[binui::kMaxImageBands];
+                        const int nb = binui::BuildImageBands(ix, iy, iw, ih, effRadius, bands);
+                        for (int q = 0; q < nb; q++) {
+                            const binui::PaintImageBand& b = bands[q];
+                            if (b.w <= 0.0f || b.h <= 0.0f) continue;
+                            gfx.drawImageEx(node.imageIndex, b.u0, b.v0, b.u1, b.v1,
+                                            b.x, b.y, b.w, b.h, tint);
+                        }
+                    };
                     if (img && !img->data.empty()) {
                         uint32_t gen = renderer.imageGeneration(node.imageIndex);
                         if (img->rawPixels) {
                             if (gfx.prepareImageRaw(node.imageIndex, img->width, img->height,
-                                                    img->data.data(), gen))
-                                gfx.drawImage(node.imageIndex, static_cast<float>(x),
-                                              static_cast<float>(y),
-                                              static_cast<float>(nw), static_cast<float>(nh));
+                                                    img->data.data(), gen)) {
+                                drawImg(static_cast<float>(x), static_cast<float>(y),
+                                        static_cast<float>(nw), static_cast<float>(nh));
+                            }
                             drawn = true;
                         } else if (gfx.prepareImage(node.imageIndex, img->data.data(),
                                                     img->data.size(), gen)) {
-                            gfx.drawImage(node.imageIndex, static_cast<float>(x),
-                                          static_cast<float>(y),
-                                          static_cast<float>(nw), static_cast<float>(nh));
+                            drawImg(static_cast<float>(x), static_cast<float>(y),
+                                    static_cast<float>(nw), static_cast<float>(nh));
                             drawn = true;
                         }
                     }

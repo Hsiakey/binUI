@@ -333,7 +333,9 @@ struct BinUID3D::Impl {
                          (unsigned)shr, (unsigned)device->GetDeviceRemovedReason());
             return false;
         }
-        smd.Filter = D3D11_FILTER_MIN_MAG_LINEAR_MIP_POINT;
+        // v0.16.15：切到三线性（带 mip 插值）。单级纹理（字形图集/离屏目标/视频帧）
+        // 没有 mip 链，MIN_MAG_MIP_LINEAR 与原来的 MIN_MAG_LINEAR 逐像素相同。
+        smd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
         shr = device->CreateSamplerState(&smd, &samLinear);
         if (FAILED(shr)) {
             std::fprintf(stderr, "[d3d11] sampler linear failed hr=0x%08X removed=0x%08X\n",
@@ -519,20 +521,39 @@ struct BinUID3D::Impl {
             return false;
         }
         if (it != images.end() && it->second) it->second->Release();
+        // v0.16.15（P1-8）：图片生成完整 mip 链（缩小时不再"4 个纹素代表上百像素"）。
+        // GenerateMips 要求 MipLevels=0 + RENDER_TARGET 绑定 + GENERATE_MIPS 标志，
+        // 且只能喂第 0 级的初始数据。采样器那边切成 MIN_MAG_MIP_LINEAR —— 单级纹理
+        // （字形图集/离屏目标）行为不变，等同原来的 MIN_MAG_LINEAR。
+        const bool wantMip = (w >= 2 && h >= 2);
         D3D11_TEXTURE2D_DESC td = {};
         td.Width = static_cast<UINT>(w);
         td.Height = static_cast<UINT>(h);
-        td.MipLevels = 1;
+        td.MipLevels = wantMip ? 0 : 1;
         td.ArraySize = 1;
         td.Format = DXGI_FORMAT_B8G8R8A8_UNORM; // DecodeImagePixels 为 BGRA
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE | (wantMip ? D3D11_BIND_RENDER_TARGET : 0);
+        td.MiscFlags = wantMip ? D3D11_RESOURCE_MISC_GENERATE_MIPS : 0;
         D3D11_SUBRESOURCE_DATA init = { px.data(), static_cast<UINT>(w) * 4, 0 };
         ID3D11Texture2D* tex = nullptr;
         ID3D11ShaderResourceView* srv = nullptr;
-        if (FAILED(device->CreateTexture2D(&td, &init, &tex)) ||
-            FAILED(device->CreateShaderResourceView(tex, nullptr, &srv))) {
+        // 带 mip 的纹理**不能**在 CreateTexture2D 里只喂第 0 级（D3D11 要求 pInitialData
+        // 覆盖整条链，否则创建直接失败 → 图片整块消失，实测过）。改成先建空纹理，
+        // UpdateSubresource 写第 0 级，再 GenerateMips。
+        if (wantMip) {
+            if (FAILED(device->CreateTexture2D(&td, nullptr, &tex)) || !tex ||
+                FAILED(device->CreateShaderResourceView(tex, nullptr, &srv))) {
+                if (tex) tex->Release();
+                images[index] = nullptr;
+                imageGen[index] = generation;
+                return false;
+            }
+            ctx->UpdateSubresource(tex, 0, nullptr, px.data(), static_cast<UINT>(w) * 4, 0);
+            ctx->GenerateMips(srv);
+        } else if (FAILED(device->CreateTexture2D(&td, &init, &tex)) ||
+                   FAILED(device->CreateShaderResourceView(tex, nullptr, &srv))) {
             if (tex) tex->Release();
             images[index] = nullptr;
             imageGen[index] = generation;
@@ -1457,13 +1478,14 @@ bool BinUID3D::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba
     return impl_->uploadImageRaw(index, w, h, rgba, generation);
 }
 
-void BinUID3D::drawImage(uint16_t index, float x, float y, float w, float h) {
+void BinUID3D::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
+                           float x, float y, float w, float h, uint32_t tint) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
     auto it = impl_->images.find(index);
     if (it == impl_->images.end() || !it->second) return;
     impl_->curLinear = 1;
     impl_->curSrv = it->second;
-    impl_->emitQuad(x, y, x + w, y + h, 0, 0, 1, 1, 0xFFFFFFFF);
+    impl_->emitQuad(x, y, x + w, y + h, u0, v0, u1, v1, tint);
     impl_->curLinear = 0;
     impl_->curSrv = impl_->whiteSrv;
 }

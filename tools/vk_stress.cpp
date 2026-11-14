@@ -83,7 +83,7 @@ bool LoadScene(Scene& s, const char* uiPath) {
     const auto& paths = s.renderer.imagePaths();
     if (!paths.empty()) {
         auto imgs = binui::ex::LoadImages(binui::ex::DirOf(uiPath), paths, std::string());
-        if (!imgs.empty()) s.renderer.loadResources(imgs);
+        if (!imgs.empty()) { s.renderer.setImageOrder(paths); s.renderer.loadResources(imgs); }
     }
     s.ok = true;
     return true;

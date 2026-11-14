@@ -82,7 +82,8 @@ public:
     bool prepareImage(uint16_t index, const uint8_t* data, size_t size, uint32_t generation);
     // 原始 RGBA 像素直传纹理（RGBA 字节序，无解码）
     bool prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba, uint32_t generation);
-    void drawImage(uint16_t index, float x, float y, float w, float h);
+    void drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
+                     float x, float y, float w, float h, uint32_t tint) override;
 
     // 裁剪栈：与当前 scissor 求交，返回进入前的深度（popClipTo 恢复）
     int pushClip(float x, float y, float w, float h);

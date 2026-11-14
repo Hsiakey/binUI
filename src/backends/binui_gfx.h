@@ -61,7 +61,18 @@ public:
                           uint32_t color) = 0;
     virtual void strokeRounded(float x, float y, float w, float h, float radius,
                                float thickness, uint32_t color) = 0;
-    virtual void drawImage(uint16_t index, float x, float y, float w, float h) = 0;
+    // ---- 图片（v0.16.15：子矩形 + 染色）----
+    // u0..v1 是**源图的归一化子矩形**，tint 与纹理相乘（0xFFFFFFFF = 原色）。
+    // 为什么需要这两个参数：后端没有"圆角裁剪"能力，圆角图片是"按行切细条、每条只画
+    // 该行的横向区间"画出来的（见 binui_paint.h 的 BuildImageBands）—— 每条都要取源图
+    // 对应的一行，所以必须能指定 UV 子矩形；染色则是 CSS filter: brightness() 的落点
+    // （三个 GPU 后端的着色器本来就做"纹理 × 顶点色"，接到这里不用改着色器）。
+    virtual void drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
+                             float x, float y, float w, float h, uint32_t tint) = 0;
+    // 整图、不染色的便捷写法（老接口的语义）
+    void drawImage(uint16_t index, float x, float y, float w, float h) {
+        drawImageEx(index, 0.0f, 0.0f, 1.0f, 1.0f, x, y, w, h, 0xFFFFFFFFu);
+    }
 
     // ---- 文本（x/y 为基线；centerH/centerV 时 x/y 为矩形中心）----
     virtual void drawText(float x, float y, float size, int weight,

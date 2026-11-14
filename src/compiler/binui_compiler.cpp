@@ -4974,7 +4974,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 "word-break", "visibility", "float",
                 "outline",
                 "cursor", "grid-template-columns", "text-overflow", "object-fit",
-                "right", "bottom", "inset", "transform", "filter", "aspect-ratio",
+                "right", "bottom", "inset", "transform", "aspect-ratio",
             };
             for (const char* k : kIgnoredCss)
                 if (style.count(k))
@@ -6141,7 +6141,62 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             }
         }
 
-        if (pflags || paint.textFlags) {
+        // ---- v0.16.15：CSS filter: brightness()（只对图片生效）----
+        // 三个 GPU 后端画图片时本来就是"纹理 × 顶点色"，所以"乘暗"是免费的；
+        // 系数存进扩展绘制段的 reserve[2]（1..255，0 = 没声明；255 = 1.0 不动作）。
+        // blur()/grayscale()/saturate() 这些要改着色器（VK 是预编译 SPIR-V），不做。
+        {
+            auto fit = style.find("filter");
+            if (fit != style.end()) {
+                const std::string fv = LowerCopy(TrimCopy(fit->second));
+                if (!fv.empty() && fv != "none") {
+                    // 按空白拆函数（括号内的空格不拆）
+                    std::vector<std::string> fns;
+                    {
+                        std::string cur;
+                        int depth = 0;
+                        for (char ch : fv) {
+                            if (ch == '(') depth++;
+                            else if (ch == ')' && depth > 0) depth--;
+                            if ((ch == ' ' || ch == '\t') && depth == 0) {
+                                if (!cur.empty()) { fns.push_back(cur); cur.clear(); }
+                                continue;
+                            }
+                            cur += ch;
+                        }
+                        if (!cur.empty()) fns.push_back(cur);
+                    }
+                    bool sawOther = false;
+                    for (const std::string& fn : fns) {
+                        const size_t lp = fn.find('(');
+                        if (lp == std::string::npos || fn.back() != ')') { sawOther = true; continue; }
+                        const std::string name = fn.substr(0, lp);
+                        const std::string arg = fn.substr(lp + 1, fn.size() - lp - 2);
+                        if (name != "brightness") { sawOther = true; continue; }
+                        float k = 0.0f;
+                        if (!arg.empty() && arg.back() == '%')
+                            k = parseLen(arg.substr(0, arg.size() - 1), 100.0f, "filter") / 100.0f;
+                        else
+                            k = parseLen(arg, 1.0f, "filter");
+                        if (k < 0.0f) k = 0.0f;
+                        if (k >= 1.0f) continue;                    // 1.0 = 不动作（不提亮）
+                        if (k > 1.0f)
+                            Warn("CSS filter: brightness() 只支持乘暗（0~1），\"" + fn + "\" 按 1 处理");
+                        int b8 = (int)std::lround(k * 255.0f);
+                        if (b8 < 1) b8 = 1;                          // 0 留给"没声明"
+                        if (b8 > 255) b8 = 255;
+                        paint.reserve[2] = (uint8_t)b8;
+                    }
+                    if (sawOther)
+                        Warn("CSS filter 只支持 brightness(0~1)，其余滤镜（blur/grayscale/"
+                             "saturate/…）已忽略");
+                }
+            }
+        }
+
+        // 注意 reserve[2]（filter: brightness）没有对应的 PAINT_* 位可用，所以它自己也算
+        // "这个节点要出扩展绘制条目"的理由 —— 否则一个只写了 filter 的 <img> 不会进段。
+        if (pflags || paint.textFlags || paint.reserve[2]) {
             paint.nodeId = n.id;
             paint.flags = pflags;
             paintNodes.push_back(paint);

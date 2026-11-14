@@ -78,6 +78,72 @@ P2 四条明确不填（GPU 路径光栅、文字次像素、完整 SVG 滤镜�
 false = 后端退回逐元素模式）、渲染器侧的分组规则、三端实现要点（GL/D3D11 直接做，VK 要改主
 render pass 的 loadOp 所以排最后）、层缓存的失效条件与验收线先写清楚，动手时照这个来。
 
+## [0.16.15] - 2026-11-15
+
+图片能力补齐（P1-8）：**圆角裁剪 / mip / 染色**。以前 `<img>` 只有"一张方图双线性拉进盒子"，
+圆角头像会露出方块、大图缩小满屏摩尔纹、也没有任何染色的手段。**格式不变**（`BINUI_VERSION`
+仍是 23：亮度复用了扩展绘制段一直为 0 的 `reserve[2]`）。
+
+### 加 — 圆角图片：横条 + UV 子矩形
+
+- 后端没有"圆角裁剪"原语，所以把图片按行切成横条：上下两个圆角区各 1px 一条、中间直边区
+  一条整宽，每条只画该行的 `[内缩, w-内缩]`。形状就是解析式圆弧（`PaintRoundInset`），
+  边缘交给后端的 MSAA。条带数 = 2r+1，与图片高度无关（96px 高的圆角图 49 条、正圆头像也是）；
+  半径大到装不下时放大行高，保证画完而不是画一半（`BuildImageBands`，`binui_paint.h`）。
+- **UV 跟着内缩走**：圆角区取源图 `[in/w, 1-in/w]` 那一段。图片仍然"按整个盒子缩放"，
+  被圆角裁掉的是两侧 —— 与 CSS 的 `border-radius` 语义一致；若 UV 恒取 `0..1`，圆角区的
+  图片会被横向拉伸（鱼眼），实测一眼能看出来。
+- 直角时仍然一条整图，**像素与 0.16.14 完全相同**。
+- GDI 用 GDI+ 的圆角路径裁剪（自带解析 AA）。
+
+### 加 — 染色：`filter: brightness(0..1)`
+
+- 三个 GPU 后端画图片本来就是"纹理 × 顶点色"，所以"乘暗"是免费的：系数写进扩展绘制段的
+  `reserve[2]`（1..255，0 = 没声明）。GDI 用 GDI+ 的 color matrix（**注意对角线第四维
+  `m[3][3]` 必须置 1**，否则 alpha 归零、整张图消失 —— 实测踩到）。
+- `brightness(>1)` 不提亮（顶点色只能乘），`blur`/`grayscale`/`saturate` 仍不支持并告警。
+- 只写了 `filter` 的 `<img>` 也必须进扩展绘制段 —— 编译器的"要不要出 paint 条目"条件补上
+  `reserve[2]`（`PAINT_*` 的 16 位早就用满了，没有空位可用）。
+
+### 加 — mip（大图缩小的质量）
+
+- GL：`glGenerateMipmap` + `GL_LINEAR_MIPMAP_LINEAR`（新增 `glGenerateMipmap` 装载）。
+- D3D11：`MipLevels=0` + `RENDER_TARGET` + `GENERATE_MIPS`，`UpdateSubresource` 写第 0 级再
+  `GenerateMips`；采样器从 `MIN_MAG_LINEAR_MIP_POINT` 换成 `MIN_MAG_MIP_LINEAR`。
+  **注意**：带 mip 的纹理不能在 `CreateTexture2D` 里只喂第 0 级（D3D11 要求
+  `pInitialData` 覆盖整条链，否则创建失败、图片整块消失 —— 实测踩到，先建空纹理再更新）。
+- VK：mip 链在 **CPU** 上按 2×2 平均生成再逐级上传（`vkCmdCopyBufferToImage` 带
+  `mipLevel`），采样器线性档改 `MIPMAP_MODE_LINEAR` + `maxLod = VK_LOD_CLAMP_NONE`。
+  不走 `vkCmdBlitImage` 的理由写在后端注释里：VK 这边是"一张图一个布局状态"的记账模型，
+  blit 链要 `TRANSFER_SRC` + 逐级布局切换，比"多传几张小图"更容易出错；而链只在
+  换 generation 时生成一次。
+- `prepareImageRaw`（视频帧 / 程序化纹理）**不做** mip：它们每帧换内容，生成 mip 不划算，
+  通常也是 1:1 或放大显示。
+
+### 修 — 三个测试工具一直没在真正渲染图片
+
+`gl_shot` / `vk_shot` / `d3d11_shot` / `vk_window` / `vk_stress` 加载了图片字节却**没调
+`setImageOrder`** —— 渲染器的 `getImage()` 走的是 `imageOrder_`，于是这些工具画出来的
+`<img>` 全是空白（`pixels-vk` 里的 `texturedemo` 用例因此一直是"没有图片的在跑"）。
+现在加载资源前先 `setImageOrder(imagePaths())`。
+
+### 测试 / 文档
+
+- 新像素用例 `image-round`（直角/16/圆形/胶囊/竖长条/带边框 + 3 档 brightness）与
+  `image-mip`（512×512 的 2px 棋盘按 4 种比例缩小，另加圆形与圆角），基准由 GDI 生成：
+  `make pixels` 15/15 零差异、`pixels-vk` / `pixels-d3d11` 全 0 差异（VK 与 GL 的 mip 结果
+  逐像素相同）。
+- 新的接口 `drawImageEx(index, u0,v0,u1,v1, x,y,w,h, tint)`（`IBinUIGfx`），`drawImage` 变成
+  它的便捷包装 —— 三个 GPU 后端都只需几行改动（顶点色/UV 本来就有）。
+- `tests/test_css.cpp` 新增 0.16.15 一组 14 条断言：`brightness(0.5)` → `reserve[2] == 128`、
+  `brightness(180%)` 不提亮、`grayscale(1) brightness(0.25)` 只吃到 0.25、只有 filter 也出
+  paint 条目、直角 = 1 条整图、圆角 = 2r+1 条、圆角区 UV 取内侧、直边区一条整宽、
+  纵向首尾相接且铺满整图高、超大半径仍铺满。
+- README 的图片一节与"不生效属性"清单同步；`docs/future.md` P1-8 标记完成（剩下的：
+  九宫格 nine-slice 图片、`filter` 的其它函数、视频帧的 mip）。
+
+
+
 ## [0.16.14] - 2026-11-15 【格式 v23】
 
 `box-shadow` 能用了（P1-5）。这是"卡片浮起来"缺的那一层：以前卡片只能靠 1px 边框 + 色差
