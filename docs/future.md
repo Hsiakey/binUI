@@ -94,10 +94,19 @@ C++17 写、需要时再挂一层 `extern "C"` 的 C 入口**。"是 API 就得�
 pass + 层自己的 framebuffer：合成后只剩最后一个子块且不透明、父底消失；代码已回退），走
 `pushLayer` 的 false 分支（= 0.16.8 的逐元素近似）。层缓存（P0-1）仍是空白。
 
-**VK 的下一步建议**：别复用主 render pass —— 给层单独写一个**单附件** render pass（单采样、
-`initialLayout = UNDEFINED`、`finalLayout = SHADER_READ_ONLY`）+ 对应 pipeline，避开
-"MSAA + resolve 附件 + 中途重启 pass"这一组布局交互；pop 时 `EndRenderPass` 之后层图已经可采样，
-直接发合成四边形即可。
+**VK 的下一步建议**：这轮又试了一版"独立的单附件层 render pass + 独立 pipeline"（单采样、
+`loadOp=CLEAR` 透明、`finalLayout=SHADER_READ_ONLY`），层内容验证是对的（批次 dump：背景/子块
+三笔都在、scissor 正确；把合成四边形改成不透明后子块颜色确实来自层），但**仍有两个没解释的现象**：
+
+1. 主 pass 重启后（`EndRenderPass` → 再 `BeginRenderPass`，attachment0 是 `LOAD_OP_LOAD`），
+   重启之前画到主目标上的内容（页面底色、层外的图元）**消失** —— LOAD 没起到预期效果；
+2. 层里 **owner 自己那一笔**（父元素的底色）在最终画面里不出现，而它的子节点正常。
+
+这两条都指向"MSAA 附件 + 中途重启 render pass"这一组行为。下一轮建议**绕开 render pass 对象**：
+设备是 Vulkan 1.4，直接用 **dynamic rendering**（`vkCmdBeginRendering` / `vkCmdEndRendering`，
+配 `VK_PIPELINE_RENDERING_CREATE_INFO` 建 pipeline），切目标就是 end/begin 两条命令，
+没有 framebuffer / render pass 的布局交互。改动集中在建 pipeline 与 beginFrame/图层三处，
+比继续跟 render pass 较劲干净。
 
 **接口**（加在 `IBinUIGfx`，与 `setTextSubpixel` 一样"默认不实现"）：
 
