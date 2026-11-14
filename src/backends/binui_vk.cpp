@@ -3371,6 +3371,20 @@ bool BinUIVK::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
     return ok;
 }
 
+// v25 九宫格（切分数学见 binui_gfx.h 的 BuildNineSlice，三端共用）
+void BinUIVK::drawImageNine(uint16_t index, float x, float y, float w, float h,
+                           float slice, uint32_t tint) {
+    if (!impl_ || !impl_->ready) return;
+    auto it = impl_->images.find(index);
+    float q[9][8];
+    const int n = it == impl_->images.end() || !it->second.view
+        ? 0 : BuildNineSlice(x, y, w, h, it->second.w, it->second.h, slice, q);
+    if (n <= 0) { drawImageEx(index, 0.0f, 0.0f, 1.0f, 1.0f, x, y, w, h, tint); return; }
+    for (int i = 0; i < n; i++)
+        drawImageEx(index, q[i][0], q[i][1], q[i][2], q[i][3],
+                    q[i][4], q[i][5], q[i][6], q[i][7], tint);
+}
+
 void BinUIVK::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
                           float x, float y, float w, float h, uint32_t tint) {
     Impl& d = *impl_;

@@ -376,6 +376,95 @@ static void TestIssueRegressions() {
         TEST("16.16: 多层只取第一层", sm && nm == 1 && std::fabs(sm->blur - 2.0f) < 0.01f);
     }
 
+    // ---- 0.16.19：九宫格图片（v25 绘制附加段，P1-8 的尾巴）----
+    // 钉住四件事：
+    //   1. `image-slice: <n>` 落进段里（renderer.imageSliceOf），与 border-radius 互斥
+    //      （九宫格优先，圆角被清成 0），百分比忽略、超 255 钳制、四值不等取第一个；
+    //   2. 切分几何：9 块、四角保尺寸（= 内缩）、四边与中心拉伸、UV 与目标块一一对应；
+    //   3. 内缩被**两端**钳制（源图半张 / 目标盒半宽），不会切出负宽度；
+    //   4. 没有 `image-slice` 的图片完全走老路径（像素中性）。
+    {
+        const char* html = R"HTML(<app_window width="420" height="320" bg="#101014">
+<html width="420" height="320" bg="#101014">
+<body>
+  <img id="plain" src="a.png" style="position:absolute; left:10; top:10; width:180; height:70" />
+  <img id="nine"  src="a.png" style="position:absolute; left:10; top:90; width:180; height:70; image-slice:12" />
+  <img id="both"  src="a.png" style="position:absolute; left:10; top:170; width:180; height:70;
+                                     image-slice:12; border-radius:20" />
+  <img id="pct"   src="a.png" style="position:absolute; left:10; top:250; width:180; height:70;
+                                     image-slice:10%" />
+  <img id="big"   src="a.png" style="position:absolute; left:200; top:10; width:180; height:70;
+                                     image-slice:900" />
+  <img id="four"  src="a.png" style="position:absolute; left:200; top:90; width:180; height:70;
+                                     image-slice:8 12 16 20" />
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("16.19: 九宫格布局可解析", ParseInto(r, bin));
+        auto sliceOfName = [&](const char* name) -> int {
+            const uint16_t id = r.findNodeByName(name);
+            return id ? r.imageSliceOf(id) : -1;
+        };
+        TEST("16.19: 没写 = 0（普通拉伸）", sliceOfName("plain") == 0);
+        TEST("16.19: image-slice:12 → 12", sliceOfName("nine") == 12);
+        TEST("16.19: 与 border-radius 互斥（九宫格优先）", sliceOfName("both") == 12);
+        {
+            const uint16_t bid = r.findNodeByName("both");
+            int rad = -1;
+            for (const auto& ni : r.getNodes())
+                if (ni.id == bid) rad = static_cast<int>(ni.radius);
+            TEST("16.19: 同时写圆角时圆角被清成 0", bid != 0 && rad == 0);
+        }
+        TEST("16.19: 百分比忽略 → 0", sliceOfName("pct") == 0);
+        TEST("16.19: 超过 255 钳制", sliceOfName("big") == 255);
+        TEST("16.19: 四值不等取第一个", sliceOfName("four") == 8);
+
+        // ---- 切分几何 ----
+        float q[9][8];
+        int n = binui::BuildNineSlice(0.0f, 0.0f, 180.0f, 70.0f, 48, 48, 12.0f, q);
+        TEST("16.19: 9 块", n == 9);
+        if (n == 9) {
+            // 0=左上 1=上中 2=右上 3=左中 4=中心 5=右中 6=左下 7=下中 8=右下
+            TEST("16.19: 左上角保尺寸（12×12，UV 0..0.25）",
+                 std::fabs(q[0][4]) < 1e-4f && std::fabs(q[0][5]) < 1e-4f &&
+                 std::fabs(q[0][6] - 12.0f) < 1e-4f && std::fabs(q[0][7] - 12.0f) < 1e-4f &&
+                 std::fabs(q[0][0]) < 1e-6f && std::fabs(q[0][2] - 0.25f) < 1e-5f &&
+                 std::fabs(q[0][3] - 0.25f) < 1e-5f);
+            TEST("16.19: 中心块拉伸（180-24 × 70-24，UV 0.25..0.75）",
+                 std::fabs(q[4][4] - 12.0f) < 1e-4f && std::fabs(q[4][6] - 156.0f) < 1e-4f &&
+                 std::fabs(q[4][5] - 12.0f) < 1e-4f && std::fabs(q[4][7] - 46.0f) < 1e-4f &&
+                 std::fabs(q[4][0] - 0.25f) < 1e-5f && std::fabs(q[4][2] - 0.75f) < 1e-5f);
+            // 每一行的宽度之和 = 盒宽；每一列的 UV 上下相邻不重叠
+            bool widthsOk = true, uvsOk = true;
+            for (int row = 0; row < 3; row++) {
+                float sum = 0.0f;
+                for (int c = 0; c < 3; c++) sum += q[row * 3 + c][6];
+                if (std::fabs(sum - 180.0f) > 1e-3f) widthsOk = false;
+            }
+            for (int row = 0; row < 3; row++) {
+                if (std::fabs(q[row * 3 + 0][2] - q[row * 3 + 1][0]) > 1e-6f) uvsOk = false;
+                if (std::fabs(q[row * 3 + 1][2] - q[row * 3 + 2][0]) > 1e-6f) uvsOk = false;
+            }
+            TEST("16.19: 每行宽度之和 = 盒宽", widthsOk);
+            TEST("16.19: 横向 UV 首尾相接", uvsOk);
+            TEST("16.19: 首块 UV 从 0 开始、末块到 1",
+                 std::fabs(q[2][2] - 1.0f) < 1e-6f && std::fabs(q[8][3] - 1.0f) < 1e-6f);
+        }
+        // 内缩超过半张图：按半张钳制（两块角不能重叠）
+        n = binui::BuildNineSlice(0.0f, 0.0f, 100.0f, 100.0f, 20, 20, 99.0f, q);
+        TEST("16.19: 内缩钳到源图半张", n > 0 && std::fabs(q[0][6] - 50.0f) < 1e-4f);
+        // 目标盒比内缩还小：按半盒钳制，仍是 9 块且不出现负宽
+        n = binui::BuildNineSlice(0.0f, 0.0f, 10.0f, 8.0f, 48, 48, 12.0f, q);
+        bool positive = n > 0;
+        for (int i = 0; i < n; i++) if (q[i][6] <= 0.0f || q[i][7] <= 0.0f) positive = false;
+        TEST("16.19: 盒比内缩小时不出现负宽", positive && n <= 9);
+        // 退化输入
+        TEST("16.19: 退化输入返回 0", binui::BuildNineSlice(0, 0, 0, 70, 48, 48, 12, q) == 0 &&
+                                      binui::BuildNineSlice(0, 0, 180, 70, 0, 48, 12, q) == 0 &&
+                                      binui::BuildNineSlice(0, 0, 180, 70, 48, 48, 0, q) == 0);
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

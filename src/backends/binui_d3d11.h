@@ -54,6 +54,8 @@ public:
                        float thickness, uint32_t color) override;
     void drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
                      float x, float y, float w, float h, uint32_t tint) override;
+    void drawImageNine(uint16_t index, float x, float y, float w, float h,
+                       float slice, uint32_t tint) override;
 
     void drawText(float x, float y, float size, int weight, const std::string& utf8,
                   uint32_t color, bool centerH = false, bool centerV = false,

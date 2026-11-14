@@ -417,6 +417,8 @@ struct BinUIGLGdi::Impl {
     uint64_t roundClock_ = 0;   // 圆角模板缓存 LRU 时钟
 
     std::unordered_map<uint16_t, GLuint> images;
+    // v25 九宫格要**源图像素尺寸**才切得开（UV 是归一化的，切分点得按像素算）
+    std::unordered_map<uint16_t, std::pair<int,int>> imageDims;
     std::unordered_map<uint16_t, uint32_t> imageGen; // 换图 generation：不匹配时重新上传
 
     // GDI 光栅化 DC
@@ -732,6 +734,7 @@ struct BinUIGLGdi::Impl {
         }
         if (it != images.end() && it->second) glDeleteTextures(1, &it->second);
         images[index] = CreateTexture2D(w, h, px.data(), true);
+    imageDims[index] = { w, h };    // v25：九宫格切分要用源图像素尺寸
         // v0.16.15（P1-8）：给图片生成 mip 链，并把缩小采样改成三线性。
         // 只做双线性时"大图缩小"只取最近的 4 个纹素 —— 一像素的屏幕区域要代表上百个
         // 源像素，远看会闪、摩尔纹；mip 让 GPU 自动挑合适的层级再插值。
@@ -753,6 +756,7 @@ struct BinUIGLGdi::Impl {
         if (w <= 0 || h <= 0 || !rgba) return false;
         if (it != images.end() && it->second) glDeleteTextures(1, &it->second);
         images[index] = CreateTexture2D(w, h, rgba, true, true);
+    imageDims[index] = { w, h };    // v25：九宫格切分要用源图像素尺寸
         // 视频帧/纹理会**每帧**换内容（generation 每次都变），gen mip 太贵；而且它们是
         // 1:1 或放大显示，双线性就够 —— 这里不做 mip。
         imageGen[index] = generation;
@@ -1456,6 +1460,21 @@ bool BinUIGLGdi::prepareImage(uint16_t index, const uint8_t* data, size_t size, 
 bool BinUIGLGdi::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba, uint32_t generation) {
     if (!impl_->ready) return false;
     return impl_->uploadImageRaw(index, w, h, rgba, generation);
+}
+
+// v25 九宫格：切分数学在 binui_gfx.h 的 BuildNineSlice（三端共用），这里只负责
+// 按算出的小块发九个四边形。源图尺寸缺失就退回整图拉伸（不至于什么都不画）。
+void BinUIGLGdi::drawImageNine(uint16_t index, float x, float y, float w, float h,
+                              float slice, uint32_t tint) {
+    if (!impl_ || !impl_->ready) return;
+    auto it = impl_->imageDims.find(index);
+    float q[9][8];
+    const int n = it == impl_->imageDims.end()
+        ? 0 : BuildNineSlice(x, y, w, h, it->second.first, it->second.second, slice, q);
+    if (n <= 0) { drawImageEx(index, 0.0f, 0.0f, 1.0f, 1.0f, x, y, w, h, tint); return; }
+    for (int i = 0; i < n; i++)
+        drawImageEx(index, q[i][0], q[i][1], q[i][2], q[i][3],
+                    q[i][4], q[i][5], q[i][6], q[i][7], tint);
 }
 
 void BinUIGLGdi::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,

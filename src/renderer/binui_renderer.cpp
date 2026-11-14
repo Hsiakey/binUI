@@ -744,7 +744,30 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
     }
 
     nameToId_.clear();
-    if (const uint8_t* np = sectionAt(10)) {
+    // ---- 绘制附加段（v25）：uint32 peBytes + uint32 peCount + BinUIPaintEx[] ----
+    // 段序（v25）：… / 路径 / 阴影 / 文字阴影 / 绘制附加 / 名称。
+    // 目前只放九宫格内缩；一个节点一条，重复条目后者覆盖（防御畸形数据）。
+    paintEx_.clear();
+    if (const uint8_t* pp = sectionAt(10)) {
+        uint32_t pb = 0;
+        memcpy(&pb, pp, sizeof(pb));
+        if (pb >= sizeof(uint32_t) && size - static_cast<size_t>(pp - data) >= sizeof(uint32_t) + pb) {
+            const uint8_t* q = pp + sizeof(uint32_t);
+            uint32_t pc = 0;
+            memcpy(&pc, q, sizeof(pc));
+            q += sizeof(pc);
+            const uint8_t* qend = pp + sizeof(uint32_t) + pb;
+            for (uint32_t i = 0; i < pc && q + sizeof(BinUIPaintEx) <= qend; i++) {
+                BinUIPaintEx pe;
+                memcpy(&pe, q, sizeof(pe));
+                q += sizeof(pe);
+                if (!nodeIndexById_.count(pe.nodeId)) continue;
+                paintEx_[pe.nodeId] = pe;
+            }
+        }
+    }
+
+    if (const uint8_t* np = sectionAt(11)) {
         uint32_t nbytes = 0;
         memcpy(&nbytes, np, sizeof(uint32_t));
         if (nbytes > 0 && size - static_cast<size_t>(np - data) >= sizeof(uint32_t) + nbytes) {

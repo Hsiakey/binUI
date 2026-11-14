@@ -1152,6 +1152,26 @@ static void AppendTextShadowSection(std::vector<uint8_t>& buf,
     memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
     memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
+// 追加绘制附加段（v25）：uint32 peBytes + uint32 peCount + BinUIPaintEx[]
+// 恒定写出（无条目时 peBytes=4），位于文字阴影段之后、名称段之前。
+static void AppendPaintExSection(std::vector<uint8_t>& buf,
+                                 const std::vector<BinUIPaintEx>& items) {
+    size_t start = buf.size();
+    std::vector<uint8_t> data;
+    auto wu = [&](uint32_t x) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&x);
+        data.insert(data.end(), p, p + 4);
+    };
+    wu((uint32_t)items.size());
+    if (!items.empty())
+        data.insert(data.end(), reinterpret_cast<const uint8_t*>(items.data()),
+                    reinterpret_cast<const uint8_t*>(items.data() + items.size()));
+    uint32_t nbytes = (uint32_t)data.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
+
 // 点用 uint16 归一化存（0..65535 映射包围盒），比 float 省一半且精度远超显示能力。
 struct PendingPath {
     BinUIPathEntry head = {};
@@ -1872,6 +1892,7 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     AppendPathSection(buf, {});      // v15：XML 路径无 SVG 路径，段同样恒定写出
     AppendShadowSection(buf, {});    // v23：XML 路径无 box-shadow，段同样恒定写出
     AppendTextShadowSection(buf, {}); // v24：XML 路径无 text-shadow，段同样恒定写出
+    AppendPaintExSection(buf, {});  // v25：XML 路径无九宫格图片
     AppendNameSection(buf, nodeNames, offsets);
 
     return buf;
@@ -4394,6 +4415,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::vector<BinUIPaintNode> paintNodes;    // v13 扩展绘制段（文字色/边框/渐变/字重/行高/装饰）
     std::vector<BinUIShadow> shadowNodes;      // v23 阴影段（box-shadow，绘制顺序 = 下标升序）
     std::vector<BinUITextShadow> textShadowNodes;  // v24 文字阴影段（text-shadow）
+    std::vector<BinUIPaintEx> paintExNodes;        // v25 绘制附加段（九宫格图片等）
     std::vector<PendingPath> pendingPaths;     // v15 路径段（SVG <path>/<ellipse> 的折线）
     std::vector<std::string> strings;
     strings.push_back(""); // 字符串表首位 = 空串：无文本节点的 textOffset=0 指向空串
@@ -6500,6 +6522,47 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             }
         }
 
+        // v25 九宫格图片：`image-slice: <内缩像素>`（CSS 的 border-image-slice 简化版）。
+        // 只支持**四边同宽**：`BinUIPaintEx` 只占 4 字节（一个 u8 内缩），而"四边不等"
+        // 在 UI 里几乎见不到（九宫格贴图本身是对称的）。与 border-radius 互斥：
+        // 九宫格的圆角通常已经烘进贴图，再叠加圆角裁剪只会把四角切掉一层。
+        if (type == BINUI_IMAGE) {
+            std::string slv = pick(e.attrs, style, "image-slice", "image-slice", "");
+            if (slv.empty()) slv = pick(e.attrs, style, "nine-slice", "nine-slice", "");
+            if (!slv.empty()) {
+                std::vector<std::string> toks = splitCssTokens(slv);
+                float vals[4] = { 0, 0, 0, 0 };
+                int nv = 0;
+                for (const std::string& tk : toks) {
+                    const LenPct lp = ParseLenPct(tk, 0.0f, curCtx, "image-slice");
+                    if (lp.pct) { Warn("CSS image-slice 不接受百分比（\"" + tk + "\"），按 0 处理"); continue; }
+                    if (nv < 4) vals[nv] = lp.value;
+                    nv++;
+                }
+                float sl = vals[0];
+                if (nv >= 2) {
+                    sl = vals[0];
+                    bool same = true;
+                    for (int k = 0; k < std::min(nv, 4); k++) if (vals[k] != sl) same = false;
+                    if (!same) Warn("CSS image-slice 只支持四边同宽，\"" + slv +
+                                   "\" 取第一个值");
+                }
+                int ipx = (int)(sl + 0.5f);
+                if (ipx < 1) ipx = 0;
+                if (ipx > 255) { Warn("CSS image-slice 上限 255px，已钳制"); ipx = 255; }
+                if (ipx > 0) {
+                    const bool hasRadius = style.count("border-radius") != 0 || e.attrs.count("radius") != 0;
+                    if (hasRadius)
+                        Warn("图片同时写了 image-slice 与 border-radius：九宫格优先，圆角忽略");
+                    BinUIPaintEx pe = {};
+                    pe.nodeId = n.id;
+                    pe.imageSlice = (uint8_t)ipx;
+                    paintExNodes.push_back(pe);
+                    n.radius = 0;   // 九宫格自己带角，别再裁一层
+                }
+            }
+        }
+
         // 视频节点：src -> 伪图片槽 + 视频描述段；解码帧由可选模块经
         // updateImageRaw 推送，无模块时仅绘制底色（优雅降级）
         if (type == BINUI_VIDEO) {
@@ -7015,6 +7078,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     AppendPathSection(buf, pendingPaths);
     AppendShadowSection(buf, shadowNodes);
     AppendTextShadowSection(buf, textShadowNodes);
+    AppendPaintExSection(buf, paintExNodes);
     AppendNameSection(buf, nodeNames, offsets);
 
     // ---- 6. 二进制组件：编译期离线合并 ----
@@ -7219,6 +7283,7 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     AppendPathSection(buf, {});      // v15：默认布局没有 SVG，段恒定写出保证解析链确定
     AppendShadowSection(buf, {});    // v23：默认布局没有 box-shadow，段同样恒定写出
     AppendTextShadowSection(buf, {}); // v24：默认布局没有 text-shadow
+    AppendPaintExSection(buf, {});  // v25：默认布局没有九宫格图片
 
     return buf;
 }

@@ -23,7 +23,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 //      BinUISpecNode 72 -> 84 字节；BinUISpecFlex 的两个 reserve 变成 wrap / alignContent（尺寸不变）
 // v23: 阴影段（box-shadow），见 BinUIShadow
 // v24: 文字阴影段（text-shadow），见 BinUITextShadow
-constexpr uint32_t BINUI_VERSION    = 24;
+// v25: 绘制附加段（九宫格图片），见 BinUIPaintEx
+constexpr uint32_t BINUI_VERSION    = 25;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -537,6 +538,30 @@ struct BinUITextShadow {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUITextShadow) == 20, "BinUITextShadow must be 20 bytes");
+
+// ============================================================
+// 绘制附加段（v25）：九宫格图片 等"每个节点一两个小整数"的绘制参数
+//
+// 布局：uint32 peBytes（0 = 无）+ uint32 peCount + BinUIPaintEx[count]
+// 恒定写出，位于文字阴影段之后、名称段之前。
+//
+// 为什么又开一段：九宫格只需要一个内缩像素（1 字节），可 `BinUIPaintNode` 的
+// `reserve[3]` 三个字节已经全部用完（opacity / 渐变角度 / 图片亮度），而 48 字节
+// 的结构一个字节都加不了（换布局就得动所有后端与旧二进制）。稀疏段是这里唯一
+// 不破坏兼容的落点 —— 与 v23 阴影段、v24 文字阴影段同一条取舍。
+//
+// 语义：`imageSlice > 0` 表示这个 `<img>` 按九宫格画（四边内缩 = 源图像素）。
+// 详见 src/backends/binui_draw_nodes.h 的 BINUI_IMAGE 分支与
+// IBinUIGfx::drawImageNine。
+// ============================================================
+#pragma pack(push, 1)
+struct BinUIPaintEx {
+    uint16_t nodeId;
+    uint8_t  imageSlice;  // 九宫格内缩（源图像素，四边同宽；0 = 普通拉伸）
+    uint8_t  flags;       // 保留（目前恒 0）
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUIPaintEx) == 4, "BinUIPaintEx must be 4 bytes");
 
 // ============================================================
 // 路径段（v15，恒定写出，位于扩展绘制段之后、名称段之前）

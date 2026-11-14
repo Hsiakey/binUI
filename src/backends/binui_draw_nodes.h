@@ -1120,7 +1120,14 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                     }
                     // 圆角图片 = 横向细条（见 binui_paint.h 的 BuildImageBands）；
                     // 直角时一条整图，像素与旧版完全相同。
+                    // v25 九宫格（image-slice）：交给后端切（它才知道源图像素尺寸）。
+                    const int slicePx = renderer.imageSliceOf(node.id);
                     auto drawImg = [&](float ix, float iy, float iw, float ih) {
+                        if (slicePx > 0) {
+                            gfx.drawImageNine(node.imageIndex, ix, iy, iw, ih,
+                                              static_cast<float>(slicePx), tint);
+                            return;
+                        }
                         if (effRadius <= 0.5f) {
                             gfx.drawImageEx(node.imageIndex, 0.0f, 0.0f, 1.0f, 1.0f,
                                             ix, iy, iw, ih, tint);

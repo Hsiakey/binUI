@@ -74,6 +74,20 @@ public:
         drawImageEx(index, 0.0f, 0.0f, 1.0f, 1.0f, x, y, w, h, 0xFFFFFFFFu);
     }
 
+    // ---- 九宫格图片（v25：`image-slice: <n>`）----
+    // 把源图按 `slice` 像素切成 9 块：四角保尺寸、四边与中心拉伸。UI 里的"带框/带圆角
+    // 的贴图容器"（按钮底、卡片框、气泡）都靠它 —— 否则一张 32×32 的框拉伸到 300×120
+    // 后边框粗成 20px。
+    //
+    // 为什么放在后端而不是 drawNodes 里切：切分要**源图像素尺寸**，只有解码过图片的
+    // 后端知道。默认实现退回普通整图拉伸（GDI 这类遗留后端不必为此改）——
+    // 这样"不支持九宫格"退化成"框被拉粗"，而不是什么都不画。
+    virtual void drawImageNine(uint16_t index, float x, float y, float w, float h,
+                               float slice, uint32_t tint) {
+        (void)slice;
+        drawImageEx(index, 0.0f, 0.0f, 1.0f, 1.0f, x, y, w, h, tint);
+    }
+
     // ---- 文本（x/y 为基线；centerH/centerV 时 x/y 为矩形中心）----
     virtual void drawText(float x, float y, float size, int weight,
                           const std::string& utf8, uint32_t color,

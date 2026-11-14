@@ -178,6 +178,8 @@ struct BinUID3D::Impl {
 
     // 图片纹理缓存（按 imageIndex）
     std::unordered_map<uint16_t, ID3D11ShaderResourceView*> images;
+    // v25 九宫格要源图像素尺寸
+    std::unordered_map<uint16_t, std::pair<int,int>> imageDims;
     std::unordered_map<uint16_t, uint32_t> imageGen; // 换图 generation：不一致时重新上传
 
     // 字形图集 + 文本排版：整份逻辑在 backends/binui_glyph_atlas.h（GL / Vulkan / D3D11 共用）。
@@ -574,6 +576,7 @@ struct BinUID3D::Impl {
             return false;
         }
         tex->Release();
+        imageDims[index] = { w, h };    // v25：九宫格切分用
         images[index] = srv;
         imageGen[index] = generation;
         return true;
@@ -607,6 +610,7 @@ struct BinUID3D::Impl {
             return false;
         }
         tex->Release();
+        imageDims[index] = { w, h };    // v25：九宫格切分用
         images[index] = srv;
         imageGen[index] = generation;
         return true;
@@ -1526,6 +1530,20 @@ bool BinUID3D::prepareImage(uint16_t index, const uint8_t* data, size_t size, ui
 bool BinUID3D::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba, uint32_t generation) {
     if (!impl_->ready) return false;
     return impl_->uploadImageRaw(index, w, h, rgba, generation);
+}
+
+// v25 九宫格（切分数学见 binui_gfx.h 的 BuildNineSlice，三端共用）
+void BinUID3D::drawImageNine(uint16_t index, float x, float y, float w, float h,
+                            float slice, uint32_t tint) {
+    if (!impl_) return;
+    auto it = impl_->imageDims.find(index);
+    float q[9][8];
+    const int n = it == impl_->imageDims.end()
+        ? 0 : BuildNineSlice(x, y, w, h, it->second.first, it->second.second, slice, q);
+    if (n <= 0) { drawImageEx(index, 0.0f, 0.0f, 1.0f, 1.0f, x, y, w, h, tint); return; }
+    for (int i = 0; i < n; i++)
+        drawImageEx(index, q[i][0], q[i][1], q[i][2], q[i][3],
+                    q[i][4], q[i][5], q[i][6], q[i][7], tint);
 }
 
 void BinUID3D::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,

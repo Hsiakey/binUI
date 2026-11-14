@@ -144,6 +144,12 @@ public:
         return textShadows_.data() + it->second.first;
     }
 
+    // v25 绘制附加段：九宫格内缩（源图像素，四边同宽）。0 = 普通拉伸，没有条目也返回 0。
+    int imageSliceOf(uint16_t nodeId) const {
+        auto it = paintEx_.find(nodeId);
+        return it == paintEx_.end() ? 0 : static_cast<int>(it->second.imageSlice);
+    }
+
     // v15 路径段：BINUI_PATH 节点的折线（归一化坐标 + 子路径表；无条目返回 nullptr）
     struct PathRecord {
         BinUIPathEntry head{};
@@ -681,6 +687,7 @@ private:
     // nodeId -> (shadows_ 起始下标, 条数)
     std::unordered_map<uint16_t, std::pair<size_t, uint32_t>> shadowIdx_;
     std::vector<BinUITextShadow> textShadows_;   // v24 文字阴影段（同一节点多条连续存放）
+    std::unordered_map<uint16_t, BinUIPaintEx> paintEx_;   // v25 绘制附加段（一个节点一条）
     // nodeId -> (textShadows_ 起始下标, 条数)
     std::unordered_map<uint16_t, std::pair<size_t, uint32_t>> textShadowIdx_;
     // v19 路径条带的跨帧缓存（条带数量有上限，条目数也封顶）。

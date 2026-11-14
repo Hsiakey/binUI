@@ -775,6 +775,45 @@ inline int BuildImageBands(float x, float y, float w, float h, float radius,
     return n;
 }
 
+// ============================================================
+// 九宫格切分（v25）：把"源图 + 目标盒 + 内缩"算成最多 9 个四边形。
+// 输出 out[i] = { u0, v0, u1, v1, x, y, w, h }（UV 归一化、坐标是屏幕像素），返回条数。
+// 三个 GPU 后端共用这一份数学 → 九宫格的像素必须一致。
+//
+// 内缩会被**两端同时**钳制：源图方向上不超过半张图（两块角不能重叠），
+// 目标盒方向上不超过半个盒（否则中间那块会被拉成负宽）。
+// ============================================================
+inline int BuildNineSlice(float x, float y, float w, float h, int srcW, int srcH,
+                          float slice, float out[9][8]) {
+    if (out == nullptr || w <= 0.0f || h <= 0.0f || srcW <= 0 || srcH <= 0) return 0;
+    float sx = slice;
+    if (sx > static_cast<float>(srcW) * 0.5f) sx = static_cast<float>(srcW) * 0.5f;
+    if (sx > static_cast<float>(srcH) * 0.5f) sx = static_cast<float>(srcH) * 0.5f;
+    float dx = slice;
+    if (dx > w * 0.5f) dx = w * 0.5f;
+    if (dx > h * 0.5f) dx = h * 0.5f;
+    if (sx <= 0.0f || dx <= 0.0f) return 0;
+
+    // 源图的 4 条竖线 / 横线（UV）与目标盒的 4 条线（像素）
+    const float su[4] = { 0.0f, sx / static_cast<float>(srcW), 1.0f - sx / static_cast<float>(srcW), 1.0f };
+    const float sv[4] = { 0.0f, sx / static_cast<float>(srcH), 1.0f - sx / static_cast<float>(srcH), 1.0f };
+    const float tx[4] = { x, x + dx, x + w - dx, x + w };
+    const float ty[4] = { y, y + dx, y + h - dx, y + h };
+    int n = 0;
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 3; c++) {
+            const float qw = tx[c + 1] - tx[c];
+            const float qh = ty[r + 1] - ty[r];
+            if (qw <= 0.0f || qh <= 0.0f) continue;
+            float* o = out[n++];
+            o[0] = su[c]; o[1] = sv[r]; o[2] = su[c + 1]; o[3] = sv[r + 1];
+            o[4] = tx[c]; o[5] = ty[r]; o[6] = qw;       o[7] = qh;
+        }
+    }
+    return n;
+}
+
+
 // CSS font-weight 归一化到后端认识的"常规/粗体"两档
 inline int PaintWeightOf(const BinUIPaintNode* p) {
     return (p && (p->flags & PAINT_WEIGHT) && p->weight >= 6) ? 700 : 400;
