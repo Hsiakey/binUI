@@ -150,6 +150,8 @@ mingw32-make SHELL=sh demos-d3d11  # 同一份 demo 源码编出 examples/*_d3d1
 
 GPU 后端绘制原语（`fillRect`/`fillRounded`/`fillLine`/`strokeRounded`/`drawText`/`drawImageEx`）：纯色与圆角矩形为顶点四边形（九宫格模板），`fillLine` 用旋转四边形画**任意角度实心线段**（`x0,y0→x1,y1` + 线宽），文本走字形图集。`drawImageEx`（v0.16.15 起取代 `drawImage`）带**源图 UV 子矩形 + 染色**两个参数：圆角图片靠"横条 + UV"实现（后端不需要新的裁剪能力），`filter:brightness()` 靠顶点色乘（着色器本来就做"纹理 × 顶点色"）。GL 后端离屏帧缓冲为 **4× MSAA**（渲染到多采样渲染缓冲，`present()` 时 `glBlitFramebuffer` 解析到单采样离屏纹理），线条/圆角/圆的边缘全部抗锯齿；D3D 后端可直接用 `fillLine` 画线段。
 
+**仿射状态（v0.16.18）：文字/图片也能跟着卡片转。** 以前旋转/斜切只作用在"底/边框"上（`fillRoundedXf` 自带矩阵），文字和图片必须按整像素对齐，只能保持竖直 —— 旋转卡片里的字就是"盒子转了、字没转"。现在多了一个**状态**而不是新原语：`IBinUIGfx::setAffine(xf)` 一开，**接下来所有原语的四边形**都过同一个 2×3 矩阵（三个 GPU 后端各改一处 `emitQuad`，复用已有的任意四边形+每角 UV 通路），`drawNodes` 在仿射节点里整段改用**节点局部坐标**，于是文字、图片、边框、阴影、渐变条带全部一起变换；`setAffine` 返回 `false` 的后端（GDI，没有任意四边形）退回"只转盒子"的老行为，像素一位不变。代价是字形是**位图旋转**（双线性采样），大角度下边缘略软 —— 真"矢量旋转"要 GPU 栅格化字形，那是 bin2d/binGPU 的事。
+
 D3D11 后端要点：
 - 文字渲染委托 `binui_font_renderer`（FreeType + HarfBuzz），与 Windows GDI/DirectWrite 完全解耦——同一份字体服务可直接用于 Linux/macOS/OpenGL 后端。
 - 文本：`FT_Get_Char_Index` + `FT_Load_Glyph` + `FT_Render_Glyph(FT_RENDER_MODE_NORMAL)` 把字形光栅化为 8bit alpha，白字黑底 → 预乘 alpha 进图集纹理，着色器顶点色染色。**渲染质量三件事**：

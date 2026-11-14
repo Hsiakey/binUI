@@ -391,6 +391,23 @@ struct BinUIGLGdi::Impl {
 
     // 字形图集 + 文本排版：整份逻辑在 backends/binui_glyph_atlas.h（与 Vulkan 后端共用）。
     // 后端只提供纹理宿主与四边形发射 —— 两个 GPU 后端的文字因此是同一份像素。
+    // v0.16.18 仿射状态：设置后所有 emitQuad/emitQuadRot 的四边形都过这个 2×3 矩阵
+    // （文字/图片因此能跟着卡片一起旋转）。fillRoundedXf 自带矩阵，走 emitQuadUV，
+    // 不经过这里 —— 否则圆角底会被变换两次。
+    bool affineOn = false;
+    float aff[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+    void affPoint(float lx, float ly, float& sx, float& sy) const {
+        sx = aff[0] * lx + aff[1] * ly + aff[2];
+        sy = aff[3] * lx + aff[4] * ly + aff[5];
+    }
+    // 轴对齐矩形 → 四角（0=左上 1=右上 2=左下 3=右下，与 emitQuadUV 的角序一致）
+    void affCorners(float x0, float y0, float x1, float y1, float* p) const {
+        affPoint(x0, y0, p[0], p[1]);
+        affPoint(x1, y0, p[2], p[3]);
+        affPoint(x0, y1, p[4], p[5]);
+        affPoint(x1, y1, p[6], p[7]);
+    }
+
     GLGlyphTexHost glyphHost;
     GlyphAtlas atlas;
 
@@ -821,6 +838,14 @@ struct BinUIGLGdi::Impl {
 
     void emitQuad(float x0, float y0, float x1, float y1,
                   float u0, float v0, float u1, float v1, uint32_t color) {
+        if (affineOn) {   // 仿射：换成任意四边形（四角过矩阵），UV/颜色不变
+            float p[8], uv[8];
+            affCorners(x0, y0, x1, y1, p);
+            uv[0] = u0; uv[1] = v0; uv[2] = u1; uv[3] = v0;
+            uv[4] = u0; uv[5] = v1; uv[6] = u1; uv[7] = v1;
+            emitQuadUV(p, uv, color);
+            return;
+        }
         GLVertex* o = vertRoom(6);
         if (!o) return;
         beginBatch();
@@ -856,6 +881,16 @@ struct BinUIGLGdi::Impl {
     // 任意旋转四边形（三角形带，白纹理；UV 无意义）
     void emitQuadRot(float x0, float y0, float x1, float y1,
                      float x2, float y2, float x3, float y3, uint32_t color) {
+        if (affineOn) {   // 线段同样跟着转
+            float p[8];
+            affPoint(x0, y0, p[0], p[1]);
+            affPoint(x1, y1, p[2], p[3]);
+            affPoint(x2, y2, p[4], p[5]);
+            affPoint(x3, y3, p[6], p[7]);
+            const float uv[8] = { 0, 0, 1, 0, 1, 1, 0, 1 };
+            emitQuadUV(p, uv, color);
+            return;
+        }
         GLVertex* o = vertRoom(6);
         if (!o) return;
         beginBatch();
@@ -1348,6 +1383,20 @@ void BinUIGLGdi::setTextSubpixel(bool on) {
 
 // v24 文字阴影：图集负责"字形位图 → 模糊覆盖率"，这里只要把状态传下去。
 // 节点内的每一次 drawText 都会先铺一遍阴影四边形，再画清晰字形。
+// v0.16.18 仿射状态：文字/图片/填充的四边形统一过矩阵（见 Impl::affineOn）。
+// 只在"节点有旋转/斜切/非等比缩放"时打开，关掉时 emitQuad 走原来的整数/浮点快路径。
+bool BinUIGLGdi::setAffine(const float* xf) {
+    if (!impl_) return false;
+    if (!xf || !(xf[0] != 1.0f || xf[1] != 0.0f || xf[2] != 0.0f ||
+                 xf[3] != 0.0f || xf[4] != 1.0f || xf[5] != 0.0f)) {
+        impl_->affineOn = false;
+        return true;
+    }
+    for (int i = 0; i < 6; i++) impl_->aff[i] = xf[i];
+    impl_->affineOn = true;
+    return true;
+}
+
 void BinUIGLGdi::setTextShadow(float dx, float dy, float blur, uint32_t color) {
     if (impl_) impl_->atlas.setTextShadow(dx, dy, blur, color);
 }

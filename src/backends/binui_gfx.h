@@ -53,8 +53,8 @@ public:
     // 范围 [0,w]×[0,h]）映射到屏幕 X = a*lx + c*ly + e, Y = b*lx + d*ly + f。
     // radius <= 0 时就是一整个四边形；> 0 时把圆角模板的九宫格每片按 xf 变换后发射。
     // stroke=true 走 1px 圆环模板、thickness 像素多层同心（与 strokeRounded 同语义）。
-    // 约定：文字/图片/路径**不参与**仿射（字形与贴图要按像素对齐，旋转会糊），
-    // 调用方负责只把"底/边框"交给它。
+    // v0.16.18 起：文字/图片**也参与**仿射，但走下面的 `setAffine` **状态**（文字是几百个
+    // 小四边形，逐四边形传矩阵不现实）。这个函数仍只负责"底/边框"这类**整块**几何。
     virtual void fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
                               uint32_t color, const float xf[6]) = 0;
     virtual void fillLine(float x0, float y0, float x1, float y1, float width,
@@ -91,6 +91,18 @@ public:
     // （位图 1:1，最锐利）。有动画的节点传 true —— 位置不再取整，而是量化到 ¼ 像素，
     // 每份相位是一张独立的字形位图（不再靠 LINEAR 采样糊一层），文字既能连续滑又保持锐利。
     virtual void setTextSubpixel(bool on) { (void)on; }
+
+    // ---- 仿射状态（v0.16.18：文字/图片参与旋转）----
+    // 设置之后，**接下来所有原语**的四边形都按 xf（2×3 行主序 [a c e; b d f]）变换：
+    //   屏幕 = (a*x + c*y + e, b*x + d*y + f)
+    // 于是"旋转卡片里的文字、倾斜的图标"不需要新原语 —— 调用方改用**节点局部坐标**画，
+    // 矩阵负责转到屏幕。传 nullptr 关闭。
+    //
+    // 返回 false = 这个后端不支持（GDI：字形与位图都交给系统光栅化，没有任意四边形）→
+    // 调用方必须退回"只转盒子、文字/图片保持轴对齐"的旧行为，这样老页面的像素一位不变。
+    //
+    // 注意：fillRoundedXf 自带矩阵，**不受**这个状态影响（否则圆角底会被变换两次）。
+    virtual bool setAffine(const float xf[6]) { (void)xf; return false; }
 
     // ---- 文字阴影（v24：CSS text-shadow）----
     // 在画一个节点的文字**之前**设好，节点画完用 alpha=0 清掉（或下个节点重设）。

@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<app_window width="640" height="380" resizable="false">
+<html width="640" height="380">
+<head>
+<style>
+    body { background: #EEF2F7; color: #16202C; }
+    /* v0.16.18：文字/图片参与仿射。关键帧 from == to，所以第一帧就固定在给定变换上。 */
+    @keyframes rot20  { from { transform: rotate(20deg); } to { transform: rotate(20deg); } }
+    @keyframes rotm12 { from { transform: rotate(-12deg); } to { transform: rotate(-12deg); } }
+    @keyframes sq14   { from { transform: scale(1.4, 0.7); } to { transform: scale(1.4, 0.7); } }
+</style>
+</head>
+<body>
+    <!-- 对照组：不转 -->
+    <div style="position:absolute; left:24; top:24; width:180; height:110; background:#FFFFFF; border-radius:14; border:1px solid #C9D3E0">
+        <span style="position:absolute; left:14; top:12; width:150; height:24; font-size:16px; color:#1B2733">对照组 0°</span>
+        <span style="position:absolute; left:14; top:44; width:150; height:20; font-size:13px; color:#5A6B80">文字不转</span>
+        <img src="image-round-img.png" style="position:absolute; left:14; top:68; width:36; height:36; border-radius:8" />
+    </div>
+
+    <!-- 旋转 20°：卡片、文字、图片一起转 -->
+    <div animation="rot20 4s linear 0s infinite" style="position:absolute; left:230; top:24; width:180; height:110; background:#FFFFFF; border-radius:14; border:1px solid #C9D3E0">
+        <span style="position:absolute; left:14; top:12; width:150; height:24; font-size:16px; color:#1B2733">旋转 20°</span>
+        <span style="position:absolute; left:14; top:44; width:150; height:20; font-size:13px; color:#5A6B80">文字跟着转</span>
+        <img src="image-round-img.png" style="position:absolute; left:14; top:68; width:36; height:36; border-radius:8" />
+    </div>
+
+    <!-- 旋转 -12°：阴影也跟着 -->
+    <div animation="rotm12 4s linear 0s infinite" style="position:absolute; left:436; top:32; width:170; height:100; background:#FFFFFF; border-radius:14; box-shadow:0 6px 14px rgba(10,30,60,0.28)">
+        <span style="position:absolute; left:14; top:12; width:140; height:24; font-size:16px; color:#0B5FA5; text-shadow:0 2px 4px rgba(0,0,0,0.35)">旋转 -12°</span>
+        <span style="position:absolute; left:14; top:44; width:140; height:20; font-size:13px; color:#5A6B80">阴影 + 阴影字</span>
+        <img src="image-round-img.png" style="position:absolute; left:14; top:66; width:32; height:32; border-radius:16" />
+    </div>
+
+    <!-- 非等比缩放：文字被横向拉宽 -->
+    <div animation="sq14 4s linear 0s infinite" style="position:absolute; left:24; top:170; width:200; height:100; background:#FFFFFF; border-radius:14; border:1px solid #C9D3E0">
+        <span style="position:absolute; left:14; top:12; width:170; height:24; font-size:16px; color:#8B3A9E">scale(1.4, 0.7)</span>
+        <span style="position:absolute; left:14; top:42; width:170; height:20; font-size:13px; color:#5A6B80">文字横向拉宽</span>
+        <img src="image-round-img.png" style="position:absolute; left:14; top:64; width:40; height:24; border-radius:6" />
+    </div>
+
+    <!-- 大字号 + 旋转，检查字形边缘 -->
+    <div animation="rotm12 4s linear 0s infinite" style="position:absolute; left:270; top:186; width:330; height:70">
+        <span style="position:absolute; left:10; top:6; width:310; height:40; font-size:28px; color:#16202C; font-weight:700">旋转的标题 AaBb</span>
+        <span style="position:absolute; left:10; top:44; width:310; height:18; font-size:12px; color:#7A8798">28px 粗体 / 12px 小字</span>
+    </div>
+
+    <span style="position:absolute; left:24; top:300; width:592; height:20; font-size:13px; color:#7A8798">v0.16.18：setAffine 状态下文字/图片/边框/阴影全部过同一矩阵（GL / VK / D3D11 逐像素相同）</span>
+    <span style="position:absolute; left:24; top:326; width:592; height:20; font-size:13px; color:#7A8798">GDI 不支持任意四边形 → 只转盒子（本页在 GDI 上没有参考价值）</span>
+</body>
+</html>
+</app_window>

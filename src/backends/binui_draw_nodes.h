@@ -764,7 +764,17 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             gfx.pushClip(par.x - offX[ai], par.y - offY[ai], par.width, par.height);
         }
 
+        // v0.16.18 仿射文字/图片：后端支持时整段改用**节点局部坐标**，由 setAffine 转到屏幕；
+        // GDI 返回 false → 保持 AABB（"只转盒子"的老行为，像素不变）。
+        bool affineLocal = false;
         if (draw) {
+            // v0.16.18 仿射文字/图片：后端支持时把整段改到**节点局部坐标**下画，
+            // 由 gfx.setAffine(xf) 把每个四边形转到屏幕 —— 旋转卡片的文字/图标跟着转。
+            // GDI 返回 false（没有任意四边形）→ 坐标保持 AABB，仍是"只转盒子"的老行为。
+            if (affine) {
+                affineLocal = gfx.setAffine(xf);
+                if (affineLocal) { x = 0.0f; y = 0.0f; nw = lw; nh = lh; }
+            }
             // v24 文字阴影：状态设一次，本节点内所有 drawText / drawTextWrapped 都带上它；
             // 没有阴影（或元素透明）就显式清零 —— 状态是后端的，不清会漏到下一个节点。
             if (ts && tsCount > 0 && opacity > 0.002f)
@@ -805,7 +815,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             auto fillNodeBg = [&](uint32_t color, float radius) {
                 if (affine) {
                     // 仿射路径：整块底一次性交给后端（渐变条带在旋转下会被撕开，
-                    // 这里退回单色底；文字/图片本来就不参与仿射）
+                    // 这里退回单色底；文字/图片另走 setAffine 状态（v0.16.18）
                     gfx.fillRoundedXf(lw, lh, lr, false, 0.0f, color, xf);
                     return;
                 }
@@ -1272,6 +1282,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             }
         }
 
+        if (affineLocal) gfx.setAffine(nullptr);   // v0.16.18：恢复轴对齐
         gfx.popClipTo(savedDepth);
     }
     // 收尾：图层必须成对弹出（正常不会剩下，防御性兜底）

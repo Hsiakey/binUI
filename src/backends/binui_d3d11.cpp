@@ -153,6 +153,20 @@ struct BinUID3D::Impl {
     int scissor[4] = { 0, 0, 0, 0 };
     int scissorDepth = 0;
     uint8_t curLinear = 0;
+    // v0.16.18 仿射状态：设置后 emitQuad/emitQuadRot 的四角都过这个 2×3 矩阵
+    bool affineOn = false;
+    float aff[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+    void affPoint(float lx, float ly, float& sx, float& sy) const {
+        sx = aff[0] * lx + aff[1] * ly + aff[2];
+        sy = aff[3] * lx + aff[4] * ly + aff[5];
+    }
+    void affCorners(float x0, float y0, float x1, float y1, float* p) const {
+        affPoint(x0, y0, p[0], p[1]);
+        affPoint(x1, y0, p[2], p[3]);
+        affPoint(x0, y1, p[4], p[5]);
+        affPoint(x1, y1, p[6], p[7]);
+    }
+
     uint8_t subpixelText = 0;   // setTextSubpixel(true)：字形批次走 LINEAR 采样
     ID3D11ShaderResourceView* curSrv = nullptr;
 
@@ -733,6 +747,14 @@ struct BinUID3D::Impl {
 
     void emitQuad(float x0, float y0, float x1, float y1,
                   float u0, float v0, float u1, float v1, uint32_t color) {
+        if (affineOn) {   // 仿射：四角过矩阵（文字/图片跟着卡片转）
+            float p[8], uv[8];
+            affCorners(x0, y0, x1, y1, p);
+            uv[0] = u0; uv[1] = v0; uv[2] = u1; uv[3] = v0;
+            uv[4] = u0; uv[5] = v1; uv[6] = u1; uv[7] = v1;
+            emitQuadUV(p, uv, color);
+            return;
+        }
         D3DVertex* o = vertRoom(6);
         if (!o) return; // 缓冲上限，丢弃多余
         beginBatch();
@@ -766,6 +788,16 @@ struct BinUID3D::Impl {
 
     void emitQuadRot(float x0, float y0, float x1, float y1,
                      float x2, float y2, float x3, float y3, uint32_t color) {
+        if (affineOn) {
+            float p[8];
+            affPoint(x0, y0, p[0], p[1]);
+            affPoint(x1, y1, p[2], p[3]);
+            affPoint(x2, y2, p[4], p[5]);
+            affPoint(x3, y3, p[6], p[7]);
+            const float uv[8] = { 0, 0, 1, 0, 1, 1, 0, 1 };
+            emitQuadUV(p, uv, color);
+            return;
+        }
         D3DVertex* o = vertRoom(6);
         if (!o) return;
         beginBatch();
@@ -1430,6 +1462,19 @@ void BinUID3D::setTextSubpixel(bool on) {
 }
 
 // v24 文字阴影：状态交给共享图集，三端像素一致
+// v0.16.18 仿射状态：见 GL 后端同名函数（三端语义一致）
+bool BinUID3D::setAffine(const float* xf) {
+    if (!impl_) return false;
+    if (!xf || !(xf[0] != 1.0f || xf[1] != 0.0f || xf[2] != 0.0f ||
+                 xf[3] != 0.0f || xf[4] != 1.0f || xf[5] != 0.0f)) {
+        impl_->affineOn = false;
+        return true;
+    }
+    for (int i = 0; i < 6; i++) impl_->aff[i] = xf[i];
+    impl_->affineOn = true;
+    return true;
+}
+
 void BinUID3D::setTextShadow(float dx, float dy, float blur, uint32_t color) {
     if (impl_) impl_->atlas.setTextShadow(dx, dy, blur, color);
 }

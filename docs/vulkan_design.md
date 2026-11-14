@@ -1427,9 +1427,9 @@ NEAREST 会把弧线量化成 texel 台阶 —— 每帧台阶位置变一次，
 - 共享遍历 `binui_draw_nodes.h`：仿射节点用
   `[a c e; b d f]`（绕矩形中心：先缩放、再旋转、最后平移）把**局部坐标**映射到屏幕，
   并且用它算 AABB 做剔除/裁剪（`floor/ceil` 外扩）；**只有底和边框**走仿射，
-  文字/图片/路径不参与（字形要对齐像素，旋转只会糊）—— 这在接口注释里写死了。
-- 新原语 `IBinUIGfx::fillRoundedXf(w, h, radius, stroke, thickness, color, xf)`：
-  把九宫格每片按 `xf` 变换后发射。三个后端各自加了一个
+   文字/图片/路径不参与（字形要对齐像素，旋转只会糊）—— 这在接口注释里写死了。
+   （v0.16.18 更新：文字/图片现在也能参与 —— 走 `setAffine` **状态**而不是逐四边形参数，
+   见 `binui_gfx.h`；"不参与"只对 `fillRoundedXf` 这条整块几何成立。）
   `emitQuadUV(p[8], uv[8], color)`（任意四角 + 每角 UV），九宫格几何与
   `fillRounded/strokeRounded` 同源，所以"不旋转时"逐像素一致。
 

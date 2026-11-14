@@ -573,6 +573,20 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     bool cmdOpen = false;   // 命令缓冲正在录制（帧内，或一次性的初始化提交）
 
     // ---- 文本（排版/图集在共享头里，本类只当纹理宿主）----
+    // v0.16.18 仿射状态：设置后 emitQuad/emitQuadRot 的四角都过这个 2×3 矩阵
+    bool affineOn = false;
+    float aff[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
+    void affPoint(float lx, float ly, float& sx, float& sy) const {
+        sx = aff[0] * lx + aff[1] * ly + aff[2];
+        sy = aff[3] * lx + aff[4] * ly + aff[5];
+    }
+    void affCorners(float x0, float y0, float x1, float y1, float* p) const {
+        affPoint(x0, y0, p[0], p[1]);
+        affPoint(x1, y0, p[2], p[3]);
+        affPoint(x0, y1, p[4], p[5]);
+        affPoint(x1, y1, p[6], p[7]);
+    }
+
     GlyphAtlas atlas;
     std::vector<Tex*> glyphTexes;   // 图集纹理（shutdown 时统一释放）
 
@@ -2097,6 +2111,14 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
 
     void emitQuad(float x0, float y0, float x1, float y1, float u0, float v0, float u1, float v1,
                   uint32_t color, Tex* tex = nullptr) {
+        if (affineOn) {   // 仿射：四角过矩阵（文字/图片跟着卡片转）
+            float p[8], uv[8];
+            affCorners(x0, y0, x1, y1, p);
+            uv[0] = u0; uv[1] = v0; uv[2] = u1; uv[3] = v0;
+            uv[4] = u0; uv[5] = v1; uv[6] = u1; uv[7] = v1;
+            emitQuadUV(p, uv, color, tex);
+            return;
+        }
         VkVertex* o = vertRoom(6);
         if (!o) return;
         switchBatch(tex);
@@ -3147,6 +3169,16 @@ void BinUIVK::fillLine(float x0, float y0, float x1, float y1, float width, uint
     uint32_t c = color;
     Premult(c);
     // 旋转四边形：两个三角形，法向偏移半线宽
+    if (d.affineOn) {   // v0.16.18：线段也跟着仿射
+        float p[8];
+        d.affPoint(x0 + nx, y0 + ny, p[0], p[1]);
+        d.affPoint(x1 + nx, y1 + ny, p[2], p[3]);
+        d.affPoint(x1 - nx, y1 - ny, p[4], p[5]);
+        d.affPoint(x0 - nx, y0 - ny, p[6], p[7]);
+        const float uv[8] = { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
+        d.emitQuadUV(p, uv, c, &d.white);
+        return;
+    }
     d.switchBatch(&d.white);
     VkVertex* o = d.vertRoom(6);
     if (!o) return;
@@ -3228,6 +3260,19 @@ void BinUIVK::setTextSubpixel(bool on) {
 }
 
 // v24 文字阴影：状态交给共享图集（GL / VK / D3D11 是同一份实现，所以三端逐像素相同）
+// v0.16.18 仿射状态：三端语义一致（见 GL 后端同名函数）
+bool BinUIVK::setAffine(const float* xf) {
+    if (!impl_) return false;
+    if (!xf || !(xf[0] != 1.0f || xf[1] != 0.0f || xf[2] != 0.0f ||
+                 xf[3] != 0.0f || xf[4] != 1.0f || xf[5] != 0.0f)) {
+        impl_->affineOn = false;
+        return true;
+    }
+    for (int i = 0; i < 6; i++) impl_->aff[i] = xf[i];
+    impl_->affineOn = true;
+    return true;
+}
+
 void BinUIVK::setTextShadow(float dx, float dy, float blur, uint32_t color) {
     if (impl_) impl_->atlas.setTextShadow(dx, dy, blur, color);
 }
