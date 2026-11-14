@@ -102,8 +102,13 @@ bool caretBlinkOn();
 // 设置 GDI 绘制用字体（默认 Segoe UI；终端等场景用等宽字体如 Consolas）
 void setGdiFontName(const char* name);
 
-// 将 BinUIRenderer 节点树用 GDI 绘制到指定 HDC（演示用 GDI 后端）。
+// 将 BinUIRenderer 节点树用 GDI 绘制到指定 HDC。
 // clipRect 为脏矩形（RECT*，null=按窗口客户区全量）；要求 hdc 已被裁剪到 clipRect。
+//
+// ⚠ **遗留（OLD）后端**（v0.16.17 起）：只保证"不崩 / 不阻塞 / 能出像素基准图"。
+// 新特性（绘制/文字/图片/阴影…）只做 GL / Vulkan / D3D11 三端；GDI 不再新增能力、
+// 也不再修观感类问题（已知差异见 docs/future.md「后端支持级别」与
+// docs/issues/09-gdi-text-clip.md）。例外：画错到没法看（静默擦掉/整块消失）照旧要修。
 void drawNodesGDI(void* hdc, const binui::BinUIRenderer& renderer, const void* clipRect = nullptr);
 
 // 点击定位文本框光标：在聚焦输入框内按点击 x 坐标放置光标（渲染器无字体测量能力，由后端完成）

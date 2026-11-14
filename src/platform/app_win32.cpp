@@ -1,4 +1,4 @@
-// app_win32.cpp - 极简 Win32 应用外壳 + GDI 节点绘制后端
+// app_win32.cpp - 极简 Win32 应用外壳 + GDI 节点绘制后端（⚠ 遗留/OLD，见 drawNodesGDI 上方）
 #include "app_win32.h"
 
 #ifndef _WIN32
@@ -1037,6 +1037,16 @@ static void GdiDrawTextShadowed(HDC hdc, LPCWSTR text, int len, LPRECT rc, UINT 
     DrawTextW(hdc, text, len, rc, fmt);
 }
 
+// ============================================================
+// drawNodesGDI —— ⚠ 遗留（OLD）后端（v0.16.17 起）
+// ------------------------------------------------------------
+// 只保证三件事：不崩 / 不阻塞 / 能出像素基准图（docs/pixels 由它生成：
+// 无 GPU 依赖、确定性最好）。**新特性只做 GL / Vulkan / D3D11 三端**，
+// 这里不再新增能力、也不再修观感类问题 —— 它没有 alpha 合成、没有字形图集、
+// 没有 AA 填充，为它逐项对齐 GPU 端的性价比已经很低。
+// 例外：画错到没法看（静默擦掉/整块消失/崩）照旧要修，否则基准图本身失去意义。
+// 已知差异：docs/future.md「后端支持级别」、docs/issues/09-gdi-text-clip.md。
+// ============================================================
 void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipRect) {    HDC hdc = static_cast<HDC>(hdcCtx);    const auto& nodes = renderer.getNodes();
 
     // 绘制范围：脏矩形（局部重绘）或窗口客户区（全量）

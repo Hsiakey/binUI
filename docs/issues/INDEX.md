@@ -1,7 +1,8 @@
 # binUI 问题清单（用 Go + C ABI 做 GUI 时踩到的）
 
-> **状态：7 条全部已修复**（改动见 [CHANGELOG.md](../../CHANGELOG.md) 的 Unreleased 段）。
-> 下面保留原始记录，方便回溯复现方式与当时的实测边界。
+> **状态：01–08 已修复**（改动见 [CHANGELOG.md](../../CHANGELOG.md) 的 Unreleased 段）；
+> **09 不修（WON'T FIX）**：v0.16.17 起 GDI 后端标记为**遗留（OLD）后端**，只保证不崩/不阻塞/能出基准图，
+> 新特性只做 GL / Vulkan / D3D11 三端。
 
 复盘环境，所有条目都在同一套环境里复现：
 
@@ -26,6 +27,7 @@ Windows 11 · MinGW-w64 gcc · Go 1.26（cgo）
 | 06 | [`setText` 不重算文本高度](06-settext-no-reflow.md) | enhancement | 中 | 运行期换长文本就压到下一个元素 |
 | 07 | [C ABI 缺 `scrollTo` / `setNodeBounds` / `addNode`](07-cabi-runtime-apis.md) | enhancement | 中 | 渲染器里都有，只是没导出；Go 绑定还漏了 `set_image*` |
 | 08 | [Go 绑定文档说错「主 goroutine 天然固定线程」](08-go-binding-thread-affinity.md) | documentation | **高（踩了就必现）** | 宿主不 `LockOSThread` → 跨线程调 Win32/WGL → 随机崩或退出挂死；**02 的崩溃就是这条** |
+| 09 | [GDI 的文字矩形比节点盒小一圈，大字号被上下裁掉](09-gdi-text-clip.md) | bug（观感）→ **不修** | 低（GDI 已降级为遗留后端） | `DrawTextW` 按文字矩形裁剪；GPU 三端完整。留作记录 |
 
 ## 修复顺序建议
 
@@ -47,7 +49,7 @@ Windows 11 · MinGW-w64 gcc · Go 1.26（cgo）
 | `display-none2.html` / `-gl.png` | 03 | 内联 / class 两种 `display:none`，子块都跑到左上角 |
 | `probe.html` / `probe.png` | 04 | 三个按钮的 `text-align:left` 全部无效 |
 | `scrollbar-light.png` | 05 | 浅色主题下右侧那条黑杠 |
-| `gui-dark-chat.png` | 全部 | 完整界面（深色），说明这些限制在真实布局里的表现 |
+| `gui-dark-chat.png` | 全部 | 完整界面（深色），说明这些限制在真实布局里的表现 |\n| `gdi-text-clip.html` / `-gl.png` / `-gdi.png` | 09 | 同一页 `<div>`（被裁）与 `<span>`（完整）的 GDI / GL 对照 |
 
 > `assets/` 里的 HTML 都是 self-contained 的，可以直接
 > `build-mingw/bin/offscreen_render.exe <html> out.png` 跑 GDI 结果；

@@ -1,0 +1,16 @@
+<app_window width="640" height="240" resizable="false">
+<html width="640" height="240" bg="#FFFFFF">
+  <!-- 09：GDI 的文字矩形 = 节点盒扣掉上下 padding，字号一大就被裁；GL/VK/D3D11 不裁 -->
+  <!-- 上面三行用 <div>（默认 padding 8），下面三行用 <span>（padding 0）作为对照 -->
+
+  <div style="position:absolute;left:20px;top:16px;width:600px;height:34px;font-size:22px;color:#16202C">div 容器：22px 字，盒高 34（padding 8 → 文字矩形只剩 18）</div>
+
+  <div style="position:absolute;left:20px;top:56px;width:600px;height:46px;font-size:30px;color:#16202C">div 容器：30px 字，盒高 46（文字矩形 30）</div>
+
+  <div style="position:absolute;left:20px;top:106px;width:600px;height:34px;font-size:22px;color:#C0392B">div 容器：这一行的上下边被切掉了</div>
+
+  <span style="position:absolute;left:20px;top:148px;width:600px;height:34px;font-size:22px;color:#1B2733">span 容器：22px 字，盒高 34（padding 0 → 文字矩形 34）</span>
+
+  <span style="position:absolute;left:20px;top:186px;width:600px;height:46px;font-size:30px;color:#1B2733">span 容器：30px 字，盒高 46，完整</span>
+</html>
+</app_window>

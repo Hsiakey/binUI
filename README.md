@@ -29,8 +29,8 @@ src/
   compiler/         XML、HTML5 → binUI（含 CSS 解析、级联、伪类与伪元素展开）
   renderer/         解析、节点状态、命中测试、事件、动画、滚动、文本编辑
   font/             FreeType + HarfBuzz 字体服务（灰度字形图集 + COLR emoji）
-  backends/         binui_gl-gdi.*（OpenGL 3.3）/ binui_d3d11.*（D3D11）
-  platform/         app_win32.*：Win32 窗口外壳 + GDI 绘制（演示与工具共用）
+  backends/         binui_gl-gdi.*（OpenGL 3.3）/ binui_d3d11.*（D3D11）/ binui_vk.*（Vulkan）
+  platform/         app_win32.*：Win32 窗口外壳 + GDI 绘制（**遗留/OLD**：只做后备呈现与像素基准，见「后端支持级别」）
   binui_charts.cpp  高层图表 API 实现
   binui_video_*.cpp 视频模块（FFmpeg 实现 / 无依赖桩）
 components/         **标准组件库**：titlebar / button / field / badge / toggle /
@@ -64,7 +64,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `include/binui_component.h` | 外挂组件加载（header-only）：`ex::MountAll()` 按布局里的组件引用段挂载 `.bum` |
 | `include/binui_srcmap.h` | 打包清单（`binui.res`）的读写（header-only）：让 `binui_export` 能把 `.bui` 逐字节还原成打包前的目录结构 |
 | `include/binui_video.h` | 可选视频编解码模块接口：FFmpeg 解码 + WASAPI 音频（`BINUI_ENABLE_VIDEO`，默认 OFF 桩实现零依赖） |
-| `src/platform/app_win32.*` | 演示用 Win32 窗口外壳 + GDI 绘制后端（可替换为其他平台后端） |
+| `src/platform/app_win32.*` | Win32 窗口外壳 + GDI 绘制后端（**遗留/OLD**：只做后备呈现与像素基准图；新特性只做 GL/VK/D3D11） |
 | `include/binui_paths.h` | 跨平台路径解析：exe 真实路径（`GetModuleFileName`/`/proc/self/exe`）+ UI 查找顺序 + 图片资源加载（`--ui` / `$BINUI_UI`） |
 | `include/binui_hot_reload.h` | UI 热重载（`--watch`）：保存即重编译换树，保留窗口尺寸/滚动/焦点/输入内容 |
 | `src/backends/binui_gl-gdi.h/.cpp` | GPU 绘制后端：OpenGL 3.3 + 字形图集 + 顶点四边形（无边框窗口） |
@@ -113,10 +113,24 @@ CMake 会直接 `add_subdirectory` 编译为静态库（MSVC/MinGW 均可）；M
 
 | 后端 | 窗口 | 绘制 | 文本 | emoji |
 |------|------|------|------|-------|
-| GDI（`app_win32`） | 标准标题栏 | GDI 局部重绘 + 脏矩形 | `DrawTextW`（UTF-8→UTF-16） | 单色字形 |
+| GDI（`app_win32`）**遗留（OLD）** | 标准标题栏 | GDI 局部重绘 + 脏矩形 | `DrawTextW`（UTF-8→UTF-16） | 单色字形 |
 | D3D11（`binui_d3d11`，0.11.0 起并入共享代码） | WS_POPUP 无边框（外壳与 GL/Vulkan 共用 `binui_app.h`）；透明窗/全屏直翻转/拖拽期走读回 + GDI 贴屏 | GPU 四边形（图集/九宫格模板/**持久离屏帧缓冲**+脏矩形局部重绘），VSync 按需呈现；节点树遍历与 GL/Vulkan **同一份** `binui_draw_nodes.h` | FreeType 字形图集（灰度 8bit；≤16px 轻 hinting + gamma + 像素对齐） | 彩色（FreeType COLR/CPAL 层合成） |
 | OpenGL（`binui_gl-gdi`） | WS_POPUP 无边框 | 同 D3D11 架构：GL 3.3 core + 顶点四边形/图集/九宫格/FBO，VSync（wglSwapIntervalEXT）；resize 拖拽期走 GDI `StretchDIBits` 呈现（规避 NVIDIA 驱动 SwapBuffers 崩溃） | 同 D3D11（共享 `binui_font_renderer`） | 同 D3D11 |
 | **Vulkan**（`binui_vk`，0.10.0 起） | WS_POPUP 无边框，`VK_KHR_swapchain` 呈现；透明窗/全屏直翻转/拖拽期自动走读回 + GDI 贴屏 | 同架构：Vulkan 1.0 + 顶点四边形/图集/九宫格 + **持久 4× MSAA 累积帧**（脏矩形局部清屏；0.16.12 起有 1.3 就整条走 **dynamic rendering**，组透明度的离屏图层靠它）；只 `LoadLibrary("vulkan-1.dll")`，不链 `vulkan-1.lib`、不需要 SDK | **与 GL 共用同一份** `binui_glyph_atlas.h`（逐像素同源） | 同 GL |
+
+### 后端支持级别（v0.16.17 起）
+
+- **GL / Vulkan / D3D11 = 主线**：新特性（绘制/文字/图片/阴影/动画…）只在这三端实现，
+  三端共用 `binui_draw_nodes.h` + `binui_glyph_atlas.h`，所以**逐像素相同**是硬约束。
+- **GDI（`app_win32` 的 `drawNodesGDI`）= 遗留（OLD）后端**：只保证三件事 ——
+  ① 不崩；② 不阻塞（它本来就是无 GPU/远程会话/全屏直翻转时的后备呈现路径）；
+  ③ 能出**像素基准图**（`docs/pixels/` 的基准由它生成：无 GPU 依赖、确定性最好）。
+  **不再为它新增特性，也不再修观感类问题**：它没有 alpha 合成、没有字形图集、
+  没有 AA 填充，照着 GPU 端逐项对齐的性价比已经很低。
+  已知差异记在 [`docs/issues/09-gdi-text-clip.md`](docs/issues/09-gdi-text-clip.md)
+  与 `docs/future.md` 的"GDI 遗留后端"一节。
+  例外：**修掉会崩/会挂死的问题照旧要修**（比如 0.16.14 的 `AlphaBlend` 源位图未选中、
+  0.16.15 的透明条带擦掉阴影 —— 那些属于"画错到没法看"，不是"精度差一点"）。
 
 后端契约是同一份 `IBinUIGfx`（`src/backends/binui_gfx.h`），节点树遍历（`binui_draw_nodes.h`）、
 字形图集与排版（`binui_glyph_atlas.h`）、无边框窗口外壳（`binui_app.h`，模板化在具体后端上）
