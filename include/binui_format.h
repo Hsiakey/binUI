@@ -22,7 +22,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v22: flex 属性补齐（flex 简写/flex-shrink/flex-basis/order/align-self/flex-wrap/align-content），
 //      BinUISpecNode 72 -> 84 字节；BinUISpecFlex 的两个 reserve 变成 wrap / alignContent（尺寸不变）
 // v23: 阴影段（box-shadow），见 BinUIShadow
-constexpr uint32_t BINUI_VERSION    = 23;
+// v24: 文字阴影段（text-shadow），见 BinUITextShadow
+constexpr uint32_t BINUI_VERSION    = 24;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -509,6 +510,33 @@ struct BinUIShadow {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIShadow) == 24, "BinUIShadow must be 24 bytes");
+
+// ============================================================
+// 文字阴影段（v24）：CSS 的 text-shadow
+//
+// 布局：uint32 tsBytes（0 = 无）+ uint32 tsCount + BinUITextShadow[count]
+// 恒定写出，位于阴影段之后、名称段之前（段序见 BinUIGlyphAtlas 的注释）。
+//
+// 为什么再开一段而不是塞进 box-shadow 段：一条 box-shadow 有 5 个几何量（多了
+// spread），一条 text-shadow 只有 3 个，而且两者的**绘制位置**完全不同（一个是
+// 盒子轮廓的环，一个是字形位图的模糊）。混在一条里得靠 flags 分支区分，读段的人
+// 反而要多想一层；分开是每种 20 字节的定长数组，两边都最省。
+//
+// **数组顺序同样是绘制顺序**（下标小的先画）。text-shadow 是**可继承**属性，
+// 所以编译器会把祖先的阴影折进每个真正画字的节点（见 binui_compiler.cpp 的
+// Ctx::textShadow）—— 换句话说，一个卡片上写一次，卡片里所有文字都带阴影。
+// ============================================================
+#pragma pack(push, 1)
+struct BinUITextShadow {
+    uint16_t nodeId;
+    uint16_t flags;      // 保留（目前恒 0）
+    float    offsetX;    // 水平偏移（像素）
+    float    offsetY;    // 垂直偏移（像素）
+    float    blur;       // 模糊半径（像素；标准差 σ = blur/2，与 box-shadow 同一口径）
+    uint32_t color;      // AARRGGBB（已折入 opacity）
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUITextShadow) == 20, "BinUITextShadow must be 20 bytes");
 
 // ============================================================
 // 路径段（v15，恒定写出，位于扩展绘制段之后、名称段之前）

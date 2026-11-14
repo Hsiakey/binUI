@@ -708,8 +708,43 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         }
     }
 
+    // ---- 文字阴影段（v24）：uint32 tsBytes + uint32 tsCount + BinUITextShadow[] ----
+    // 段序（v24）：… / 扩展绘制 / 路径 / 阴影 / 文字阴影 / 名称。
+    // 与 box-shadow 段同一套索引：同一节点的连续条目用 (起始下标, 条数) 表示。
+    // 目前编译器每个节点只写一条（多层文字阴影不支持），但解析这边按多条的通用情形写，
+    // 将来真要支持多层不用再动二进制。
+    textShadows_.clear();
+    textShadowIdx_.clear();
+    if (const uint8_t* tp = sectionAt(9)) {
+        uint32_t tb = 0;
+        memcpy(&tb, tp, sizeof(tb));
+        if (tb >= sizeof(uint32_t) && size - static_cast<size_t>(tp - data) >= sizeof(uint32_t) + tb) {
+            const uint8_t* q = tp + sizeof(uint32_t);
+            uint32_t tc = 0;
+            memcpy(&tc, q, sizeof(tc));
+            q += sizeof(tc);
+            const uint8_t* qend = tp + sizeof(uint32_t) + tb;
+            for (uint32_t i = 0; i < tc && q + sizeof(BinUITextShadow) <= qend; i++) {
+                BinUITextShadow s;
+                memcpy(&s, q, sizeof(s));
+                q += sizeof(s);
+                if (!nodeIndexById_.count(s.nodeId)) continue;          // 悬空条目防御
+                if (((s.color >> 24) & 0xFFu) == 0) continue;           // 全透明
+                auto it = textShadowIdx_.find(s.nodeId);
+                if (it == textShadowIdx_.end()) {
+                    textShadowIdx_[s.nodeId] = { textShadows_.size(), 1 };
+                } else if (it->second.first + it->second.second == textShadows_.size()) {
+                    it->second.second++;
+                } else {
+                    it->second = { textShadows_.size(), 1 };
+                }
+                textShadows_.push_back(s);
+            }
+        }
+    }
+
     nameToId_.clear();
-    if (const uint8_t* np = sectionAt(9)) {
+    if (const uint8_t* np = sectionAt(10)) {
         uint32_t nbytes = 0;
         memcpy(&nbytes, np, sizeof(uint32_t));
         if (nbytes > 0 && size - static_cast<size_t>(np - data) >= sizeof(uint32_t) + nbytes) {

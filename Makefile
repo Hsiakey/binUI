@@ -478,7 +478,7 @@ tools: $(TOOL_BINS)
 #   mingw32-make SHELL=sh pixels           # 渲染 + 与 docs/pixels 基准图比对
 #   mingw32-make SHELL=sh pixels-update    # 改完绘制/布局后重新生成基准图
 # =============================================
-PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad svgjoin svgstroke svgfinish svgaa opacity grad-angle shadow image-round image-mip
+PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad svgjoin svgstroke svgfinish svgaa opacity grad-angle shadow image-round image-mip text-shadow
 PIXEL_OUT   := $(BUILD_DIR)/pixels
 PIXEL_GOLD  := docs/pixels
 PIXEL_TOL   ?= 0.5
@@ -523,7 +523,7 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # roundtex-lru（v0.12.8）：一页里 >48 种圆角半径，专门压"圆角模板 LRU 淘汰"——
 # 淘汰时如果当场删纹理，本帧已经录进批次的四边形还在引用它，跨后端比对会看到某几块
 # 圆角被画成整块纯色。这条用例只进跨后端比对（GL vs VK / D3D11），不建 GDI 基准图。
-ANIM_CASES := anim-midphase affine-corners roundtex-lru
+ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 

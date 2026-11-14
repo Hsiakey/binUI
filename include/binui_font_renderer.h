@@ -91,6 +91,18 @@ public:
     bool renderGlyph(const std::string& face, float size, uint32_t cp, bool bold, bool italic,
                      GrayGlyph& out);
 
+    // 亚像素横向相位（v24）：subpixelX ∈ {0,1,2,3}，单位 ¼ 像素。
+    //
+    // 做法：光栅化前用 FT_Set_Transform 把轮廓整体右移 subpixelX/4 像素，让**位图自己**
+    // 带上这 ¼ 像素的偏移 —— 于是调用方照样把字形画在整数坐标上，文字却能停在任意
+    // ¼ 像素位置。这比"整数位图 + 线性过滤"锐得多：过滤把整个字形糊掉，位移只是换了
+    // 一份位图（4 份全在字形图集里，按相位缓存）。
+    //
+    // 只做横向：纵向亚像素要么 4×4=16 份变体（图集体积爆炸），要么放弃纵向 hinting
+    // （小字号会糊）—— DirectWrite / Chrome 的取舍同样只做横向，纵向按整像素吸附。
+    bool renderGlyph(const std::string& face, float size, uint32_t cp, bool bold, bool italic,
+                     int subpixelX, GrayGlyph& out);
+
     // 彩色渲染整个簇（内部经 HarfBuzz 做 GSUB 合体/旗帜/肤色等）；
     // false = 该簇无 COLR 层（调用方降级灰度）
     bool renderColorCluster(const std::string& face, float size,

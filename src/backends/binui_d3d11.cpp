@@ -1429,6 +1429,11 @@ void BinUID3D::setTextSubpixel(bool on) {
     impl_->subpixelText = on ? 1 : 0;
 }
 
+// v24 文字阴影：状态交给共享图集，三端像素一致
+void BinUID3D::setTextShadow(float dx, float dy, float blur, uint32_t color) {
+    if (impl_) impl_->atlas.setTextShadow(dx, dy, blur, color);
+}
+
 bool BinUID3D::pushLayer(float x, float y, float w, float h, float alpha) {
     return impl_ ? impl_->pushLayer(x, y, w, h, alpha) : false;
 }

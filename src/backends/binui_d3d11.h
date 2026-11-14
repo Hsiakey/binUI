@@ -66,6 +66,7 @@ public:
     void fontMetrics(float size, int weight, int& ascent, int& lineHeight,
                      bool italic = false) override;
     void setTextSubpixel(bool on) override;
+    void setTextShadow(float dx, float dy, float blur, uint32_t color) override;
     // v0.16.10：组透明度的离屏合成（见 binui_gfx.h 的 pushLayer 注释）
     bool pushLayer(float x, float y, float w, float h, float alpha) override;
     void popLayer() override;

@@ -87,10 +87,18 @@ public:
                             bool italic = false) = 0;
     virtual void fontMetrics(float size, int weight, int& ascent, int& lineHeight,
                              bool italic = false) = 0;
-    // 文字亚像素定位（v0.16.4）：默认 false = 字形按整像素落位（位图 1:1，最锐利）。
-    // 有动画的节点传 true —— 位置保留小数、字形按 LINEAR 采样，文字才能跟着亚像素
-    // 位移连续滑（否则每 2 帧跳 1px，肉眼像在抖）。整数位置下两者逐像素相同。
+    // 文字亚像素定位（v0.16.4 / v24 换成 ¼ 像素相位）：默认 false = 字形按整像素落位
+    // （位图 1:1，最锐利）。有动画的节点传 true —— 位置不再取整，而是量化到 ¼ 像素，
+    // 每份相位是一张独立的字形位图（不再靠 LINEAR 采样糊一层），文字既能连续滑又保持锐利。
     virtual void setTextSubpixel(bool on) { (void)on; }
+
+    // ---- 文字阴影（v24：CSS text-shadow）----
+    // 在画一个节点的文字**之前**设好，节点画完用 alpha=0 清掉（或下个节点重设）。
+    // color 的 alpha 已折入元素 opacity；blur < 0.5px 由实现按"硬阴影"（偏移一份字形）处理。
+    // 默认空实现：不支持的后端（如 GDI 的老路径）文字照常画，只是没有阴影。
+    virtual void setTextShadow(float dx, float dy, float blur, uint32_t color) {
+        (void)dx; (void)dy; (void)blur; (void)color;
+    }
 
     // ---- 图层 / 组透明度（v0.16.9）----
     // push 之后的所有绘制先落到一块离屏图层（框 = x,y,w,h），pop 时按 alpha 整体合成回来。

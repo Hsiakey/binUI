@@ -644,6 +644,18 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             shPadY = std::max(shPadY, pad + std::fabs(shs[k].offsetY) * shScale);
         }
 
+        // v24 文字阴影：字形模糊会溢出节点盒（CSS 的 text-shadow 不受盒子边界约束），
+        // 所以自身裁剪矩形要按阴影外扩量放大，否则贴边文字的阴影会被切出一道直边。
+        int tsCount = 0;
+        const BinUITextShadow* ts = renderer.textShadowsOf(node.id, tsCount);
+        float tsPadX = 0.0f, tsPadY = 0.0f;
+        if (ts && tsCount > 0) {
+            const float tSig = ts[0].blur > 0.0f ? ts[0].blur * 0.5f : 0.0f;
+            const float tPad = tSig * 3.0f + 1.0f;
+            tsPadX = tPad + std::fabs(ts[0].offsetX);
+            tsPadY = tPad + std::fabs(ts[0].offsetY);
+        }
+
         if (x - shPadX + nw <= clipL || x + shPadX >= clipR ||
             y - shPadY + nh <= clipT || y + shPadY >= clipB) continue;
         if (hasVp[i] && (x - shPadX + nw <= vpL[i] || x + shPadX >= vpR[i] ||
@@ -663,6 +675,8 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             cw = std::ceil(x + nw) - fx0;
             ch = std::ceil(y + nh) - fy0;
         }
+        // 文字阴影露在盒外：外扩量折进自身裁剪（放在 animGeo 之后 —— 那一支会整块重算 cl/ct/cw/ch）
+        cl -= tsPadX; ct -= tsPadY; cw += 2.0f * tsPadX; ch += 2.0f * tsPadY;
         if (dbgClip) {
             std::fprintf(stderr,
                          "[clip] node=%u type=%u own=(%.1f,%.1f %.1fx%.1f) dx=%.1f dy=%.1f"
@@ -751,6 +765,13 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         }
 
         if (draw) {
+            // v24 文字阴影：状态设一次，本节点内所有 drawText / drawTextWrapped 都带上它；
+            // 没有阴影（或元素透明）就显式清零 —— 状态是后端的，不清会漏到下一个节点。
+            if (ts && tsCount > 0 && opacity > 0.002f)
+                gfx.setTextShadow(ts[0].offsetX, ts[0].offsetY, ts[0].blur,
+                                  GfxScaleAlpha(ts[0].color, opacity));
+            else
+                gfx.setTextShadow(0.0f, 0.0f, 0.0f, 0u);
             uint32_t cc = dc;
             uint32_t textCol = GfxScaleAlpha(0xFFFFFFFF, opacity);
             uint32_t accentCol = GfxScaleAlpha(0xFFBB86FC, opacity);
@@ -1254,6 +1275,8 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         gfx.popClipTo(savedDepth);
     }
     // 收尾：图层必须成对弹出（正常不会剩下，防御性兜底）
+    // v24 文字阴影是后端状态：整趟遍历结束显式清掉，别让画布回调/浮层继承到上一节点的阴影
+    gfx.setTextShadow(0.0f, 0.0f, 0.0f, 0u);
     while (!layerStack.empty()) {
         gfx.popLayer();
         layerStack.pop_back();

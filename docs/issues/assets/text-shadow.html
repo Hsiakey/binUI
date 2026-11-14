@@ -1,0 +1,35 @@
+<app_window width="640" height="400" resizable="false">
+<html width="640" height="400" bg="#F2F5FA">
+  <!-- v24 text-shadow：偏移 / 模糊 / 硬阴影 / 继承 / currentColor / 负偏移 / none 清除 -->
+  <span style="position:absolute;left:24px;top:12px;width:592px;height:42px;font-size:30px;color:#16202C;text-shadow:0 2px 6px rgba(0,0,0,0.55)">文字阴影 text-shadow</span>
+
+  <span style="position:absolute;left:24px;top:66px;width:270px;height:30px;font-size:22px;color:#0B5FA5;text-shadow:0 0 8px rgba(20,120,220,0.85)">发光 0 0 8px</span>
+
+  <span style="position:absolute;left:320px;top:66px;width:290px;height:30px;font-size:22px;color:#16202C;text-shadow:2px 2px 0 rgba(255,90,0,0.95)">硬阴影 2 2 0</span>
+
+  <span style="position:absolute;left:24px;top:104px;width:270px;height:30px;font-size:22px;color:#233043;text-shadow:-3px -3px 3px rgba(0,0,0,0.45)">负偏移 -3 -3 3</span>
+
+  <span style="position:absolute;left:320px;top:104px;width:290px;height:30px;font-size:22px;color:#C0392B;text-shadow:0 4px 2px rgba(0,0,0,0.35)">大偏移 0 4 2</span>
+
+  <!-- 继承：阴影写在容器上，子元素文字自动带 -->
+  <div style="position:absolute;left:24px;top:150px;width:280px;height:150px;border-radius:14px;background:#FFFFFF;text-shadow:0 2px 5px rgba(0,0,0,0.40)">
+    <span style="position:absolute;left:16px;top:14px;width:248px;height:24px;font-size:18px;color:#1B2733">父级声明，子元素继承</span>
+    <span style="position:absolute;left:16px;top:44px;width:248px;height:20px;font-size:14px;color:#5A6B80">第二行同样带阴影（继承）</span>
+    <span style="position:absolute;left:16px;top:72px;width:248px;height:20px;font-size:14px;color:#5A6B80;text-shadow:none">这一行 none 清掉了阴影</span>
+    <span style="position:absolute;left:16px;top:100px;width:248px;height:26px;font-size:20px;color:#C0392B;font-weight:700">粗体阴影</span>
+  </div>
+
+  <!-- currentColor：不写颜色 = 跟随文字色 -->
+  <div style="position:absolute;left:324px;top:150px;width:292px;height:150px;border-radius:14px;background:#101A26;text-shadow:0 3px 6px currentColor">
+    <span style="position:absolute;left:18px;top:14px;width:256px;height:26px;font-size:20px;color:#6FD3FF">currentColor 阴影</span>
+    <span style="position:absolute;left:18px;top:46px;width:256px;height:20px;font-size:14px;color:#8FA6BC">blur 6 + offset 3</span>
+    <span style="position:absolute;left:18px;top:78px;width:256px;height:36px;font-size:26px;color:#FFD166;font-weight:700">Emoji 🙂 无阴影</span>
+  </div>
+
+  <span style="position:absolute;left:24px;top:316px;width:592px;height:18px;font-size:13px;color:#7A8798;text-shadow:0 1px 1px #FFFFFF">浅色 1px 投影（贴边也不该被盒子裁掉）</span>
+
+  <span style="position:absolute;left:24px;top:342px;width:592px;height:20px;font-size:16px;color:#3B4A5C;text-shadow:3px 3px 0 rgba(0,0,0,0.15)">静态页面里 ¼ 像素相位恒为 0（像素中性）</span>
+
+  <span style="position:absolute;left:24px;top:370px;width:592px;height:20px;font-size:16px;color:#1B2733;text-shadow:0 0 4px rgba(0,0,0,0.9)">最后一行：0 0 4 的四周光晕</span>
+</html>
+</app_window>

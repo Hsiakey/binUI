@@ -68,6 +68,7 @@ public:
     void fontMetrics(float size, int weight, int& ascent, int& lineHeight,
                      bool italic = false) override;
     void setTextSubpixel(bool on) override;
+    void setTextShadow(float dx, float dy, float blur, uint32_t color) override;
 
     bool prepareImage(uint16_t index, const uint8_t* data, size_t size,
                       uint32_t generation) override;

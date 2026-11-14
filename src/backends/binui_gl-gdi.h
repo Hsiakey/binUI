@@ -75,6 +75,7 @@ public:
     void fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic = false);
     // 文字亚像素定位：true = 位置保留小数（图集 LINEAR 采样），动画节点用
     void setTextSubpixel(bool on);
+    void setTextShadow(float dx, float dy, float blur, uint32_t color) override;
     // v0.16.9：组透明度的离屏合成（见 binui_gfx.h 的 pushLayer 注释）
     bool pushLayer(float x, float y, float w, float h, float alpha);
     void popLayer();

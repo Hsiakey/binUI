@@ -193,6 +193,13 @@ struct GlyphRunQuad {
     float x = 0, y = 0, w = 0, h = 0;
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
     bool white = false;   // 彩色字形用白顶点（不染色）
+    // v24 文字阴影：同一字形的阴影格。
+    //   blur = 0 → 直接复用字形格（sTex == tex、同 UV、sPad = 0），"阴影 = 偏移一份字形"；
+    //   blur > 0 → 模糊图集里的一格，每边比字形格多 sPad 像素，画的时候按 sPad 外扩。
+    // 彩色字形（emoji）不挂阴影（见 FillShadowQuad 注释），sTex 保持 nullptr。
+    void* sTex = nullptr;
+    float su0 = 0, sv0 = 0, su1 = 0, sv1 = 0;
+    float sPad = 0;
 };
 struct GlyphRun {
     uint64_t gen = 0;                 // 建立时的图集代数
@@ -219,10 +226,33 @@ public:
     bool hasHost() const { return host_ != nullptr; }
 
     // 文字是否按**整像素**落位（默认 true：字形位图 1:1，整像素最锐利）。
-    // 有动画的节点要设成 false —— 位置保留小数、图集按 LINEAR 采样，文字才能跟着
-    // 亚像素位移连续滑；否则每 2 帧跳 1px，肉眼就是"字在抖"（见 CHANGELOG 0.16.4）。
-    // 整数位置下 LINEAR 采样与 NEAREST 逐像素相同，静态页面不受影响。
+    // 有动画的节点要设成 false —— 位置保留小数，文字才能跟着亚像素位移连续滑；
+    // 否则每 2 帧跳 1px，肉眼就是"字在抖"（见 CHANGELOG 0.16.4）。
+    //
+    // v24 起 false 的含义变了：不再靠图集 LINEAR 采样"糊一层"换平滑，而是把小数部分
+    // 量化成 **¼ 像素相位**，每份相位是一张独立的字形位图（见 PhaseOf）。整数位置下
+    // 相位恒为 0，与旧行为逐像素相同，静态页面不受影响。
     bool snapText = true;
+
+    // ---- v24：文字阴影（后端在画一个节点的文字之前设好，节点画完清掉）----
+    // 语义与 CSS text-shadow 一致：先把整段文字的**模糊覆盖率**按 (dx,dy) 偏移铺一遍，
+    // 再把清晰文字盖上去。模糊在 CPU 上做（字形位图 → 高斯），按 (字形, 模糊半径)
+    // 缓存在独立的图集里，所以同一段文字每帧只是多发射一批四边形。
+    //
+    // blur < 0.5px 视为 0：这时候"阴影"就是偏移一份字形位图，不需要模糊图集。
+    void setTextShadow(float dx, float dy, float blur, uint32_t color) {
+        shadow_.on = ((color >> 24) & 0xFFu) != 0;
+        shadow_.dx = dx;
+        shadow_.dy = dy;
+        shadow_.blur = blur > 0.0f ? blur : 0.0f;
+        shadow_.color = color;
+        int q = static_cast<int>(std::lround(shadow_.blur * 4.0f));
+        if (q < 2) q = 0;                 // < 0.5px 的模糊等于没模糊（硬阴影）
+        if (q > kMaxShadowBlurQ) q = kMaxShadowBlurQ;
+        shadow_.blurQ = q;
+    }
+    void clearTextShadow() { shadow_.on = false; }
+    bool textShadowActive() const { return shadow_.on; }
 
     // 纹理/字体变动即让整形缓存失效（见 GlyphRun 注释）
     void bumpAtlasGen() {
@@ -231,9 +261,13 @@ public:
     }
 
     static constexpr size_t kMaxRuns = 1024;   // 整形缓存条目上限（LRU）
+    // 文字阴影的模糊半径上限（¼ 像素单位：64 = 16px）。再大就只是"一团灰"，
+    // 而图集格子会膨胀到装不下几个字形 —— 超过的按上限处理。
+    static constexpr int kMaxShadowBlurQ = 64;
 
-    // 缓存 key：文本 + 字号 + 字重 + 斜体 + 字体面（FNV-1a）
-    uint64_t RunKey(const std::string& s, float size, int weight, bool italic) const {
+    // 缓存 key：文本 + 字号 + 字重 + 斜体 + 字体面 + 亚像素相位（FNV-1a）
+    uint64_t RunKey(const std::string& s, float size, int weight, bool italic,
+                    int phase = 0) const {
         uint64_t h = 1469598103934665603ull;
         auto mix = [&h](uint64_t v) {
             for (int i = 0; i < 8; i++) {
@@ -250,6 +284,7 @@ public:
         mix(su);
         mix(static_cast<uint64_t>(weight));
         mix(italic ? 1u : 0u);
+        mix(static_cast<uint64_t>(phase & 3));
         for (unsigned char c : asciiFont_) {
             h ^= c;
             h *= 1099511628211ull;
@@ -257,9 +292,28 @@ public:
         return h;
     }
 
-    // 重放整形结果：颜色按调用方给的（灰字形染色，彩色字形白顶点）
+    // 重放整形结果：颜色按调用方给的（灰字形染色，彩色字形白顶点）。
+    // 有文字阴影时**先整条阴影、再整条字形** —— 逐字交错会让后面那个字的阴影
+    // 压到前面那个字上（半透明文字会看出脏边）。
     void EmitRun(const GlyphRun& run, float x, float baseline, uint32_t color,
                  const EmitFn& emit) {
+        const bool sh = textShadowActive();
+        uint32_t shColor = 0;
+        if (sh) { shColor = shadow_.color; PremultColor(shColor); }
+        if (sh) {
+            for (const GlyphRunQuad& q : run.quads) {
+                if (!q.sTex) continue;
+                GlyphQuad g;
+                g.tex = q.sTex;
+                g.x = x + q.x - q.sPad + shadow_.dx;
+                g.y = baseline + q.y - q.sPad + shadow_.dy;
+                g.w = q.w + 2.0f * q.sPad;
+                g.h = q.h + 2.0f * q.sPad;
+                g.u0 = q.su0; g.v0 = q.sv0; g.u1 = q.su1; g.v1 = q.sv1;
+                g.color = shColor;
+                emit(g);
+            }
+        }
         for (const GlyphRunQuad& q : run.quads) {
             GlyphQuad g;
             g.tex = q.tex;
@@ -320,36 +374,37 @@ public:
 
     // 画一行文本。x/y 语义与 IBinUIGfx::drawText 一致：
     //   y 是基线（centerV 时为矩形中心），centerH 时 x 为矩形中心。
+    //
+    // v24：snapText=false 时不再靠 LINEAR 采样换平滑，而是把 x 的小数部分量化成
+    // ¼ 像素相位，取对应相位的字形位图（位图里已经烘进了那 ¼ 像素的位移）。
+    // 于是"文字在连续滑动"与"字形逐像素锐利"同时成立。
+    // 纵向仍按整像素吸附：4×4 变体会让图集体积爆炸，而纵向模糊的观感代价远小于横向。
     void drawText(float x, float y, float size, int weight, const std::string& utf8,
                   uint32_t color, bool centerH, bool centerV, bool italic, const EmitFn& emit) {
         if (!host_ || utf8.empty()) return;
         uint32_t premult = color;
         PremultColor(premult);
 
-        // ---- 整形缓存：命中时只剩"按四边形表发射"这一件事 ----
-        const uint64_t key = RunKey(utf8, size, weight, italic);
-        GlyphRun* run = nullptr;
-        auto it = runs_.find(key);
-        if (it != runs_.end() && it->second.gen == atlasGen_) {
-            it->second.lastUse = ++runClock_;
-            run = &it->second;
-            if (centerH) x -= run->advance / 2;
-            if (centerV) y -= run->lineH / 2.0f;
-            EmitRun(*run, snapText ? std::floor(x + 0.5f) : x,
-                    snapText ? std::floor(y + 0.5f) : y, premult, emit);
-            return;
-        }
-
         if (centerH) x -= textWidth(size, weight, utf8, italic) / 2;
-
         int ascent = 0, lineH = 0;
         fontMetrics(size, weight, ascent, lineH, italic);
         if (centerV) y -= lineH / 2.0f;
-        // 像素对齐（snapText）：字形位图天生是整数像素设计，落在半像素上会被过滤糊一层。
-        // advance 本身是整数，所以只要把起点/基线取整，整行字形就都在整数像素上。
-        // 动画节点（snapText=false）保留小数：图集是 LINEAR 采样，亚像素位置是连续的。
-        float baseline = snapText ? std::floor(y + 0.5f) : y;
-        x = snapText ? std::floor(x + 0.5f) : x;
+
+        // 落位：x 量化到"整数 + ¼ 相位"，基线取整
+        float qx = x;
+        int phase = 0;
+        if (snapText) qx = std::floor(x + 0.5f);
+        else if (PhaseEnabled()) QuantizeSubpixelX(x, qx, phase);
+        const float baseline = std::floor(y + 0.5f);
+
+        // ---- 整形缓存：命中时只剩"按四边形表发射"这一件事 ----
+        const uint64_t key = RunKey(utf8, size, weight, italic, phase);
+        auto it = runs_.find(key);
+        if (it != runs_.end() && it->second.gen == atlasGen_) {
+            it->second.lastUse = ++runClock_;
+            EmitRun(it->second, qx, baseline, premult, emit);
+            return;
+        }
 
         const std::vector<uint32_t> cps = Utf8ToCodepoints(utf8);
         color = premult;
@@ -359,34 +414,36 @@ public:
         built.gen = atlasGen_;
         built.lineH = static_cast<float>(lineH);
         built.ascent = static_cast<float>(ascent);
-        const float originX = x;
+        const float originX = qx;
         const float originBaseline = baseline;
-        auto record = [&](void* tex, float qx, float qy, float qw, float qh,
-                          float gx, float gy, float gw, float gh, float t, bool white) {
+        auto record = [&](void* tex, float qx0, float qy0, float qw, float qh,
+                          float gx, float gy, float gw, float gh, float t,
+                          bool white) -> GlyphRunQuad& {
             GlyphRunQuad q;
             q.tex = tex;
-            q.x = qx - originX;
-            q.y = qy - originBaseline;
+            q.x = qx0 - originX;
+            q.y = qy0 - originBaseline;
             q.w = qw; q.h = qh;
             q.u0 = gx / t; q.v0 = gy / t;
             q.u1 = (gx + gw) / t; q.v1 = (gy + gh) / t;
             q.white = white;
             built.quads.push_back(q);
+            return built.quads.back();
         };
 
-        float cx = x;
+        float cx = qx;
         auto drawGray = [&](uint32_t cp) {
-            Atlas* a = getAtlasForCp(size, weight, faceIdxForCp(cp), italic, cp);
+            Atlas* a = getAtlasForCp(size, weight, faceIdxForCp(cp), italic, cp, phase);
             if (!a) return;
-            const Glyph* g = glyphFor(a, cp);
+            const Glyph* g = glyphFor(a, cp, phase);
             if (!g) return;
             const float t = static_cast<float>(a->sizePx);
             const float cell = static_cast<float>(a->cellW);
             const float gx = (g->cell % a->cols) * cell;
             const float gy = (g->cell / a->cols) * cell;
             const float top = baseline - (a->ascent + 1);
-            record(a->tex, cx, top, cell, cell, gx, gy, cell, cell, t, false);
-            emitGlyph(emit, a->tex, cx, top, cell, cell, gx, gy, cell, t, color);
+            GlyphRunQuad& q = record(a->tex, cx, top, cell, cell, gx, gy, cell, cell, t, false);
+            FillShadowQuad(q, a, cp, gx, gy, cell, t);
             cx += g->advW;
         };
 
@@ -405,12 +462,11 @@ public:
                     const float gx = (g->cell % ca->cols) * ccw;
                     const float gy = (g->cell / ca->cols) * ca->cellH;
                     const float top = baseline - g->baseline;
+                    // 彩色字形不挂文字阴影：阴影要用"覆盖率"染色，而彩色格子里
+                    // 每个像素自带颜色（乘上阴影色会糊成一团彩色，不是剪影）。
                     record(ca->tex, cx, top, static_cast<float>(g->w),
                            static_cast<float>(g->h), gx, gy, static_cast<float>(g->w),
                            static_cast<float>(g->h), t, true);
-                    emitGlyph(emit, ca->tex, cx, top, static_cast<float>(g->w),
-                              static_cast<float>(g->h), gx, gy, static_cast<float>(g->w),
-                              t, 0xFFFFFFFF);   // 彩色字形：白色顶点，不染色
                     cx += g->advW;
                     i += n;
                     continue;
@@ -429,7 +485,10 @@ public:
                 if (k->second.lastUse < victim->second.lastUse) victim = k;
             runs_.erase(victim);
         }
-        if (!built.quads.empty()) runs_.emplace(key, std::move(built));
+        if (!built.quads.empty()) {
+            EmitRun(built, qx, baseline, premult, emit);
+            runs_.emplace(key, std::move(built));
+        }
     }
 
     // 中文避头点：这些标点不能出现在行首（CSS line-break: normal 的常见规则）。
@@ -507,6 +566,12 @@ public:
             delete a;
         }
         colorAtlases_.clear();
+        for (ShadowAtlas* sa : shadowAtlases_) {
+            if (sa->tex && host_) host_->destroyTex(sa->tex);
+            delete sa;
+        }
+        shadowAtlases_.clear();
+        shadow_.on = false;
         scratch_.clear();
         scratch_.shrink_to_fit();
     }
@@ -552,6 +617,45 @@ private:
         bool warnedFull = false;
         std::unordered_map<uint64_t, ColorGlyph> glyphs;
     };
+
+    // ---------- v24 文字阴影的模糊图集 ----------
+    // 阴影要的是"字形的模糊覆盖率"，与字形图集不同：格子每边要大出一圈模糊余量
+    // （pad），而且内容是可复用的灰度覆盖率。所以按 (字号, 字重, 斜体, 面, 模糊半径)
+    // 单独开图集 —— 一个页面通常只有一两个模糊半径，实际就一两张纹理。
+    struct ShadowGlyph {
+        uint16_t cell = 0;
+    };
+    struct ShadowAtlas {
+        void* tex = nullptr;
+        int sizePx = 1024;
+        int cell = 0;        // 格子边长 = 基础字形格 + 2*pad
+        int pad = 0;         // 每边外扩的模糊余量（像素）
+        int cols = 0;
+        int next = 0;
+        float size = 0;
+        int weight = 400;
+        int faceIdx = 0;     // 合成面下标（回退链）
+        bool italic = false;
+        int blurQ = 0;       // ¼ 像素量化的模糊半径
+        float blur = 0.0f;
+        bool warnedFull = false;
+        std::unordered_map<uint32_t, ShadowGlyph> glyphs;   // 码点（相位 0）→ 格
+    };
+    // 一个字形对应的阴影格引用（UV + 外扩量）
+    struct ShadowRef {
+        void* tex = nullptr;
+        float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+        float pad = 0;
+    };
+    // 当前生效的文字阴影（由 setTextShadow 写入）
+    struct ShadowState {
+        bool on = false;
+        float dx = 0, dy = 0, blur = 0;
+        int blurQ = 0;
+        uint32_t color = 0;
+    };
+    ShadowState shadow_;
+    std::vector<ShadowAtlas*> shadowAtlases_;
 
     struct ClusterMetric {
         size_t len = 1;
@@ -622,12 +726,14 @@ private:
     // 按码点取图集：优先返回**已经含有该字形**的那一代（UV 必须和纹理对得上），
     // 否则找有空间的一代，都没有就再开一代 —— 图集满了是"多占一张纹理"，
     // 而不是"新字直接不出现"。
-    Atlas* getAtlasForCp(float size, int weight, int faceIdx, bool italic, uint32_t cp) {
+    Atlas* getAtlasForCp(float size, int weight, int faceIdx, bool italic, uint32_t cp,
+                         int phase = 0) {
         const uint64_t key = atlasKey(size, weight, faceIdx, italic);
+        const uint32_t gk = GlyphKey(cp, phase);
         auto it = atlases_.find(key);
         if (it != atlases_.end()) {
             for (Atlas* a : it->second)
-                if (a->glyphs.count(cp)) return a;
+                if (a->glyphs.count(gk)) return a;
             for (Atlas* a : it->second)
                 if (hasRoom(a)) return a;
             if (it->second.size() < 8) return makeAtlas(key, size, weight, faceIdx, italic);
@@ -636,6 +742,27 @@ private:
         return makeAtlas(key, size, weight, faceIdx, italic);
     }
 
+    // x 量化成"整数落位 + ¼ 像素相位"：0.37 → (floor, 1)；0.9 → (floor+1, 0)。
+    // 相位取"最近的 ¼"，所以最坏位置误差 0.125px（肉眼不可见），换来 4 份位图。
+    static void QuantizeSubpixelX(float x, float& outX, int& outPhase) {
+        const float fl = std::floor(x);
+        int ph = static_cast<int>(std::lround((x - fl) * 4.0f));
+        float ix = fl;
+        if (ph >= 4) { ph = 0; ix = fl + 1.0f; }
+        else if (ph < 0) ph = 0;
+        outX = ix;
+        outPhase = ph & 3;
+    }
+
+    // A/B 开关：BINUI_TEXT_PHASE_OFF=1 退回 0.16.15 的行为（小数落位 + 图集 LINEAR 采样）。
+    // 只用来做"锐利度前后对比"的证据图，运行期读一次环境变量，不参与任何逻辑判断。
+    static bool PhaseEnabled() {
+        static const bool on = std::getenv("BINUI_TEXT_PHASE_OFF") == nullptr;
+        return on;
+    }
+    // 图集里一个字形格的键：码点 × 4 + 相位（码点 ≤ 0x10FFFF，不会溢出）
+    static uint32_t GlyphKey(uint32_t cp, int phase) { return (cp << 2) | (uint32_t)(phase & 3); }
+
     bool ensureScratch(int w, int h) {
         const size_t need = static_cast<size_t>(w) * h * 4;
         if (scratch_.size() < need) scratch_.resize(need);
@@ -643,8 +770,10 @@ private:
         return true;
     }
 
-    // 把单个码点光栅化进图集格子（FreeType 灰度字形 → 白字预乘 alpha）
-    void rasterGlyph(Atlas* a, uint32_t cp) {
+    // 把单个码点（指定 ¼ 像素相位）光栅化进图集格子（FreeType 灰度字形 → 白字预乘 alpha）。
+    // 相位是**位图的一部分**：renderGlyph 用 FT_Set_Transform 把轮廓先右移 phase/4 像素，
+    // 所以同一个字形最多占 4 个格子；只有真的用到某个相位时才造它（懒加载）。
+    void rasterGlyph(Atlas* a, uint32_t cp, int phase = 0) {
         const int total = a->cols * (a->sizePx / a->cellH);
         if (a->next >= total) {
             // 图集满了：以前这里**静默 return**，新字形直接不出现 —— 用户看到的是
@@ -662,7 +791,8 @@ private:
         binui_font::GrayGlyph g;
         // 粗体：atlas key 里带 weight，粗体是独立的一张图集；这里让 FreeType
         // 合成加粗（FT_GlyphSlot_Embolden），否则 font-weight:700 只是换个空图集重复光栅化
-        bool ok = font_.renderGlyph(a->face, a->size, cp, a->weight >= 600, a->italic, g);
+        bool ok = font_.renderGlyph(a->face, a->size, cp, a->weight >= 600, a->italic,
+                                    phase, g);
         if (!ok && !IsInvisibleCp(cp)) {
             // 缺字 → 画豆腐块。留白会被当成"引擎显示 bug"，空方框才是给用户的
             // 明确信号：这个字体链里没有这个字符。浏览器和终端都是这么做的。
@@ -675,7 +805,7 @@ private:
                 Glyph gl;
                 gl.cell = static_cast<uint16_t>(a->next++);   // 格子保持全零纹理（不可见）
                 gl.advW = static_cast<uint8_t>(std::min(255, std::max(0, g.advance)));
-                a->glyphs[cp] = gl;
+                a->glyphs[GlyphKey(cp, phase)] = gl;
             }
             return;
         }
@@ -709,15 +839,197 @@ private:
         // advance 用 HarfBuzz/FreeType 的真实值（以前 +1，每个字形多占 1px：
         // 文字比真实排版宽、组合符号被推离基字、换行宽度与实际绘制不符）
         gl.advW = static_cast<uint8_t>(std::min(255, std::max(0, g.advance)));
-        a->glyphs[cp] = gl;
+        a->glyphs[GlyphKey(cp, phase)] = gl;
     }
 
-    const Glyph* glyphFor(Atlas* a, uint32_t cp) {
-        auto it = a->glyphs.find(cp);
+    const Glyph* glyphFor(Atlas* a, uint32_t cp, int phase = 0) {
+        const uint32_t gk = GlyphKey(cp, phase);
+        auto it = a->glyphs.find(gk);
         if (it != a->glyphs.end()) return &it->second;
-        rasterGlyph(a, cp);
-        it = a->glyphs.find(cp);
+        rasterGlyph(a, cp, phase);
+        it = a->glyphs.find(gk);
         return it != a->glyphs.end() ? &it->second : nullptr;
+    }
+
+    // ---------- v24：文字阴影 ----------
+    // 可分离高斯模糊（σ = blur/2，核截断 3σ）。核按权重和归一化：阴影的"深浅"必须
+    // 与字形覆盖率线性对应，否则大模糊会整体发灰。
+    static void BlurAlpha(std::vector<float>& buf, int w, int h, float sigma) {
+        if (sigma <= 0.0f || w <= 0 || h <= 0) return;
+        const int rad = std::max(1, static_cast<int>(std::ceil(sigma * 3.0f)));
+        std::vector<float> k(static_cast<size_t>(rad) * 2 + 1);
+        float sum = 0.0f;
+        const float inv = 1.0f / (2.0f * sigma * sigma);
+        for (int i = -rad; i <= rad; i++) {
+            const float v = std::exp(-static_cast<float>(i * i) * inv);
+            k[static_cast<size_t>(i + rad)] = v;
+            sum += v;
+        }
+        for (float& v : k) v /= sum;
+        std::vector<float> tmp(buf.size(), 0.0f);
+        for (int y = 0; y < h; y++) {
+            const float* src = buf.data() + static_cast<size_t>(y) * w;
+            float* dst = tmp.data() + static_cast<size_t>(y) * w;
+            for (int x = 0; x < w; x++) {
+                float acc = 0.0f;
+                const int lo = std::max(0, x - rad), hi = std::min(w - 1, x + rad);
+                for (int xx = lo; xx <= hi; xx++)
+                    acc += src[xx] * k[static_cast<size_t>(xx - x + rad)];
+                dst[x] = acc;
+            }
+        }
+        for (int y = 0; y < h; y++) {
+            float* dst = buf.data() + static_cast<size_t>(y) * w;
+            const int lo = std::max(0, y - rad), hi = std::min(h - 1, y + rad);
+            for (int x = 0; x < w; x++) {
+                float acc = 0.0f;
+                for (int yy = lo; yy <= hi; yy++)
+                    acc += tmp[static_cast<size_t>(yy) * w + x] * k[static_cast<size_t>(yy - y + rad)];
+                dst[x] = acc;
+            }
+        }
+    }
+
+    // 取（必要时建）某个 (字号, 字重, 斜体, 面, 模糊半径) 的模糊图集。
+    // 条目很少（一页通常 1~2 个模糊半径），线性找足够。
+    ShadowAtlas* getShadowAtlas(Atlas* base, int blurQ) {
+        if (!host_ || !base || blurQ <= 0) return nullptr;
+        for (ShadowAtlas* sa : shadowAtlases_) {
+            if (sa->blurQ == blurQ && sa->faceIdx == base->faceIdx &&
+                sa->weight == base->weight && sa->italic == base->italic &&
+                static_cast<int>(sa->size) == static_cast<int>(base->size))
+                return sa;
+        }
+        // 模糊半径 → σ = blur/2 → 余量 3σ+1（与 box-shadow 的裁断距离同一口径）
+        const float blur = static_cast<float>(blurQ) * 0.25f;
+        const float sigma = blur * 0.5f;
+        int pad = static_cast<int>(std::ceil(sigma * 3.0f)) + 1;
+        int cell = base->cellW + 2 * pad;
+        const int kMaxCell = 192;   // 再大就装不下几个格子了，模糊按上限收
+        if (cell > kMaxCell) {
+            pad = std::max(0, (kMaxCell - base->cellW) / 2);
+            cell = base->cellW + 2 * pad;
+        }
+        if (cell <= 0) return nullptr;
+        ShadowAtlas* sa = new ShadowAtlas();
+        sa->size = base->size;
+        sa->weight = base->weight;
+        sa->faceIdx = base->faceIdx;
+        sa->italic = base->italic;
+        sa->blurQ = blurQ;
+        sa->blur = blur;
+        sa->pad = pad;
+        sa->cell = cell;
+        sa->cols = std::max(1, sa->sizePx / cell);
+        sa->tex = host_->createTex(sa->sizePx, sa->sizePx);
+        if (!sa->tex) { delete sa; return nullptr; }
+        shadowAtlases_.push_back(sa);
+        return sa;
+    }
+
+    // 在模糊图集里造一格：先按相位 0 光栅化字形，把覆盖率放进"基础格 + 每边 pad"
+    // 的大格子里，再做高斯模糊 —— 模糊的结果就是这块字形在该半径下的柔影。
+    void rasterShadowGlyph(ShadowAtlas* sa, Atlas* base, uint32_t cp) {
+        const int total = sa->cols * (sa->sizePx / sa->cell);
+        if (sa->next >= total) {
+            if (!sa->warnedFull) {
+                sa->warnedFull = true;
+                std::fprintf(stderr,
+                    "[atlas] 文字阴影图集已满（%.0fpx / blur %.2f / 共 %d 格）："
+                    "该组合下新字形的阴影将缺失（文字本身正常）。\n",
+                    static_cast<double>(sa->size), static_cast<double>(sa->blur), total);
+            }
+            return;
+        }
+        binui_font::GrayGlyph g;
+        bool ok = font_.renderGlyph(base->face, base->size, cp, base->weight >= 600,
+                                    base->italic, 0, g);
+        if (!ok && !IsInvisibleCp(cp))
+            ok = font_.renderMissingGlyph(base->size, base->weight >= 600, base->italic, g);
+        // 空白字形（空格等）没有像素：不留格子，直接记一个"无阴影"标记即可
+        // —— 但那样每次查表都要重新光栅化，所以还是占一格全零（与字形图集一致的做法）
+        const int cs = sa->cell;
+        std::vector<float> cov(static_cast<size_t>(cs) * cs, 0.0f);
+        if (ok && g.alpha && g.height > 0) {
+            const int ox = 1 + g.left + sa->pad;
+            const int oy = (base->ascent + 1) - g.top + sa->pad;
+            for (int y = 0; y < g.height; y++) {
+                const int py = oy + y;
+                if (py < 0 || py >= cs) continue;
+                const uint8_t* src = g.alpha + static_cast<size_t>(y) * g.pitch;
+                float* row = cov.data() + static_cast<size_t>(py) * cs;
+                for (int x = 0; x < g.width; x++) {
+                    const int px = ox + x;
+                    if (px < 0 || px >= cs) continue;
+                    row[px] = static_cast<float>(src[x]);
+                }
+            }
+        } else if (!ok) {
+            return;                      // 连豆腐块都画不出：不占格子（下帧再试）
+        }
+
+        BlurAlpha(cov, cs, cs, sa->blur * 0.5f);
+
+        ensureScratch(cs, cs);
+        uint8_t* dst = scratch_.data();
+        for (int i = 0; i < cs * cs; i++) {
+            int a = static_cast<int>(cov[static_cast<size_t>(i)] + 0.5f);
+            if (a < 0) a = 0;
+            if (a > 255) a = 255;
+            // 白字预乘：BGRA 全 = 覆盖率（画的时候用顶点色染成阴影色）
+            dst[i * 4 + 0] = dst[i * 4 + 1] = dst[i * 4 + 2] = dst[i * 4 + 3] =
+                static_cast<uint8_t>(a);
+        }
+        const int cell = sa->next++;
+        const int cx = (cell % sa->cols) * sa->cell;
+        const int cy = (cell / sa->cols) * sa->cell;
+        host_->updateTex(sa->tex, cx, cy, sa->cell, sa->cell, scratch_.data());
+        ShadowGlyph sg;
+        sg.cell = static_cast<uint16_t>(cell);
+        sa->glyphs[cp] = sg;
+    }
+
+    // 取一个字形的阴影格。没有阴影 / 造不出来都返回空（调用方跳过这个字的阴影）。
+    ShadowRef shadowRef(Atlas* base, uint32_t cp) {
+        ShadowRef r;
+        if (!shadow_.on || !base || shadow_.blurQ <= 0) return r;
+        ShadowAtlas* sa = getShadowAtlas(base, shadow_.blurQ);
+        if (!sa) return r;
+        auto it = sa->glyphs.find(cp);
+        if (it == sa->glyphs.end()) {
+            rasterShadowGlyph(sa, base, cp);
+            it = sa->glyphs.find(cp);
+            if (it == sa->glyphs.end()) return r;
+        }
+        const float cs = static_cast<float>(sa->cell);
+        const float t = static_cast<float>(sa->sizePx);
+        r.tex = sa->tex;
+        r.u0 = (it->second.cell % sa->cols) * cs / t;
+        r.v0 = (it->second.cell / sa->cols) * cs / t;
+        r.u1 = (it->second.cell % sa->cols) * cs / t + cs / t;
+        r.v1 = (it->second.cell / sa->cols) * cs / t + cs / t;
+        r.pad = static_cast<float>(sa->pad);
+        return r;
+    }
+
+    // 给一个字形四边形挂上阴影格：
+    //   blur = 0 → 复用字形自己那一格（阴影就是偏移一份字形，最精确、零额外纹理）；
+    //   blur > 0 → 模糊图集里的一格（每边多 pad 像素）。
+    void FillShadowQuad(GlyphRunQuad& q, Atlas* a, uint32_t cp,
+                        float gx, float gy, float cell, float t) {
+        if (!shadow_.on) return;
+        if (shadow_.blurQ <= 0) {
+            q.sTex = a->tex;
+            q.su0 = gx / t; q.sv0 = gy / t;
+            q.su1 = (gx + cell) / t; q.sv1 = (gy + cell) / t;
+            q.sPad = 0.0f;
+            return;
+        }
+        const ShadowRef r = shadowRef(a, cp);
+        if (!r.tex) return;
+        q.sTex = r.tex;
+        q.su0 = r.u0; q.sv0 = r.v0; q.su1 = r.u1; q.sv1 = r.v1;
+        q.sPad = r.pad;
     }
 
     // ---------- 彩色字形（FreeType COLR 合成） ----------

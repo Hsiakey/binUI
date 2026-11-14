@@ -134,6 +134,16 @@ public:
         return shadows_.data() + it->second.first;
     }
 
+    // v24 文字阴影段（text-shadow）：返回该节点的阴影数组（绘制顺序），count 写入条数；
+    // 没有阴影返回 nullptr / count = 0。text-shadow 是可继承属性，所以子节点通常**也有**
+    // 自己的条目（编译器把祖先的值折了进来），调用方只需按本节点查。
+    const BinUITextShadow* textShadowsOf(uint16_t nodeId, int& count) const {
+        auto it = textShadowIdx_.find(nodeId);
+        if (it == textShadowIdx_.end()) { count = 0; return nullptr; }
+        count = static_cast<int>(it->second.second);
+        return textShadows_.data() + it->second.first;
+    }
+
     // v15 路径段：BINUI_PATH 节点的折线（归一化坐标 + 子路径表；无条目返回 nullptr）
     struct PathRecord {
         BinUIPathEntry head{};
@@ -670,6 +680,9 @@ private:
     std::vector<BinUIShadow> shadows_;                   // v23 阴影段（同一节点的多条连续存放）
     // nodeId -> (shadows_ 起始下标, 条数)
     std::unordered_map<uint16_t, std::pair<size_t, uint32_t>> shadowIdx_;
+    std::vector<BinUITextShadow> textShadows_;   // v24 文字阴影段（同一节点多条连续存放）
+    // nodeId -> (textShadows_ 起始下标, 条数)
+    std::unordered_map<uint16_t, std::pair<size_t, uint32_t>> textShadowIdx_;
     // v19 路径条带的跨帧缓存（条带数量有上限，条目数也封顶）。
     // mutable：三个绘制后端拿到的是 const renderer，缓存属于"绘制期副作用"。
     mutable std::unordered_map<uint16_t, PathBandCacheEntry> pathBands_;

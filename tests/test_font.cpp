@@ -194,6 +194,71 @@ int main() {
         CHECK(s.ok && s.nonzero > 0, msg);
     }
 
+    // 2b. v24 亚像素相位（¼ 像素字形变体）：FT_Set_Transform 的 delta 把轮廓右移
+    //     phase/4 像素，所以墨量的水平重心必须跟着整步右移 ≈ 0.25px，而 advance 完全不变
+    //     （变了就会"测宽与绘制不一致"，换行位置会漂）。
+    //     只在**无 hinting**的字号上测：小字号的轻 hinting 会把笔干吸回整像素网格，
+    //     重心移动不再线性（那是 FreeType 的正常行为，不是本特性的判据）。
+    {
+        auto hcentroid = [&](float size, int phase, int& adv, double& ink, bool& ok) {
+            GrayGlyph g;
+            ok = fe.renderGlyph(face, size, 'H', false, false, phase, g);
+            adv = g.advance;
+            ink = 0;
+            double num = 0;
+            if (!ok || !g.alpha) return 0.0;
+            for (int y = 0; y < g.height; y++) {
+                const uint8_t* row = g.alpha + static_cast<size_t>(y) * g.pitch;
+                for (int x = 0; x < g.width; x++) {
+                    num += static_cast<double>(row[x]) * (g.left + x);
+                    ink += row[x];
+                }
+            }
+            return ink > 0 ? num / ink : 0.0;
+        };
+        double cen[4] = { 0, 0, 0, 0 }, inkv[4] = { 0, 0, 0, 0 };
+        int adv[4] = { 0, 0, 0, 0 };
+        bool okAll = true;
+        for (int ph = 0; ph < 4; ph++) {
+            bool ok = false;
+            cen[ph] = hcentroid(40.0f, ph, adv[ph], inkv[ph], ok);
+            if (!ok) okAll = false;
+        }
+        CHECK(okAll, "24：四个相位都能光栅化（'H' @ 40px）");
+        if (okAll) {
+            bool advSame = true;
+            for (int ph = 1; ph < 4; ph++)
+                if (adv[ph] != adv[0]) advSame = false;
+            CHECK(advSame, "24：advance 与相位无关（测宽/绘制仍然一致）");
+
+            bool mono = cen[1] > cen[0] && cen[2] > cen[1] && cen[3] > cen[2];
+            CHECK(mono, "24：墨量重心随相位单调右移");
+            char msg[200];
+            std::snprintf(msg, sizeof(msg),
+                          "24：每步右移 ≈ 0.25px（%.3f / %.3f / %.3f）",
+                          cen[1] - cen[0], cen[2] - cen[1], cen[3] - cen[2]);
+            bool steps = true;
+            for (int ph = 1; ph < 4; ph++) {
+                const double d = cen[ph] - cen[ph - 1];
+                if (d < 0.12 || d > 0.38) steps = false;
+            }
+            // 末端的位图宽度/left 可能差 1px，但重心移动必须紧贴 0.25
+            CHECK(steps, msg);
+
+            double mn = inkv[0], mx = inkv[0];
+            for (int ph = 1; ph < 4; ph++) { mn = std::min(mn, inkv[ph]); mx = std::max(mx, inkv[ph]); }
+            std::snprintf(msg, sizeof(msg), "24：墨量基本不变（%.0f..%.0f）", mn, mx);
+            CHECK(mn > 0 && (mx - mn) / mx < 0.05, msg);
+
+            // phase 4 回绕到 phase 0（4 个变体覆盖整像素，不会有第 5 份位图）
+            GrayGlyph g0, g4;
+            const bool b0 = fe.renderGlyph(face, 40.0f, 'H', false, false, 0, g0);
+            const bool b4 = fe.renderGlyph(face, 40.0f, 'H', false, false, 4, g4);
+            CHECK(b0 && b4 && g0.left == g4.left && g0.width == g4.width,
+                  "24：相位 4 回绕到 0（同一份位图）");
+        }
+    }
+
     // 3. gamma 修正不能把覆盖率压成 0 或永远饱和：墨量应随字号单调增长，
     //    且"实心像素占比"保持克制（<= 60%，否则说明对比度被拉爆）
     {

@@ -1133,7 +1133,25 @@ static void AppendShadowSection(std::vector<uint8_t>& buf,
     memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
 
-// 路径段的编译期暂存：定长头 +（v16/v17 可选渐变）+ 三条变长表（子路径起点 / 闭合标记 / 归一化点）
+// 追加文字阴影段（v24）：uint32 tsBytes + uint32 tsCount + BinUITextShadow[]
+// 恒定写出（无阴影时 tsBytes=4），位于阴影段之后、名称段之前。
+static void AppendTextShadowSection(std::vector<uint8_t>& buf,
+                                    const std::vector<BinUITextShadow>& s) {
+    size_t start = buf.size();
+    std::vector<uint8_t> data;
+    auto wu = [&](uint32_t x) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&x);
+        data.insert(data.end(), p, p + 4);
+    };
+    wu((uint32_t)s.size());
+    if (!s.empty())
+        data.insert(data.end(), reinterpret_cast<const uint8_t*>(s.data()),
+                    reinterpret_cast<const uint8_t*>(s.data() + s.size()));
+    uint32_t nbytes = (uint32_t)data.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
 // 点用 uint16 归一化存（0..65535 映射包围盒），比 float 省一半且精度远超显示能力。
 struct PendingPath {
     BinUIPathEntry head = {};
@@ -1853,6 +1871,7 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     AppendPaintSection(buf, {});     // v13：XML 路径无扩展绘制，段同样恒定写出
     AppendPathSection(buf, {});      // v15：XML 路径无 SVG 路径，段同样恒定写出
     AppendShadowSection(buf, {});    // v23：XML 路径无 box-shadow，段同样恒定写出
+    AppendTextShadowSection(buf, {}); // v24：XML 路径无 text-shadow，段同样恒定写出
     AppendNameSection(buf, nodeNames, offsets);
 
     return buf;
@@ -4374,6 +4393,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::vector<BinUIStateStyle> stateStyles;  // v11 状态样式段（:hover/:active/:focus/:checked）
     std::vector<BinUIPaintNode> paintNodes;    // v13 扩展绘制段（文字色/边框/渐变/字重/行高/装饰）
     std::vector<BinUIShadow> shadowNodes;      // v23 阴影段（box-shadow，绘制顺序 = 下标升序）
+    std::vector<BinUITextShadow> textShadowNodes;  // v24 文字阴影段（text-shadow）
     std::vector<PendingPath> pendingPaths;     // v15 路径段（SVG <path>/<ellipse> 的折线）
     std::vector<std::string> strings;
     strings.push_back(""); // 字符串表首位 = 空串：无文本节点的 textOffset=0 指向空串
@@ -4427,6 +4447,11 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // "fill 被提到过"（写成 none 也算）：用来区分"作者明确说不要填充"和"压根没写"。
         // 两者在 SVG 里含义不同 —— 没写 = 默认黑填充，写了 none = 不填。
         bool fillMentioned = false;
+        // v24：生效的文字阴影（CSS text-shadow 是**继承属性**：卡片上写一次，卡片里
+        // 所有文字都带）。present=false = 本子树没有阴影；写了 none / 全透明就从这里清掉。
+        bool     tsPresent = false;
+        float    tsDx = 0.0f, tsDy = 0.0f, tsBlur = 0.0f;
+        uint32_t tsColor = 0xFF000000u;
     };
 
     // 根节点固定 id 0，位于坐标原点。画布默认白色；<app_window bg>/<html bg> 覆盖
@@ -4967,10 +4992,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // 避免"写了没效果"这种最耗时间的困惑。
         // v13 起 border*/font-weight/line-height/text-decoration 已经实现，从清单里移除。
         // v14 起 font-style（italic）/white-space（pre）也实现了，同样移除。
-        // v23 起 box-shadow 也实现了（阴影段），只剩 text-shadow（字形模糊画不了）。
+        // v23 起 box-shadow、v24 起 text-shadow 也实现了，两者都从清单里移除。
         {
             static const char* kIgnoredCss[] = {
-                "text-shadow", "letter-spacing",
+                "letter-spacing",
                 "word-break", "visibility", "float",
                 "outline",
                 "cursor", "grid-template-columns", "text-overflow", "object-fit",
@@ -6281,6 +6306,99 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             }
         }
 
+        // ---- v24 text-shadow（文字阴影段）----
+        // 语法：none | [<length>{2,3} && <color>] [, ...]*
+        //   两个长度必填（offset-x / offset-y），第三个是 blur，**没有 spread、没有 inset**。
+        //   颜色不写 = 当前文字色（CSS 的 currentColor）。
+        // 可继承：本元素没写就沿用祖先的生效值（CSS 规定 text-shadow 是继承属性）；
+        //   写了 none / 全透明 = 从本元素起清掉整棵子树。
+        // 只能取一条：多层文字阴影要多次"模糊字形位图"，图集里每种模糊半径都要多一份
+        //   变体，代价跟收益不成比例（真实用到多层的页面极少），所以第二层起明确告警。
+        bool tsPresent = pc.tsPresent;
+        float tsDx = pc.tsDx, tsDy = pc.tsDy, tsBlur = pc.tsBlur;
+        uint32_t tsColor = pc.tsColor;
+        {
+            std::string tsv = pick(e.attrs, style, "text-shadow", "text-shadow", "");
+            if (!tsv.empty()) {
+                std::vector<std::string> items;
+                {
+                    std::string cur;
+                    int depth = 0;
+                    for (char ch : tsv) {
+                        if (ch == '(') depth++;
+                        else if (ch == ')' && depth > 0) depth--;
+                        if (ch == ',' && depth == 0) { items.push_back(cur); cur.clear(); continue; }
+                        cur += ch;
+                    }
+                    if (!cur.empty()) items.push_back(cur);
+                }
+                bool stated = false;      // 本次是否给出了"生效值"（false = none/全透明）
+                for (const std::string& raw : items) {
+                    const std::string piece = TrimCopy(raw);
+                    if (piece.empty()) continue;
+                    if (LowerCopy(piece) == "none") { stated = false; tsPresent = false; continue; }
+                    BinUITextShadow s = {};
+                    float lens[3] = { 0, 0, 0 };
+                    int nlen = 0;
+                    bool hasColor = false;
+                    for (const std::string& tok : splitCssTokens(piece)) {
+                        const char c0 = tok.empty() ? ' ' : tok[0];
+                        if (c0 == '#' || std::isalpha(static_cast<unsigned char>(c0))) {
+                            uint32_t c = 0;
+                            if (LowerCopy(tok) == "currentcolor") { s.color = textCol; hasColor = true; continue; }
+                            if (ParseColorValue(tok, &c, "text-shadow 颜色")) { s.color = c; hasColor = true; }
+                            continue;
+                        }
+                        const LenPct lp = ParseLenPct(tok, 0.0f, curCtx, "text-shadow");
+                        if (lp.pct) {
+                            Warn("CSS text-shadow 的偏移/模糊不接受百分比（\"" + tok +
+                                 "\"），按 0 处理");
+                            continue;
+                        }
+                        if (nlen < 3) lens[nlen] = lp.value;
+                        nlen++;
+                    }
+                    if (nlen < 2) {
+                        Warn("CSS text-shadow 至少需要 2 个长度（offset-x / offset-y）：\"" +
+                             piece + "\" 已忽略");
+                        continue;
+                    }
+                    if (nlen > 3)
+                        Warn("CSS text-shadow 最多 3 个长度（offset-x / offset-y / blur）：\"" +
+                             piece + "\"，多出来的按 0 处理（text-shadow 没有 spread）");
+                    if (lens[2] < 0.0f) lens[2] = 0.0f;      // 负的 blur 半径无意义
+                    if (!hasColor) s.color = textCol;        // currentColor
+                    if (((s.color >> 24) & 0xFFu) == 0) continue;   // 全透明 = 不画
+                    if (stated) {
+                        Warn("CSS text-shadow 目前只支持**一层**：\"" + piece +
+                             "\" 已忽略（第一层先生效）");
+                        continue;
+                    }
+                    s.offsetX = lens[0];
+                    s.offsetY = lens[1];
+                    s.blur    = lens[2];
+                    s.nodeId  = n.id;
+                    s.flags   = 0;
+                    tsPresent = true;
+                    stated = true;
+                    tsDx = s.offsetX; tsDy = s.offsetY; tsBlur = s.blur; tsColor = s.color;
+                }
+                if (!stated) tsPresent = false;     // 只写了 none / 全透明
+            }
+        }
+        // 只有真正会画字的节点才写条目：阴影是"按字形位图模糊"，没字就没得画。
+        // （INPUT 的文字来自运行期的输入值，编译期可能是空的 —— 它是单行输入框，
+        //   占位符/内容一定非空时才画，所以用 srcText 判断已足够。）
+        if (tsPresent && !srcText.empty()) {
+            BinUITextShadow ts = {};
+            ts.nodeId = n.id;
+            ts.offsetX = tsDx;
+            ts.offsetY = tsDy;
+            ts.blur = tsBlur;
+            ts.color = tsColor;
+            textShadowNodes.push_back(ts);
+        }
+
         // 字号已在元素开头算好（供 em 换算用），这里直接落库
         {
             float fsz = nodeFontSize;
@@ -6704,6 +6822,12 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             child.fillMentioned = eFillMentioned;   // fill（含 none）的"提到过"也沿树继承
             child.fillGradId = fillGradId;   // 渐变填充是继承属性（<svg>/<g> 写一次全子树生效）
             child.strokeGradId = strokeGradId;   // 渐变描边同理（v17）
+            // v24：文字阴影同样是继承属性，往整棵子树传（写了 none 的元素上面已置 false）
+            child.tsPresent = tsPresent;
+            child.tsDx = tsDx;
+            child.tsDy = tsDy;
+            child.tsBlur = tsBlur;
+            child.tsColor = tsColor;
             if (e.tag == "svg") {
                 // 子元素坐标 = viewBox 用户单位 → 本容器内容盒局部坐标。
                 // 注意**不乘位移**：Ctx.ox 已经是内容盒原点，再加一次就是双重偏移
@@ -6890,6 +7014,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     AppendPaintSection(buf, paintNodes);
     AppendPathSection(buf, pendingPaths);
     AppendShadowSection(buf, shadowNodes);
+    AppendTextShadowSection(buf, textShadowNodes);
     AppendNameSection(buf, nodeNames, offsets);
 
     // ---- 6. 二进制组件：编译期离线合并 ----
@@ -7093,6 +7218,7 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     AppendPaintSection(buf, {});
     AppendPathSection(buf, {});      // v15：默认布局没有 SVG，段恒定写出保证解析链确定
     AppendShadowSection(buf, {});    // v23：默认布局没有 box-shadow，段同样恒定写出
+    AppendTextShadowSection(buf, {}); // v24：默认布局没有 text-shadow
 
     return buf;
 }

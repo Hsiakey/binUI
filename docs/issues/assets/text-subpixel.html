@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<app_window width="640" height="280" resizable="false">
+<html width="640" height="280">
+<head>
+<style>
+    body { background: #F2F5FA; color: #16202C; font-size: 16px; }
+    /* v24 ¼ 像素字形相位回归用例：
+       关键帧的 from == to，所以**第一帧**就固定落在小数位移上，与时间无关（可复现）。
+       0.3px → 相位 1（¼ 像素那份位图）；0.55px → 相位 2；0.8px → 相位 3。
+       静态页面相位恒为 0，这条用例是唯一覆盖"非 0 相位"的通路：
+       GL / VK / D3D11 三端取的是同一份图集位图，跨后端必须逐像素相同。 */
+    @keyframes sub1 { from { transform: translateX(0.3px); } to { transform: translateX(0.3px); } }
+    @keyframes sub2 { from { transform: translateX(0.55px); } to { transform: translateX(0.55px); } }
+    @keyframes sub3 { from { transform: translateX(0.8px); } to { transform: translateX(0.8px); } }
+    @keyframes subY { from { transform: translate(0.3px, 2px); } to { transform: translate(0.3px, 2px); } }
+</style>
+</head>
+<body>
+    <div animation="sub1 4s linear 0s infinite" style="position:absolute; left:24; top:20; width:300; height:40; font-size:22px">相位1 subpixel 0.3</div>
+    <div animation="sub2 4s linear 0s infinite" style="position:absolute; left:24; top:66; width:300; height:40; font-size:22px">相位2 subpixel 0.55</div>
+    <div animation="sub3 4s linear 0s infinite" style="position:absolute; left:24; top:112; width:300; height:40; font-size:22px">相位3 subpixel 0.8</div>
+    <div animation="subY 4s linear 0s infinite" style="position:absolute; left:24; top:158; width:300; height:40; font-size:22px">相位1 + 纵向 2px</div>
+    <div style="position:absolute; left:24; top:210; width:300; height:40; font-size:22px; color:#B0503A">对照：静态整像素</div>
+    <div animation="sub1 4s linear 0s infinite" style="position:absolute; left:340; top:20; width:280; height:40; font-size:18px; text-shadow:0 2px 4px rgba(0,0,0,0.45)">阴影 + 相位 0.3</div>
+    <div animation="sub2 4s linear 0s infinite" style="position:absolute; left:340; top:66; width:280; height:40; font-size:18px; color:#0B5FA5">中文亚像素：字体回退与 HarfBuzz</div>
+    <div animation="sub3 4s linear 0s infinite" style="position:absolute; left:340; top:112; width:280; height:40; font-size:16px; color:#0B7A4B; font-weight:700">粗体 相位 0.8 粗体</div>
+</body>
+</html>
+</app_window>

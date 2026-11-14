@@ -3227,6 +3227,11 @@ void BinUIVK::setTextSubpixel(bool on) {
     if (impl_) impl_->atlas.snapText = !on;
 }
 
+// v24 文字阴影：状态交给共享图集（GL / VK / D3D11 是同一份实现，所以三端逐像素相同）
+void BinUIVK::setTextShadow(float dx, float dy, float blur, uint32_t color) {
+    if (impl_) impl_->atlas.setTextShadow(dx, dy, blur, color);
+}
+
 // ---------- 图片 ----------
 // generation = "这份资源被换了"的代号：相同就复用，不重复解码/上传。
 bool BinUIVK::prepareImage(uint16_t index, const uint8_t* data, size_t size,

@@ -1346,6 +1346,12 @@ void BinUIGLGdi::setTextSubpixel(bool on) {
     if (impl_) impl_->atlas.snapText = !on;
 }
 
+// v24 文字阴影：图集负责"字形位图 → 模糊覆盖率"，这里只要把状态传下去。
+// 节点内的每一次 drawText 都会先铺一遍阴影四边形，再画清晰字形。
+void BinUIGLGdi::setTextShadow(float dx, float dy, float blur, uint32_t color) {
+    if (impl_) impl_->atlas.setTextShadow(dx, dy, blur, color);
+}
+
 bool BinUIGLGdi::pushLayer(float x, float y, float w, float h, float alpha) {
     return impl_ ? impl_->pushLayer(x, y, w, h, alpha) : false;
 }

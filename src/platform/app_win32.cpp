@@ -811,6 +811,232 @@ static ShadowBitmap* ShadowBitmapGet(HDC ref, int boxW, int boxH, int radius,
     return &g_shadowCache.back();
 }
 
+// ============================================================
+// v24 文字阴影（GDI 路径）
+// ------------------------------------------------------------
+// 三个 GPU 后端的文字走共享字形图集，阴影是"字形覆盖率 → 高斯模糊 → 图集格"。
+// GDI 没有图集（系统 DrawTextW 直接光栅化），所以这里另走一条等价的路：
+//   1) 用**同一字体、同一矩形、同一套 DrawTextW 参数**把文字画进 32bpp DIB；
+//      GDI 往 DIB 填色不写 alpha 字节，所以覆盖率只能编码在 RGB 里（与 box-shadow
+//      那张位图同一招；ClearType 的彩色边用三通道平均还原成覆盖率）。
+//   2) 对覆盖率做可分离高斯模糊（σ = blur/2，截断 3σ，与 GPU 侧同一口径）。
+//   3) 按阴影色预乘成 BGRA，AlphaBlend 贴到 (矩形左上 - pad + 偏移)。
+// 为什么不用 GDI+ 的 DrawString：阴影与正文必须**逐像素同源**，两套排版器/hinting
+// 会差出半个字宽，阴影就和文字对不齐了。
+//
+// 缓存：键 = 文字 + 字体 + 矩形尺寸 + 排版标志 + 阴影参数。位图与屏幕位置无关
+// （位置在 AlphaBlend 时给），所以滚动/动画时同一句话挪位置仍然命中。
+// ============================================================
+struct TextShadowBmp {
+    HDC      dc = nullptr;
+    HBITMAP  dib = nullptr;
+    void*    bits = nullptr;
+    int      w = 0, h = 0;
+    int      pad = 0;
+    uint64_t lastUse = 0;
+    uint64_t key = 0;
+};
+
+static std::vector<TextShadowBmp> g_textShadowCache;
+static uint64_t g_textShadowUse = 0;
+// 当前节点的文字阴影（alpha = 0 = 不画）。由 drawNodesGDI 的节点循环设置。
+static binui::BinUITextShadow g_gdiTextShadow;
+static bool g_gdiTextShadowOn = false;
+
+static void TextShadowBmpFree(TextShadowBmp& e) {
+    if (e.dc) DeleteDC(e.dc);
+    if (e.dib) DeleteObject(e.dib);
+    e = TextShadowBmp();
+}
+
+static uint64_t TextShadowKeyMix(uint64_t h, const void* data, size_t n) {
+    const uint8_t* p = static_cast<const uint8_t*>(data);
+    for (size_t i = 0; i < n; i++) {
+        h ^= p[i];
+        h *= 1099511628211ull;
+    }
+    return h;
+}
+
+// 覆盖率可分离高斯模糊（与 binui_glyph_atlas.h 的 BlurAlpha 同一套数学，
+// 保证 GDI 与三个 GPU 后端的阴影软硬程度一致）
+static void TextShadowBlur(std::vector<float>& buf, int w, int h, float sigma) {
+    if (sigma <= 0.0f || w <= 0 || h <= 0) return;
+    const int rad = std::max(1, (int)std::ceil(sigma * 3.0f));
+    std::vector<float> k((size_t)rad * 2 + 1);
+    float sum = 0.0f;
+    const float inv = 1.0f / (2.0f * sigma * sigma);
+    for (int i = -rad; i <= rad; i++) {
+        const float v = std::exp(-(float)(i * i) * inv);
+        k[(size_t)(i + rad)] = v;
+        sum += v;
+    }
+    for (float& v : k) v /= sum;
+    std::vector<float> tmp(buf.size(), 0.0f);
+    for (int y = 0; y < h; y++) {
+        const float* src = buf.data() + (size_t)y * w;
+        float* dst = tmp.data() + (size_t)y * w;
+        for (int x = 0; x < w; x++) {
+            float acc = 0.0f;
+            const int lo = std::max(0, x - rad), hi = std::min(w - 1, x + rad);
+            for (int xx = lo; xx <= hi; xx++) acc += src[xx] * k[(size_t)(xx - x + rad)];
+            dst[x] = acc;
+        }
+    }
+    for (int y = 0; y < h; y++) {
+        float* dst = buf.data() + (size_t)y * w;
+        const int lo = std::max(0, y - rad), hi = std::min(h - 1, y + rad);
+        for (int x = 0; x < w; x++) {
+            float acc = 0.0f;
+            for (int yy = lo; yy <= hi; yy++)
+                acc += tmp[(size_t)yy * w + x] * k[(size_t)(yy - y + rad)];
+            dst[x] = acc;
+        }
+    }
+}
+
+// 取该文字阴影的预乘位图（缓存命中直接复用）。pad 写回"位图比文字矩形每边多出的像素"。
+static TextShadowBmp* TextShadowBmpGet(HDC ref, LPCWSTR text, int len, const RECT& box, UINT fmt) {
+    const int boxW = box.right - box.left;
+    const int boxH = box.bottom - box.top;
+    if (boxW <= 0 || boxH <= 0 || !text) return nullptr;
+
+    // 字体（调用方已经把要用的字体选进 DC 了）
+    LOGFONTW lf = {};
+    HFONT cur = (HFONT)GetCurrentObject(ref, OBJ_FONT);
+    if (cur) GetObjectW(cur, sizeof(lf), &lf);
+
+    const float blur = g_gdiTextShadow.blur > 0.0f ? g_gdiTextShadow.blur : 0.0f;
+    const float sigma = blur * 0.5f;
+    int pad = sigma > 0.01f ? (int)std::ceil(sigma * 3.0f) + 1 : 1;
+    if (pad > 48) pad = 48;                        // 再大就只是浪费内存
+    const int iw = boxW + 2 * pad, ih = boxH + 2 * pad;
+    if ((int64_t)iw * ih > 4000000) return nullptr;   // 超大节点不做阴影（一次几 MB 不划算）
+
+    uint64_t key = 1469598103934665603ull;
+    const size_t textBytes = (len < 0 ? (size_t)lstrlenW(text) : (size_t)len) * sizeof(WCHAR);
+    key = TextShadowKeyMix(key, text, textBytes);
+    const int32_t fontSig[4] = { lf.lfHeight, lf.lfWeight, lf.lfItalic, (int32_t)lf.lfCharSet };
+    key = TextShadowKeyMix(key, fontSig, sizeof(fontSig));
+    if (lf.lfFaceName[0])
+        key = TextShadowKeyMix(key, lf.lfFaceName, (size_t)lstrlenW(lf.lfFaceName) * sizeof(WCHAR));
+    key = TextShadowKeyMix(key, &boxW, sizeof(boxW));
+    key = TextShadowKeyMix(key, &boxH, sizeof(boxH));
+    key = TextShadowKeyMix(key, &fmt, sizeof(fmt));
+    key = TextShadowKeyMix(key, &g_gdiTextShadow.offsetX, sizeof(float));
+    key = TextShadowKeyMix(key, &g_gdiTextShadow.offsetY, sizeof(float));
+    key = TextShadowKeyMix(key, &g_gdiTextShadow.blur, sizeof(float));
+    key = TextShadowKeyMix(key, &g_gdiTextShadow.color, sizeof(uint32_t));
+
+    ++g_textShadowUse;
+    for (TextShadowBmp& e : g_textShadowCache) {
+        if (e.key == key) {
+            e.lastUse = g_textShadowUse;
+            return &e;
+        }
+    }
+
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = iw;
+    bmi.bmiHeader.biHeight = -ih;          // top-down
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(ref, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!dib || !bits) { if (dib) DeleteObject(dib); return nullptr; }
+    HDC dc = CreateCompatibleDC(ref);
+    if (!dc) { DeleteObject(dib); return nullptr; }
+    // 注意：dib 读完后**不解除选中** —— AlphaBlend 的源必须就是这块位图（同 box-shadow）。
+    SelectObject(dc, dib);
+    // 底：全黑（覆盖率 0）
+    RECT all = { 0, 0, iw, ih };
+    HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
+    FillRect(dc, &all, black);
+    DeleteObject(black);
+    // 白字（文字色无关，覆盖率藏在亮度里）
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    if (cur) SelectObject(dc, cur);
+    RECT tr = { pad, pad, pad + boxW, pad + boxH };
+    DrawTextW(dc, text, len, &tr, fmt);
+
+    // 覆盖率（ClearType 的彩色边取三通道平均）→ 模糊 → 预乘 BGRA
+    std::vector<float> cov((size_t)iw * ih, 0.0f);
+    {
+        const uint8_t* px = static_cast<const uint8_t*>(bits);
+        for (size_t p = 0, n = (size_t)iw * ih; p < n; p++, px += 4)
+            cov[p] = (static_cast<float>(px[0]) + px[1] + px[2]) / 3.0f;
+    }
+    TextShadowBlur(cov, iw, ih, sigma);
+    {
+        static const bool tsDbg = std::getenv("BINUI_TEXTSHADOW_DBG") != nullptr;
+        if (tsDbg) {
+            double sum = 0; int nz = 0; float mx = 0;
+            for (int k = 0; k < iw * ih; k++) { sum += cov[(size_t)k]; if (cov[(size_t)k] > 0.5f) nz++; if (cov[(size_t)k] > mx) mx = cov[(size_t)k]; }
+            std::fprintf(stderr, "[textshadow] box=%dx%d pad=%d blur=%.2f ink=%d sum=%.0f max=%.1f\n",
+                         boxW, boxH, pad, (double)blur, nz, sum, (double)mx);
+        }
+    }
+
+    const uint32_t rgb = g_gdiTextShadow.color & 0x00FFFFFFu;
+    const uint32_t sr = (rgb >> 16) & 0xFFu, sg = (rgb >> 8) & 0xFFu, sb = rgb & 0xFFu;
+    const uint32_t baseA = (g_gdiTextShadow.color >> 24) & 0xFFu;
+    uint8_t* px = static_cast<uint8_t*>(bits);
+    for (size_t p = 0, n = (size_t)iw * ih; p < n; p++, px += 4) {
+        int c = (int)(cov[p] + 0.5f);
+        if (c <= 0) { px[0] = px[1] = px[2] = px[3] = 0; continue; }
+        if (c > 255) c = 255;
+        const uint32_t a = ((uint32_t)c * baseA + 127u) / 255u;
+        px[0] = (uint8_t)((sb * a + 127u) / 255u);
+        px[1] = (uint8_t)((sg * a + 127u) / 255u);
+        px[2] = (uint8_t)((sr * a + 127u) / 255u);
+        px[3] = (uint8_t)a;
+    }
+
+    // 入缓存（条数 + 字节数双重封顶）
+    const size_t bytes = (size_t)iw * ih * 4;
+    size_t total = 0;
+    for (const TextShadowBmp& e : g_textShadowCache) total += (size_t)e.w * (size_t)e.h * 4;
+    while (!g_textShadowCache.empty() &&
+           (g_textShadowCache.size() >= 64 || total + bytes > (8u << 20))) {
+        size_t oldest = 0;
+        for (size_t k = 1; k < g_textShadowCache.size(); k++)
+            if (g_textShadowCache[k].lastUse < g_textShadowCache[oldest].lastUse) oldest = k;
+        total -= (size_t)g_textShadowCache[oldest].w * g_textShadowCache[oldest].h * 4;
+        TextShadowBmpFree(g_textShadowCache[oldest]);
+        g_textShadowCache.erase(g_textShadowCache.begin() + (long)oldest);
+    }
+    TextShadowBmp e;
+    e.dc = dc; e.dib = dib; e.bits = bits;
+    e.w = iw; e.h = ih; e.pad = pad;
+    e.lastUse = g_textShadowUse;
+    e.key = key;
+    g_textShadowCache.push_back(e);
+    return &g_textShadowCache.back();
+}
+
+// 画文字（有阴影先铺一层模糊覆盖率）。所有**真正落像素**的 DrawTextW 都走这里；
+// 测量用的 DT_CALCRECT 直接透传（不铺阴影、不进缓存）。
+static void GdiDrawTextShadowed(HDC hdc, LPCWSTR text, int len, LPRECT rc, UINT fmt) {
+    // A/B 开关：BINUI_TEXTSHADOW_OFF=1 关掉文字阴影（排查"阴影还是排版弄的"用）
+    static const bool tsOff = std::getenv("BINUI_TEXTSHADOW_OFF") != nullptr;
+    if (tsOff) { DrawTextW(hdc, text, len, rc, fmt); return; }
+    if (!g_gdiTextShadowOn || !text || !rc || (fmt & DT_CALCRECT)) {
+        DrawTextW(hdc, text, len, rc, fmt);
+        return;
+    }
+    TextShadowBmp* bmp = TextShadowBmpGet(hdc, text, len, *rc, fmt);
+    if (bmp) {
+        const int dx = rc->left - bmp->pad + (int)std::lround(g_gdiTextShadow.offsetX);
+        const int dy = rc->top - bmp->pad + (int)std::lround(g_gdiTextShadow.offsetY);
+        BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        AlphaBlend(hdc, dx, dy, bmp->w, bmp->h, bmp->dc, 0, 0, bmp->w, bmp->h, bf);
+    }
+    DrawTextW(hdc, text, len, rc, fmt);
+}
+
 void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipRect) {    HDC hdc = static_cast<HDC>(hdcCtx);    const auto& nodes = renderer.getNodes();
 
     // 绘制范围：脏矩形（局部重绘）或窗口客户区（全量）
@@ -959,6 +1185,21 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             shPadY = std::max(shPadY, pad + std::fabs(shs[k].offsetY) * nodeScale);
         }
         const int shPadXi = (int)std::ceil(shPadX), shPadYi = (int)std::ceil(shPadY);
+
+        // v24 文字阴影：本节点的状态（GDI 侧自己烘覆盖率位图，见 TextShadowBmpGet）。
+        // 颜色 alpha 折入元素 opacity —— GDI 没有分层合成，阴影也得跟着一起淡。
+        {
+            int tsN = 0;
+            const binui::BinUITextShadow* tss = renderer.textShadowsOf(node.id, tsN);
+            g_gdiTextShadowOn = (tss != nullptr && tsN > 0 && nodeOp > 0.002f);
+            { static const bool d = std::getenv("BINUI_TEXTSHADOW_DBG") != nullptr; if (d) std::fprintf(stderr, "[ts] node=%u type=%u text=%d tsN=%d\\n", (unsigned)node.id, (unsigned)node.type, (int)node.text.size(), tsN); }
+            if (g_gdiTextShadowOn) {
+                g_gdiTextShadow = tss[0];
+                const uint32_t a0 = (g_gdiTextShadow.color >> 24) & 0xFFu;
+                const uint32_t a = (uint32_t)(a0 * nodeOp + 0.5f);
+                g_gdiTextShadow.color = (g_gdiTextShadow.color & 0x00FFFFFFu) | (a << 24);
+            }
+        }
         // 全透明：GDI 没有 alpha 合成，画出来是一块黑，所以整块跳过。
         // 但有文字的节点必须画（<pre>/<div>文字</div> 这种没底色的容器否则整个消失）。
         if (((dc >> 24) & 0xFF) == 0 && !hasBorder && !hasGrad && node.text.empty() && shN == 0) {
@@ -1160,6 +1401,13 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         int savedDC = SaveDC(hdc);
         bool draw = true;
         RECT nr = rc;
+        if (g_gdiTextShadowOn) {   // 文字阴影露在盒外：自身裁剪跟着外扩（与 GPU 路径一致）
+            const int tpad = (int)std::ceil(g_gdiTextShadow.blur * 1.5f) + 1;
+            const int tox = (int)std::fabs((float)g_gdiTextShadow.offsetX);
+            const int toy = (int)std::fabs((float)g_gdiTextShadow.offsetY);
+            nr.left -= tpad + tox; nr.top -= tpad + toy;
+            nr.right += tpad + tox; nr.bottom += tpad + toy;
+        }
         if (IntersectClipRect(hdc, nr.left, nr.top, nr.right, nr.bottom) == NULLREGION)
             draw = false;
 
@@ -1206,17 +1454,17 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                 // 单行但比内容盒宽时同样走 WORDBREAK —— GPU 后端的 drawTextWrapped 一直会换行，
                 // GDI 以前硬套 SINGLELINE，长段落会被直接裁掉（两端表现不一致）。
                 if (node.text.find('\n') != std::string::npos) {
-                    DrawTextW(hdc, wtext.c_str(), -1, &tr, halign | DT_WORDBREAK);
+                    GdiDrawTextShadowed(hdc, wtext.c_str(), -1, &tr, halign | DT_WORDBREAK);
                 } else {
                     RECT mr = { 0, 0, 0, 10 };
-                    DrawTextW(hdc, wtext.c_str(), -1, &mr, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
+                    GdiDrawTextShadowed(hdc, wtext.c_str(), -1, &mr, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
                     // v21 自然排版：一行放不下就折行（与 GPU 后端同一口径，见
                     // binui_draw_nodes.h 的 LABEL 分支）。以前是"超宽 20% 才折"，
                     // 与 GPU 端对不上：同一份 UI 在 GDI 里单行裁掉、在 GL 里折成两行。
                     if (mr.right > (nw - 2 * pad))
-                        DrawTextW(hdc, wtext.c_str(), -1, &tr, halign | DT_WORDBREAK);
+                        GdiDrawTextShadowed(hdc, wtext.c_str(), -1, &tr, halign | DT_WORDBREAK);
                     else
-                        DrawTextW(hdc, wtext.c_str(), -1, &tr, halign | DT_VCENTER | DT_SINGLELINE);
+                        GdiDrawTextShadowed(hdc, wtext.c_str(), -1, &tr, halign | DT_VCENTER | DT_SINGLELINE);
                 }
 
                 // 文字装饰线（下划线/删除线/上划线）：测量文字块位置后补画细条
@@ -1226,7 +1474,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                     const float lh = (float)tm.tmHeight;
                     auto measure = [&](const std::wstring& s) -> float {
                         RECT mr = { 0, 0, 0, 10 };
-                        DrawTextW(hdc, s.c_str(), -1, &mr, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
+                        GdiDrawTextShadowed(hdc, s.c_str(), -1, &mr, DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
                         return (float)mr.right;
                     };
                     binui::PaintBand rules[3];
@@ -1288,7 +1536,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                     // 文本是 UTF-8：必须转宽字符用 DrawTextW。早先用 DrawTextA，
                     // 中文会被按系统代码页解释成乱码（叠加成一团）。
                     std::wstring wtext = LfToCrlf(Utf8ToWide(node.text));
-                    DrawTextW(hdc, wtext.c_str(), -1, &tr,
+                    GdiDrawTextShadowed(hdc, wtext.c_str(), -1, &tr,
                         halign | DT_VCENTER | DT_SINGLELINE);
                     SelectObject(hdc, oldFont);
                     DeleteObject(font);
@@ -1348,7 +1596,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                     if (placeholder && !editing) inCol = fadeOver(inCol, 140);
                     if (disabled) inCol = fadeOver(inCol, 140);
                     SetTextColor(hdc, RGB((inCol >> 16) & 0xFF, (inCol >> 8) & 0xFF, inCol & 0xFF));
-                    DrawTextW(hdc, wtext.c_str(), -1, &tr,
+                    GdiDrawTextShadowed(hdc, wtext.c_str(), -1, &tr,
                         DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
                     if (editing) {
@@ -1360,9 +1608,9 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                             RECT rb = { tr.left, 0, tr.right, 10 };
                             std::wstring wa = Utf8ToWide(text.substr(0, a));
                             std::wstring wb = Utf8ToWide(text.substr(0, b));
-                            DrawTextW(hdc, wa.c_str(), -1, &ra,
+                            GdiDrawTextShadowed(hdc, wa.c_str(), -1, &ra,
                                 DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
-                            DrawTextW(hdc, wb.c_str(), -1, &rb,
+                            GdiDrawTextShadowed(hdc, wb.c_str(), -1, &rb,
                                 DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
                             XorFillRect(hdc, ra.right, glineTop, rb.right, glineTop + glineH);
                         }
@@ -1371,7 +1619,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                         if (caretBlinkOn()) {
                             RECT cr = { tr.left, 0, tr.right, 10 };
                             std::wstring wc = Utf8ToWide(text.substr(0, caret));
-                            DrawTextW(hdc, wc.c_str(), -1, &cr,
+                            GdiDrawTextShadowed(hdc, wc.c_str(), -1, &cr,
                                 DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
                             XorFillRect(hdc, cr.right, glineTop, cr.right + 2, glineTop + glineH);
                         }
@@ -1402,7 +1650,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                     const UINT halign = (node.flags & BINUI_TEXT_CENTER) ? DT_CENTER
                                       : (node.flags & BINUI_TEXT_RIGHT) ? DT_RIGHT : DT_LEFT;
                     std::wstring wtext = LfToCrlf(Utf8ToWide(node.text));
-                    DrawTextW(hdc, wtext.c_str(), -1, &tr,
+                    GdiDrawTextShadowed(hdc, wtext.c_str(), -1, &tr,
                         halign | DT_WORDBREAK);   // '\n'（来自 <br>）同样断行
                     SelectObject(hdc, oldFont);
                     DeleteObject(font);
@@ -1469,7 +1717,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                         gGdiFontQuality, DEFAULT_PITCH, gGdiFontName.c_str());
                     HGDIOBJ oldFont = SelectObject(hdc, font);
                     std::wstring wtext = LfToCrlf(Utf8ToWide(node.text));
-                    DrawTextW(hdc, wtext.c_str(), -1, &rc,
+                    GdiDrawTextShadowed(hdc, wtext.c_str(), -1, &rc,
                         DT_CENTER | DT_VCENTER | DT_SINGLELINE);
                     SelectObject(hdc, oldFont);
                     DeleteObject(font);
@@ -1787,7 +2035,7 @@ void placeCaretAtClick(binui::BinUIRenderer& renderer, float cx, float cy) {
     RECT tr = { textX, 0, 0, 10 };
     for (size_t i = 0; i < wtext.size(); i++) {
         RECT pr = tr;
-        DrawTextW(hdc, wtext.c_str(), static_cast<int>(i + 1), &pr,
+        GdiDrawTextShadowed(hdc, wtext.c_str(), static_cast<int>(i + 1), &pr,
             DT_LEFT | DT_SINGLELINE | DT_CALCRECT);
         if (pr.right >= target) { idx = i; break; }
         tr = pr;

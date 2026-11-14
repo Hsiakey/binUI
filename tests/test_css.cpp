@@ -288,6 +288,94 @@ static void TestIssueRegressions() {
         TEST("16.15: 超大半径仍铺满", n > 0 && n <= kMaxImageBands && std::fabs(sum2 - 40.0f) < 0.01f);
     }
 
+    // ---- 0.16.16：text-shadow（v24 文字阴影段，P1-11 的配套）----
+    // 钉住六件事：
+    //   1. 三个长度按顺序落进 offset-x / offset-y / blur（没有 spread、没有 inset）；
+    //   2. 颜色缺省 = 当前文字色（currentColor 两种写法都认）；
+    //   3. **可继承**：容器上写一次，子树里真正画字的节点各有一条（值相同）；
+    //   4. `text-shadow: none` 从那里开始清掉（子树不再有）；
+    //   5. 只有真会画字的节点才写条目（空节点/容器不写，段保持稀疏）；
+    //   6. 一层上限 + 负 blur 收敛到 0（含 4 个长度时多出来的忽略）。
+    {
+        const char* html = R"HTML(<app_window width="420" height="320" bg="#101014">
+<html width="420" height="320" bg="#101014">
+<body>
+  <span id="one"   style="position:absolute; left:10; top:10; font-size:16px;
+                          text-shadow: 0 2px 6px rgba(0,0,0,0.55)">hello</span>
+  <span id="cur"   style="position:absolute; left:10; top:40; font-size:16px; color:#FF3366;
+                          text-shadow: 1px 1px">current</span>
+  <span id="curkw" style="position:absolute; left:10; top:70; font-size:16px; color:#22CC88;
+                          text-shadow: 0 3px 4px currentColor">keyword</span>
+  <div id="card" style="position:absolute; left:10; top:100; width:400; height:120;
+                        text-shadow: 0 2px 5px rgba(0,0,0,0.40)">
+    <span id="kid" style="position:absolute; left:8; top:8; font-size:16px">inherited</span>
+    <span id="kidnone" style="position:absolute; left:8; top:40; font-size:16px;
+                              text-shadow: none">cleared</span>
+    <div id="emptybox" style="position:absolute; left:8; top:70; width:60; height:30"></div>
+  </div>
+  <span id="four"  style="position:absolute; left:10; top:240; font-size:16px;
+                          text-shadow: 2px 3px 4px 9px rgba(0,0,0,0.5)">four</span>
+  <span id="neg"   style="position:absolute; left:120; top:240; font-size:16px;
+                          text-shadow: 2px 3px -5px #000000">neg</span>
+  <span id="multi" style="position:absolute; left:220; top:240; font-size:16px;
+                          text-shadow: 0 1px 2px #000000, 0 4px 10px #FF0000">multi</span>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("16.16: 文字阴影布局可解析", ParseInto(r, bin));
+        auto tsOfName = [&](const char* name, int& n) -> const BinUITextShadow* {
+            const uint16_t id = r.findNodeByName(name);
+            return id ? r.textShadowsOf(id, n) : nullptr;
+        };
+        int n1 = 0;
+        const BinUITextShadow* s1 = tsOfName("one", n1);
+        TEST("16.16: 单条文字阴影", s1 && n1 == 1);
+        if (s1) {
+            TEST("16.16: offset/blur 解析", std::fabs(s1->offsetX) < 0.01f &&
+                                            std::fabs(s1->offsetY - 2.0f) < 0.01f &&
+                                            std::fabs(s1->blur - 6.0f) < 0.01f);
+            TEST("16.16: 颜色与 alpha 解析",
+                 ((s1->color >> 24) & 0xFF) == 140 && ((s1->color >> 16) & 0xFF) == 0);
+        }
+        int nc = 0;
+        const BinUITextShadow* sc = tsOfName("cur", nc);
+        TEST("16.16: 不写颜色 = 当前文字色（#FF3366）",
+             sc && nc == 1 && ((sc->color >> 16) & 0xFF) == 0xFF &&
+             ((sc->color >> 8) & 0xFF) == 0x33 && (sc->color & 0xFF) == 0x66);
+        TEST("16.16: 只给两个长度 = 硬阴影（blur 0）", sc && std::fabs(sc->blur) < 0.01f);
+        int nk = 0;
+        const BinUITextShadow* sk = tsOfName("curkw", nk);
+        TEST("16.16: currentColor 关键字 = 自身文字色",
+             sk && nk == 1 && ((sk->color >> 16) & 0xFF) == 0x22 &&
+             ((sk->color >> 8) & 0xFF) == 0xCC && (sk->color & 0xFF) == 0x88);
+        // 继承：card 上有，kid 上也必须有同样的值
+        int ncard = 0, nkid = 0;
+        const BinUITextShadow* scard = tsOfName("card", ncard);
+        const BinUITextShadow* skid = tsOfName("kid", nkid);
+        TEST("16.16: 容器本身没文字 → 不写条目", scard == nullptr && ncard == 0);
+        TEST("16.16: 子元素继承父级文字阴影", skid && nkid == 1);
+        if (skid && s1) {
+            TEST("16.16: 继承值一致", std::fabs(skid->offsetY - 2.0f) < 0.01f &&
+                                      std::fabs(skid->blur - 5.0f) < 0.01f);
+        }
+        int nn = 0;
+        TEST("16.16: none 清掉继承的阴影", tsOfName("kidnone", nn) == nullptr && nn == 0);
+        int ne = 0;
+        TEST("16.16: 没有文字的节点不写条目", tsOfName("emptybox", ne) == nullptr && ne == 0);
+        int n4 = 0;
+        const BinUITextShadow* s4 = tsOfName("four", n4);
+        TEST("16.16: 多余的第四个长度被忽略（blur 取第三个）",
+             s4 && n4 == 1 && std::fabs(s4->blur - 4.0f) < 0.01f &&
+             std::fabs(s4->offsetX - 2.0f) < 0.01f);
+        int ng = 0;
+        const BinUITextShadow* sg = tsOfName("neg", ng);
+        TEST("16.16: 负 blur 收敛到 0", sg && ng == 1 && std::fabs(sg->blur) < 0.01f);
+        int nm = 0;
+        const BinUITextShadow* sm = tsOfName("multi", nm);
+        TEST("16.16: 多层只取第一层", sm && nm == 1 && std::fabs(sm->blur - 2.0f) < 0.01f);
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

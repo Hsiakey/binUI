@@ -325,20 +325,40 @@ bool FontEngine::renderGlyph(const std::string& face, float size, uint32_t cp, b
 // 所以斜体不会改变排版宽度，"测宽和绘制一致"这条性质仍然成立。
 bool FontEngine::renderGlyph(const std::string& face, float size, uint32_t cp, bool bold,
                              bool italic, GrayGlyph& out) {
+    return renderGlyph(face, size, cp, bold, italic, 0, out);
+}
+
+// 亚像素横向相位（v24）：见头文件里那段理由。delta 用 26.6 定点（1px = 64），
+// 所以 ¼ 像素 = 16。FT_Set_Transform 在 FT_Load_Glyph 里生效（作用于轮廓/位图本身），
+// 因此必须在 Load_Glyph **之前**设置，渲染完再复位 —— 这个 face 是共享会话，
+// 变换残留会串到下一个字形。
+bool FontEngine::renderGlyph(const std::string& face, float size, uint32_t cp, bool bold,
+                             bool italic, int subpixelX, GrayGlyph& out) {
     auto* s = Impl::getSession(impl_, face, size);
     if (!s || !s->face) return false;
     FT_Face f = s->face;
 
+    const int phase = (subpixelX & 3);
+    if (phase != 0) {
+        FT_Vector delta;
+        delta.x = static_cast<FT_Pos>(phase * 16);   // 26.6：16 = 0.25px
+        delta.y = 0;
+        FT_Set_Transform(f, nullptr, &delta);
+    }
+    // 复位 + 返回：把 "清理变换" 收在一个小 lambda 里，避免每个 return 都写一遍
+    auto clearXform = [&]() { if (phase != 0) FT_Set_Transform(f, nullptr, nullptr); };
+
     FT_UInt gid = FT_Get_Char_Index(f, cp);
-    if (gid == 0) return false;
+    if (gid == 0) { clearXform(); return false; }
     FT_Int32 flags = loadFlagsFor(size);
     if (bold || italic) flags |= FT_LOAD_NO_BITMAP;  // 两个合成变换都只作用于矢量轮廓
-    if (FT_Load_Glyph(f, gid, flags) != 0) return false;
+    if (FT_Load_Glyph(f, gid, flags) != 0) { clearXform(); return false; }
     if (f->glyph->format == FT_GLYPH_FORMAT_OUTLINE) {
         if (bold)   FT_GlyphSlot_Embolden(f->glyph);
         if (italic) FT_GlyphSlot_Oblique(f->glyph);
     }
-    if (FT_Render_Glyph(f->glyph, FT_RENDER_MODE_NORMAL) != 0) return false;
+    if (FT_Render_Glyph(f->glyph, FT_RENDER_MODE_NORMAL) != 0) { clearXform(); return false; }
+    clearXform();   // 位图已经烘好，变换不用再挂在这个共享 face 上
 
     const FT_Bitmap& bm = f->glyph->bitmap;
     out.width = static_cast<int>(bm.width);
