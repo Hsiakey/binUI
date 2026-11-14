@@ -324,7 +324,10 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             for (size_t pos = 0; pos < order.size(); pos++) {
                 const size_t i = order[pos];
                 if (!(nodes[i].flags & BINUI_VISIBLE) || hidden[i]) continue;
-                int32_t a = pIdx[i];
+                // 从**节点自己**开始往上走：层作用域必须把 owner 自己的底色/边框也包进去。
+                // 只统计后代的话，父元素底会被留在主目标上、只有子元素进层 —— 子元素半透明
+                // 合成时就会拿"已经被淡过的父底"当背景，像素比浏览器的组语义更暗。
+                int32_t a = static_cast<int32_t>(i);
                 for (int guard = 0; a >= 0 && guard < 512; guard++) {
                     const size_t ai = static_cast<size_t>(a);
                     if (ownOp[ai] < 0.999f) {
@@ -360,10 +363,10 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         }
         for (const auto& kv : ownerSpan) {
             if (kv.second.first != static_cast<int>(oi)) continue;
-            // 最外层先 push：按祖先链深度排序
+            // 最外层先 push：按祖先链深度排序（**从节点自己**开始，owner 自己的位置也要建层）
             std::vector<size_t> chain;
             {
-                int32_t a = pIdx[i];
+                int32_t a = static_cast<int32_t>(i);
                 for (int g = 0; a >= 0 && g < 512; g++) {
                     if (ownerSpan.count(static_cast<size_t>(a))) chain.push_back(static_cast<size_t>(a));
                     a = pIdx[static_cast<size_t>(a)];
@@ -1092,3 +1095,5 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
 } // namespace binui
 
 #endif // BINUI_DRAW_NODES_H
+
+
