@@ -858,7 +858,8 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                         pr->closed.data(), static_cast<int>(pr->first.size()),
                         static_cast<float>(x), static_cast<float>(y),
                         static_cast<float>(nw), static_cast<float>(nh), pspec,
-                        renderer.pathBandCache(node.id), renderer.pathCacheGen(), pbuf,
+                        renderer.pathBandCache(node.id), renderer.pathCacheGen(),
+                        renderer.pathBandsBudget(), pbuf,
                         [&](const binui::PaintBand* b, int n) {
                             for (int k = 0; k < n; k++)
                                 gfx.fillRect(b[k].x, b[k].y, b[k].w, b[k].h, b[k].color);
@@ -869,6 +870,8 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                         [&](float rx, float ry, float rw, float rh, float rr, uint32_t dc) {
                             gfx.fillRounded(rx, ry, rw, rh, rr, dc);
                         });
+                    // 缓存记账：这一节点这帧实际占了多少条带（全局预算 pathBandsBudget 用）
+                    renderer.commitPathBands(node.id);
                     break;
                 }
                 default:

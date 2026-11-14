@@ -212,7 +212,11 @@ struct RoundTex {
 };
 
 
-constexpr size_t kMaxVerts = 100000; // 2MB 动态缓冲上限（约 16.6k 四边形）
+// 顶点缓冲：**初始** 10 万顶点（2 MB，约 1.66 万个四边形），装不下就翻倍扩容，
+// 硬上限 100 万顶点（20 MB，约 17 万个四边形）。以前这里是"满了就丢图元"的硬上限，
+// 一屏图标超过约 34 个（每个 473 条带）后面的内容就凭空消失、还不报错 —— 见 docs/future.md P0-5。
+constexpr size_t kMaxVerts = 100000;
+constexpr size_t kMaxVertsCeiling = 1u << 20;
 
 // ---------- 纹理工具 ----------
 GLuint CreateTexture2D(int w, int h, const void* data, bool linear, bool rgba = false) {
@@ -679,12 +683,26 @@ struct BinUIGLGdi::Impl {
     }
 
     // ---------- 场景 ----------
-    // 本帧顶点写入口：返回 nullptr = 缓冲满（与旧的 "verts.size()+6 > kMaxVerts 就丢"
-    // 语义一致）。首次调用时把缓冲一次扩容到上限，之后不再变。
+    // 本帧顶点写入口：装不下就扩容（翻倍，上限 kMaxVertsCeiling），
+    // 只有撞到硬上限才返回 nullptr（并且只告警一次）。
     GLVertex* vertRoom(size_t n) {
-        if (verts.size() < kMaxVerts) verts.resize(kMaxVerts);
-        if (vcount + n > verts.size()) return nullptr;
+        if (vcount + n > verts.size()) {
+            size_t cap = verts.size() ? verts.size() : kMaxVerts;
+            while (cap < vcount + n && cap < kMaxVertsCeiling) cap *= 2;
+            if (cap > kMaxVertsCeiling) cap = kMaxVertsCeiling;
+            if (vcount + n > cap) { warnVertsOverflow(); return nullptr; }
+            verts.resize(cap);
+        }
         return verts.data() + vcount;
+    }
+
+    static void warnVertsOverflow() {
+        static bool warned = false;
+        if (warned) return;
+        warned = true;
+        std::fprintf(stderr,
+                     "[gl] 顶点数撞上硬上限（%zu 个四边形/帧），后面的图元被丢弃 —— "
+                     "同屏内容太多，见 docs/future.md P0-5\n", kMaxVertsCeiling / 6);
     }
 
     void beginBatch() {
@@ -758,7 +776,6 @@ struct BinUIGLGdi::Impl {
 
     void flushAll() {
         if (vcount == 0 || !vb) return;
-        glBindBufferP(GL_ARRAY_BUFFER, vb);
         glBufferDataP(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vcount * sizeof(GLVertex)),
                       verts.data(), GL_DYNAMIC_DRAW);
         for (const auto& b : batches) {

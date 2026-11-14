@@ -4153,7 +4153,7 @@ static void TestPathBandCache() {
         spec.fillColor = color;
         return PaintPathNode(head, nd.pts.data(), nd.contourFirst.data(), cnt.data(),
                              nd.contourClosed.data(), (int)nd.contourFirst.size(),
-                             0, 0, 100, 100, spec, c, 1, buf,
+                             0, 0, 100, 100, spec, c, 1, (size_t)65536, buf,
                              [&](const PaintBand* b, int n) { nBands = n; seenColor = b[0].color; },
                              [](float, float, float, float, float, uint32_t) {},
                              [](float, float, float, float, float, uint32_t) {});
@@ -4200,14 +4200,32 @@ static void TestPathBandCache() {
             int nb = 0;
             PaintPathNode(h2, nd2.pts.data(), nd2.contourFirst.data(), cnt2.data(),
                           nd2.contourClosed.data(), (int)nd2.contourFirst.size(),
-                          0, 0, 400, 400, s2, &c2, 1, b2,
+                          0, 0, 400, 400, s2, &c2, 1, (size_t)65536, b2,
                           [&](const PaintBand*, int n) { nb = n; },
                           [](float, float, float, float, float, uint32_t) {},
                           [](float, float, float, float, float, uint32_t) {});
             std::printf("  [svgpath] 缓存：400px 圆 %d 条带，缓存条目 key=%llu（0 = 未缓存）\n",
                         nb, (unsigned long long)c2.key);
             CHECK(nb > 0, "缓存：大图形仍然正常绘制");
-            if (nb > kMaxCachedBands) CHECK(c2.key == 0, "缓存：条带超上限时不缓存（省内存）");
+            // 单节点上限从 1024 放宽到 16384（docs/future.md P0-2）：400px 的圆以前越过 1024
+            // 就"永不缓存、每帧重算"，现在应该能缓存。
+            CHECK(nb <= kMaxCachedBands, "缓存：400px 圆的条带数在单节点上限内");
+            CHECK(c2.key != 0, "缓存：上限内的图形应当缓存（1024 的老悬崖已修）");
+
+            // 全局预算为 0（渲染器记账已满）：必须退回"不缓存"，但照常画出条带
+            {
+                PathBandCacheEntry c3;
+                PathRenderBuffers b3;
+                int nb3 = 0;
+                PaintPathNode(h2, nd2.pts.data(), nd2.contourFirst.data(), cnt2.data(),
+                              nd2.contourClosed.data(), (int)nd2.contourFirst.size(),
+                              0, 0, 400, 400, s2, &c3, 1, (size_t)0, b3,
+                              [&](const PaintBand*, int n) { nb3 = n; },
+                              [](float, float, float, float, float, uint32_t) {},
+                              [](float, float, float, float, float, uint32_t) {});
+                CHECK(nb3 == nb, "缓存：预算为 0 时条带照样算出来");
+                CHECK(c3.key == 0, "缓存：全局预算为 0 时不写缓存（省内存）");
+            }
         }
     }
 }
@@ -4580,3 +4598,5 @@ int main() {
     std::printf("\n=== test_elements: %s ===\n", fails ? "FAILED" : "全部通过");
     return fails ? 1 : 0;
 }
+
+

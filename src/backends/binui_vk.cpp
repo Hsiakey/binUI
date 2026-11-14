@@ -360,7 +360,10 @@ struct VkVertex {
 static_assert(sizeof(VkVertex) == 20, "顶点必须与 GLVertex 同 20 字节");
 
 constexpr VkFormat kColorFormat = VK_FORMAT_B8G8R8A8_UNORM;
-constexpr size_t kMaxVertices = 100000;      // 与 GL 的 kMaxVerts 一致（约 16.6k 四边形）
+// 顶点缓冲：初始 10 万顶点（约 1.66 万四边形，与 GL/D3D11 一致），满了按需扩容，
+// 硬上限 100 万顶点（约 17 万四边形）。以前满了就丢图元且不报错（docs/future.md P0-5）。
+constexpr size_t kMaxVertices = 100000;
+constexpr size_t kMaxVerticesCeiling = 1u << 20;
 constexpr int kMaxBatches = 2048;
 
 uint32_t ScaleAlphaU32(uint32_t c, float op) {
@@ -411,6 +414,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         VkSemaphore semDone = VK_NULL_HANDLE;    // 渲染完成
         VkBuffer vbuf = VK_NULL_HANDLE;
         VkDeviceMemory vmem = VK_NULL_HANDLE;
+        VkDeviceSize vbufBytes = 0;              // vbuf 的容量（扩容后跟着变大）
         VkVertex* vmap = nullptr;
         std::vector<std::pair<VkBuffer, VkDeviceMemory>> staging;   // 等本槽 fence 后释放
         bool submitted = false;   // 已提交、fence 还没等（只有一帧会处于这个状态）
@@ -1857,15 +1861,70 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         void* mapped = nullptr;
         if (g_vk.vkMapMemory(device, s.vmem, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS)
             s.vmap = static_cast<VkVertex*>(mapped);
-        verts.resize(kMaxVertices);
+        s.vbufBytes = static_cast<VkDeviceSize>(kMaxVertices) * sizeof(VkVertex);
+        if (verts.size() < kMaxVertices) verts.resize(kMaxVertices);   // 只扩不缩（可能已被 growVertBuf 撑大）
         batches.reserve(kMaxBatches);
     }
 
-    // 顶点写入口：返回 nullptr = 缓冲已满（这一批图元直接丢弃，
-    // 与旧的"超过 kMaxVertices 就别再 push"语义一致）。
+    // 顶点写入口：装不下就扩 CPU 侧缓冲（翻倍，上限 kMaxVerticesCeiling）；
+    // 只有撞到硬上限才返回 nullptr 并告警一次。
     VkVertex* vertRoom(size_t n) {
-        if (vcount + n > verts.size()) return nullptr;
+        if (vcount + n > verts.size()) {
+            size_t cap = verts.size() ? verts.size() : kMaxVertices;
+            while (cap < vcount + n && cap < kMaxVerticesCeiling) cap *= 2;
+            if (cap > kMaxVerticesCeiling) cap = kMaxVerticesCeiling;
+            if (vcount + n > cap) { warnVertsOverflow(); return nullptr; }
+            verts.resize(cap);
+        }
         return verts.data() + vcount;
+    }
+
+    static void warnVertsOverflow() {
+        static bool warned = false;
+        if (warned) return;
+        warned = true;
+        std::fprintf(stderr,
+                     "[vk] 顶点数撞上硬上限（%zu 个四边形/帧），后面的图元被丢弃，"
+                     "见 docs/future.md P0-5\n", kMaxVerticesCeiling / 6);
+    }
+
+    // 本槽的顶点缓冲装不下本帧顶点数时重建一个更大的。
+    // 安全性：绘制命令是 flush 时才录的（此时还没 vkCmdBindVertexBuffers），而且本槽的
+    // fence 在 beginFrame 里已经等过 —— 这个缓冲此刻没有任何在飞的命令引用它。
+    bool growVertBuf(size_t needVerts) {
+        Slot& s = slots[slotIdx];
+        const VkDeviceSize needBytes = static_cast<VkDeviceSize>(needVerts) * sizeof(VkVertex);
+        if (s.vbuf && s.vbufBytes >= needBytes) return true;
+        size_t cap = s.vbufBytes ? static_cast<size_t>(s.vbufBytes / sizeof(VkVertex)) : kMaxVertices;
+        while (cap < needVerts && cap < kMaxVerticesCeiling) cap *= 2;
+        if (cap > kMaxVerticesCeiling) cap = kMaxVerticesCeiling;
+        if (cap < needVerts) { warnVertsOverflow(); return false; }
+        if (s.vbuf) {
+            g_vk.vkUnmapMemory(device, s.vmem);
+            g_vk.vkDestroyBuffer(device, s.vbuf, nullptr);
+            g_vk.vkFreeMemory(device, s.vmem, nullptr);
+            s.vbuf = VK_NULL_HANDLE;
+            s.vmem = VK_NULL_HANDLE;
+            s.vmap = nullptr;
+            s.vbufBytes = 0;
+        }
+        if (!createBuffer(static_cast<VkDeviceSize>(cap) * sizeof(VkVertex),
+                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          s.vbuf, s.vmem)) {
+            std::fprintf(stderr, "[vk] growVertBuf: 顶点缓冲重建失败（%zu 顶点）\n", cap);
+            return false;
+        }
+        void* mapped = nullptr;
+        if (g_vk.vkMapMemory(device, s.vmem, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+            return false;
+        s.vmap = static_cast<VkVertex*>(mapped);
+        s.vbufBytes = static_cast<VkDeviceSize>(cap) * sizeof(VkVertex);
+        // 本帧的别名同步（flush 里用的是 d.vbuf / d.vmap）
+        vbuf = s.vbuf;
+        vmap = s.vmap;
+        vmem = s.vmem;
+        return true;
     }
 
     void switchBatch(Tex* tex) {
@@ -1931,6 +1990,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         }
         // 顶点攒在 CPU 缓冲里（见 verts 的注释），这里整块拷进映射的槽缓冲。
         if (vcount == 0 || !vmap) return;
+        if (!growVertBuf(vcount)) return;   // 本帧顶点比槽缓冲大：先扩容（不会每帧发生）
         std::memcpy(vmap, verts.data(), vcount * sizeof(VkVertex));
 
         g_vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);

@@ -1310,7 +1310,8 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                     pr->head, pr->pts.data(), pr->first.data(), pr->count.data(),
                     pr->closed.data(), static_cast<int>(pr->first.size()),
                     nfx, nfy, nfw, nfh, pspec,
-                    renderer.pathBandCache(node.id), renderer.pathCacheGen(), pbuf,
+                    renderer.pathBandCache(node.id), renderer.pathCacheGen(),
+                    renderer.pathBandsBudget(), pbuf,
                     [&](const binui::PaintBand* b, int n) { FillPaintBands(hdc, b, n, pbg); },
                     [&](float x0, float y0, float x1, float y1, float lw, uint32_t lc) {
                         HPEN hp = penFor(lw, lc);
@@ -1329,6 +1330,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                         SelectObject(hdc, ob);
                         DeleteObject(br);
                     });
+                renderer.commitPathBands(node.id);   // 缓存记账（全局预算用）
                 if (pen) DeleteObject(pen);
                 break;
             }

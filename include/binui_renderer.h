@@ -148,12 +148,38 @@ public:
     PathBandCacheEntry* pathBandCache(uint16_t nodeId) const {
         if (!pathBands_.count(nodeId) && pathBands_.size() >= kMaxPathCacheEntries) return nullptr;
         PathBandCacheEntry& e = pathBands_[nodeId];
-        if (e.gen != pathCacheGen_) { e.gen = pathCacheGen_; e.key = 0; e.bands.clear(); }
+        if (e.gen != pathCacheGen_) {
+            pathBandsTotal_ -= e.accounted;
+            e.gen = pathCacheGen_;
+            e.key = 0;
+            e.accounted = 0;
+            e.bands.clear();
+        }
         return &e;
     }
     uint64_t pathCacheGen() const { return pathCacheGen_; }
+    // 全局条带预算：给 PaintPathNode 的"这个节点还能占多少"。
+    // 单节点上限 16384 条（binui_paint.h），全局 65536 条（≈1.5 MB），
+    // 超预算的节点退回"每帧重算"，不会因为一屏图标就把内存吃穿。
+    size_t pathBandsBudget() const {
+        return pathBandsTotal_ >= kMaxPathCacheBandsTotal
+                   ? 0
+                   : kMaxPathCacheBandsTotal - pathBandsTotal_;
+    }
+    // 画完之后把这一节点实际缓存了多少条带记账（供 pathBandsBudget 用）
+    void commitPathBands(uint16_t nodeId) const {
+        auto it = pathBands_.find(nodeId);
+        if (it == pathBands_.end()) return;
+        PathBandCacheEntry& e = it->second;
+        const size_t now = e.bands.size();
+        pathBandsTotal_ += now;
+        if (pathBandsTotal_ >= e.accounted) pathBandsTotal_ -= e.accounted;
+        else pathBandsTotal_ = 0;
+        e.accounted = now;
+    }
     void invalidatePathBands() {
         pathBands_.clear();
+        pathBandsTotal_ = 0;
         ++pathCacheGen_;
     }
     // 该节点是否只是"裁剪容器"（CSS overflow:hidden）：可裁剪但不可滚动
@@ -625,7 +651,12 @@ private:
     // mutable：三个绘制后端拿到的是 const renderer，缓存属于"绘制期副作用"。
     mutable std::unordered_map<uint16_t, PathBandCacheEntry> pathBands_;
     mutable uint64_t pathCacheGen_ = 1;                  // 布局代数（变化即整表作废）
+    mutable size_t pathBandsTotal_ = 0;                  // 当前缓存里一共多少条带（全局预算）
     static constexpr size_t kMaxPathCacheEntries = 256;
+    // 全局条带预算：256 条 × 平均几百条带 ≈ 几十 MB 就太夸张了，所以按**条带数**封顶。
+    // 65536 条 ≈ 1.5 MB（PaintBand 24 字节），够 55 个 300×300 图标全缓存。
+    // 超了之后新节点不再入缓存（旧条目留着继续命中），不会出现"整表反复清空"的抖动。
+    static constexpr size_t kMaxPathCacheBandsTotal = 65536;
     // 边框宽度快照（与 paints_ 同下标）：ui_scale="fixed" 子树在等比缩放时按比例重设边框，
     // 每次都从这份原始值算，避免多次 setSize 累乘
     std::vector<std::array<uint8_t, 4>> designBorderW_;

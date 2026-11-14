@@ -656,7 +656,12 @@ constexpr int kMaxOpenRuns = 96;         // 跨行合并的"正在延伸的条�
 // 代价是**色阶可见**：levels 每级约 2 设备像素，放大到 400px 的高饱和度渐变能看出
 // 台阶。这与"不做抗锯齿、只用 fillRect"是同一条底线，不是这里偷懒。
 constexpr int kMaxGradSplits = 96;       // 单行条带内最多再切几段
-constexpr int kMaxCachedBands = 1024;    // 单节点缓存上限（超了就不缓存，省内存）
+// 单节点缓存上限。**别按"够用"去调小**：条带数 ≈ 节点高度 × 1~3（AA 逐行），
+// 300×300 的图标实测 1173 条 —— 以前的 1024 让这种图标一张就"永不缓存、每帧重算 199 µs"，
+// 而 240×240（935 条）刚好能缓存，阈值卡在两个相邻尺寸之间，等于随机。
+// 现在单节点放宽到 16384 条（≈384 KB），全局预算由渲染器的 pathBandsBudget() 把关，
+// 超预算的节点退回"不缓存"，不会把内存吃穿。
+constexpr int kMaxCachedBands = 16384;
 constexpr int kPathGradLevelsMin = 8;
 constexpr int kPathGradLevelsMax = 96;
 
@@ -1223,6 +1228,7 @@ inline int PaintPathStroke(const PaintPath& path, float width, uint8_t cap,
 struct PathBandCacheEntry {
     uint64_t key = 0;               // 0 = 空（永不命中：编译期 key 从 1 起）
     uint64_t gen = 0;               // 渲染器布局代数（作废判断）
+    size_t   accounted = 0;         // 已经计入渲染器全局预算的条带数（记账用）
     std::vector<PaintBand> bands;
 };
 
@@ -1270,6 +1276,7 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
                           const PathPaintSpec& spec,
                           PathBandCacheEntry* cache,   // 可为 nullptr（不缓存）
                           uint64_t cacheGen,
+                          size_t cacheBudget,          // 本节点最多还能占多少条带（渲染器给）
                           PathRenderBuffers& buf,
                           FillBands&& fillBands, LineFn&& line, DotFn&& dot) {
     if (!normPts || !first || !count || contours <= 0 || head.pointCount == 0) return;
@@ -1287,8 +1294,8 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
 
     if (head.flags & PATH_FILL) {
         // v19：先看缓存 —— 形状、尺寸、颜色、透明度都没变时直接重放上一次的条带。
-        // 命不中就算一遍并（在预算内）存下来；条带太多（>kMaxCachedBands）就不缓存，
-        // 免得一个 400px 大图把内存吃掉。
+        // 命不中就算一遍并（在预算内）存下来；单节点超过 kMaxCachedBands 条、或者吃掉
+        // 渲染器剩下的全局预算（cacheBudget）就不缓存 —— 少缓存只影响速度，不影响画面。
         const uint64_t key = cache ? MakePathBandKey(x, y, w, h, spec, head.flags) : 0;
         if (cache && cache->key == key && cache->gen == cacheGen && !cache->bands.empty()) {
             fillBands(cache->bands.data(), static_cast<int>(cache->bands.size()));
@@ -1325,7 +1332,9 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
             }
             if (n > 0) fillBands(buf.bands.data(), n);
             if (cache) {
-                if (n > 0 && n <= kMaxCachedBands) {
+                // 单节点 16384 条的安全上限 + 渲染器给的全局预算；任何一个不够就不缓存
+                // （不缓存只是每帧重算，不影响画对，所以这里是"宁可少缓存"）。
+                if (n > 0 && n <= kMaxCachedBands && static_cast<size_t>(n) <= cacheBudget) {
                     cache->bands.assign(buf.bands.data(), buf.bands.data() + n);
                     cache->key = key;
                     cache->gen = cacheGen;

@@ -95,7 +95,11 @@ struct RoundTex {
     uint64_t lastUse = 0;   // LRU 时钟（缓存上限 48 张）
 };
 
-constexpr size_t kMaxVerts = 100000; // 2MB 动态缓冲上限（约 16.6k 四边形）
+// 顶点缓冲：初始 10 万顶点（2 MB，约 1.66 万四边形），装不下就按需重建更大的，
+// 硬上限 100 万顶点（20 MB）。以前满了就丢图元 —— 一屏图标超过约 34 个就凭空少画，
+// 且不报错（docs/future.md P0-5）。
+constexpr size_t kMaxVerts = 100000;
+constexpr size_t kMaxVertsCeiling = 1u << 20;
 
 } // namespace
 
@@ -124,6 +128,7 @@ struct BinUID3D::Impl {
     ID3D11InputLayout* il = nullptr;
     ID3D11Buffer* cb = nullptr;
     ID3D11Buffer* vb = nullptr;
+    size_t vbCapVerts = 0;              // vb 目前能装多少顶点（扩容后跟着变大）
     ID3D11SamplerState* samPoint = nullptr;
     ID3D11SamplerState* samLinear = nullptr;
     ID3D11BlendState* blend = nullptr;
@@ -313,6 +318,7 @@ struct BinUID3D::Impl {
             std::fprintf(stderr, "[d3d11] VB failed\n");
             return false;
         }
+        vbCapVerts = kMaxVerts;
 
         D3D11_SAMPLER_DESC smd = {};
         smd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
@@ -638,9 +644,51 @@ struct BinUID3D::Impl {
     // 按指针偏移写。以前是 verts.insert(verts.end(), v, v+6)，每条图元都要做容量
     // 检查 + size 递增，和 GL/Vulkan 后端同一个坑（详见 binui_gl-gdi.cpp 的注释）。
     D3DVertex* vertRoom(size_t n) {
-        if (verts.size() < kMaxVerts) verts.resize(kMaxVerts);
-        if (vcount + n > verts.size()) return nullptr;
+        if (vcount + n > verts.size()) {
+            size_t cap = verts.size() ? verts.size() : kMaxVerts;
+            while (cap < vcount + n && cap < kMaxVertsCeiling) cap *= 2;
+            if (cap > kMaxVertsCeiling) cap = kMaxVertsCeiling;
+            if (vcount + n > cap) { warnVertsOverflow(); return nullptr; }
+            verts.resize(cap);
+        }
         return verts.data() + vcount;
+    }
+
+    static void warnVertsOverflow() {
+        static bool warned = false;
+        if (warned) return;
+        warned = true;
+        std::fprintf(stderr,
+                     "[d3d11] 顶点数撞上硬上限（%zu 个四边形/帧），后面的图元被丢弃，"
+                     "见 docs/future.md P0-5\n", kMaxVertsCeiling / 6);
+    }
+
+    // 顶点缓冲按需变大：D3D11 的动态 VB 尺寸建好就固定，所以只有"本帧顶点数超过
+    // 现有 VB 容量"时才重建一次（之后一直复用它，不会每帧重建）。
+    bool ensureVbCapacity(size_t needVerts) {
+        if (vb && vbCapVerts >= needVerts) return true;
+        size_t cap = vbCapVerts ? vbCapVerts : kMaxVerts;
+        while (cap < needVerts && cap < kMaxVertsCeiling) cap *= 2;
+        if (cap > kMaxVertsCeiling) cap = kMaxVertsCeiling;
+        if (cap < needVerts) { warnVertsOverflow(); return false; }
+
+        D3D11_BUFFER_DESC vbd = {};
+        vbd.ByteWidth = static_cast<UINT>(cap * sizeof(D3DVertex));
+        vbd.Usage = D3D11_USAGE_DYNAMIC;
+        vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        vbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        ID3D11Buffer* nb = nullptr;
+        if (FAILED(device->CreateBuffer(&vbd, nullptr, &nb))) {
+            std::fprintf(stderr, "[d3d11] VB 扩容失败（%zu 顶点）\n", cap);
+            return false;
+        }
+        if (vb) vb->Release();
+        vb = nb;
+        vbCapVerts = cap;
+        // 输入装配阶段引用的是缓冲对象本身，换了必须重新绑
+        UINT stride = sizeof(D3DVertex), off = 0;
+        ctx->IASetVertexBuffers(0, 1, &vb, &stride, &off);
+        return true;
     }
 
     void beginBatch() {
@@ -713,6 +761,7 @@ struct BinUID3D::Impl {
 
     void flushAll() {
         if (vcount == 0 || !vb) return;
+        if (!ensureVbCapacity(vcount)) return;   // 本帧顶点比 VB 大：先扩容（不会每帧发生）
         D3D11_MAPPED_SUBRESOURCE map = {};
         if (FAILED(ctx->Map(vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
         memcpy(map.pData, verts.data(), vcount * sizeof(D3DVertex));
