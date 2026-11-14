@@ -820,7 +820,9 @@ struct BinUID3D::Impl {
         if (idx < 0) { warnLayerLimit(); return false; }
         LayerFrame f;
         f.idx = idx; f.x = x; f.y = y; f.w = w; f.h = h; f.alpha = alpha;
-        f.prevTarget = msTarget;
+        // 父目标 = 外层图层的 RT（嵌套时不能一律回到主目标，否则内层会直接合成到主目标上，
+        // 外层那一次 alpha 就漏掉了 —— v0.16.12 用 6 层嵌套用例抓到，差 25% 像素）
+        f.prevTarget = layerStack.empty() ? msTarget : layers[layerStack.back().idx].rtv;
         LayerTarget& t = layers[idx];
         t.inUse = true;
         ID3D11RenderTargetView* rt = t.rtv;

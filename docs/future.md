@@ -88,25 +88,29 @@ C++17 写、需要时再挂一层 `extern "C"` 的 C 入口**。"是 API 就得�
 重叠区会叠深，而且"内容没变也要每帧重算条带 + 全量重传顶点"没有任何改善。两件事都指向同一个
 设施：**离屏图层**。
 
-**状态（0.16.11）**：接口与 **GL / D3D11 实现已完成**（层作用域已修：owner 自己的底色/边框也进层，
-否则合成时拿"已经被淡过一次的父底"当背景，整体暗一档）。只对"绘制顺序连续、覆盖 ≥2 个节点"的
-半透明子树建层，池化窗口大小的纹理 + FBO（上限 4 层）。**Vulkan 还没打通**（试过复用主 render
-pass + 层自己的 framebuffer：合成后只剩最后一个子块且不透明、父底消失；代码已回退），走
-`pushLayer` 的 false 分支（= 0.16.8 的逐元素近似）。层缓存（P0-1）仍是空白。
+**状态（0.16.12）**：接口与 **GL / D3D11 / Vulkan 三个后端全部完成**，三端像素逐位相同。
 
-**VK 的下一步建议**：这轮又试了一版"独立的单附件层 render pass + 独立 pipeline"（单采样、
-`loadOp=CLEAR` 透明、`finalLayout=SHADER_READ_ONLY`），层内容验证是对的（批次 dump：背景/子块
-三笔都在、scissor 正确；把合成四边形改成不透明后子块颜色确实来自层），但**仍有两个没解释的现象**：
+- 0.16.9 GL：离屏 FBO + 纹理（按窗口大小，池 4 层）；
+- 0.16.10 D3D11：第二张 `offTex` + SRV + RTV；
+- 0.16.11 层作用域修正：owner 自己的底色/边框也进层（否则合成时拿"已经被淡过一次的父底"
+  当背景，整体暗一档）；
+- 0.16.12 Vulkan：**整条渲染路径改用 dynamic rendering**（`vkCmdBeginRendering` /
+  `vkCmdEndRendering` + `VK_PIPELINE_RENDERING_CREATE_INFO`），绕开 render pass /
+  framebuffer 的附件布局交互，一次打通。细节与实测见
+  [`docs/vulkan_design.md`](vulkan_design.md) §7.13。
+
+只对"绘制顺序连续、覆盖 ≥2 个节点"的半透明子树建层；拿不到动态渲染的老驱动上
+`pushLayer` 返回 false，退回逐元素近似（像素与 0.16.8 完全一致）。层缓存（P0-1）仍是空白。
+
+**为什么 render pass 那条路走不通**（记下来，免得以后又想"用 render pass 不是更简单"）：
+两轮尝试都卡在同一组现象上 ——
 
 1. 主 pass 重启后（`EndRenderPass` → 再 `BeginRenderPass`，attachment0 是 `LOAD_OP_LOAD`），
-   重启之前画到主目标上的内容（页面底色、层外的图元）**消失** —— LOAD 没起到预期效果；
+   重启之前画到主目标上的内容（页面底色、层外的图元）**消失**；
 2. 层里 **owner 自己那一笔**（父元素的底色）在最终画面里不出现，而它的子节点正常。
 
-这两条都指向"MSAA 附件 + 中途重启 render pass"这一组行为。下一轮建议**绕开 render pass 对象**：
-设备是 Vulkan 1.4，直接用 **dynamic rendering**（`vkCmdBeginRendering` / `vkCmdEndRendering`，
-配 `VK_PIPELINE_RENDERING_CREATE_INFO` 建 pipeline），切目标就是 end/begin 两条命令，
-没有 framebuffer / render pass 的布局交互。改动集中在建 pipeline 与 beginFrame/图层三处，
-比继续跟 render pass 较劲干净。
+换了动态渲染之后两条现象**同时消失**，说明它们确实是"MSAA 附件 + 中途重启 render pass"
+这一组行为的问题，不是层内容本身画错。
 
 **接口**（加在 `IBinUIGfx`，与 `setTextSubpixel` 一样"默认不实现"）：
 
@@ -122,13 +126,13 @@ virtual void popLayer() {}
 
 **后端实现要点**：
 
-- **GL**：离屏 FBO + 纹理，按层盒尺寸分配、池化复用。`pushLayer` = `flushAll()` → 绑层 FBO →
+- **GL**：离屏 FBO + 纹理，按窗口尺寸分配、池化复用。`pushLayer` = `flushAll()` → 绑层 FBO →
   clear 透明；`popLayer` = `flushAll()` → 绑回原 FBO → 用白色纹理画一个带 alpha 的四边形。
 - **D3D11**：第二张 `offTex` + SRV，`OMSetRenderTargets` 切目标；pop 时用同一条像素着色器采样
   层纹理（现有 `emitQuad` 已经有 SRV 通路）。
-- **VK**：最麻烦的一个 —— 层 image 要自己的 render pass，而主 render pass 现在是
-  `LOAD_OP_CLEAR`，中途切回来必须改成 `LOAD_OP_LOAD`；命令缓冲里"切 pass → 画层 → 切回"三段。
-  排在最后做，做完之前 VK 走 `pushLayer` 的 false 分支（与今天一致）。
+- **VK**：动态渲染下 `endRendering` → `beginRendering(层图)` → 画 → `endRendering` →
+  `beginRendering(主目标, LOAD)` → 合成四边形。层图在 `COLOR_ATTACHMENT ↔ SHADER_READ_ONLY`
+  之间往返，主目标在每层进出各一次（代价见 vulkan_design §7.13.6）。
 
 **层缓存**（P0-1 的本体）：同一个层作用域在"内容签名没变"时，直接重放上次的图层纹理，跳过
 条带生成与顶点上传。签名 = 子树里每个节点的矩形 + 颜色 + 文本 + 滚动偏移 + 动画值；任一项变化
@@ -171,7 +175,7 @@ virtual void popLayer() {}
 |---|---|---|---|
 | 5 | `box-shadow` / `text-shadow` | 编译期就告警"不支持"（`binui_compiler.cpp:4894`）；卡片浮起的阴影现在靠叠半透明圆角假造 | binUI（先做单遍盒式模糊） |
 | 6 | **对角渐变是假的** | `linear-gradient(135deg, …)` 按**垂直渐变**近似（`binui_paint.h` 头注释自己写着）；轴对齐条带画不出斜向过渡 | binUI（斜向条带，条带数约翻倍）或 binGPU（渐变 shader） |
-| 7 | **组透明度是错的**（这是 bug，不是缺功能） | ✅ **已修（0.16.8 级联 + 0.16.9 GL 图层）**：0.16.8 让父元素 opacity 级联到子树（`drawOpacity()`/`drawState().opacity` 返回级联值）；0.16.9 在 GL 上加了真正的离屏图层（`pushLayer/popLayer`），重叠区不再叠深 —— 实测重叠区是纯蓝 @50%，逐元素模式是 `(99,35,163)` 混色。**剩下的**：D3D11 / Vulkan 还没实现图层（走 false 分支 = 0.16.8 的近似），层缓存（P0-1）也没做 | binUI → bin2d（离屏合成，和 P0-1 是同一套设施） |
+| 7 | **组透明度是错的**（这是 bug，不是缺功能） | ✅ **已修（0.16.8 级联 + 0.16.9 GL / 0.16.10 D3D11 / 0.16.12 VK 图层）**：0.16.8 让父元素 opacity 级联到子树（`drawOpacity()`/`drawState().opacity` 返回级联值）；三个 GPU 后端都有真正的离屏图层（`pushLayer/popLayer`），重叠区不再叠深 —— 实测重叠区是纯蓝 @50%，逐元素模式是 `(99,35,163)` 混色；三端像素逐位相同。**剩下的**：GDI 后端仍是逐元素近似（GDI 没有离屏合成面），层缓存（P0-1）也没做 | binUI → bin2d（离屏合成，和 P0-1 是同一套设施） |
 | 8 | 图片能力薄 | 只有 bilinear：无 mip（大图缩小闪）、无圆角裁剪、无 tint、无九宫格 | binUI |
 | 9 | 文字/图片不参与仿射 | `fillRoundedXf` 注释明说"文字/图片不参与"，旋转文字、旋转贴图做不了（有意，位图会糊） | binUI（或 bin2d 的图层变换） |
 | 10 | SVG 语义缺一半 | `mask` / `clipPath` / `pattern` / `marker` / `filter` 不支持（`docs/svg.md` 已列，编译告警） | 不做（见 P2） |
@@ -191,6 +195,9 @@ virtual void popLayer() {}
 
 1. **离屏合成 → 组透明度 + 层缓存**：一套设施同时结掉 P1-7（正确性 bug）和 P0-1（数量级差距），
    这是唯一一个"差十倍"的地方，优先。
+   - ~~组透明度~~ —— **三端已完成（GL 0.16.9 / D3D11 0.16.10 / VK 0.16.12）**，剩下的只有 GDI
+     与「层缓存」那一半。
+   - 下一步就做**层缓存**（P0-1）：静态页面上有 opacity 组的场景，每帧仍在重画层内容。
 2. ~~顶点预算别静默丢几何（P0-5）~~ —— **已完成（0.16.7）**：三端按需扩容到 100 万顶点，
    撞硬上限才告警一次。
 3. ~~去掉路径缓存的 1024 硬上限（P0-2）~~ —— **已完成（0.16.7）**：单节点 16384 + 全局 65536 条预算。
@@ -206,7 +213,7 @@ virtual void popLayer() {}
 | 扫描线路径填充 + 3×3 覆盖 AA | `include/binui_paint.h` §路径填充 | 完整，抗锯齿已落地 |
 | 字形图集与排版 | `src/backends/binui_glyph_atlas.h` | 完整（含亚像素定位开关） |
 | 后端契约（7 原语 + 裁剪栈） | `src/backends/binui_gfx.h` | 四套实现：GDI / GL / VK / D3D11 |
-| 像素基准与三端 diff | `docs/pixels/` + `make pixels` / `pixels-vk` / `pixels-d3d11` | 10 个用例，GL/VK/D3D 三方比 |
+| 像素基准与三端 diff | `docs/pixels/` + `make pixels` / `pixels-vk` / `pixels-d3d11` | 10 个用例，GL/VK/D3D 三方比（含 `opacity` 组透明度用例） |
 
 也就是说：**bin2d 缺的不是"画的能力"，是"组织画面的能力"**。
 

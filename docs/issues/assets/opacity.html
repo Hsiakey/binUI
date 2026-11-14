@@ -1,0 +1,23 @@
+<app_window width="640" height="320" resizable="false">
+<html width="640" height="320" bg="#FFFFFF">
+  <!-- 组透明度（v0.16.12 起的像素基准）
+       判据：两个子块互相重叠时，重叠区必须是"上层子块 × 组 alpha over 背景"，
+       而不是两个 50% 叠加两次（后者会暗一档、偏色）。四块分别覆盖：
+         A 重叠子块 + 父底色      B 嵌套图层（0.5 × 0.5）
+         C overflow 裁剪里的组     D 旋转元素 + 组透明度 -->
+  <div style="position:absolute;left:20px;top:20px;width:280px;height:120px;background:#00C000;opacity:0.5">
+    <div style="position:absolute;left:20px;top:20px;width:100px;height:80px;background:#FF0000"></div>
+    <div style="position:absolute;left:80px;top:20px;width:100px;height:80px;background:#0000FF"></div>
+  </div>
+  <div style="position:absolute;left:340px;top:20px;width:280px;height:120px;background:#00C000;opacity:0.5">
+    <div style="position:absolute;left:40px;top:20px;width:180px;height:80px;background:#FF0000;opacity:0.5"></div>
+  </div>
+  <div style="position:absolute;left:20px;top:180px;width:280px;height:120px;background:#000000;overflow:hidden;opacity:0.5">
+    <div style="position:absolute;left:40px;top:20px;width:180px;height:80px;background:#FFFFFF"></div>
+    <div style="position:absolute;left:-20px;top:-10px;width:80px;height:60px;background:#FFFF00"></div>
+  </div>
+  <div style="position:absolute;left:340px;top:180px;width:280px;height:120px;background:#00A0FF;opacity:0.5;transform:rotate(12deg)">
+    <div style="position:absolute;left:40px;top:30px;width:120px;height:60px;background:#FF4000"></div>
+  </div>
+</html>
+</app_window>

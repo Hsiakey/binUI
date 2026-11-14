@@ -335,6 +335,9 @@ BINUI_PERF=1 build-mingw/bin/examples/svgdemo_vk.exe                        # �
 - 每帧 `loadOp = LOAD`，只对脏矩形 `vkCmdClearAttachments`（scissor 生效）；
 - `resize` 才重建；
 - present：`vkCmdResolveImage(msaa → target)`。
+- v0.16.12 落地记录：这条"显式 resolve"是**图层上线后**才真正按设计做的。之前用 render pass 时
+  靠 attachment 的 `finalLayout` 顺带 resolve；接上图层后一帧内主 pass 会进出多次，每次
+  `vkCmdEndRenderPass` 都隐式 resolve 一遍全屏 —— 改成帧末一次 `vkCmdResolveImage`（见 §7.13）。
 
 ### 5.5 三路 present
 
@@ -1486,6 +1489,92 @@ NEAREST 会把弧线量化成 texel 台阶 —— 每帧台阶位置变一次，
 
 
 
+
+---
+
+## 7.13 Vulkan 图层：整条渲染路径改用动态渲染（2026-11-14，v0.16.12）
+
+### 7.13.1 为什么要动渲染骨架
+
+组透明度（`opacity` 作用于整棵子树）只有一条正路：把"节点 + 子树"画进离屏目标，
+再整组乘一次 alpha 合成回来。逐元素乘 alpha 在**子元素互相重叠**时必然错 —— 重叠区会被
+乘两次（父色暗一档、子色偏色）。
+
+一帧内切换渲染目标这件事，render pass 做起来代价很高：要重建 pass + framebuffer，
+而且 v0.16.11 的两次尝试都卡在附件布局的隐式交互上（记录在 [`docs/future.md`](future.md)）：
+
+| 尝试 | 做法 | 结果 |
+|---|---|---|
+| #1 | 复用主 pass + 层 framebuffer（MSAA + resolve） | 合成结果不透明、只有最后一个子元素可见、父底色丢失 |
+| #2 | 层单独一条单附件 pass + 自己的 pipeline | 层的批次内容经查是对的，但父底色不出现；主 pass 重启后**重启前的内容全部消失**（`LOAD_OP_LOAD` 没保住） |
+
+结论：不是参数没调对，是这条路和这台驱动的 render pass 实现互相不兼容。于是改走
+**动态渲染**（Vulkan 1.3 核心）：`vkCmdBeginRendering` / `vkCmdEndRendering` +
+`VK_PIPELINE_RENDERING_CREATE_INFO`。没有 pass/framebuffer 对象，切目标就是两条命令，
+附件布局不再被隐式转换（全部由我们显式 barrier 记账），一次通过。
+
+### 7.13.2 改动清单（`src/backends/binui_vk.cpp`）
+
+- 设备创建时查询并启用 `VkPhysicalDeviceVulkan13Features::dynamicRendering`；
+  实例版本协商到 1.3（老 loader 没有 `vkEnumerateInstanceVersion` 就留 1.0，
+  这时 `useDynamic=false`，退回 render pass 路径，只是没有图层 —— 像素不变）。
+  `BINUI_VK_DYNRENDER=0` 可强制关掉，用来做 A/B 对照。
+- 两条管线：主目标（4x MSAA）+ 层目标（单采样）。除"采样数 + 目标形式"外状态完全一致，
+  同一份 `VkGraphicsPipelineCreateInfo` 改 `rasterizationSamples` 建第二条。
+- `beginMainPass(resume)` / `endMainPass()` / `beginLayerPass()` / `endLayerPass()` 收在一处，
+  render pass 与动态渲染的写法差异只出现在这里。
+- 布局记账：MSAA 图常驻 `COLOR_ATTACHMENT_OPTIMAL`；resolve 图在 `TRANSFER_DST`（帧末
+  `vkCmdResolveImage` 写它）↔ `TRANSFER_SRC`（读回/blit 读它）之间往返；层图在
+  `COLOR_ATTACHMENT_OPTIMAL`（被画）↔ `SHADER_READ_ONLY_OPTIMAL`（被合成四边形采样）之间往返。
+- 层的 `renderArea` 只取**层框**：clear 的代价跟着元素面积走，不是窗口面积
+  （窗口大小的层目标全窗 clear 每层要多花 ~0.9 Mpx 的填充）。
+- 合成用**整窗四边形 + UV 0..1**：层图和主目标像素一一对应，这样就是严格 1:1 采样，
+  层框落在非整数坐标也不会糊（GL/D3D11 用层框坐标做 UV，非整数时会轻微插值）。
+
+### 7.13.3 顺手抓到的一个真 bug：一帧多次 flush 时顶点缓冲被覆盖
+
+`flush()` 原来每次都把顶点从 0 开始 memcpy 进映射的槽缓冲 —— 因为**以前一帧只 flush 一次**
+（在 `present()` 里），所以从来没暴露。接上图层后一帧要 flush 多次，后面那次 memcpy 会把
+前面所有 draw 的顶点数据覆盖成最后一批，现象是**整帧只剩最后画的那几个四边形**（第一次跑
+图层用例时满屏白，只有一个小黄块）。
+
+修法：`vcount` 跨 flush 累加不归零，只把 `[flushBase, vcount)` 这段追加进缓冲；
+帧内扩容淘汰的旧顶点缓冲挂进 `Slot::retiredVb`，等本槽 fence 之后再释放
+（否则已经录进命令缓冲的 draw 会指向一张已销毁的缓冲）。
+
+### 7.13.4 顺带修掉的 D3D11 嵌套层
+
+`pushLayer` 一律把 `prevTarget` 记成主目标，嵌套时内层会直接合成到主目标上，
+外层那一次 alpha 就漏掉了。6 层嵌套用例差 25% 像素。改成"父目标 = 外层层的 RT"。
+
+### 7.13.5 验证
+
+| 项 | 结果 |
+|---|---|
+| `make pixels`（GDI golden，10 用例，含新增 `opacity`） | 10/10 **0 差异** |
+| `make pixels-vk`（VK ↔ GL，14 用例 + 4 demo + 3 anim） | 全部 **0 差异**（含 `opacity`） |
+| `make pixels-d3d11` | 全部 0 差异 |
+| `make vk-window`（交换链 / GDI 读回 / 透明 / 脏矩形 / resize / 全屏守卫） | 全部 0 差异 |
+| `make vk-stress`（含用 opacity 页面单独压一次） | 显存记账归零、无泄漏、像素 0 差异 |
+| `BINUI_VK_DYNRENDER=0` A/B（features 900×932、svgaa） | 两条路径**逐像素完全相同** |
+| 期望值直方图（420×320 三层页面） | 只红区 (255,127,127)、重叠区 (127,127,255)、父底色 (127,255,127) —— 逐元素近似下这三处是 (191,127,63) / (95,63,159) / 不变，差别肉眼可辨 |
+
+### 7.13.6 代价（`BINUI_VK_PERF=1`，`vk_window --frames 300`）
+
+| 页面 | 无图层 | 有图层 | 差 |
+|---|---|---|---|
+| features 900×932（本来就没有 opacity：动态渲染 vs 原 render pass 路径） | 0.182 ms/帧（render pass） | 0.170 ms/帧（动态渲染） | 持平（录制 0.060 vs 0.058） |
+| 420×320，3 个层 | 0.111 ms/帧 | 0.148 ms/帧 | +0.037 ms（≈12 µs/层） |
+| 1280×720，12 个层（最坏合成场景） | 0.180 ms/帧 | 0.39 ms/帧 | +0.21 ms（≈17 µs/层） |
+
+每层的固定代价主要是"主 pass 进出各一次"带来的 4x MSAA 附件 LOAD/STORE（1280×720 一次
+≈14.7 MB 带宽），不是层本身。所以层数越多越贵，但 12 层的合成场景也只占 16.7 ms 预算的 2.4%。
+
+### 7.13.7 已知未做
+
+- 层目标还是**窗口大小**（与 GL/D3D11 一致）：1280×720 一层 3.7 MB，池子 4 层最多 14.7 MB。
+  改成"元素大小"能省显存和 clear 带宽，但要连带改 UV/坐标换算，留作后续。
+- 层内容**没有缓存**（`docs/future.md` P0-1）：静态页面上有 opacity 组的场景，每帧仍然重画一遍层内容。
 
 ---
 

@@ -78,6 +78,70 @@ P2 四条明确不填（GPU 路径光栅、文字次像素、完整 SVG 滤镜�
 false = 后端退回逐元素模式）、渲染器侧的分组规则、三端实现要点（GL/D3D11 直接做，VK 要改主
 render pass 的 loadOp 所以排最后）、层缓存的失效条件与验收线先写清楚，动手时照这个来。
 
+## [0.16.12] - 2026-11-14
+
+Vulkan 的组透明度打通：**整条渲染路径从 render pass 换成 dynamic rendering**，
+图层在三个 GPU 后端上终于齐了；顺带抓到一个"一帧多次 flush 时顶点缓冲被覆盖"的真 bug。
+
+### 改 — Vulkan 改用动态渲染（`vkCmdBeginRendering` / `vkCmdEndRendering`）
+
+图层要求"一帧内切渲染目标"，而 render pass 那条路在这台驱动上已经证明走不通（0.16.11 记录：
+主 pass 重启后 `LOAD_OP_LOAD` 没保住内容、层里 owner 那一笔不出现）。动态渲染没有
+pass/framebuffer 对象，切目标就是两条命令，附件布局全由显式 barrier 记账 —— 两条现象同时消失。
+
+- 设备创建时查询并启用 `VkPhysicalDeviceVulkan13Features::dynamicRendering`；实例版本协商到 1.3，
+  老 loader（没有 `vkEnumerateInstanceVersion`）上 `useDynamic=false`，退回原 render pass 路径，
+  **像素与原实现逐位相同**，只是没有图层。
+- `BINUI_VK_DYNRENDER=0` 可强制关掉，用来做 A/B 对照（两条路径实测逐像素相同）。
+- 两条管线：主目标（4x MSAA）+ 层目标（单采样），除"采样数 + 目标形式"外状态完全一致。
+- MSAA resolve 改回设计里写的显式 `vkCmdResolveImage`（一帧一次）。原来靠 render pass 的
+  `finalLayout` 顺带 resolve，接上图层后每进出一次主 pass 就隐式 resolve 一遍全屏。
+- 就绪日志多一项：「动态渲染开（组透明度可用）/关（组透明度退回逐元素近似）」。
+
+### 修 — 一帧多次 flush 会把顶点缓冲覆盖掉（图层一上线就满屏白）
+
+`flush()` 原来每次从 0 重拷顶点到映射的槽缓冲，因为**以前一帧只 flush 一次**（在 `present()` 里）
+所以从没暴露。图层要在一帧内 flush 多次，后一次 memcpy 把前面所有 draw 的顶点覆盖成最后一批 ——
+现象是整帧只剩最后画的那几个四边形。改成 `vcount` 跨 flush 累加、只追加 `[flushBase, vcount)`；
+帧内扩容淘汰的旧顶点缓冲挂进 `Slot::retiredVb`，等本槽 fence 之后再释放。
+
+### 修 — D3D11 嵌套图层漏乘外层 alpha
+
+`pushLayer` 一律把 `prevTarget` 记成主目标，嵌套时内层直接合成到主目标上，外层那一次 alpha 就
+漏了（6 层嵌套用例差 25% 像素）。改成"父目标 = 外层图层的 RT"。
+
+### 加 — 组透明度的像素基准用例 `opacity`
+
+`docs/issues/assets/opacity.html` + `docs/pixels/opacity.png`，进 `PIXEL_CASES`。四块场景：
+重叠子块、嵌套 0.5×0.5、`overflow:hidden` 里的组、`transform:rotate` + 组透明度。
+判据是"重叠区必须是上层子块 × 组 alpha over 背景"，逐元素近似会在这里暗一档、偏色。
+
+实测（420×320 三层页面）：只红区 `(255,127,127)`、红蓝重叠 `(127,127,255)`、父底色 `(127,255,127)`；
+逐元素近似是 `(191,127,63)` / `(95,63,159)`。
+
+### 性能 — 动态渲染本身不慢，每层有固定成本
+
+`BINUI_VK_PERF=1`，`vk_window --frames 300`：
+
+| 页面 | 基线 | 结果 |
+|---|---|---|
+| features 900×932（本来没有 opacity） | render pass 0.182 ms/帧 | 动态渲染 0.170 ms/帧（持平） |
+| 420×320，3 个层 | 0.111 ms/帧 | 0.148 ms/帧 |
+| 1280×720，12 个层（最坏合成场景） | 0.180 ms/帧 | 0.39 ms/帧（占 16.7 ms 预算 2.4%） |
+
+每层的固定代价主要是主 pass 进出各一次带来的 4x MSAA 附件 LOAD/STORE（1280×720 一次 ≈14.7 MB
+带宽），不是层本身。层的 `renderArea` 只取层框，所以 clear 的代价跟着元素面积走。
+
+### 验收
+
+- `make pixels`（GDI 基准，现在 10 个用例）：10/10 0 差异；
+- `make pixels-vk` / `pixels-d3d11`（14 用例 + 4 demo + 3 anim）：全部 0 差异；
+- `make vk-window`（交换链 / GDI 读回 / 透明窗 / 脏矩形 / resize / 全屏守卫）：全部 0 差异；
+- `make vk-stress`（含用 `opacity` 页面单独压一次）：显存记账归零、无泄漏、像素 0 差异；
+- `make test` 全绿，`check_examples` 16 示例 0 问题。
+
+细节与实测表：[`docs/vulkan_design.md`](docs/vulkan_design.md) §7.13。
+
 ## [0.16.11] - 2026-11-14
 
 把 0.16.9/0.16.10 的图层作用域修对：**owner 自己的底色/边框也必须进层**。

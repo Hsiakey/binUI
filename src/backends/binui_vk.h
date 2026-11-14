@@ -75,6 +75,11 @@ public:
 
     int  pushClip(float x, float y, float w, float h) override;
     void popClipTo(int depth) override;
+
+    // 组透明度（v0.16.12）：把"节点 + 子树"画进窗口大小的离屏层，再整组乘一次 alpha 合成。
+    // 需要 Vulkan 1.3 动态渲染；拿不到就返回 false，调用方退回逐元素乘 alpha。
+    bool pushLayer(float x, float y, float w, float h, float alpha) override;
+    void popLayer() override;
     void setFontName(const char* name) override;
 
     // ---- 离屏读回（vk_shot 用）：BGRA8 prepremultiplied，行序自上而下 ----

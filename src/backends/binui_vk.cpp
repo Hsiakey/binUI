@@ -120,6 +120,10 @@ struct VkApi {
     BINUI_VK_FN(vkDestroyPipeline)
     BINUI_VK_FN(vkCmdBeginRenderPass)
     BINUI_VK_FN(vkCmdEndRenderPass)
+    // Vulkan 1.3 动态渲染（可选）：拿不到就退回 render pass 路径。
+    // 图层必须靠它 —— 见 Impl::useDynamic 的说明。
+    BINUI_VK_FN(vkCmdBeginRendering)
+    BINUI_VK_FN(vkCmdEndRendering)
     BINUI_VK_FN(vkCmdBindPipeline)
     BINUI_VK_FN(vkCmdBindVertexBuffers)
     BINUI_VK_FN(vkCmdBindDescriptorSets)
@@ -131,9 +135,11 @@ struct VkApi {
     BINUI_VK_FN(vkCmdPipelineBarrier)
     BINUI_VK_FN(vkCmdCopyImageToBuffer)
     BINUI_VK_FN(vkCmdCopyBufferToImage)
+    BINUI_VK_FN(vkCmdResolveImage)
     BINUI_VK_FN(vkCmdClearColorImage)
 
     // ---- WSI（只在窗口模式加载；离屏模式下这些指针必须允许为空）----
+    PFN_vkGetPhysicalDeviceFeatures2 vkGetPhysicalDeviceFeatures2 = nullptr;
     PFN_vkDestroySurfaceKHR vkDestroySurfaceKHR = nullptr;
     PFN_vkCreateWin32SurfaceKHR vkCreateWin32SurfaceKHR = nullptr;
     PFN_vkGetPhysicalDeviceSurfaceSupportKHR vkGetPhysicalDeviceSurfaceSupportKHR = nullptr;
@@ -196,6 +202,9 @@ struct VkApi {
                 get("vkGetPhysicalDeviceMemoryProperties"));
         vkCreateDevice = reinterpret_cast<PFN_vkCreateDevice>(get("vkCreateDevice"));
         vkGetDeviceQueue = reinterpret_cast<PFN_vkGetDeviceQueue>(get("vkGetDeviceQueue"));
+        // 可选：动态渲染的特性查询（1.1 起才有；拿不到就不启用动态渲染）
+        vkGetPhysicalDeviceFeatures2 = reinterpret_cast<PFN_vkGetPhysicalDeviceFeatures2>(
+            get("vkGetPhysicalDeviceFeatures2"));
         return vkEnumeratePhysicalDevices && vkCreateDevice && vkGetDeviceQueue;
     }
 
@@ -268,11 +277,20 @@ struct VkApi {
         BINUI_VK_LOAD(vkCmdPipelineBarrier)
         BINUI_VK_LOAD(vkCmdCopyImageToBuffer)
         BINUI_VK_LOAD(vkCmdCopyBufferToImage)
+        BINUI_VK_LOAD(vkCmdResolveImage)
         BINUI_VK_LOAD(vkCmdClearColorImage)
         BINUI_VK_LOAD(vkFreeDescriptorSets)
 #undef BINUI_VK_LOAD
         // 可选：present_wait（拿不到就留空，改用 present + DwmFlush）
         vkWaitForPresentKHR = reinterpret_cast<PFN_vkWaitForPresentKHR>(get("vkWaitForPresentKHR"));
+        // 可选：动态渲染。1.3 是核心名，1.1/1.2 的驱动只有 KHR 后缀名 —— 两个都试一次。
+        vkCmdBeginRendering = reinterpret_cast<PFN_vkCmdBeginRendering>(get("vkCmdBeginRendering"));
+        if (!vkCmdBeginRendering)
+            vkCmdBeginRendering =
+                reinterpret_cast<PFN_vkCmdBeginRendering>(get("vkCmdBeginRenderingKHR"));
+        vkCmdEndRendering = reinterpret_cast<PFN_vkCmdEndRendering>(get("vkCmdEndRendering"));
+        if (!vkCmdEndRendering)
+            vkCmdEndRendering = reinterpret_cast<PFN_vkCmdEndRendering>(get("vkCmdEndRenderingKHR"));
         return true;
     }
 
@@ -417,6 +435,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         VkDeviceSize vbufBytes = 0;              // vbuf 的容量（扩容后跟着变大）
         VkVertex* vmap = nullptr;
         std::vector<std::pair<VkBuffer, VkDeviceMemory>> staging;   // 等本槽 fence 后释放
+        std::vector<std::pair<VkBuffer, VkDeviceMemory>> retiredVb; // 帧内扩容淘汰的顶点缓冲
         bool submitted = false;   // 已提交、fence 还没等（只有一帧会处于这个状态）
     };
     Slot slots[kSlots];
@@ -459,6 +478,20 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     VkDeviceMemory readbackMem = VK_NULL_HANDLE;
     void* readbackMapped = nullptr;
 
+    // ---- 动态渲染（Vulkan 1.3，v0.16.12）----
+    // 为什么整条渲染路径改走 vkCmdBeginRendering / vkCmdEndRendering：
+    // 组透明度的图层必须在**一帧内**切换渲染目标（主目标 → 层目标 → 合成 → 回主目标）。
+    // 用 render pass 做这件事要重建 pass + framebuffer，v0.16.11 实测两个坑
+    // （见 docs/future.md）：主 pass 重启后 LOAD_OP_LOAD 没保住已有内容、层里的第一笔不出现。
+    // 动态渲染没有 render pass / framebuffer 对象，切目标就是两条命令，附件布局也不再被
+    // 隐式转换（全由我们显式 barrier 管），把那一整类交互一次性绕开。
+    // 拿不到 1.3 动态渲染时（老驱动）useDynamic=false，退回原来的 render pass 路径，
+    // 只是没有图层 —— 组透明度退回逐元素近似，别的像素完全不变。
+    bool useDynamic = false;
+    // 实例创建时实际拿到的 API 版本：动态渲染的特性结构体只有 1.3 实例才"名正言顺"，
+    // 低版本实例上启用它属于路径未定义，所以上面 useDynamic 还要再看这个值。
+    uint32_t instApiVersion = VK_API_VERSION_1_0;
+
     // ---- 窗口 / 交换链（hwnd != nullptr 时才有）----
     // 设计选择：渲染目标始终是 MSAA + resolve 这套离屏图（与离屏模式完全同一条路径），
     // present 时才把 resolve 图 blit 到交换链图像。这样窗口模式与离屏模式的像素必然一致，
@@ -491,6 +524,10 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     VkDescriptorSetLayout dsLayout = VK_NULL_HANDLE;
     VkPipelineLayout pipeLayout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
+    // 层管线：与主管线只差"采样数"（层目标是单采样）和 render pass 绑定方式。
+    // flush() 里按 activePipeline 绑，所以同一套 vertex/descriptor 代码两边共用。
+    VkPipeline pipelineLayer = VK_NULL_HANDLE;
+    VkPipeline activePipeline = VK_NULL_HANDLE;
     VkDescriptorPool dsPool = VK_NULL_HANDLE;
 
     // ---- 采样器 ----
@@ -545,7 +582,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // std::vector 的逐顶点 push_back（容量检查 + size 递增）：缓冲一次 resize 到位，
     // 写顶点就是一个指针 + 偏移。
     std::vector<VkVertex> verts;                 // 本帧顶点（预分配到 kMaxVertices）
-    size_t vcount = 0;                           // 本帧已写顶点数
+    size_t vcount = 0;                           // 本帧已写顶点数（跨 flush 累加，不归零）
+    size_t flushBase = 0;                        // 本帧已拷进 GPU 缓冲的顶点数（见 flush）
     size_t frameVerts = 0;                       // 上一帧最终提交的顶点数（perf 用）
 
     struct Batch {
@@ -561,6 +599,23 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     int scissorDepth = 0;
     bool vsync = true;
     bool ready = false;
+
+    // ---- 图层（v0.16.12）：组透明度的离屏合成 ----
+    // 与 GL/D3D11 同一套设计：每层一块**窗口大小**的 RGBA 目标（这里复用 Tex：
+    // image + view + descriptor set），所以坐标不用换算、UV 就是 0..1 的整窗映射。
+    // 层内容单采样 —— 图元全是不带 MSAA 的 quad（圆角/描边是解析式覆盖率模板），
+    // 少这层 MSAA 逐像素没有差别，但省掉一整张 1280×720×4x 的显存和 resolve 带宽。
+    // 池子上限 4 层，超了 pushLayer 返回 false，调用方退回逐元素乘 alpha。
+    struct LayerTarget { Tex tex; bool inUse = false; };
+    std::vector<LayerTarget> layers;
+    struct LayerFrame {
+        int idx = -1;
+        int l = 0, t = 0, r = 0, b = 0;          // 层框（与进入时的裁剪求交）
+        int pl = 0, pt = 0, pr = 0, pb = 0;      // 进入前的裁剪，退出时还原
+        float alpha = 1.0f;
+    };
+    std::vector<LayerFrame> layerStack;
+    static constexpr int kMaxLayers = 4;
 
     // ---- 显存记账（P4：区分"我们漏了"和"驱动池化"）----
     // 只统计 vkAllocateMemory/vkFreeMemory 这一对，swapchain 图像由驱动持有，不在账上。
@@ -653,6 +708,13 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             freeMem(kv.second);
         }
         s.staging.clear();
+        // 帧内扩容淘汰下来的旧顶点缓冲：命令缓冲里已经录好的 draw 还指着它们，
+        // 必须等 fence 之后才真释放（见 growVertBuf）
+        for (auto& kv : s.retiredVb) {
+            g_vk.vkDestroyBuffer(device, kv.first, nullptr);
+            freeMem(kv.second);
+        }
+        s.retiredVb.clear();
     }
 
     // 等这一槽的 GPU 工作跑完，并回收它的 staging
@@ -903,6 +965,39 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         presentWaitFeat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PRESENT_WAIT_FEATURES_KHR;
         presentWaitFeat.presentWait = VK_TRUE;
 
+        // ---- 动态渲染特性：先问支持，再从 pNext 链里正式启用 ----
+        // 光有函数指针不够：Vulkan 要求 dynamicRendering 特性在设备创建时显式打开，
+        // 否则 vkCmdBeginRendering 是未定义行为（有的驱动能用、有的直接丢命令）。
+        // BINUI_VK_DYNRENDER=0 可强制关掉，用来做 A/B 对比（两条路径必须逐像素相同）。
+        //
+        // ★ 设备函数表要到 loadDeviceFns（vkCreateDevice 之后）才填，但"要不要启用这个特性"
+        // 必须在建设备时决定 —— 所以这里先用实例的 getInstanceProcAddr 单独探一次。
+        auto probeDevFn = [&](const char* name, const char* altName) {
+            void* p = reinterpret_cast<void*>(g_vk.getInstanceProcAddr(instance, name));
+            if (!p && altName) p = reinterpret_cast<void*>(g_vk.getInstanceProcAddr(instance, altName));
+            return p;
+        };
+        const bool hasDynFns = probeDevFn("vkCmdBeginRendering", "vkCmdBeginRenderingKHR") != nullptr &&
+                               probeDevFn("vkCmdEndRendering", "vkCmdEndRenderingKHR") != nullptr;
+        bool wantDynamic = std::getenv("BINUI_VK_DYNRENDER") == nullptr &&
+                           instApiVersion >= VK_API_VERSION_1_3 && hasDynFns;
+        VkPhysicalDeviceVulkan13Features vk13{};
+        vk13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+        if (wantDynamic && g_vk.vkGetPhysicalDeviceFeatures2) {
+            VkPhysicalDeviceVulkan13Features q{};
+            q.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+            VkPhysicalDeviceFeatures2 f2{};
+            f2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+            f2.pNext = &q;
+            g_vk.vkGetPhysicalDeviceFeatures2(physical, &f2);
+            useDynamic = q.dynamicRendering == VK_TRUE;
+            if (!useDynamic)
+                std::fprintf(stderr, "[vk] 设备不支持 dynamicRendering，图层关闭（用 render pass 路径）\n");
+        } else if (wantDynamic) {
+            std::fprintf(stderr, "[vk] 取不到 vkGetPhysicalDeviceFeatures2，图层关闭\n");
+        }
+        if (useDynamic) vk13.dynamicRendering = VK_TRUE;
+
         std::vector<const char*> exts{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
         const void* dciPNext = nullptr;
         if (windowMode && hasDeviceExt(VK_KHR_PRESENT_ID_EXTENSION_NAME) &&
@@ -913,6 +1008,10 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             presentWaitFeat.pNext = nullptr;
             dciPNext = &presentIdFeat;
             presentWaitAvailable = true;
+        }
+        if (useDynamic) {
+            vk13.pNext = const_cast<void*>(dciPNext);
+            dciPNext = &vk13;
         }
         VkDeviceCreateInfo dci{};
         dci.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -927,6 +1026,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         if (!g_vk.loadDeviceFns(instance)) return false;
         // 扩展启用但函数取不到 → 当作不可用，别让它变成空指针调用
         if (presentWaitAvailable && !g_vk.vkWaitForPresentKHR) presentWaitAvailable = false;
+        if (useDynamic && (!g_vk.vkCmdBeginRendering || !g_vk.vkCmdEndRendering)) useDynamic = false;
         return true;
     }
 
@@ -957,7 +1057,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
                            samples, msaaImage, msaaMem, VK_IMAGE_ASPECT_COLOR_BIT))
             return fail("msaa image");
         if (!createImage2D(w, h, kColorFormat,
-                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT,
+                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                               VK_IMAGE_USAGE_TRANSFER_DST_BIT,   // TRANSFER_DST：动态渲染的显式 resolve
                            VK_SAMPLE_COUNT_1_BIT, resolveImage, resolveMem, VK_IMAGE_ASPECT_COLOR_BIT))
             return fail("resolve image");
         msaaView = makeView(msaaImage, kColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
@@ -966,6 +1067,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
 
         // render pass：attachment0 = MSAA 颜色（LOAD，present 前不 swap），
         // attachment1 = resolve 目标（DONT_CARE 加载、STORE、末尾转 TRANSFER_SRC）
+        // 动态渲染路径不需要这两个对象 —— 直接跳过（见 useDynamic 的说明）。
+        if (!useDynamic) {
         VkAttachmentDescription att[2]{};
         att[0].format = kColorFormat;
         att[0].samples = samples;
@@ -981,7 +1084,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         att[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         att[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
         att[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-        att[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        att[1].initialLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;   // 与下面的首次转换一致
         att[1].finalLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
 
         VkAttachmentReference colorRef{};
@@ -1031,6 +1134,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         fbi.height = static_cast<uint32_t>(h);
         fbi.layers = 1;
         VK_CHECK(g_vk.vkCreateFramebuffer(device, &fbi, nullptr, &framebuffer), "vkCreateFramebuffer");
+        }   // !useDynamic
 
         // 读回 buffer（host visible）
         // 尺寸取"渲染目标"与"交换链"两者的较大者：DPI 缩放/跨显示器移动时 swapchain 的
@@ -1047,16 +1151,26 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         if (g_vk.vkMapMemory(device, readbackMem, 0, VK_WHOLE_SIZE, 0, &readbackMapped) != VK_SUCCESS)
             return fail("map readback");
 
-        // 首帧前把两张图转进 render pass 需要的布局
+        // 首帧前把两张图转进各自的常驻布局。
+        // 动态渲染没有 render pass 帮忙做隐式转换，所以布局全程由我们自己记账：
+        //   MSAA 图   → COLOR_ATTACHMENT_OPTIMAL（始终）
+        //   resolve 图 → COLOR_ATTACHMENT_OPTIMAL（帧内）↔ TRANSFER_SRC_OPTIMAL（present 拷出）
         VkCommandBufferBeginInfo bi{};
         bi.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
         VK_CHECK(g_vk.vkBeginCommandBuffer(cmd, &bi), "vkBeginCommandBuffer");
         barrier(msaaImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                 0, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
                 VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-        barrier(resolveImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                0, VK_ACCESS_TRANSFER_READ_BIT,
-                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        if (useDynamic) {
+            // 常驻 TRANSFER_DST：每帧末的 vkCmdResolveImage 写它，再转到 TRANSFER_SRC 读回
+            barrier(resolveImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                    0, VK_ACCESS_TRANSFER_WRITE_BIT,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        } else {
+            barrier(resolveImage, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    0, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        }
         VK_CHECK(g_vk.vkEndCommandBuffer(cmd), "vkEndCommandBuffer");
         VkSubmitInfo si{};
         si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -1797,7 +1911,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
 
         VkPipelineMultisampleStateCreateInfo ms{};
         ms.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
-        ms.rasterizationSamples = samples;
+        ms.rasterizationSamples = samples;   // 逐管线覆盖（层管线是单采样）
         ms.minSampleShading = 1.0f;
 
         VkPipelineColorBlendAttachmentState cba{};
@@ -1832,10 +1946,27 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         gp.pColorBlendState = &cb;
         gp.pDynamicState = &dy;
         gp.layout = pipeLayout;
-        gp.renderPass = renderPass;
-        gp.subpass = 0;
-        const VkResult pr = g_vk.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp,
-                                                          nullptr, &pipeline);
+        // 动态渲染的管线不绑 render pass，改成用 pNext 声明附件格式
+        VkPipelineRenderingCreateInfo prci{};
+        VkFormat colorFmt = kColorFormat;
+        if (useDynamic) {
+            prci.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+            prci.colorAttachmentCount = 1;
+            prci.pColorAttachmentFormats = &colorFmt;
+            gp.pNext = &prci;
+        } else {
+            gp.renderPass = renderPass;
+            gp.subpass = 0;
+        }
+
+        // 两条管线：主目标（可能 4x MSAA）+ 层目标（单采样）。除采样数外状态完全一致，
+        // 所以同一份 VkGraphicsPipelineCreateInfo 改一下 ms 就建第二条。
+        auto build = [&](VkSampleCountFlagBits sc, VkPipeline& out) {
+            ms.rasterizationSamples = sc;
+            return g_vk.vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &out);
+        };
+        VkResult pr = build(samples, pipeline);
+        if (pr == VK_SUCCESS && useDynamic) pr = build(VK_SAMPLE_COUNT_1_BIT, pipelineLayer);
         g_vk.vkDestroyShaderModule(device, vs, nullptr);
         g_vk.vkDestroyShaderModule(device, fs, nullptr);
         if (pr != VK_SUCCESS) {
@@ -1900,9 +2031,10 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         if (cap > kMaxVerticesCeiling) cap = kMaxVerticesCeiling;
         if (cap < needVerts) { warnVertsOverflow(); return false; }
         if (s.vbuf) {
+            // 不能立刻销毁：本帧已经 flush 出去的 draw 还引用着它（一帧内可以多次 flush），
+            // 挂到 retiredVb 上等本槽 fence 之后由 freeStaging 统一回收。
             g_vk.vkUnmapMemory(device, s.vmem);
-            g_vk.vkDestroyBuffer(device, s.vbuf, nullptr);
-            g_vk.vkFreeMemory(device, s.vmem, nullptr);
+            s.retiredVb.emplace_back(s.vbuf, s.vmem);
             s.vbuf = VK_NULL_HANDLE;
             s.vmem = VK_NULL_HANDLE;
             s.vmap = nullptr;
@@ -1981,21 +2113,28 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             std::fprintf(stderr, "[vk][trace] flush: verts=%zu batches=%zu cur.count=%u\n",
                          vcount, batches.size(), cur.count);
         }
-        if (batches.empty()) {
-            if (cur.count > 0) batches.push_back(cur);
-            cur = Batch{};
-        } else if (cur.count > 0) {
-            batches.push_back(cur);
-            cur = Batch{};
-        }
+        if (cur.count > 0) batches.push_back(cur);
+        cur = Batch{};
         // 顶点攒在 CPU 缓冲里（见 verts 的注释），这里整块拷进映射的槽缓冲。
-        if (vcount == 0 || !vmap) return;
-        if (!growVertBuf(vcount)) return;   // 本帧顶点比槽缓冲大：先扩容（不会每帧发生）
-        std::memcpy(vmap, verts.data(), vcount * sizeof(VkVertex));
+        //
+        // ★ 一帧内可以 flush 多次（图层进出目标时各一次），所以**只能追加，不能从 0 重拷**：
+        // 顶点缓冲是帧共享的，前面已经录进命令缓冲的 draw 都指着它。以前一帧只 flush 一次，
+        // 从 0 重拷看不出问题；接上图层后，后一次 flush 的 memcpy 会把前面所有 draw 的
+        // 数据覆盖成最后一批 —— 现象是"整帧只剩最后画的那几个四边形"（v0.16.12 抓到）。
+        if (vcount == flushBase || !vmap) { batches.clear(); return; }
+        // 本帧顶点比槽缓冲大：先扩容（扩容会把旧缓冲挂到 staging 上等 fence 后再释放，
+        // 否则已经录进命令缓冲的 draw 会指向一张已销毁的缓冲）
+        if (!growVertBuf(vcount)) { batches.clear(); return; }
+        std::memcpy(vmap + flushBase, verts.data() + flushBase,
+                    (vcount - flushBase) * sizeof(VkVertex));
 
-        g_vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        g_vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              activePipeline ? activePipeline : pipeline);
         VkDeviceSize off = 0;
         g_vk.vkCmdBindVertexBuffers(cmd, 0, 1, &vbuf, &off);
+        // 正在画进图层时，每条批次再和层框求交 —— 层外的内容不该出现在层里。
+        // 层内若发生 popClipTo（把裁剪放宽回整窗），这条兜住它，不让图元越出层框。
+        const LayerFrame* lf = layerStack.empty() ? nullptr : &layerStack.back();
         for (const Batch& b : batches) {
             if (b.count == 0) continue;
             VkRect2D sc{};
@@ -2003,6 +2142,15 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
                          static_cast<int32_t>(std::max(0, b.sy))};
             sc.extent = {static_cast<uint32_t>(std::max(0, std::min(b.sw, w - b.sx))),
                          static_cast<uint32_t>(std::max(0, std::min(b.sh, h - b.sy)))};
+            if (lf) {
+                const int32_t l = std::max<int32_t>(sc.offset.x, lf->l);
+                const int32_t t = std::max<int32_t>(sc.offset.y, lf->t);
+                const int32_t r = std::min<int32_t>(sc.offset.x + static_cast<int32_t>(sc.extent.width), lf->r);
+                const int32_t bb = std::min<int32_t>(sc.offset.y + static_cast<int32_t>(sc.extent.height), lf->b);
+                sc.offset = {l, t};
+                sc.extent = {static_cast<uint32_t>(std::max(0, r - l)),
+                             static_cast<uint32_t>(std::max(0, bb - t))};
+            }
             if (sc.extent.width == 0 || sc.extent.height == 0) continue;
             Tex* tex = b.tex ? b.tex : &white;
             // 上传留下的 TRANSFER_DST 必须在这里转成只读：绘制是 flush 时才录进
@@ -2014,8 +2162,260 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             g_vk.vkCmdDraw(cmd, b.count * 3, 1, b.first, 0);   // count 是三角形数，first 是顶点索引
         }
         batches.clear();
+        flushBase = vcount;   // 已提交到 GPU 的部分，下一次 flush 只追加后面的
         frameVerts = vcount;
-        vcount = 0;
+    }
+
+    // ============================================================
+    // 渲染目标切换（主目标 / 图层目标）
+    // ============================================================
+    // 收在一处的两个 helper：动态渲染和 render pass 两种写法的差异只在这里出现。
+    // 视角/推入常量每条 pass 开头重设一次（切 pass 后保持，但不靠保持）。
+
+    void setPassState() {
+        VkViewport vp{};
+        vp.x = 0; vp.y = 0;
+        vp.width = static_cast<float>(w);
+        vp.height = static_cast<float>(h);
+        vp.minDepth = 0.0f;
+        vp.maxDepth = 1.0f;
+        g_vk.vkCmdSetViewport(cmd, 0, 1, &vp);
+        float vs[2] = {static_cast<float>(w), static_cast<float>(h)};
+        if (pipeLayout)
+            g_vk.vkCmdPushConstants(cmd, pipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 8, vs);
+    }
+
+    // 附件写→写/读→写 的显式依赖：动态渲染没有 subpass 依赖表，同一张图在一帧内
+    // 被两次 beginRendering 当附件用时（主目标进出图层、外层图层嵌套）必须自己发 barrier。
+    void barrierAttachment(VkImage img) {
+        const VkAccessFlags rw = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                                 VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier(img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, rw, rw,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    }
+
+    VkRenderingAttachmentInfo makeAttachment(VkImageView view, VkImageLayout layout,
+                                            VkAttachmentLoadOp loadOp) {
+        VkRenderingAttachmentInfo ca{};
+        ca.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        ca.imageView = view;
+        ca.imageLayout = layout;
+        ca.loadOp = loadOp;
+        ca.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        return ca;
+    }
+
+    VkRenderingInfo makeRenderingInfo(VkRenderingAttachmentInfo* ca, int l = 0, int t = 0,
+                                     int r = -1, int b = -1) {
+        if (r < 0) r = w;
+        if (b < 0) b = h;
+        VkRenderingInfo ri{};
+        ri.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        ri.renderArea.offset = {l, t};
+        ri.renderArea.extent = {static_cast<uint32_t>(std::max(0, r - l)),
+                                static_cast<uint32_t>(std::max(0, b - t))};
+        ri.layerCount = 1;
+        ri.colorAttachmentCount = 1;
+        ri.pColorAttachments = ca;
+        return ri;
+    }
+
+    // resume=true：本帧内第二次进入主目标（从图层回来）—— 内容要保住，加一条依赖
+    void beginMainPass(bool resume = false) {
+        activePipeline = pipeline;
+        if (!useDynamic) {
+            VkRenderPassBeginInfo rpb{};
+            rpb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+            rpb.renderPass = renderPass;
+            rpb.framebuffer = framebuffer;
+            rpb.renderArea.offset = {0, 0};
+            rpb.renderArea.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h)};
+            g_vk.vkCmdBeginRenderPass(cmd, &rpb, VK_SUBPASS_CONTENTS_INLINE);
+            setPassState();
+            return;
+        }
+        if (resume) {
+            barrierAttachment(msaaImage);
+        }
+        VkRenderingAttachmentInfo ca =
+            makeAttachment(msaaView, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                           VK_ATTACHMENT_LOAD_OP_LOAD);   // 累积帧：进出图层都要保住已有内容
+        // ★ 这里**不挂 resolveImageView**：一帧内主 pass 可能进进出出好几次（每个图层两次），
+        // 每次 EndRendering 都隐式 resolve 一遍 4x MSAA 全屏，实测 12 个图层的页面里
+        // GPU 侧多花 0.17 ms/帧。改成帧末用 vkCmdResolveImage 显式 resolve 一次。
+        VkRenderingInfo ri = makeRenderingInfo(&ca);
+        g_vk.vkCmdBeginRendering(cmd, &ri);
+        setPassState();
+    }
+
+    void endMainPass() {
+        if (useDynamic) g_vk.vkCmdEndRendering(cmd);
+        else g_vk.vkCmdEndRenderPass(cmd);
+    }
+
+    // ---- 图层目标 ----
+    static void warnLayerLimit() {
+        static bool warned = false;
+        if (warned) return;
+        warned = true;
+        std::fprintf(stderr, "[vk] 图层超过 %d 层，多出来的退回逐元素乘 alpha（减少嵌套即可）\n",
+                     kMaxLayers);
+    }
+
+    int acquireLayer() {
+        for (size_t i = 0; i < layers.size(); i++)
+            if (!layers[i].inUse) return static_cast<int>(i);
+        if (static_cast<int>(layers.size()) >= kMaxLayers) return -1;
+        LayerTarget t;
+        if (!createImage2D(w, h, kColorFormat,
+                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                           VK_SAMPLE_COUNT_1_BIT, t.tex.image, t.tex.mem,
+                           VK_IMAGE_ASPECT_COLOR_BIT))
+            return -1;
+        t.tex.w = w;
+        t.tex.h = h;
+        // 线性采样：合成四边形是整窗 1:1 映射，两种过滤器结果完全相同；选 LINEAR 是为了
+        // 以后若改成"按层框 UV 合成"（省填充率）时不会突然糊掉。
+        t.tex.linear = true;
+        t.tex.needClear = false;   // 内容由 loadOp=CLEAR 负责，不走上传路径
+        t.tex.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        t.tex.view = makeView(t.tex.image, kColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+        if (!t.tex.view || !allocTexDs(t.tex)) {
+            std::fprintf(stderr, "[vk] 图层目标创建失败（%dx%d）\n", w, h);
+            freeTex(t.tex);
+            return -1;
+        }
+        layers.push_back(t);
+        return static_cast<int>(layers.size() - 1);
+    }
+
+    void destroyLayers() {
+        for (LayerTarget& t : layers) freeTex(t.tex);
+        layers.clear();
+        layerStack.clear();
+    }
+
+    // 异常路径（上一帧有层没闭合）：层图内容不重要，池子的占用标记必须复位
+    void abandonLayers() {
+        for (const LayerFrame& f : layerStack)
+            if (f.idx >= 0 && f.idx < static_cast<int>(layers.size())) layers[f.idx].inUse = false;
+        layerStack.clear();
+    }
+
+    // 层图布局：附件（被写）↔ 只读（被合成四边形采样）
+    void layerToAttachment(int idx, bool resume) {
+        Tex& t = layers[idx].tex;
+        if (t.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+            if (resume) barrierAttachment(t.image);
+            return;
+        }
+        VkAccessFlags srcA = 0;
+        VkPipelineStageFlags srcS = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        if (t.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            srcA = VK_ACCESS_SHADER_READ_BIT;
+            srcS = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        }
+        barrier(t.image, t.layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, srcA,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, srcS,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        t.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+
+    void layerToSampled(int idx) {
+        Tex& t = layers[idx].tex;
+        if (t.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return;
+        barrier(t.image, t.layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        t.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    void beginLayerPass(int idx, bool resume, const LayerFrame& f) {
+        VkRenderingAttachmentInfo ca =
+            makeAttachment(layers[idx].tex.view, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                           resume ? VK_ATTACHMENT_LOAD_OP_LOAD : VK_ATTACHMENT_LOAD_OP_CLEAR);
+        // 层从"全透明"开始：CLEAR 覆盖整个 renderArea（= 层框，见下），
+        // 所以层框内的起点一定是透明的 —— 合成时乘 alpha 不会带上脏内容。
+        ca.clearValue.color.float32[0] = 0.0f;
+        ca.clearValue.color.float32[1] = 0.0f;
+        ca.clearValue.color.float32[2] = 0.0f;
+        ca.clearValue.color.float32[3] = 0.0f;
+        // renderArea 只取层框：clear 的代价跟着**元素面积**走，而不是窗口面积
+        //（1280×720 的窗口大小层目标，全窗 clear 每层要多花 ~0.9 Mpx 的填充）。
+        // 层框外既没人写也没人采样（合成四边形按层框 scissor），所以不用管它。
+        VkRenderingInfo ri = makeRenderingInfo(&ca, f.l, f.t, f.r, f.b);
+        g_vk.vkCmdBeginRendering(cmd, &ri);
+        activePipeline = pipelineLayer;
+        setPassState();
+    }
+
+    void endLayerPass() { g_vk.vkCmdEndRendering(cmd); }
+
+    // 组透明度：把"一个节点 + 它的子树"画进离屏层，再整组乘一次 alpha 合成回来。
+    // 逐元素乘 alpha 做不到这件事 —— 重叠的孩子会被乘两次（父色暗一档、子色偏色），
+    // 那正是 v0.16.8 留下、v0.16.9/v0.16.10 用图层修掉的近似。
+    bool pushLayer(float x, float y, float lw, float lh, float alpha) {
+        if (!ready || !useDynamic || !cmdOpen) return false;
+        if (!(lw > 0.0f) || !(lh > 0.0f) || alpha >= 0.999f) return false;
+        if (static_cast<int>(layerStack.size()) >= kMaxLayers) { warnLayerLimit(); return false; }
+        // 顺序很重要：先把主目标上攒着的图元录到**当前**目标，再去切目标 ——
+        // 反过来的话它们会画进刚清空的层里，然后被合成四边形整块盖掉。
+        flush();
+        const int idx = acquireLayer();
+        if (idx < 0) { warnLayerLimit(); return false; }
+        LayerFrame f;
+        f.idx = idx;
+        f.alpha = alpha;
+        f.pl = clipL; f.pt = clipT; f.pr = clipR; f.pb = clipB;
+        // 层框 = 元素框 ∩ 当前裁剪（层外的东西本来也不该显示）
+        f.l = std::max(f.pl, static_cast<int>(std::floor(x)));
+        f.t = std::max(f.pt, static_cast<int>(std::floor(y)));
+        f.r = std::min(f.pr, static_cast<int>(std::ceil(x + lw)));
+        f.b = std::min(f.pb, static_cast<int>(std::ceil(y + lh)));
+        if (layerStack.empty()) endMainPass();
+        else endLayerPass();
+        layerToAttachment(idx, false);
+        beginLayerPass(idx, false, f);
+        clipL = f.l; clipT = f.t; clipR = f.r; clipB = f.b;   // 层内只画层框里的内容
+        layers[idx].inUse = true;
+        layerStack.push_back(f);
+        return true;
+    }
+
+    void popLayer() {
+        if (layerStack.empty()) return;
+        flush();                       // 层内容落盘（flush 按批次 scissor 裁剪，已在层框内）
+        const LayerFrame f = layerStack.back();
+        layerStack.pop_back();
+        endLayerPass();
+        layerToSampled(f.idx);
+        // 回到父目标：还有外层就回外层，否则回主目标
+        if (layerStack.empty()) beginMainPass(true);
+        else beginLayerPass(layerStack.back().idx, true, layerStack.back());
+        clipL = f.pl; clipT = f.pt; clipR = f.pr; clipB = f.pb;
+        // 合成：整窗四边形 + UV 0..1。层图与主目标像素一一对应，整窗映射就是 1:1 采样
+        //（层框是整数像素与否都不影响），层框外的层图内容是未定义的，所以 scissor 必须
+        // 卡在层框上 —— 省填充率，也让"层内被 popClipTo 放宽的裁剪"不会漏到层外。
+        const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
+        // 诊断开关：BINUI_VK_LAYER_OPAQUE=1 时合成按 alpha=1 画，用来直接看"层里到底存了什么"
+        //（判断"层内容是空的"还是"合成算错了"，比猜快得多）
+        static const bool dbgOpaque = std::getenv("BINUI_VK_LAYER_OPAQUE") != nullptr;
+        const float aFinal = dbgOpaque ? 1.0f : a;
+        uint32_t col = (static_cast<uint32_t>(aFinal * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
+        // 着色器算 (t.rgb * vcol.rgb, t.a * vcol.a)：层里存的是预乘色，
+        // 顶点色不预乘的话 rgb 会被整块加进去（和 GL/D3D11 同一个坑）。
+        Premult(col);
+        const int sl = clipL, st = clipT, sr = clipR, sb = clipB;
+        clipL = f.l; clipT = f.t; clipR = f.r; clipB = f.b;
+        emitQuad(0.0f, 0.0f, static_cast<float>(w), static_cast<float>(h), 0.0f, 0.0f, 1.0f, 1.0f,
+                 col, &layers[f.idx].tex);
+        flush();
+        clipL = sl; clipT = st; clipR = sr; clipB = sb;
+        layers[f.idx].inUse = false;
+        switchBatch(&white);           // 把当前纹理换回纯白（flush 已清空 cur）
     }
 };
 
@@ -2048,6 +2448,16 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
     app.pEngineName = "binUI";
     app.engineVersion = VK_MAKE_VERSION(0, 11, 4);
     app.apiVersion = VK_API_VERSION_1_0;
+    // 实例版本协商：1.3 才允许把 VkPhysicalDeviceVulkan13Features 挂进设备创建链
+    //（动态渲染 = 图层的前提）。老 loader 没有 vkEnumerateInstanceVersion，直接留 1.0。
+    auto enumInstVer = reinterpret_cast<PFN_vkEnumerateInstanceVersion>(
+        g_vk.getInstanceProcAddr(VK_NULL_HANDLE, "vkEnumerateInstanceVersion"));
+    if (enumInstVer) {
+        uint32_t supported = VK_API_VERSION_1_0;
+        if (enumInstVer(&supported) == VK_SUCCESS && supported >= VK_API_VERSION_1_3)
+            app.apiVersion = VK_API_VERSION_1_3;
+    }
+    d.instApiVersion = app.apiVersion;
     const char* instExt[] = {VK_KHR_SURFACE_EXTENSION_NAME, VK_KHR_WIN32_SURFACE_EXTENSION_NAME};
     VkInstanceCreateInfo ici{};
     ici.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
@@ -2151,9 +2561,9 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
 
     d.ready = true;
     d.coversMonitor = d.windowMode ? d.clientCoversMonitor() : false;
-    std::fprintf(stderr, "[vk] %s就绪 %dx%d（MSAA %dx%s）\n", d.windowMode ? "窗口" : "离屏",
+    std::fprintf(stderr, "[vk] %s就绪 %dx%d（MSAA %dx，动态渲染%s）\n", d.windowMode ? "窗口" : "离屏",
                  width, height, static_cast<int>(d.samples),
-                 d.windowMode ? (d.useSwapchain ? "，交换链呈现" : "，读回呈现") : "");
+                 d.useDynamic ? "开（组透明度可用）" : "关（组透明度退回逐元素近似）");
     if (d.windowMode && d.useSwapchain)
         std::fprintf(stderr, "[vk] 交换链 %u 图，呈现模式 %s，present_wait %s\n",
                      d.swapImageCount, d.vsync ? "FIFO(vsync)" : "不等待垂直同步",
@@ -2175,6 +2585,7 @@ void BinUIVK::shutdown() {
     d.useSwapchain = false;
     d.windowMode = false;
     d.hwnd = nullptr;
+    d.destroyLayers();   // 层图先放（它们的 Tex 也占 descriptor set 和显存）
     // 图集纹理要先释放（自己 new 出来的 Tex）
     d.atlas.clear();
     d.atlas.setHost(nullptr);
@@ -2197,6 +2608,7 @@ void BinUIVK::shutdown() {
     if (d.samplerLinear) g_vk.vkDestroySampler(d.device, d.samplerLinear, nullptr);
     d.samplerNearest = d.samplerLinear = VK_NULL_HANDLE;
     if (d.pipeline) g_vk.vkDestroyPipeline(d.device, d.pipeline, nullptr);
+    if (d.pipelineLayer) g_vk.vkDestroyPipeline(d.device, d.pipelineLayer, nullptr);
     if (d.pipeLayout) g_vk.vkDestroyPipelineLayout(d.device, d.pipeLayout, nullptr);
     if (d.dsLayout) g_vk.vkDestroyDescriptorSetLayout(d.device, d.dsLayout, nullptr);
     // 双槽：每槽自己一套顶点缓冲 / fence / 信号量
@@ -2239,6 +2651,8 @@ void BinUIVK::resize(int width, int height) {
     g_vk.vkDeviceWaitIdle(d.device);
     d.w = width;
     d.h = height;
+    // 层目标是窗口大小的：尺寸一变就得全放掉，下次 pushLayer 按新尺寸重建
+    d.destroyLayers();
     // 先重建交换链：readback buffer 要按"渲染目标与交换链的较大者"分配，
     // 反过来（先建目标后建交换链）会让 DPI 缩放时缓冲区偏小（P4 修的隐患）。
     if (d.windowMode && d.useSwapchain) {
@@ -2288,6 +2702,7 @@ void BinUIVK::beginFrame(const void* clipRect) {
     }
     d.clipL = l; d.clipT = t; d.clipR = r; d.clipB = b;
     d.scissorDepth = 0;
+    d.abandonLayers();   // 上一帧若有层没闭合（异常路径），池子占用标记在这里复位
 
     // ---- 换到本帧的槽 ----
     // 这一槽上次提交是**两帧前**，present() 的串行化点已经等过一帧，这里通常立即返回；
@@ -2314,24 +2729,8 @@ void BinUIVK::beginFrame(const void* clipRect) {
     // 放在 render pass 之前，于是"先上传后绘制"在同一帧内天然成立，不需要预热帧。
     d.drainPendingUploads();
 
-    VkRenderPassBeginInfo rpb{};
-    rpb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-    rpb.renderPass = d.renderPass;
-    rpb.framebuffer = d.framebuffer;
-    rpb.renderArea.offset = {0, 0};
-    rpb.renderArea.extent = {static_cast<uint32_t>(d.w), static_cast<uint32_t>(d.h)};
-    rpb.clearValueCount = 0;
-    g_vk.vkCmdBeginRenderPass(d.cmd, &rpb, VK_SUBPASS_CONTENTS_INLINE);
-
-    VkViewport vp{};
-    vp.x = 0; vp.y = 0;
-    vp.width = static_cast<float>(d.w);
-    vp.height = static_cast<float>(d.h);
-    vp.minDepth = 0.0f;
-    vp.maxDepth = 1.0f;
-    g_vk.vkCmdSetViewport(d.cmd, 0, 1, &vp);
-    float vs[2] = {static_cast<float>(d.w), static_cast<float>(d.h)};
-    if (d.pipeLayout) g_vk.vkCmdPushConstants(d.cmd, d.pipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 8, vs);
+    // 开始主目标（动态渲染或 render pass，见 beginMainPass）
+    d.beginMainPass(false);
 
     // 脏矩形清成底色（与 GL 的 beginFrame 同语义：不透明画布清白）
     VkClearAttachment ca{};
@@ -2350,6 +2749,7 @@ void BinUIVK::beginFrame(const void* clipRect) {
 
     d.ensureVertBuf(d.slots[d.slotIdx]);
     d.vcount = 0;
+    d.flushBase = 0;
     d.batches.clear();
     d.cur = Impl::Batch{};
     d.switchBatch(&d.white);
@@ -2413,8 +2813,40 @@ void BinUIVK::present() {
     if (!d.ready || !d.recording) return;
     const double tPresent = d.perfOn ? VkNowMs() : 0.0;
     Impl::Slot& slot = d.slots[d.slotIdx];
+    // 防御：调用方忘了 popLayer 时先把层收干净 —— 否则主 pass 还开着，
+    // 后面的 readback/blit 就都录在 pass 里面（整帧作废）。
+    while (!d.layerStack.empty()) d.popLayer();
     d.flush();
-    g_vk.vkCmdEndRenderPass(d.cmd);
+    d.endMainPass();
+    if (d.useDynamic) {
+        // 动态渲染没有 render pass 的 finalLayout / 隐式 resolve，这两步自己来：
+        //   1) MSAA → 单采样：显式 vkCmdResolveImage（一帧只做一次，不是每个 pass 一次）
+        //   2) resolve 图转到 TRANSFER_SRC，交给下面的读回 / blit
+        if (d.samples != VK_SAMPLE_COUNT_1_BIT) {
+            d.barrier(d.msaaImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                      VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT);
+            VkImageResolve rgn{};
+            rgn.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            rgn.srcSubresource.layerCount = 1;
+            rgn.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            rgn.dstSubresource.layerCount = 1;
+            rgn.extent = {static_cast<uint32_t>(d.w), static_cast<uint32_t>(d.h), 1};
+            g_vk.vkCmdResolveImage(d.cmd, d.msaaImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                                   d.resolveImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                                   &rgn);
+            // MSAA 图转回附件布局给下一帧用；resolve 图转到 TRANSFER_SRC 给拷贝/blit
+            d.barrier(d.msaaImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                      VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                      VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            d.barrier(d.resolveImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                      VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                      VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                      VK_PIPELINE_STAGE_TRANSFER_BIT);
+        }
+    }
 
     // ---- 呈现前的 surface 复查（P4：DPI 变化 / 跨显示器移动 / 最小化）----
     // caps.currentExtent 由 surface 决定，客户区尺寸只是我们的"期望"；两者不一致说明
@@ -2528,11 +2960,15 @@ void BinUIVK::present() {
                       VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT);
         }
     }
-    // 拷完把 resolve 图转回 render pass 的写入布局（下一帧 subpass 会再 resolve 进去）
-    d.barrier(d.resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-              VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
-              VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-              VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    // 拷完把 resolve 图转回下一帧的写入布局。两条路径的"常驻布局"不同：
+    //   动态渲染 → TRANSFER_DST_OPTIMAL（下一帧由 vkCmdResolveImage 写它）
+    //   render pass → COLOR_ATTACHMENT_OPTIMAL（下一帧 subpass 会再 resolve 进去）
+    const VkImageLayout resolveRest =
+        d.useDynamic ? VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL
+                     : VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    d.barrier(d.resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, resolveRest,
+              VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+              VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
     g_vk.vkEndCommandBuffer(d.cmd);
     d.recording = false;
     d.cmdOpen = false;
@@ -2830,6 +3266,18 @@ void BinUIVK::drawImage(uint16_t index, float x, float y, float w, float h) {
     auto it = d.images.find(index);
     if (it == d.images.end() || !it->second.view) return;
     d.emitQuad(x, y, x + w, y + h, 0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFF, &it->second);
+}
+
+// ---- 组透明度：离屏图层（v0.16.12）----
+// 语义与 GL/D3D11 后端逐条一致：层的范围 = 一个节点 + 它的整棵子树，
+// 画进窗口大小的离屏目标后按 alpha 一次合成回来。
+// 拿不到动态渲染（useDynamic=false，老驱动）时返回 false，调用方退回逐元素乘 alpha。
+bool BinUIVK::pushLayer(float x, float y, float w, float h, float alpha) {
+    return impl_ ? impl_->pushLayer(x, y, w, h, alpha) : false;
+}
+
+void BinUIVK::popLayer() {
+    if (impl_) impl_->popLayer();
 }
 
 int BinUIVK::pushClip(float x, float y, float w, float h) {
