@@ -109,6 +109,41 @@ GDI 文字阴影 `AlphaBlend` 源位图未选中导致阴影整块不出现）�
   每行宽度之和 = 盒宽、横向 UV 首尾相接、首末块 UV 到 0/1、内缩钳到源图半张、
   盒比内缩小不出现负宽、退化输入返回 0。
 
+## [0.16.20] - 2026-11-15
+
+程序化纹理 / 视频帧的 mip（P1-8 的最后一条）。以前 `prepareImageRaw`（`<video>` 帧、
+`updateImageRaw` 推上来的棋盘/噪声纹理）**故意不做 mip** —— 视频帧每帧换内容，每帧
+`GenerateMipmap` 太贵。但"程序化纹理"是静态的，缩小时同样满屏摩尔纹。
+
+### 加 — "第二次见到同一个 generation" 才补 mip 链
+
+判据只有一句：`prepareImageRaw(index, …, generation)` 被**同一个 generation** 调第二次，
+就说明这份像素不再逐帧变了 —— 视频帧的 generation 每次都变，永远走不到那条分支；程序化
+纹理从第二帧起命中，补一次 mip 链后一直复用。三端各自落地：
+
+- **GL**：命中时 `glGenerateMipmap` + `MIN_FILTER = LINEAR_MIPMAP_LINEAR`（`rawMips` 标记只做一次）。
+- **D3D11**：mip 链不能在创建后追加，所以命中时**重建**成 `MipLevels=0 + GENERATE_MIPS +
+  RENDER_TARGET` 的纹理 → `UpdateSubresource` 第 0 级 → `GenerateMips`。
+- **Vulkan**：链在 CPU 上做（后端没有"每帧重传"的余量，也不能 blit），命中时用传入的像素
+  建整条链、逐级上传。
+- 视频帧路径**完全不变**（不生成、不重传），零额外开销。
+
+### 抽 — `include/binui_mip.h`：mip 链的 CPU 盒式滤波只有一份
+
+三端"同一张图缩小时必须看着一样"，而硬件 `GenerateMipmap` 改不了，所以 CPU 这一侧的公式
+写死并单测：第 l 级 = 上一级 **2×2 四舍五入平均**（`(a+b+c+d+2)/4`），奇数尺寸边缘夹取。
+`BuildMipChainBGRA` / `MipLevels` 同时被 VK 的两条路径（图片 + raw 纹理）复用 —— 以前这两段
+各写了一遍同样的循环，正是"两份实现慢慢分叉"的温床。
+
+### 验收
+
+- `test_css` 新增 8 条断言：层数（1×1 / 2×2 / 256×256=9 / 1920×1080=11）、4×4 出 3 级、
+  第 0 级原样、同级色块保留、1×1 = 128（四舍五入平均）、3×3 → 1×1 = 70（边缘夹取）、
+  退化输入返回空。
+- `make pixels` 16/16 零差异、`pixels-vk` / `pixels-d3d11` 全 0（VK 的链改走共享实现后与
+  GL 的硬件生成仍逐像素一致）、`make test` 全绿、`check_examples` 16 示例 0 问题。
+- `texturedemo`（30Hz `updateImageRaw`）跑 3 秒无崩溃 —— 视频帧路径确认没被这条改动影响。
+
 ## [Unreleased]
 
 ### 文档 — 补一份「欠缺清单」：13 条，带实测数字、优先级和"谁来填"

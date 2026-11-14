@@ -32,6 +32,7 @@
 #include "backends/binui_vk_shaders.h"
 #include "binui_paint.h"   // RoundTemplateSize / BuildRoundedNineSlice / PaintQuad
 #include "backends/binui_glyph_atlas.h"   // 字形图集 + 排版（与 GL 后端共用）
+#include "binui_mip.h"                  // v0.16.20：mip 链的 CPU 2×2 盒式滤波（与 GL/D3D 的硬件生成等价）
 #include "backends/binui_win_image.h"     // GDI+ 图片解码（与 GL 后端共用）
 
 // 不链接 vulkan-1.lib：全部函数指针自己取（与 binui_gl_ext_min.h 同思路，但这里用官方头，
@@ -558,6 +559,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     std::unordered_map<int, RoundTex> rounds;   // key = 半径（描边用负值，与 GL 同）
     std::unordered_map<int, Tex> images;        // 图片（按 index）
     std::unordered_map<int, uint32_t> imageGen; // 换图 generation：不匹配时重新上传
+    // v0.16.20：原始像素纹理（视频帧/程序化纹理）的 mip 是否已补（见 prepareImageRaw）
+    std::unordered_map<int, uint8_t> rawMips;
 
     // 帧外产生的上传（测量文本时会光栅化字形，那时命令缓冲还没开始录制）。
     // 这些先攒着，在下一个 beginFrame 里、render pass 开始之前一次性录进去 ——
@@ -2645,6 +2648,7 @@ void BinUIVK::shutdown() {
     for (auto& kv : d.images) d.freeTex(kv.second);
     d.images.clear();
     d.imageGen.clear();
+    d.rawMips.clear();
     d.pendingUploads.clear();
     d.freeTex(d.white);
     for (VkDescriptorPool p : d.dsPools)
@@ -3300,43 +3304,23 @@ bool BinUIVK::prepareImage(uint16_t index, const uint8_t* data, size_t size,
     // 布局状态"的记账模型别扭），要么 vkCmdBlit 对格式/线性滤波有要求，都不如
     // "多传几张小图"干脆：一次性代价（图片只在换 generation 时上传），质量与 GPU
     // 生成一致（2×2 平均）。视频帧/图集走 prepareImageRaw/atlas，**不做** mip。
-    uint32_t levels = 1;
-    {
-        int m = std::max(iw, ih);
-        while (m > 1 && levels < 16) { m >>= 1; levels++; }
-    }
-    if (levels < 2) levels = 1;                         // 1×1 之类的退化图
+    // v0.16.20：链的 2×2 盒式滤波换成共享实现（binui_mip.h，单测钉住；与 GL/D3D
+    // 的硬件 GenerateMipmap/GenerateMips 等价），这里只管逐级上传。
+    std::vector<std::vector<uint8_t>> chain = BuildMipChainBGRA(px.data(), iw, ih);
+    if (chain.empty()) return false;
+    const uint32_t levels = static_cast<uint32_t>(chain.size());
     Impl::Tex& t = d.images[index];
     if (!d.createTexImage(t, iw, ih, true, levels)) {
         d.images.erase(index);
         return false;
     }
     t.needClear = false;   // 整张覆盖，不用先清零
-    bool ok = d.uploadRegion(t, 0, 0, iw, ih, px.data(), iw * 4, 0);
-    // 逐级盒式滤波 + 上传（第 l 级 = 上一级 2×2 平均）
-    std::vector<uint8_t> cur = std::move(px);
+    bool ok = true;
     int cw = iw, ch = ih;
-    for (uint32_t l = 1; l < levels && ok; l++) {
-        const int nw = std::max(1, cw / 2), nh = std::max(1, ch / 2);
-        std::vector<uint8_t> next(static_cast<size_t>(nw) * nh * 4);
-        for (int y = 0; y < nh; y++) {
-            const int y0 = std::min(ch - 1, y * 2), y1 = std::min(ch - 1, y * 2 + 1);
-            for (int x = 0; x < nw; x++) {
-                const int x0 = std::min(cw - 1, x * 2), x1 = std::min(cw - 1, x * 2 + 1);
-                for (int c = 0; c < 4; c++) {
-                    const uint32_t s = cur[(static_cast<size_t>(y0) * cw + x0) * 4 + c] +
-                                       cur[(static_cast<size_t>(y0) * cw + x1) * 4 + c] +
-                                       cur[(static_cast<size_t>(y1) * cw + x0) * 4 + c] +
-                                       cur[(static_cast<size_t>(y1) * cw + x1) * 4 + c];
-                    next[(static_cast<size_t>(y) * nw + x) * 4 + c] =
-                        static_cast<uint8_t>((s + 2) / 4);
-                }
-            }
-        }
-        ok = d.uploadRegion(t, 0, 0, nw, nh, next.data(), nw * 4, static_cast<int>(l));
-        cur.swap(next);
-        cw = nw;
-        ch = nh;
+    for (uint32_t l = 0; l < levels && ok; l++) {
+        ok = d.uploadRegion(t, 0, 0, cw, ch, chain[l].data(), cw * 4, static_cast<int>(l));
+        cw = std::max(1, cw / 2);
+        ch = std::max(1, ch / 2);
     }
     d.imageGen[index] = generation;
     return ok;
@@ -3349,6 +3333,40 @@ bool BinUIVK::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
     if (!d.ready || w <= 0 || h <= 0 || !rgba) return false;
     auto gi = d.imageGen.find(index);
     auto ti = d.images.find(index);
+    // v0.16.20：同一个 generation 又来了一次 = 这份原始像素不再每帧变（视频帧的
+    // generation 每次都变，走不到这里）。此时补一条 mip 链：与 prepareImage 同一套
+    // **CPU 2×2 盒式滤波**逐级上传 —— 程序化纹理缩小时才有 mip 可用，视频帧不必为
+    // 每帧的链付钱。只做一次（rawMips 标记），之后 generation 不变就一直复用。
+    if (gi != d.imageGen.end() && gi->second == generation && ti != d.images.end() &&
+        ti->second.view && !d.rawMips.count(index) && w >= 2 && h >= 2) {
+        std::vector<uint8_t> bgra(static_cast<size_t>(w) * h * 4);
+        for (size_t i = 0; i < static_cast<size_t>(w) * h; i++) {
+            bgra[i * 4 + 0] = rgba[i * 4 + 2];
+            bgra[i * 4 + 1] = rgba[i * 4 + 1];
+            bgra[i * 4 + 2] = rgba[i * 4 + 0];
+            bgra[i * 4 + 3] = rgba[i * 4 + 3];
+        }
+        // mip 链的 2×2 盒式滤波用共享实现（binui_mip.h，单测钉住；与 GL/D3D 的硬件生成等价）
+        std::vector<std::vector<uint8_t>> chain = BuildMipChainBGRA(bgra.data(), w, h);
+        if (chain.empty()) return false;
+        d.freeTex(ti->second);
+        Impl::Tex& t = d.images[index];
+        if (!d.createTexImage(t, w, h, true, static_cast<uint32_t>(chain.size()))) {
+            d.images.erase(index);
+            d.imageGen.erase(index);
+            return false;
+        }
+        t.needClear = false;
+        bool ok = true;
+        int cw = w, ch = h;
+        for (size_t l = 0; l < chain.size() && ok; l++) {
+            ok = d.uploadRegion(t, 0, 0, cw, ch, chain[l].data(), cw * 4, static_cast<int>(l));
+            cw = std::max(1, cw / 2);
+            ch = std::max(1, ch / 2);
+        }
+        if (ok) d.rawMips[index] = 1;
+        return ok;
+    }
     if (gi != d.imageGen.end() && gi->second == generation && ti != d.images.end())
         return ti->second.view != VK_NULL_HANDLE;
 
@@ -3367,6 +3385,7 @@ bool BinUIVK::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
     }
     t.needClear = false;
     const bool ok = d.uploadRegion(t, 0, 0, w, h, bgra.data(), w * 4);
+    d.rawMips.erase(index);
     d.imageGen[index] = generation;
     return ok;
 }

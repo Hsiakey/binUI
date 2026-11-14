@@ -180,6 +180,8 @@ struct BinUID3D::Impl {
     std::unordered_map<uint16_t, ID3D11ShaderResourceView*> images;
     // v25 九宫格要源图像素尺寸
     std::unordered_map<uint16_t, std::pair<int,int>> imageDims;
+    // v0.16.20：原始像素纹理（视频帧/程序化纹理）的 mip 是否已补（见 uploadImageRaw）
+    std::unordered_map<uint16_t, uint8_t> rawMips;
     std::unordered_map<uint16_t, uint32_t> imageGen; // 换图 generation：不一致时重新上传
 
     // 字形图集 + 文本排版：整份逻辑在 backends/binui_glyph_atlas.h（GL / Vulkan / D3D11 共用）。
@@ -586,6 +588,37 @@ struct BinUID3D::Impl {
     bool uploadImageRaw(uint16_t index, int w, int h, const uint8_t* rgba, uint32_t generation) {
         auto it = images.find(index);
         auto git = imageGen.find(index);
+        // v0.16.20：同一个 generation 又来了一次 = 这份原始像素不再每帧变（视频帧的
+        // generation 每次都变，走不到这里）。此时**重建**成带完整 mip 链的纹理并
+        // GenerateMips —— 程序化纹理（棋盘/渐变/噪声）缩小时才有 mip 可用，而视频帧
+        // 不必为每帧的 GenerateMips 付钱。D3D11 的 mip 链不能在创建后追加，所以要重建。
+        if (it != images.end() && git != imageGen.end() && git->second == generation &&
+            it->second && !rawMips.count(index) && w >= 2 && h >= 2 && rgba) {
+            std::vector<uint8_t> px(rgba, rgba + static_cast<size_t>(w) * h * 4);
+            it->second->Release();
+            images[index] = nullptr;
+            D3D11_TEXTURE2D_DESC td = {};
+            td.Width = static_cast<UINT>(w);
+            td.Height = static_cast<UINT>(h);
+            td.MipLevels = 0;   // 0 = 完整链（必须配合 GENERATE_MIPS + RENDER_TARGET）
+            td.ArraySize = 1;
+            td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            td.SampleDesc.Count = 1;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+            td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+            ID3D11Texture2D* tex = nullptr;
+            ID3D11ShaderResourceView* srv = nullptr;
+            if (SUCCEEDED(device->CreateTexture2D(&td, nullptr, &tex)) && tex &&
+                SUCCEEDED(device->CreateShaderResourceView(tex, nullptr, &srv))) {
+                ctx->UpdateSubresource(tex, 0, nullptr, px.data(), static_cast<UINT>(w) * 4, 0);
+                ctx->GenerateMips(srv);
+                images[index] = srv;
+                rawMips[index] = 1;
+            }
+            if (tex) tex->Release();
+            return images[index] != nullptr;
+        }
         if (it != images.end() && git != imageGen.end() && git->second == generation)
             return it->second != nullptr;
         if (w <= 0 || h <= 0 || !rgba) return false;
@@ -612,6 +645,7 @@ struct BinUID3D::Impl {
         tex->Release();
         imageDims[index] = { w, h };    // v25：九宫格切分用
         images[index] = srv;
+        rawMips.erase(index);
         imageGen[index] = generation;
         return true;
     }

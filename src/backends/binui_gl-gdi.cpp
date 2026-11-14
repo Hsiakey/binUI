@@ -419,6 +419,8 @@ struct BinUIGLGdi::Impl {
     std::unordered_map<uint16_t, GLuint> images;
     // v25 九宫格要**源图像素尺寸**才切得开（UV 是归一化的，切分点得按像素算）
     std::unordered_map<uint16_t, std::pair<int,int>> imageDims;
+    // v0.16.20：原始像素纹理（视频帧/程序化纹理）的 mip 是否已补（见 uploadImageRaw）
+    std::unordered_map<uint16_t, uint8_t> rawMips;
     std::unordered_map<uint16_t, uint32_t> imageGen; // 换图 generation：不匹配时重新上传
 
     // GDI 光栅化 DC
@@ -751,14 +753,24 @@ struct BinUIGLGdi::Impl {
     bool uploadImageRaw(uint16_t index, int w, int h, const uint8_t* rgba, uint32_t generation) {
         auto it = images.find(index);
         auto git = imageGen.find(index);
-        if (it != images.end() && git != imageGen.end() && git->second == generation)
+        if (it != images.end() && git != imageGen.end() && git->second == generation) {
+            // v0.16.20：**同一个 generation 又来了一次** = 这份原始像素不再每帧变
+            //（视频帧的 generation 每次都变，永远走不到这里）。此时补一次 mip 链：
+            // 程序化纹理（棋盘/渐变/噪声）缩小显示时才有 mip 可用，而视频帧不必为
+            // 每帧的 glGenerateMipmap 付钱。只做一次（mipsBuilt 标记）。
+            if (it->second && glGenerateMipmapP && !rawMips.count(index)) {
+                glBindTexture(GL_TEXTURE_2D, it->second);
+                glGenerateMipmapP(GL_TEXTURE_2D);
+                glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+                rawMips[index] = 1;
+            }
             return it->second != 0;
+        }
         if (w <= 0 || h <= 0 || !rgba) return false;
         if (it != images.end() && it->second) glDeleteTextures(1, &it->second);
         images[index] = CreateTexture2D(w, h, rgba, true, true);
-    imageDims[index] = { w, h };    // v25：九宫格切分要用源图像素尺寸
-        // 视频帧/纹理会**每帧**换内容（generation 每次都变），gen mip 太贵；而且它们是
-        // 1:1 或放大显示，双线性就够 —— 这里不做 mip。
+        imageDims[index] = { w, h };    // v25：九宫格切分要用源图像素尺寸
+        rawMips.erase(index);
         imageGen[index] = generation;
         return images[index] != 0;
     }
