@@ -65,6 +65,9 @@ public:
     void fontMetrics(float size, int weight, int& ascent, int& lineHeight,
                      bool italic = false) override;
     void setTextSubpixel(bool on) override;
+    // v0.16.10：组透明度的离屏合成（见 binui_gfx.h 的 pushLayer 注释）
+    bool pushLayer(float x, float y, float w, float h, float alpha) override;
+    void popLayer() override;
 
     bool prepareImage(uint16_t index, const uint8_t* data, size_t size,
                       uint32_t generation) override;

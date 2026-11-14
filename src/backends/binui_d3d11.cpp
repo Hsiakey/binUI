@@ -759,6 +759,108 @@ struct BinUID3D::Impl {
         batches[curBatch].count++;
     }
 
+    // ---- 图层（v0.16.10）：组透明度的离屏合成 ----
+    // 和 GL 同一个设计：池化**窗口大小**的 RGBA 目标（这里是 texture + RTV + SRV 三件套），
+    // 坐标不用换算、UV 直接是像素坐标 ÷ 窗口尺寸。层内是单采样的：内容全是不带 MSAA 的
+    // quad，圆角/描边本来就是解析式几何，少这层 MSAA 看不出差别。
+    struct LayerTarget {
+        ID3D11Texture2D* tex = nullptr;
+        ID3D11RenderTargetView* rtv = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+        bool inUse = false;
+    };
+    struct LayerFrame {
+        int idx = -1;
+        float x = 0, y = 0, w = 0, h = 0, alpha = 1;
+        ID3D11RenderTargetView* prevTarget = nullptr;
+    };
+    std::vector<LayerTarget> layers;
+    std::vector<LayerFrame> layerStack;
+    static constexpr int kMaxLayers = 4;
+
+    static void warnLayerLimit() {
+        static bool warned = false;
+        if (warned) return;
+        warned = true;
+        std::fprintf(stderr, "[d3d11] 图层超过 %d 层，多出来的退回逐元素乘 alpha（减少嵌套即可）\n",
+                     kMaxLayers);
+    }
+
+    int acquireLayer() {
+        for (size_t i = 0; i < layers.size(); i++)
+            if (!layers[i].inUse) return static_cast<int>(i);
+        if (static_cast<int>(layers.size()) >= kMaxLayers) return -1;
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = static_cast<UINT>(winW);
+        td.Height = static_cast<UINT>(winH);
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        LayerTarget t;
+        if (FAILED(device->CreateTexture2D(&td, nullptr, &t.tex))) return -1;
+        if (FAILED(device->CreateRenderTargetView(t.tex, nullptr, &t.rtv)) ||
+            FAILED(device->CreateShaderResourceView(t.tex, nullptr, &t.srv))) {
+            if (t.srv) t.srv->Release();
+            if (t.rtv) t.rtv->Release();
+            t.tex->Release();
+            return -1;
+        }
+        layers.push_back(t);
+        return static_cast<int>(layers.size() - 1);
+    }
+
+    bool pushLayer(float x, float y, float w, float h, float alpha) {
+        if (!ready || w <= 0.0f || h <= 0.0f || alpha >= 0.999f) return false;
+        if (static_cast<int>(layerStack.size()) >= kMaxLayers) { warnLayerLimit(); return false; }
+        flushAll();                     // 先把手头的图元画到当前目标（此时还没换 RT）
+        const int idx = acquireLayer();
+        if (idx < 0) { warnLayerLimit(); return false; }
+        LayerFrame f;
+        f.idx = idx; f.x = x; f.y = y; f.w = w; f.h = h; f.alpha = alpha;
+        f.prevTarget = msTarget;
+        LayerTarget& t = layers[idx];
+        t.inUse = true;
+        ID3D11RenderTargetView* rt = t.rtv;
+        ctx->OMSetRenderTargets(1, &rt, nullptr);
+        const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        ctx->ClearRenderTargetView(t.rtv, zero);
+        layerStack.push_back(f);
+        return true;
+    }
+
+    void popLayer() {
+        if (layerStack.empty()) return;
+        flushAll();                     // 层内容落盘（flushAll 会按层框裁剪）
+        const LayerFrame f = layerStack.back();
+        layerStack.pop_back();
+        LayerTarget& t = layers[f.idx];
+        ID3D11RenderTargetView* rt = f.prevTarget;
+        ctx->OMSetRenderTargets(1, &rt, nullptr);
+        // 合成：层里是**预乘**颜色（混合 ONE/INV_SRC_ALPHA），顶点色也必须预乘 ——
+        // 着色器算 (t.rgb * vcol.rgb, t.a * vcol.a)，不预乘的话通道会被整块加进去。
+        const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
+        uint32_t col = (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
+        Premult(col);
+        // D3D 的纹理原点在左上，和屏幕坐标一致 —— 这里**不用**像 GL 那样翻转 V。
+        curSrv = t.srv;
+        curLinear = 0;
+        scissor[0] = static_cast<int>(f.x);
+        scissor[1] = static_cast<int>(f.y);
+        scissor[2] = static_cast<int>(f.x + f.w);
+        scissor[3] = static_cast<int>(f.y + f.h);
+        emitQuad(f.x, f.y, f.x + f.w, f.y + f.h,
+                 f.x / static_cast<float>(winW), f.y / static_cast<float>(winH),
+                 (f.x + f.w) / static_cast<float>(winW), (f.y + f.h) / static_cast<float>(winH),
+                 col);
+        curSrv = whiteSrv;
+        scissor[0] = 0; scissor[1] = 0; scissor[2] = winW; scissor[3] = winH;
+        flushAll();
+        t.inUse = false;
+    }
+
     void flushAll() {
         if (vcount == 0 || !vb) return;
         if (!ensureVbCapacity(vcount)) return;   // 本帧顶点比 VB 大：先扩容（不会每帧发生）
@@ -767,9 +869,19 @@ struct BinUID3D::Impl {
         memcpy(map.pData, verts.data(), vcount * sizeof(D3DVertex));
         ctx->Unmap(vb, 0);
 
+        // 正在画进图层时，每条批次再和层框求交（层外的内容不该出现在层里）
+        const LayerFrame* lf = layerStack.empty() ? nullptr : &layerStack.back();
         for (const auto& b : batches) {
             if (b.count == 0) continue;
             D3D11_RECT r = { b.sx, b.sy, b.sx + b.sw, b.sy + b.sh };
+            if (lf) {
+                const LONG ll = static_cast<LONG>(std::floor(lf->x));
+                const LONG lt = static_cast<LONG>(std::floor(lf->y));
+                const LONG lr = static_cast<LONG>(std::ceil(lf->x + lf->w));
+                const LONG lb = static_cast<LONG>(std::ceil(lf->y + lf->h));
+                r.left = std::max(r.left, ll); r.top = std::max(r.top, lt);
+                r.right = std::min(r.right, lr); r.bottom = std::min(r.bottom, lb);
+            }
             if (r.right <= r.left || r.bottom <= r.top) continue;
             ctx->RSSetScissorRects(1, &r);
             ctx->PSSetShaderResources(0, 1, &b.srv);
@@ -782,6 +894,11 @@ struct BinUID3D::Impl {
             if (rt.srv) rt.srv->Release();
         }
         pendingRoundRelease.clear();
+        // 图层（v0.16.10）：flush 之后必须清零，否则 present 会把合成四边形再画一遍
+        // （GL 那边踩过：表现为组透明度彻底失效、画面全不透明）。
+        vcount = 0;
+        batches.clear();
+        curBatch = static_cast<size_t>(-1);
     }
 
     // 读回 present：离屏 → staging → CPU 内存 → GDI 贴屏。
@@ -1287,6 +1404,14 @@ void BinUID3D::setTextSubpixel(bool on) {
     if (!impl_) return;
     impl_->atlas.snapText = !on;
     impl_->subpixelText = on ? 1 : 0;
+}
+
+bool BinUID3D::pushLayer(float x, float y, float w, float h, float alpha) {
+    return impl_ ? impl_->pushLayer(x, y, w, h, alpha) : false;
+}
+
+void BinUID3D::popLayer() {
+    if (impl_) impl_->popLayer();
 }
 
 // 文本排版/光栅化/图集全在 binui::GlyphAtlas 里（与 GL / Vulkan 后端同一份代码），
