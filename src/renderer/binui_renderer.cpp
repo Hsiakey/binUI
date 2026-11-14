@@ -671,8 +671,45 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         }
     }
 
+    // ---- 阴影段（v23）：uint32 shadowBytes + uint32 shadowCount + BinUIShadow[] ----
+    // 段序（v23）：… / 扩展绘制 / 路径 / 阴影 / 名称。同一节点的多条阴影在数组里连续，
+    // 所以索引表存 (起始下标, 条数)。
+    shadows_.clear();
+    shadowIdx_.clear();
+    if (const uint8_t* sp = sectionAt(8)) {
+        uint32_t sb = 0;
+        memcpy(&sb, sp, sizeof(sb));
+        if (sb >= sizeof(uint32_t) && size - static_cast<size_t>(sp - data) >= sizeof(uint32_t) + sb) {
+            const uint8_t* q = sp + sizeof(uint32_t);
+            uint32_t sc = 0;
+            memcpy(&sc, q, sizeof(sc));
+            q += sizeof(sc);
+            const uint8_t* qend = sp + sizeof(uint32_t) + sb;
+            for (uint32_t i = 0; i < sc && q + sizeof(BinUIShadow) <= qend; i++) {
+                BinUIShadow s;
+                memcpy(&s, q, sizeof(s));
+                q += sizeof(s);
+                if ((s.flags & SHADOW_INSET) || !nodeIndexById_.count(s.nodeId)) continue;  // 防御
+                if (((s.color >> 24) & 0xFFu) == 0) continue;                               // 全透明
+                auto it = shadowIdx_.find(s.nodeId);
+                if (it == shadowIdx_.end()) {
+                    shadowIdx_[s.nodeId] = { shadows_.size(), 1 };
+                } else {
+                    // 必须与首条连续才能用"起点 + 条数"表示；不连续（畸形布局）就各自成段，
+                    // 后一段覆盖前一段的索引（只影响这个畸形的节点，不影响别人）
+                    if (it->second.first + it->second.second == shadows_.size()) {
+                        it->second.second++;
+                    } else {
+                        it->second = { shadows_.size(), 1 };
+                    }
+                }
+                shadows_.push_back(s);
+            }
+        }
+    }
+
     nameToId_.clear();
-    if (const uint8_t* np = sectionAt(8)) {
+    if (const uint8_t* np = sectionAt(9)) {
         uint32_t nbytes = 0;
         memcpy(&nbytes, np, sizeof(uint32_t));
         if (nbytes > 0 && size - static_cast<size_t>(np - data) >= sizeof(uint32_t) + nbytes) {

@@ -158,7 +158,8 @@ ifdef ComSpec
 
 # OpenGL 后端（WGL + FreeType/HarfBuzz 静态库）
 # imm32：输入法候选窗定位（ImmGetContext / ImmSetCompositionWindow）
-GL_LIBS := -lopengl32 -ldwmapi -limm32 -Lthird_party/freetype/build -lfreetype -Lthird_party/harfbuzz/build-static/src -lharfbuzz
+# msimg32：AlphaBlend —— GDI 画布的 box-shadow 靠它贴"预乘 alpha 位图"（v23）
+GL_LIBS := -lopengl32 -ldwmapi -limm32 -lmsimg32 -Lthird_party/freetype/build -lfreetype -Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
 # C ABI 的冒烟测试（无窗口：只测编译/加载/节点查询/改文本，需链 GL 后端对象）
 TEST_BINS += $(TEST_DIR)/test_capi$(EXT)
@@ -477,7 +478,7 @@ tools: $(TOOL_BINS)
 #   mingw32-make SHELL=sh pixels           # 渲染 + 与 docs/pixels 基准图比对
 #   mingw32-make SHELL=sh pixels-update    # 改完绘制/布局后重新生成基准图
 # =============================================
-PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad svgjoin svgstroke svgfinish svgaa opacity grad-angle
+PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad svgjoin svgstroke svgfinish svgaa opacity grad-angle shadow
 PIXEL_OUT   := $(BUILD_DIR)/pixels
 PIXEL_GOLD  := docs/pixels
 PIXEL_TOL   ?= 0.5

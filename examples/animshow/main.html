@@ -10,8 +10,9 @@
            琥珀 #F2B544 / 珊瑚 #FF8A65 / 天蓝 #38BDF8 */
         body { font-family: Segoe UI; font-size: 13px; color: #1F2A37; }
 
-        /* 卡片：1px 边框 + 白面做层次，没有 box-shadow（引擎不支持） */
-        .panel { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16; }
+        /* 卡片：白面 + 柔影做层次（v0.16.14 起 box-shadow 是引擎级能力） */
+        .panel { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16;
+                 box-shadow: 0 8px 24px rgba(31,42,55,0.08); }
         .panel-title { font-size: 13px; font-weight: 700; color: #1F2A37; }
         .rule { background: #E6EDF7; }
         .cap { font-size: 11px; color: #66768C; text-align: center; }

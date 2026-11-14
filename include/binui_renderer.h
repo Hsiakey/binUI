@@ -124,6 +124,16 @@ public:
         return it == paintIdx_.end() ? nullptr : &paints_[it->second];
     }
 
+    // v23 阴影段（box-shadow）：返回该节点的阴影数组（**绘制顺序**：下标小的在下面），
+    // count 写入条数；没有阴影返回 nullptr / count = 0。多层阴影是"连续的一段"，
+    // 所以只存起点下标即可。
+    const BinUIShadow* shadowsOf(uint16_t nodeId, int& count) const {
+        auto it = shadowIdx_.find(nodeId);
+        if (it == shadowIdx_.end()) { count = 0; return nullptr; }
+        count = static_cast<int>(it->second.second);
+        return shadows_.data() + it->second.first;
+    }
+
     // v15 路径段：BINUI_PATH 节点的折线（归一化坐标 + 子路径表；无条目返回 nullptr）
     struct PathRecord {
         BinUIPathEntry head{};
@@ -657,6 +667,9 @@ private:
     std::unordered_map<uint16_t, size_t> paintIdx_;      // nodeId -> paints_ 下标
     std::vector<PathRecord> paths_;                      // v15 路径段
     std::unordered_map<uint16_t, size_t> pathIdx_;       // nodeId -> paths_ 下标
+    std::vector<BinUIShadow> shadows_;                   // v23 阴影段（同一节点的多条连续存放）
+    // nodeId -> (shadows_ 起始下标, 条数)
+    std::unordered_map<uint16_t, std::pair<size_t, uint32_t>> shadowIdx_;
     // v19 路径条带的跨帧缓存（条带数量有上限，条目数也封顶）。
     // mutable：三个绘制后端拿到的是 const renderer，缓存属于"绘制期副作用"。
     mutable std::unordered_map<uint16_t, PathBandCacheEntry> pathBands_;

@@ -29,7 +29,8 @@
            主字 #1F2A37 / 次字 #66768C / 弱字 #94A3B8 / 主色 #3E8BFF / 薄荷 #2FBF9A */
         body { font-size: 13px; color: #1F2A37; }
 
-        .card       { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 14; }
+        .card       { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 14;
+                      box-shadow: 0 8px 24px rgba(31,42,55,0.07); }
         .card-title { font-size: 12px; font-weight: 700; color: #1F2A37; }
         .note       { font-size: 11px; color: #94A3B8; }
 
@@ -37,6 +38,7 @@
         /* 过渡写在基底上：状态样式切目标值时走过渡，否则瞬时。
            尺寸类（.sm/.md/.lg）必须排在 .b 后面才盖得住 height/font-size。 */
         .b { height: 40px; border-radius: 9; font-size: 13px; color: #FFFFFF;
+             box-shadow: 0 3px 10px rgba(31,42,55,0.14);
              transition: background-color 0.16s ease, transform 0.16s ease; }
         .b:hover  { transform: scale(1.04); }
         .b:active { transform: scale(0.96); }

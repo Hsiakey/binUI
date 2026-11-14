@@ -21,7 +21,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v21: 扩展绘制段追加 resizeMask（CSS resize 的边/角位图），BinUIPaintNode 44 -> 48 字节
 // v22: flex 属性补齐（flex 简写/flex-shrink/flex-basis/order/align-self/flex-wrap/align-content），
 //      BinUISpecNode 72 -> 84 字节；BinUISpecFlex 的两个 reserve 变成 wrap / alignContent（尺寸不变）
-constexpr uint32_t BINUI_VERSION    = 22;
+// v23: 阴影段（box-shadow），见 BinUIShadow
+constexpr uint32_t BINUI_VERSION    = 23;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -475,6 +476,39 @@ struct BinUIPaintNode {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIPaintNode) == 48, "BinUIPaintNode must be 48 bytes");
+
+// ============================================================
+// 阴影段（v23）：CSS 的 box-shadow
+//
+// 布局：uint32 shadowBytes（0 = 无阴影）+ uint32 shadowCount + BinUIShadow[count]
+// 恒定写出，位于路径段之后、名称段之前（与其余可选段同一套路）。
+//
+// 为什么单独开一段：一个阴影要 5 个数（两个偏移 + 模糊 + 展开 + 颜色），48 字节的
+// BinUIPaintNode 装不下（PAINT_* 的 16 位也已用满），而阴影只出现在少数卡片上，
+// 稀疏存储最省 —— 与 v13 开扩展绘制段、v15 开路径段是同一条取舍。
+//
+// **数组顺序 = 绘制顺序**（下标小的先画，压在最下面）。CSS 的 box-shadow 列表是
+// "先写的盖在上面"，所以编译器按逆序写出；渲染器从头到尾画一遍即可。
+// 同一个节点出现多条时不合并：多层阴影（贴边硬影 + 大范围柔影）是常见手法。
+// ============================================================
+enum BinUIShadowFlag : uint16_t {
+    // inset：编译期只告警、不写出该条（后端只有 fillRect/fillRounded，画不出"挖内孔"
+    // 的几何）。这一位留在这里是为了将来翻实现时二进制不用再改一轮，目前恒为 0。
+    SHADOW_INSET = 1 << 0,
+};
+
+#pragma pack(push, 1)
+struct BinUIShadow {
+    uint16_t nodeId;
+    uint16_t flags;      // BinUIShadowFlag
+    float    offsetX;    // 水平偏移（像素；CSS offset-x，正值向右）
+    float    offsetY;    // 垂直偏移（像素；CSS offset-y，正值向下）
+    float    blur;       // 模糊半径（像素；CSS blur-radius，标准差 σ = blur/2）
+    float    spread;     // 展开半径（像素；CSS spread-radius，负值收缩）
+    uint32_t color;      // AARRGGBB（已折入 opacity，画的时候直接用）
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUIShadow) == 24, "BinUIShadow must be 24 bytes");
 
 // ============================================================
 // 路径段（v15，恒定写出，位于扩展绘制段之后、名称段之前）

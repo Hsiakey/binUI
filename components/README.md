@@ -97,4 +97,4 @@ build-mingw/bin/offscreen_render components/preview.html docs/img/std-components
   不想要最小化按钮，就把 `titlebar.bum.html` 复制一份删掉那一行 —— 这也正是"组件是源码"的好处。
 - 组件没有插槽语法，宿主子元素只能落在根容器的流式末尾（不能塞进某个具名位置）。
 - `:hover` / `:active` 的状态样式只能改底色/缩放/圆角，不能改文字色 —— 所以次按钮的悬停是"底色加深"。
-- 不支持 `box-shadow`，层次只能靠 1px 边框 + 色差。
+- `box-shadow` 自 v0.16.14 起引擎支持（`apps` 是个示例，组件库里还没逐个加）—— 现在可以给卡片/弹窗加柔影，不必只靠 1px 边框 + 色差。

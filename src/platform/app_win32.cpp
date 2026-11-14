@@ -610,6 +610,10 @@ static void FillPaintBands(HDC hdc, const binui::PaintBand* bands, int n, uint32
     for (int i = 0; i < n; i++) {
         const binui::PaintBand& b = bands[i];
         if (b.w <= 0.0f || b.h <= 0.0f) continue;
+        // 完全透明 = 这条什么都不画。以前会拿 BlendOver 返回的"底色"去铺一块不透明矩形，
+        // 于是透明节点在 GDI 上等于"把父底色重涂一遍"—— 压在它下面的兄弟/阴影会被擦掉
+        // （v23 的透明元素 + box-shadow 用例一眼就看出来了：阴影被自身盖成一片白）。
+        if (((b.color >> 24) & 0xFF) == 0) continue;
         const uint32_t c = BlendOver(b.color, over);
         if (((c >> 24) & 0xFF) == 0) continue;
         HBRUSH br = CreateSolidBrush(RGB((c >> 16) & 0xFF, (c >> 8) & 0xFF, c & 0xFF));
@@ -632,8 +636,182 @@ static void FillPaintBands(HDC hdc, const binui::PaintBand* bands, int n, uint32
     }
 }
 
-void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipRect) {    HDC hdc = static_cast<HDC>(hdcCtx);
-    const auto& nodes = renderer.getNodes();
+// ============================================================
+// v23 阴影的 GDI 实现：烘成预乘 alpha 位图，再 AlphaBlend 贴上去
+// ------------------------------------------------------------
+// 为什么不沿用底色那套"按底色预混成不透明色、逐环填矩形"：
+//   · **多条阴影会互相擦掉**。后一条阴影最外圈几乎全透明，却是不透明地盖在前一条
+//     的渐变上 —— 实测 229 级被擦成 253，卡片边缘浮出一圈亮线；
+//   · **太慢**。一帧里叠几十次全尺寸 RoundRect：300×200 的卡片 blur 32 要 20 多次
+//     十几万像素的填充，GDI 画布直接顶不住。
+// 烘成位图之后：每个阴影一次 AlphaBlend（真逐像素 alpha，底下是什么内容都对）、
+// 位图只跟"盒尺寸 + 圆角 + 阴影参数 + 颜色"有关（与位置、不透明度无关），
+// 所以同款卡片共用一张，翻页/滚动时不重建。
+//
+// 画位图的技巧：GDI 往 32 位 DIB 里填色**不写 alpha 字节**，所以不能直接把"alpha"
+// 存进去。这里把每环的**覆盖率**编码成灰度（GDI 只写 RGB，R 通道就是覆盖率），
+// 全部环填完之后再一趟 CPU 扫描，把它换成预乘 alpha 的像素。
+// ============================================================
+struct ShadowBitmap {
+    HDC     dc = nullptr;      // 选中了 dib 的内存 DC
+    HBITMAP dib = nullptr;
+    void*   bits = nullptr;
+    int     w = 0, h = 0;
+    int     offX = 0, offY = 0;  // 位图左上角相对节点盒左上角的像素偏移
+    uint64_t lastUse = 0;
+    // 缓存键（节点盒 + 圆角 + 阴影参数 + 颜色）
+    int      boxW = 0, boxH = 0, radius = 0;
+    float    ox = 0, oy = 0, blur = 0, spread = 0;
+    uint32_t color = 0;
+};
+
+// 缓存：正常页面就是几款卡片，24 条足够；单条位图按 16 MB 预算封顶（超大阴影降级为空）。
+static std::vector<ShadowBitmap> g_shadowCache;
+static uint64_t g_shadowUse = 0;
+
+static void ShadowBitmapFree(ShadowBitmap& e) {
+    if (e.dc) DeleteDC(e.dc);
+    if (e.dib) DeleteObject(e.dib);
+    e = ShadowBitmap();
+}
+
+// 返回该阴影的预乘位图（缓存命中直接复用）；offX/offY 写回相对节点盒左上角的偏移。
+// 返回 nullptr = 这个尺寸画不了（太大 / 分配失败），调用方跳过这条阴影。
+static ShadowBitmap* ShadowBitmapGet(HDC ref, int boxW, int boxH, int radius,
+                                     const binui::BinUIShadow& s, int& offX, int& offY) {
+    if (boxW <= 0 || boxH <= 0) return nullptr;
+    ++g_shadowUse;
+    for (ShadowBitmap& e : g_shadowCache) {
+        if (e.boxW == boxW && e.boxH == boxH && e.radius == radius && e.ox == s.offsetX &&
+            e.oy == s.offsetY && e.blur == s.blur && e.spread == s.spread && e.color == s.color) {
+            e.lastUse = g_shadowUse;
+            offX = e.offX;
+            offY = e.offY;
+            return &e;
+        }
+    }
+
+    // 位图范围 = 最外圈环的外接矩形
+    const float sigma = s.blur > 0.0f ? s.blur * 0.5f : 0.0f;
+    const float ext = sigma > 0.4f ? sigma * 3.0f : 1.0f;
+    const float L = -s.spread + s.offsetX - ext;
+    const float T = -s.spread + s.offsetY - ext;
+    const float R = (float)boxW + s.spread + s.offsetX + ext;
+    const float B = (float)boxH + s.spread + s.offsetY + ext;
+    const int il = (int)std::floor(L), it = (int)std::floor(T);
+    const int iw = (int)std::ceil(R) - il, ih = (int)std::ceil(B) - it;
+    if (iw <= 0 || ih <= 0 || iw > 4096 || ih > 4096) return nullptr;
+
+    binui::PaintShadowRing rings[binui::kMaxShadowRings];
+    const int rn = binui::BuildShadowRings(s, 0.0f, 0.0f, (float)boxW, (float)boxH,
+                                           (float)radius, 1.0f, rings);
+    if (rn <= 0) return nullptr;
+
+    // 建 DIB（top-down 32bpp）
+    BITMAPINFO bmi = {};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = iw;
+    bmi.bmiHeader.biHeight = -ih;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP dib = CreateDIBSection(ref, &bmi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!dib || !bits) { if (dib) DeleteObject(dib); return nullptr; }
+    HDC dc = CreateCompatibleDC(ref);
+    if (!dc) { DeleteObject(dib); return nullptr; }
+    SelectObject(dc, dib);
+    // 底：全黑（= 覆盖率 0）
+    RECT all = { 0, 0, iw, ih };
+    HBRUSH black = CreateSolidBrush(RGB(0, 0, 0));
+    FillRect(dc, &all, black);
+    DeleteObject(black);
+    // 逐环填"覆盖率灰度"：内环后画、整块盖住外环 ⇒ 每个像素留下包住它的最内环。
+    HGDIOBJ oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
+    for (int k = 0; k < rn; k++) {
+        const binui::PaintShadowRing& rr = rings[k];
+        const int g = (int)(rr.cover * 255.0f + 0.5f);
+        if (g <= 0) continue;
+        HBRUSH br = CreateSolidBrush(RGB(g, g, g));
+        HGDIOBJ ob = SelectObject(dc, br);
+        const int x0 = (int)std::lround(rr.x) - il;
+        const int y0 = (int)std::lround(rr.y) - it;
+        const int x1 = (int)std::lround(rr.x + rr.w) - il;
+        const int y1 = (int)std::lround(rr.y + rr.h) - it;
+        if (x1 > x0 && y1 > y0) {
+            if (rr.radius > 0.5f) {
+                // GDI 的 RoundRect 把填充范围**右/下各收 1px**（实测 [x0,x1-1)×[y0,y1-1)，
+                // 上/左却是含的），不补回来的话每一环的右边和下边都短一行，环与环之间
+                // 会漏出一条没画的缝（四端叠出来是一圈 1px 的亮线）。
+                const int e2 = (int)std::lround(rr.radius * 2.0f);
+                RoundRect(dc, x0, y0, x1 + 1, y1 + 1, e2, e2);
+            } else {
+                RECT r = { x0, y0, x1, y1 };
+                FillRect(dc, &r, br);
+            }
+        }
+        SelectObject(dc, ob);
+        DeleteObject(br);
+    }
+    SelectObject(dc, oldPen);
+
+    // 覆盖率 → 预乘 alpha 像素（AlphaBlend 要的就是预乘）
+    {
+        const uint32_t rgb = s.color & 0x00FFFFFFu;
+        const uint32_t sr = (rgb >> 16) & 0xFFu, sg = (rgb >> 8) & 0xFFu, sb = rgb & 0xFFu;
+        const uint32_t baseA = (s.color >> 24) & 0xFFu;
+        uint8_t* px = static_cast<uint8_t*>(bits);
+        const size_t n = (size_t)iw * (size_t)ih;
+        for (size_t p = 0; p < n; p++, px += 4) {
+            const uint32_t g = px[0];                       // R 通道 = 覆盖率
+            if (!g) { px[3] = 0; continue; }
+            const uint32_t a = (g * baseA + 127u) / 255u;   // 覆盖率 × 阴影自身 alpha
+            px[0] = (uint8_t)((sb * a + 127u) / 255u);
+            px[1] = (uint8_t)((sg * a + 127u) / 255u);
+            px[2] = (uint8_t)((sr * a + 127u) / 255u);
+            px[3] = (uint8_t)a;
+        }
+    }
+
+    // 入缓存（先按"条数 + 字节数"淘汰最久没用的）。dib 一直选在 dc 里 ——
+    // AlphaBlend 的源必须就是这块位图；删除时先 DeleteDC 再 DeleteObject。
+    const size_t bytes = (size_t)iw * (size_t)ih * 4;
+    size_t total = 0;
+    for (const ShadowBitmap& e : g_shadowCache) total += (size_t)e.w * (size_t)e.h * 4;
+    while (!g_shadowCache.empty() &&
+           (g_shadowCache.size() >= 24 || total + bytes > (16u << 20))) {
+        size_t oldest = 0;
+        for (size_t k = 1; k < g_shadowCache.size(); k++)
+            if (g_shadowCache[k].lastUse < g_shadowCache[oldest].lastUse) oldest = k;
+        total -= (size_t)g_shadowCache[oldest].w * g_shadowCache[oldest].h * 4;
+        ShadowBitmapFree(g_shadowCache[oldest]);
+        g_shadowCache.erase(g_shadowCache.begin() + (long)oldest);
+    }
+    offX = il;
+    offY = it;
+    if (total + bytes > (16u << 20)) {          // 单条就超预算：不缓存，用一次就丢
+        static ShadowBitmap scratch;
+        ShadowBitmapFree(scratch);
+        scratch.dc = dc; scratch.dib = dib; scratch.bits = bits;
+        scratch.w = iw; scratch.h = ih;
+        scratch.offX = il; scratch.offY = it;
+        return &scratch;
+    }
+
+    ShadowBitmap e;
+    e.dc = dc;
+    e.dib = dib;
+    e.bits = bits;
+    e.w = iw; e.h = ih;
+    e.offX = il; e.offY = it;
+    e.lastUse = g_shadowUse;
+    e.boxW = boxW; e.boxH = boxH; e.radius = radius;
+    e.ox = s.offsetX; e.oy = s.offsetY; e.blur = s.blur; e.spread = s.spread; e.color = s.color;
+    g_shadowCache.push_back(e);
+    return &g_shadowCache.back();
+}
+
+void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipRect) {    HDC hdc = static_cast<HDC>(hdcCtx);    const auto& nodes = renderer.getNodes();
 
     // 绘制范围：脏矩形（局部重绘）或窗口客户区（全量）
     RECT clip;
@@ -742,12 +920,12 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         int nh = static_cast<int>(node.height);
         // 动画的位移/缩放：以前 GDI 画布只取颜色，hover 放大在 GDI 后端根本不发生，
         // 与 GL/D3D 表现不一致。绕中心缩放 + 平移，算法与两个 GPU 后端一致。
+        const float nodeScale = renderer.drawScale(node.id);
         {
-            const float sc = renderer.drawScale(node.id);
-            if (sc != 1.0f && sc > 0.0f) {
+            if (nodeScale != 1.0f && nodeScale > 0.0f) {
                 const float cx = x + nw / 2.0f, cy = y + nh / 2.0f;
-                nw = static_cast<int>(nw * sc);
-                nh = static_cast<int>(nh * sc);
+                nw = static_cast<int>(nw * nodeScale);
+                nh = static_cast<int>(nh * nodeScale);
                 x = static_cast<int>(cx - nw / 2.0f);
                 y = static_cast<int>(cy - nh / 2.0f);
             }
@@ -770,9 +948,20 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         const BinUIPaintNode* pt = renderer.paintOf(node.id);
         const bool hasBorder = pt && (pt->flags & PAINT_BORDER);
         const bool hasGrad = pt && (pt->flags & PAINT_GRADIENT);
+        // v23 阴影段（box-shadow）：阴影露在盒子外面，剔除与裁剪都要按外扩算
+        int shN = 0;
+        const BinUIShadow* shs = renderer.shadowsOf(node.id, shN);
+        float shPadX = 0.0f, shPadY = 0.0f;
+        for (int k = 0; k < shN; k++) {
+            const float sig = shs[k].blur > 0.0f ? shs[k].blur * 0.5f : 0.0f;
+            const float pad = (std::fabs(shs[k].spread) + sig * 3.0f + 1.0f) * nodeScale;
+            shPadX = std::max(shPadX, pad + std::fabs(shs[k].offsetX) * nodeScale);
+            shPadY = std::max(shPadY, pad + std::fabs(shs[k].offsetY) * nodeScale);
+        }
+        const int shPadXi = (int)std::ceil(shPadX), shPadYi = (int)std::ceil(shPadY);
         // 全透明：GDI 没有 alpha 合成，画出来是一块黑，所以整块跳过。
         // 但有文字的节点必须画（<pre>/<div>文字</div> 这种没底色的容器否则整个消失）。
-        if (((dc >> 24) & 0xFF) == 0 && !hasBorder && !hasGrad && node.text.empty()) {
+        if (((dc >> 24) & 0xFF) == 0 && !hasBorder && !hasGrad && node.text.empty() && shN == 0) {
             // GDI 没有 alpha 合成：全透明节点画出来是一块黑。图片/视频帧例外（只看自身像素）
             const bool drawsOwnPixels =
                 (node.type == BINUI_IMAGE && renderer.getImage(node.imageIndex) != nullptr) ||
@@ -782,12 +971,12 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
 
 
         // 与脏矩形不相交的节点快速跳过（GDI 裁剪链较贵，仅在相交节点上做）
-        if (x + nw <= clip.left || x >= clip.right ||
-            y + nh <= clip.top || y >= clip.bottom)
+        if (x - shPadXi + nw <= clip.left || x + shPadXi >= clip.right ||
+            y - shPadYi + nh <= clip.top || y + shPadYi >= clip.bottom)
             continue;
         // 滚动容器内：视口外的节点（内容溢出/未滚动到）纯整数裁剪，避免 GDI 链
-        if (hasVp[i] && (x + nw <= vpL[i] || x >= vpR[i] ||
-                         y + nh <= vpT[i] || y >= vpB[i]))
+        if (hasVp[i] && (x - shPadXi + nw <= vpL[i] || x + shPadXi >= vpR[i] ||
+                         y - shPadYi + nh <= vpT[i] || y + shPadYi >= vpB[i]))
             continue;
         // BINUI_LINE：x,y = 起点；width,height = 终点；radius = 线宽。
         // 这条分支以前在 GDI 后端是缺的 —— SVG 的 line / polyline / polygon 在 GDI
@@ -904,6 +1093,65 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             const int bn = binui::BuildBorderBands(pt, nfx, nfy, nfw, nfh, (float)node.radius, bb);
             FillPaintBands(hdc, bb, bn, dc | 0xFF000000u);
         };
+
+        // ---- v23 box-shadow：先画阴影，再进"节点自身盒子"的裁剪 ----
+        // 阴影属于元素自己的背景层（CSS 里画在 background 之下），而盒子裁剪会把它整块
+        // 切掉，所以这段单独开一层裁剪：自身盒**外扩**到阴影范围，祖先裁剪照旧。
+        // GDI 没有 alpha 合成：每环按"目标累计覆盖率 × 阴影色"与父容器底色预混成不透明色。
+        // 由内向外画时后画的环整块盖住先画的，所以最终颜色 = 包住该点的最内环 ⇒ 正确。
+        if (shN > 0 && nodeOp > 0.002f) {
+            int sSaved = SaveDC(hdc);
+            RECT sr = { (LONG)std::floor((float)x - shPadX), (LONG)std::floor((float)y - shPadY),
+                        (LONG)std::ceil((float)(x + nw) + shPadX),
+                        (LONG)std::ceil((float)(y + nh) + shPadY) };
+            bool sDraw = IntersectClipRect(hdc, sr.left, sr.top, sr.right, sr.bottom) != NULLREGION;
+            size_t scur = i;
+            while (sDraw) {
+                const auto& anc = nodes[scur];
+                if (anc.parentId == 0xFFFF) break;
+                auto pit = byId.find(anc.parentId);
+                if (pit == byId.end()) break;
+                scur = pit->second;
+                const auto& par = nodes[scur];
+                if (!(par.flags & BINUI_VISIBLE)) { sDraw = false; break; }
+                RECT pr = { (int)(par.x - offX[scur]), (int)(par.y - offY[scur]),
+                            (int)(par.x - offX[scur] + par.width),
+                            (int)(par.y - offY[scur] + par.height) };
+                if (IntersectClipRect(hdc, pr.left, pr.top, pr.right, pr.bottom) == NULLREGION) {
+                    sDraw = false;
+                    break;
+                }
+            }
+            if (sDraw) {
+                for (int k = 0; k < shN; k++) {
+                    binui::BinUIShadow s2 = shs[k];
+                    if (nodeScale != 1.0f) {           // 缩放动画：阴影跟着一起放大
+                        s2.offsetX *= nodeScale; s2.offsetY *= nodeScale;
+                        s2.blur *= nodeScale;    s2.spread *= nodeScale;
+                    }
+                    const int srad = (int)std::lround((float)node.radius *
+                                                      (nodeScale > 0.0f ? nodeScale : 1.0f));
+                    int offXb = 0, offYb = 0;
+                    ShadowBitmap* sb = ShadowBitmapGet(hdc, nw, nh, srad, s2, offXb, offYb);
+                    if (!sb) continue;
+                    // 一次 AlphaBlend 完成整条阴影：预乘位图 + 逐像素 alpha，
+                    // 叠加顺序与 CSS 一致（作者先写的在最后画 = 压在上面）
+                    BLENDFUNCTION bf = { AC_SRC_OVER, 0,
+                                         (BYTE)(nodeOp * 255.0f + 0.5f), AC_SRC_ALPHA };
+                    const int dx = x + offXb, dy = y + offYb;
+                    static const bool shDbg = std::getenv("BINUI_SHADOW_DBG") != nullptr;
+                    if (shDbg)
+                        std::fprintf(stderr,
+                                     "[shadow] node=%u box=(%d,%d %dx%d) r=%d off=(%.1f,%.1f) "
+                                     "blur=%.1f spread=%.1f bmp=%dx%d at=(%d,%d) op=%.2f\n",
+                                     (unsigned)node.id, x, y, nw, nh, srad, (double)s2.offsetX,
+                                     (double)s2.offsetY, (double)s2.blur, (double)s2.spread,
+                                     sb->w, sb->h, dx, dy, (double)nodeOp);
+                    AlphaBlend(hdc, dx, dy, sb->w, sb->h, sb->dc, 0, 0, sb->w, sb->h, bf);
+                }
+            }
+            RestoreDC(hdc, sSaved);
+        }
 
         // 层级裁剪：先把裁剪区设为自身（滚动后）范围，再与「裁剪容器」祖先求交；
         // 交集为空则跳过绘制。裁剪容器只有 overflow:auto/scroll/hidden（编译期标 SCROLLABLE）——

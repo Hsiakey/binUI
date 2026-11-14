@@ -128,6 +128,99 @@ static void TestIssueRegressions() {
         }
     }
 
+    // ---- 0.16.14：box-shadow（v23 阴影段，P1-5）----
+    // 钉住四件事：
+    //   1. 解析落进阴影段（偏移/模糊/展开/颜色），颜色缺省 = 当前文字色；
+    //   2. 多条阴影按"绘制顺序"存（作者先写的在最后 = 压在上面）；
+    //   3. inset 只告警、不写出（不是画成外阴影）；
+    //   4. 几何：高斯覆盖率 → 同心圆角环，环数合理、中心覆盖率到 1、分布单调。
+    {
+        const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">
+<html width="400" height="300" bg="#101014">
+<body>
+  <div id="one"  style="position:absolute; left:10; top:10; width:120; height:80; border-radius:12px;
+                         box-shadow: 0 8px 18px rgba(0,0,0,0.28)"></div>
+  <div id="two"  style="position:absolute; left:150; top:10; width:120; height:80;
+                         box-shadow: 0 2px 4px rgba(0,0,0,0.5), 4px 6px 0 #22FF8800"></div>
+  <div id="cur"  style="position:absolute; left:290; top:10; width:120; height:80; color:#FF3366;
+                         box-shadow: 2px 3px 6px"></div>
+  <div id="ins"  style="position:absolute; left:10; top:150; width:120; height:80;
+                         box-shadow: inset 0 2px 6px rgba(0,0,0,0.4)"></div>
+  <div id="none" style="position:absolute; left:150; top:150; width:120; height:80;
+                         box-shadow: none"></div>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("16.14: 阴影布局可解析", ParseInto(r, bin));
+        auto shadowsOfName = [&](const char* name, int& n) -> const BinUIShadow* {
+            const uint16_t id = r.findNodeByName(name);
+            return id ? r.shadowsOf(id, n) : nullptr;
+        };
+        int n1 = 0;
+        const BinUIShadow* s1 = shadowsOfName("one", n1);
+        TEST("16.14: 单条阴影", s1 && n1 == 1);
+        if (s1) {
+            TEST("16.14: 偏移/模糊解析", std::fabs(s1->offsetX) < 0.01f &&
+                                         std::fabs(s1->offsetY - 8.0f) < 0.01f &&
+                                         std::fabs(s1->blur - 18.0f) < 0.01f &&
+                                         std::fabs(s1->spread) < 0.01f);
+            TEST("16.14: 颜色与 alpha 解析",
+                 ((s1->color >> 24) & 0xFF) == 71 && ((s1->color >> 16) & 0xFF) == 0);
+        }
+        int n2 = 0;
+        const BinUIShadow* s2 = shadowsOfName("two", n2);
+        TEST("16.14: 多条阴影各自成条", s2 && n2 == 2);
+        if (s2 && n2 == 2) {
+            // 作者先写的是"贴边硬影"（blur 4），它应该画在**后面**（数组末尾）
+            TEST("16.14: 先写的压在上面（数组末尾）",
+                 std::fabs(s2[1].blur - 4.0f) < 0.01f && std::fabs(s2[0].blur) < 0.01f &&
+                 std::fabs(s2[1].offsetY - 2.0f) < 0.01f);
+            TEST("16.14: 第二条的 0 模糊 + #AARRGGBB 颜色",
+                 std::fabs(s2[0].offsetX - 4.0f) < 0.01f && ((s2[0].color >> 24) & 0xFF) == 0x22);
+        }
+        int nc = 0;
+        const BinUIShadow* sc = shadowsOfName("cur", nc);
+        TEST("16.14: 不写颜色 = 当前文字色（#FF3366）",
+             sc && nc == 1 && ((sc->color >> 16) & 0xFF) == 0xFF &&
+             ((sc->color >> 8) & 0xFF) == 0x33 && (sc->color & 0xFF) == 0x66);
+        int ni = 0;
+        TEST("16.14: inset 不写出（不画成外阴影）", shadowsOfName("ins", ni) == nullptr && ni == 0);
+        int nn = 0;
+        TEST("16.14: none = 无阴影", shadowsOfName("none", nn) == nullptr && nn == 0);
+
+        // 几何：高斯覆盖率 → 环
+        BinUIShadow g{};
+        g.offsetY = 8.0f;
+        g.blur = 18.0f;
+        g.color = 0x47000000u;                         // 0.28 黑
+        PaintShadowRing rings[kMaxShadowRings];
+        const int rn = BuildShadowRings(g, 0.0f, 0.0f, 150.0f, 96.0f, 12.0f, 1.0f, rings);
+        TEST("16.14: 环数在合理区间", rn >= 4 && rn <= kMaxShadowRings);
+        if (rn > 0) {
+            TEST("16.14: 中心环覆盖率 = 1", rings[rn - 1].cover > 0.999f);
+            TEST("16.14: 最外环覆盖率很小", rings[0].cover < 0.05f);
+            bool monotone = true;
+            for (int i = 1; i < rn; i++)
+                if (rings[i].cover < rings[i - 1].cover - 1e-4f) monotone = false;
+            TEST("16.14: 由外向内覆盖率单调递增", monotone);
+            // 累计 alpha 必须收敛到 A（校正过的 alpha 逐环叠加 = 目标覆盖率）
+            float acc = 0.0f;
+            for (int i = 0; i < rn; i++) {
+                const float a = (float)((rings[i].color >> 24) & 0xFFu) / 255.0f;
+                acc = a + acc * (1.0f - a);
+            }
+            TEST("16.14: 叠加后中心 alpha ≈ 0.28", std::fabs(acc - 0.28f) < 0.02f);
+        }
+        // 无模糊 = 一环硬边
+        BinUIShadow hard{};
+        hard.offsetX = 8.0f; hard.offsetY = 8.0f;
+        hard.color = 0x80000000u;
+        const int hn = BuildShadowRings(hard, 0.0f, 0.0f, 50.0f, 40.0f, 0.0f, 1.0f, rings);
+        TEST("16.14: 0 模糊 = 一环", hn == 1 && std::fabs(rings[0].x - 8.0f) < 0.01f &&
+                                     rings[0].color >> 24 == 0x80);
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

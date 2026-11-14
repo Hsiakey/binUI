@@ -1112,6 +1112,27 @@ static void AppendPaintSection(std::vector<uint8_t>& buf,
     memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
 
+// 追加阴影段（v23）：uint32 shadowBytes + uint32 shadowCount + BinUIShadow[]
+// 恒定写出（无阴影时 shadowBytes=4），位于路径段之后、名称段之前。
+static void AppendShadowSection(std::vector<uint8_t>& buf,
+                                const std::vector<BinUIShadow>& shadows) {
+    size_t start = buf.size();
+    std::vector<uint8_t> data;
+    auto wu = [&](uint32_t x) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&x);
+        data.insert(data.end(), p, p + 4);
+    };
+    wu((uint32_t)shadows.size());
+    if (!shadows.empty())
+        data.insert(data.end(),
+                    reinterpret_cast<const uint8_t*>(shadows.data()),
+                    reinterpret_cast<const uint8_t*>(shadows.data() + shadows.size()));
+    uint32_t nbytes = (uint32_t)data.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
+
 // 路径段的编译期暂存：定长头 +（v16/v17 可选渐变）+ 三条变长表（子路径起点 / 闭合标记 / 归一化点）
 // 点用 uint16 归一化存（0..65535 映射包围盒），比 float 省一半且精度远超显示能力。
 struct PendingPath {
@@ -1831,6 +1852,7 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     AppendComponentSection(buf, {}); // XML 路径：无 <use>，段恒定写出保证解析链确定
     AppendPaintSection(buf, {});     // v13：XML 路径无扩展绘制，段同样恒定写出
     AppendPathSection(buf, {});      // v15：XML 路径无 SVG 路径，段同样恒定写出
+    AppendShadowSection(buf, {});    // v23：XML 路径无 box-shadow，段同样恒定写出
     AppendNameSection(buf, nodeNames, offsets);
 
     return buf;
@@ -4351,6 +4373,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::vector<BinUIVideoDesc> videoDescs;    // v9 视频描述段（<video> 节点）
     std::vector<BinUIStateStyle> stateStyles;  // v11 状态样式段（:hover/:active/:focus/:checked）
     std::vector<BinUIPaintNode> paintNodes;    // v13 扩展绘制段（文字色/边框/渐变/字重/行高/装饰）
+    std::vector<BinUIShadow> shadowNodes;      // v23 阴影段（box-shadow，绘制顺序 = 下标升序）
     std::vector<PendingPath> pendingPaths;     // v15 路径段（SVG <path>/<ellipse> 的折线）
     std::vector<std::string> strings;
     strings.push_back(""); // 字符串表首位 = 空串：无文本节点的 textOffset=0 指向空串
@@ -4944,9 +4967,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // 避免"写了没效果"这种最耗时间的困惑。
         // v13 起 border*/font-weight/line-height/text-decoration 已经实现，从清单里移除。
         // v14 起 font-style（italic）/white-space（pre）也实现了，同样移除。
+        // v23 起 box-shadow 也实现了（阴影段），只剩 text-shadow（字形模糊画不了）。
         {
             static const char* kIgnoredCss[] = {
-                "box-shadow", "text-shadow", "letter-spacing",
+                "text-shadow", "letter-spacing",
                 "word-break", "visibility", "float",
                 "outline",
                 "cursor", "grid-template-columns", "text-overflow", "object-fit",
@@ -6123,6 +6147,85 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             paintNodes.push_back(paint);
         }
 
+        // ---- v23 box-shadow（阴影段）----
+        // 语法：none | [inset? && <length>{2,4} && <color>] [, ...]*
+        //   两个长度必填（offset-x / offset-y），第三、四个是 blur / spread。
+        //   颜色可写在这几个长度的任意位置；不写 = 当前文字色（CSS 的 currentColor）。
+        // 顺序：数组按**绘制顺序**存（先画的在下面），而 CSS 是"先写的在上面"，
+        //   所以这里把作者顺序反过来写进段里（渲染器只顺序画一遍）。
+        // inset 不支持（后端只有 fillRect/fillRounded，画不出"挖内孔"的几何），
+        //   只告警不写出 —— 与其画成外阴影（看起来像"卡片浮起来"），不如干脆不画。
+        {
+            std::string shv = pick(e.attrs, style, "shadow", "box-shadow", "");
+            if (!shv.empty()) {
+                // 顶层逗号切分（rgba(0,0,0,.3) 里的逗号不算）
+                std::vector<std::string> items;
+                {
+                    std::string cur;
+                    int depth = 0;
+                    for (char ch : shv) {
+                        if (ch == '(') depth++;
+                        else if (ch == ')' && depth > 0) depth--;
+                        if (ch == ',' && depth == 0) { items.push_back(cur); cur.clear(); continue; }
+                        cur += ch;
+                    }
+                    if (!cur.empty()) items.push_back(cur);
+                }
+                std::vector<BinUIShadow> authored;
+                for (const std::string& raw : items) {
+                    const std::string piece = TrimCopy(raw);
+                    if (piece.empty()) continue;
+                    const std::string lpiece = LowerCopy(piece);
+                    if (lpiece == "none") continue;
+                    BinUIShadow s = {};
+                    float lens[4] = { 0, 0, 0, 0 };
+                    int nlen = 0;
+                    bool inset = false, hasColor = false;
+                    for (const std::string& tok : splitCssTokens(piece)) {
+                        if (tok == "inset") { inset = true; continue; }
+                        const char c0 = tok.empty() ? ' ' : tok[0];
+                        if (c0 == '#' || std::isalpha(static_cast<unsigned char>(c0))) {
+                            uint32_t c = 0;
+                            if (ParseColorValue(tok, &c, "box-shadow 颜色")) { s.color = c; hasColor = true; }
+                            continue;
+                        }
+                        const LenPct lp = ParseLenPct(tok, 0.0f, curCtx, "box-shadow");
+                        if (lp.pct) {
+                            Warn("CSS box-shadow 的偏移/模糊不接受百分比（\"" + tok +
+                                 "\"），按 0 处理");
+                            continue;
+                        }
+                        if (nlen < 4) lens[nlen] = lp.value;
+                        nlen++;
+                    }
+                    if (inset) {
+                        Warn("CSS box-shadow 目前不支持 inset（内阴影）：\"" + piece + "\" 已忽略");
+                        continue;
+                    }
+                    if (nlen < 2) {
+                        Warn("CSS box-shadow 至少需要 2 个长度（offset-x / offset-y）：\"" +
+                             piece + "\" 已忽略");
+                        continue;
+                    }
+                    if (nlen > 4)
+                        Warn("CSS box-shadow 最多 4 个长度（offset-x / offset-y / blur / spread）：\""
+                             + piece + "\"，多出来的忽略");
+                    for (int k = 0; k < 4; k++) if (lens[k] < 0.0f && k >= 2) lens[k] = 0.0f;  // blur/spread 负值无意义
+                    if (!hasColor) s.color = textCol;      // currentColor
+                    if (((s.color >> 24) & 0xFFu) == 0) continue;   // 全透明 = 不画
+                    s.offsetX = lens[0];
+                    s.offsetY = lens[1];
+                    s.blur    = lens[2];
+                    s.spread  = lens[3];
+                    s.nodeId  = n.id;
+                    s.flags   = 0;
+                    authored.push_back(s);
+                }
+                // 反序写出：数组顺序 = 绘制顺序（后画的盖在上面 = 作者先写的那条在上面）
+                for (size_t k = authored.size(); k > 0; k--) shadowNodes.push_back(authored[k - 1]);
+            }
+        }
+
         // 字号已在元素开头算好（供 em 换算用），这里直接落库
         {
             float fsz = nodeFontSize;
@@ -6731,6 +6834,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     }
     AppendPaintSection(buf, paintNodes);
     AppendPathSection(buf, pendingPaths);
+    AppendShadowSection(buf, shadowNodes);
     AppendNameSection(buf, nodeNames, offsets);
 
     // ---- 6. 二进制组件：编译期离线合并 ----
@@ -6933,6 +7037,7 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     AppendComponentSection(buf, {});
     AppendPaintSection(buf, {});
     AppendPathSection(buf, {});      // v15：默认布局没有 SVG，段恒定写出保证解析链确定
+    AppendShadowSection(buf, {});    // v23：默认布局没有 box-shadow，段同样恒定写出
 
     return buf;
 }

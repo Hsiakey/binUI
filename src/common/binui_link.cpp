@@ -51,6 +51,7 @@ struct Doc {
     std::vector<ComponentRef> comps;
     std::vector<BinUIPaintNode> paints;   // v13 扩展绘制段
     std::vector<DocPath> paths;           // v15 路径段
+    std::vector<BinUIShadow> shadows;     // v23 阴影段
     std::vector<std::pair<uint16_t, std::string>> names;
 };
 
@@ -423,6 +424,35 @@ bool ParseDoc(const void* data, size_t size, Doc& d) {
         if (!ok) r.rewind(mark);
     }
 
+    // ---- 阴影段（v23）：uint32 bytes + uint32 count + BinUIShadow[] ----
+    {
+        const uint8_t* mark = r.cur();
+        uint32_t bytes = 0;
+        bool ok = false;
+        if (r.u32(bytes)) {
+            if (bytes == 0) {
+                ok = true;
+            } else {
+                const uint8_t* sp = nullptr;
+                if (r.blob(bytes, sp)) {
+                    Reader s(sp, sp + bytes);
+                    uint32_t sc = 0;
+                    if (s.u32(sc) && s.left() >= (size_t)sc * sizeof(BinUIShadow)) {
+                        const uint8_t* ep = nullptr;
+                        if (s.blob((size_t)sc * sizeof(BinUIShadow), ep)) {
+                            if (sc)
+                                d.shadows.assign(reinterpret_cast<const BinUIShadow*>(ep),
+                                                 reinterpret_cast<const BinUIShadow*>(ep) + sc);
+                            ok = true;
+                        }
+                    }
+                }
+                if (!ok) { d.shadows.clear(); r.rewind(mark); }
+            }
+        }
+        if (!ok) r.rewind(mark);
+    }
+
     // ---- 名称段（v8，缺失 = 无命名节点） ----
     {
         uint32_t bytes = 0;
@@ -572,6 +602,13 @@ std::vector<uint8_t> EmitDoc(Doc& d) {
             if (!dp.closed.empty()) PutRaw(p, dp.closed.data(), dp.closed.size());
             if (!dp.pts.empty())    PutRaw(p, dp.pts.data(),    dp.pts.size() * sizeof(uint16_t));
         }
+        PutSection(b, p);
+    }
+    // 阴影段（v23，恒定写出；空段 = 只有计数 0，与编译器一致）
+    {
+        std::vector<uint8_t> p;
+        PutU32(p, static_cast<uint32_t>(d.shadows.size()));
+        if (!d.shadows.empty()) PutRaw(p, d.shadows.data(), d.shadows.size() * sizeof(BinUIShadow));
         PutSection(b, p);
     }
     // 名称段（非空才写）
@@ -812,6 +849,15 @@ bool MergeLayout(std::vector<uint8_t>& host, const void* comp, size_t compSize,
         DocPath d2 = dp;
         d2.head.nodeId = idMap[it->second];
         h.paths.push_back(std::move(d2));
+    }
+
+    // ---- 阴影段（v23）：组件的卡片阴影跟着搬过来（多层阴影逐条重映射） ----
+    for (const BinUIShadow& sh : c.shadows) {
+        auto it = compIdx.find(sh.nodeId);
+        if (it == compIdx.end() || it->second == 0) continue;
+        BinUIShadow s2 = sh;
+        s2.nodeId = idMap[it->second];
+        h.shadows.push_back(s2);
     }
 
     // ---- 组件引用段（组件内再外挂组件时递归） ----

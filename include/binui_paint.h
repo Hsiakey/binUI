@@ -571,6 +571,135 @@ inline int BuildBorderBands(const BinUIPaintNode* p, float x, float y, float w, 
     return n;
 }
 
+// ============================================================
+// 阴影（v23 box-shadow）：高斯模糊的盒 → 一串同心圆角矩形"环"
+// ------------------------------------------------------------
+// 后端只有 fillRect / fillRounded，没有"模糊"原语。做法是把模糊本身解析地算出来：
+// box-shadow 的形状 = 边框盒按 spread 外扩（圆角半径同步 +spread）之后的圆角矩形，
+// 再按 σ = blur/2 做高斯模糊。高斯模糊一个形状，等价于"把形状沿法线外扩 d、覆盖率
+// 取 0.5·erfc(d/σ√2)"，所以整块阴影就是**一串同心圆角矩形**：
+//
+//   环 i：几何 = 盒边外扩 d_i 的圆角矩形，颜色 = 该区间中点的覆盖率
+//
+// **必须从外往里画**（`out[0]` 是最外面那环）：后画的环整块盖住先画的，于是每个像素
+// 最终拿到的是"包住它的最内环"的覆盖率 —— 正好等于该点的真实覆盖率，而且不需要
+// 后端提供"环形（挖孔）"几何。代价是重叠区域的过绘制（32 环 × 阴影面积），GPU 上
+// 可以忽略；GDI 画布本来就慢，见 app_win32.cpp 里的按色去重。
+//
+// 两个字段的用法不同，别混：
+//   · GPU（GL/VK/D3D11）走真 alpha 混合，环与环是"叠加"关系：直接用 cover 会在
+//     **重叠区叠深**（形状内部的像素被每一环都盖一次，0.30 的阴影最后变成 0.5）。
+//     所以 color 里预先做了累计校正 a_i = (T_i−T_{i−1})/(1−T_{i−1})，逐环源覆盖之后
+//     正好得到 T_i = A×cover_i（多个阴影叠加时也自然是 1−(1−a)(1−b)）；
+//   · GDI 没有 alpha 合成：位图里每环是**直接覆盖**（不是叠加），所以用 cover
+//     （覆盖率）自己算出 alpha，见 app_win32.cpp 的 ShadowBitmapGet。
+//
+// 近似之处（有意为之）：圆角处的真实二维覆盖率略低于"按直边法线距离算"的值
+// （凸角收到的高斯权重更少），但阴影是柔和渐变，肉眼分不出来；类比 SVG 渐变
+// 只切 8~96 级色阶是同一条底线 —— 宁可近似，也不引入后端私有能力。
+// ============================================================
+struct PaintShadowRing {
+    float    x = 0, y = 0, w = 0, h = 0;
+    float    radius = 0;
+    uint32_t color = 0;   // GPU 用：已做累计 alpha 校正（直接源覆盖画）
+    float    cover = 0;   // 0..1 目标累计覆盖率（GDI 用：按底色混合）
+};
+
+constexpr int kMaxShadowRings = 48;
+
+// 直边沿法线偏移 d 处的覆盖率（d < 0 = 在形状内部 ⇒ 1）
+inline float PaintGaussCoverage(float d, float sigma) {
+    if (sigma <= 0.0f) return d <= 0.0f ? 1.0f : 0.0f;
+    return 0.5f * std::erfc(d / (sigma * 1.41421356237309505f));
+}
+
+// x/y/w/h 是节点盒，radius 是节点当前生效的圆角（含动画缩放后的值），
+// opacity 是级联后的元素不透明度（阴影跟着一起淡）。
+// 返回环数（0 = 不画：全透明 / 盒退化）；out[0] 是最外圈，画到最后才盖住中心。
+inline int BuildShadowRings(const BinUIShadow& s, float x, float y, float w, float h,
+                            float radius, float opacity,
+                            PaintShadowRing* out, int cap = kMaxShadowRings) {
+    if (!out || cap <= 0 || w <= 0.0f || h <= 0.0f) return 0;
+    const float A = (float)((s.color >> 24) & 0xFFu) / 255.0f * opacity;
+    if (A <= 0.002f) return 0;
+    const uint32_t rgb = s.color & 0x00FFFFFFu;
+    // spread：整块阴影向四周外扩，圆角半径同步增大（CSS 的语法就是这么定义的）
+    const float bx = x - s.spread + s.offsetX;
+    const float by = y - s.spread + s.offsetY;
+    const float bw = w + 2.0f * s.spread;
+    const float bh = h + 2.0f * s.spread;
+    if (bw <= 0.05f || bh <= 0.05f) return 0;       // spread 负到把盒子收没了
+    float r0 = radius + s.spread;
+    if (r0 < 0.0f) r0 = 0.0f;
+    const float lim = std::min(bw, bh) * 0.5f;
+    if (r0 > lim) r0 = lim;
+
+    const float sigma = s.blur > 0.0f ? s.blur * 0.5f : 0.0f;   // CSS：blur-radius = 2σ
+    if (sigma <= 0.4f) {                                        // 硬边阴影：一环就够（自带解析 AA）
+        out[0] = { bx, by, bw, bh, r0,
+                   ((uint32_t)(A * 255.0f + 0.5f) << 24) | rgb, 1.0f };
+        return 1;
+    }
+
+    // 环数按"相邻两环的透明度台阶 ≤ 3/255"定 —— 肉眼看不出台阶，环数也不失控
+    int steps = (int)std::ceil(A * 255.0f / 3.0f);
+    if (steps < 2) steps = 2;
+    if (steps > 32) steps = 32;
+    if (steps > cap) steps = cap;
+    const float stepCov = 1.0f / (float)steps;
+
+    // 候选边界：沿 d 从 3σ 均匀取到 0（外 → 内），再按覆盖率台阶贪心合并成环。
+    // 3σ 之外覆盖率 < 0.2%，画了也看不出来（浏览器也是在这个距离截断的）。
+    float bnd[64], cov[64];
+    int nb = 0;
+    {
+        const float ext = sigma * 3.0f;
+        const int NG = 48;
+        for (int k = 0; k <= NG && nb < 64; k++) {
+            const float d = ext * (1.0f - (float)k / (float)NG);
+            bnd[nb] = d;
+            cov[nb] = PaintGaussCoverage(d, sigma);
+            nb++;
+        }
+    }
+
+    int n = 0, last = 0;
+    float prevT = 0.0f;
+    for (int i = 1; i < nb && n < cap; i++) {
+        const bool tail = (i == nb - 1);
+        if (cov[i] - cov[last] < stepCov && !tail) continue;
+        const float k = bnd[last];                        // 环的外边界（相对盒边外扩）
+        const float cover = 0.5f * (cov[last] + cov[i]);  // 该区间的目标覆盖率
+        const float T = A * cover;                        // 目标累计 alpha
+        float a = 1.0f;                                   // 校正后的源 alpha（见上）
+        if (1.0f - prevT > 1e-4f) a = (T - prevT) / (1.0f - prevT);
+        if (a < 0.0f) a = 0.0f;
+        if (a > 1.0f) a = 1.0f;
+        PaintShadowRing& rr = out[n++];
+        rr.x = bx - k;
+        rr.y = by - k;
+        rr.w = bw + 2.0f * k;
+        rr.h = bh + 2.0f * k;
+        rr.radius = r0 + k;
+        rr.color = ((uint32_t)(a * 255.0f + 0.5f) << 24) | rgb;
+        rr.cover = cover;
+        prevT = T;
+        last = i;
+    }
+    // 最后一环 = 形状本身（外扩 0）。**必须有这一环**：外扩环只往"外面"长，
+    // 形状内部的像素（底色透明的元素、或阴影比盒子还大的情形）只有它才盖得到，
+    // 覆盖率取 1（形状内部几乎全被覆盖）。alpha 同样要按 prevT 做累计校正 ——
+    // 直接写 A 会把内部叠成 1−(1−T)(1−A)（实测 0.28 的阴影内部变成 0.38）。
+    if (n < cap) {
+        float a = 1.0f;
+        if (1.0f - prevT > 1e-4f) a = (A - prevT) / (1.0f - prevT);
+        if (a < 0.0f) a = 0.0f;
+        if (a > 1.0f) a = 1.0f;
+        out[n++] = { bx, by, bw, bh, r0, ((uint32_t)(a * 255.0f + 0.5f) << 24) | rgb, 1.0f };
+    }
+    return n;
+}
+
 // CSS font-weight 归一化到后端认识的"常规/粗体"两档
 inline int PaintWeightOf(const BinUIPaintNode* p) {
     return (p && (p->flags & PAINT_WEIGHT) && p->weight >= 6) ? 700 : 400;

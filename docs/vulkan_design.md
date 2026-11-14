@@ -24,6 +24,8 @@
 
 1. **绘制只走 7 个原语**（`fillRect/fillRounded/fillLine/strokeRounded/drawImage/drawText/drawTextWrapped`）
    + `pushClip/popClipTo`。新后端不许要求渲染器改调用方式。
+   （v0.16.14 的 `box-shadow` 就是照这条做的：阴影没有新增原语，而是解析成"一串同心圆角环"
+   交给 `fillRounded` —— 三个 GPU 后端逐像素相同，GDI 只要换"怎么把 alpha 画上去"。）
 2. **字符帧**：`beginFrame(clipRect)` → 只在 `clipRect` 内清屏并绘制 → `present()` 整帧贴出。
    **不许**在交换链 image 上做局部重绘（Vulkan spec：交换链内容不保证保留，见调研 §6）。
 3. **颜色约定**：`0xAARRGGBB`，着色器输出预乘 alpha，混合 `(ONE, ONE_MINUS_SRC_ALPHA)`，

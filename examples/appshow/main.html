@@ -16,7 +16,8 @@
         /* ---- 页面容器：白面板，四页叠在同一位置，靠宿主切可见性 ---- */
         /* 视口：页面在这儿整块推走/顶进来，必须裁在内容区（overflow:hidden）。
            圆角与边框放在视口上，页面本身是白底方块 —— 否则滑动时能看到 4 个缺口。 */
-        .viewport { background:#FFFFFF; border:1px solid #E6EDF7; border-radius:16; }
+        .viewport { background:#FFFFFF; border:1px solid #E6EDF7; border-radius:16;
+                    box-shadow: 0 10px 30px rgba(31,42,55,0.10); }
         .page { background:#FFFFFF; }
         .h1 { font-size:19; font-weight:700; color:#1F2A37; }
         .h2 { font-size:12; color:#94A3B8; }
@@ -34,19 +35,22 @@
 
         /* ---- 按钮 ---- */
         .btn-p { background:#3E8BFF; color:#FFFFFF; border-radius:9; font-size:12;
+                 box-shadow: 0 3px 8px rgba(62,139,255,0.30);
                  transition: background-color 0.18s ease; }
         .btn-p:hover  { background:#5DA0FF; }
         .btn-p:active { background:#2F79E8; }
         .btn-s { background:#EEF3FA; color:#3E8BFF; border-radius:9; font-size:12;
+                 box-shadow: 0 2px 6px rgba(31,42,55,0.08);
                  transition: background-color 0.18s ease; }
         .btn-s:hover  { background:#E1EBFA; }
         .btn-d { background:#FFE9EC; color:#E24C55; border-radius:9; font-size:12;
+                 box-shadow: 0 2px 6px rgba(226,76,85,0.20);
                  transition: background-color 0.18s ease; }
         .btn-d:hover  { background:#FFD6DB; }
 
         /* ---- 弹窗遮罩 / 提示条 ---- */
         .veil  { background:rgba(31,42,55,0.35); }
-        .toast { background:#1F2A37; border-radius:10; }
+        .toast { background:#1F2A37; border-radius:10; box-shadow: 0 14px 34px rgba(0,0,0,0.38); }
         .toast-t { font-size:12; color:#FFFFFF; }
 
         /* ---- 设置开关 ---- */

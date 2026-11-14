@@ -630,9 +630,24 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         float effRadius = effRadius0;
         if (!affine && animGeo && scale != 1.0f) effRadius *= scale;
 
-        if (x + nw <= clipL || x >= clipR || y + nh <= clipT || y >= clipB) continue;
-        if (hasVp[i] && (x + nw <= vpL[i] || x >= vpR[i] ||
-                         y + nh <= vpT[i] || y >= vpB[i])) continue;
+        // v23 阴影（box-shadow）：阴影露在盒子**外面**，所以剔除与裁剪都得把外扩算进去。
+        // 外扩 = |spread| + 3σ + 1（与 BuildShadowRings 裁断的距离一致），再叠上偏移。
+        int shN = 0;
+        float shScale = 1.0f;                  // 等比缩放动画下阴影整体跟着缩放
+        const BinUIShadow* shs = renderer.shadowsOf(node.id, shN);
+        if (animGeo && scale > 0.0f) shScale = scale;
+        float shPadX = 0.0f, shPadY = 0.0f;
+        for (int k = 0; k < shN; k++) {
+            const float sig = shs[k].blur > 0.0f ? shs[k].blur * 0.5f : 0.0f;
+            const float pad = (std::fabs(shs[k].spread) + sig * 3.0f + 1.0f) * shScale;
+            shPadX = std::max(shPadX, pad + std::fabs(shs[k].offsetX) * shScale);
+            shPadY = std::max(shPadY, pad + std::fabs(shs[k].offsetY) * shScale);
+        }
+
+        if (x - shPadX + nw <= clipL || x + shPadX >= clipR ||
+            y - shPadY + nh <= clipT || y + shPadY >= clipB) continue;
+        if (hasVp[i] && (x - shPadX + nw <= vpL[i] || x + shPadX >= vpR[i] ||
+                         y - shPadY + nh <= vpT[i] || y + shPadY >= vpB[i])) continue;
 
         // 裁剪链：自身 + 祖先 + 本次重绘范围（scissor 求交）。
         // 关键：持久离屏上节点重绘若不做脏矩形裁剪，会把整个节点矩形重涂，
@@ -657,18 +672,80 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                          (double)st.scaleX, (double)st.scaleY, (double)st.rotateDeg,
                          affine ? 1 : 0);
         }
-        int savedDepth = gfx.pushClip(cl, ct, cw, ch);
-        gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
-                     static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
+        // 祖先裁剪容器是否可见（不复位 gfx 状态：后面阴影那一趟还要再压一遍同样的矩形）
         bool draw = true;
-        // 裁剪链交给渲染器判定（clippingAncestors）：只有 overflow:auto/scroll/hidden
-        // 的祖先才裁子元素。普通 div（含组件自己的根 div）按 CSS 语义不裁。
         renderer.clippingAncestors(node.id, clipAncs);
         for (uint16_t ancId : clipAncs) {
             const size_t ai = indexOf(ancId);
             if (ai == static_cast<size_t>(-1)) continue;
+            if (!(nodes[ai].flags & BINUI_VISIBLE)) { draw = false; break; }
+        }
+
+        // ---- v23 box-shadow：先画阴影，再画自身底色 ----
+        // 阴影属于元素自己的背景层（CSS：box-shadow 画在 background 之下），所以在
+        // "进节点自身裁剪之前"单独开一段裁剪 —— 自身盒子会把阴影整块切掉。
+        // 祖先裁剪（overflow 容器 / 滚动视口）照旧，阴影同样被滚动视口裁掉。
+        if (draw && shN > 0 && opacity > 0.002f) {
+            const float ex = x - shPadX, ey = y - shPadY;
+            int sd = gfx.pushClip(ex, ey, nw + 2.0f * shPadX, nh + 2.0f * shPadY);
+            gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
+                         static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
+            for (uint16_t ancId : clipAncs) {
+                const size_t ai = indexOf(ancId);
+                if (ai == static_cast<size_t>(-1)) continue;
+                const auto& par = nodes[ai];
+                gfx.pushClip(par.x - offX[ai], par.y - offY[ai], par.width, par.height);
+            }
+            binui::PaintShadowRing rings[binui::kMaxShadowRings];
+            for (int k = 0; k < shN; k++) {
+                binui::BinUIShadow s2 = shs[k];
+                // 缩放动画：阴影（偏移/模糊/展开）跟着整体缩放，与 CSS transform 语义一致
+                if (shScale != 1.0f) {
+                    s2.offsetX *= shScale; s2.offsetY *= shScale;
+                    s2.blur *= shScale;    s2.spread *= shScale;
+                }
+                if (affine) {
+                    // 旋转/斜切：环画在**局部空间**里，再整体过仿射矩阵（整块阴影跟着转）
+                    const int rn = binui::BuildShadowRings(s2, 0.0f, 0.0f, lw, lh, lr, opacity,
+                                                           rings);
+                    for (int q = 0; q < rn; q++) {
+                        const binui::PaintShadowRing& rr = rings[q];
+                        if (rr.w <= 0.0f || rr.h <= 0.0f) continue;
+                        if (((rr.color >> 24) & 0xFFu) == 0) continue;
+                        // 环的局部原点不在 (0,0)：把平移量折进仿射矩阵的 e/f
+                        const float ox = rr.x, oy = rr.y;
+                        const float xf2[6] = {
+                            xf[0], xf[1], xf[0] * ox + xf[1] * oy + xf[2],
+                            xf[3], xf[4], xf[3] * ox + xf[4] * oy + xf[5],
+                        };
+                        gfx.fillRoundedXf(rr.w, rr.h, rr.radius, false, 0.0f, rr.color, xf2);
+                    }
+                } else {
+                    const int rn = binui::BuildShadowRings(s2, x, y, nw, nh, effRadius, opacity,
+                                                           rings);
+                    for (int q = 0; q < rn; q++) {
+                        const binui::PaintShadowRing& rr = rings[q];
+                        if (rr.w <= 0.0f || rr.h <= 0.0f) continue;
+                        if (((rr.color >> 24) & 0xFFu) == 0) continue;   // 最外圈可能已淡到 0
+                        if (rr.radius > 0.5f)
+                            gfx.fillRounded(rr.x, rr.y, rr.w, rr.h, rr.radius, rr.color);
+                        else
+                            gfx.fillRect(rr.x, rr.y, rr.w, rr.h, rr.color);
+                    }
+                }
+            }
+            gfx.popClipTo(sd);
+        }
+
+        int savedDepth = gfx.pushClip(cl, ct, cw, ch);
+        gfx.pushClip(static_cast<float>(clipL), static_cast<float>(clipT),
+                     static_cast<float>(clipR - clipL), static_cast<float>(clipB - clipT));
+        // 裁剪链交给渲染器判定（clippingAncestors）：只有 overflow:auto/scroll/hidden
+        // 的祖先才裁子元素。普通 div（含组件自己的根 div）按 CSS 语义不裁。
+        for (uint16_t ancId : clipAncs) {
+            const size_t ai = indexOf(ancId);
+            if (ai == static_cast<size_t>(-1)) continue;
             const auto& par = nodes[ai];
-            if (!(par.flags & BINUI_VISIBLE)) { draw = false; break; }
             // 裁剪矩形 = 容器在屏幕上的矩形（减掉它祖先的滚动偏移）
             gfx.pushClip(par.x - offX[ai], par.y - offY[ai], par.width, par.height);
         }
