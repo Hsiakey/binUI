@@ -71,6 +71,15 @@ P2 四条明确不填（GPU 路径光栅、文字次像素、完整 SVG 滤镜�
   `glCreateProgram` 4 / `vkCreateGraphicsPipelines` 4 / `D3DCompile` 3；着色器源码三套
   （GLSL 内联 / `binui_vk_shaders.h` 的 SPIR-V 常量 / HLSL 内联）。
 
+## [Unreleased]
+
+### 文档 — 图层设施设计稿（P0-1 / P1-7 的收口）
+
+0.16.8 的组透明度是"逐元素乘 alpha"的近似，重叠区会叠深；层缓存（内容不变不重画）也还没做。
+两件事都要同一套离屏图层，所以在 `docs/future.md` 里把接口（`pushLayer`/`popLayer`，默认返回
+false = 后端退回逐元素模式）、渲染器侧的分组规则、三端实现要点（GL/D3D11 直接做，VK 要改主
+render pass 的 loadOp 所以排最后）、层缓存的失效条件与验收线先写清楚，动手时照这个来。
+
 ## [0.16.8] - 2026-11-14
 
 缺口清单里的 P1-7：**父元素的 `opacity` 根本不影响子元素**。
