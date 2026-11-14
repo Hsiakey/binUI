@@ -567,6 +567,7 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
     paints_.clear();
     paintIdx_.clear();
     clipOnly_.clear();
+    anyStaticOpacity_ = false;
     if (const uint8_t* pp = sectionAt(6)) {
         uint32_t pb = 0;
         memcpy(&pb, pp, sizeof(pb));
@@ -583,6 +584,7 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
                 if (!nodeIndexById_.count(pn.nodeId)) continue;   // 悬空条目防御
                 paintIdx_[pn.nodeId] = paints_.size();
                 if (pn.flags & PAINT_CLIP_ONLY) clipOnly_.insert(pn.nodeId);
+                if ((pn.flags & PAINT_OPACITY) && pn.reserve[0] < 255) anyStaticOpacity_ = true;
                 paints_.push_back(pn);
             }
         }
@@ -3727,7 +3729,10 @@ BinUIRenderer::DrawState BinUIRenderer::drawState(uint16_t nodeId) const {
         auto it = animState_.find(nodeId);
         if (it != animState_.end()) rt = &it->second;
     }
-    if (!r && !rt) return st;
+    if (!r && !rt) {
+        st.opacity = ownOpacity(nodeId) * ancestorOpacity(nodeId);
+        return st;
+    }
 
     if (r && r->colorSet) {
         st.color = r->color;
@@ -3782,6 +3787,9 @@ BinUIRenderer::DrawState BinUIRenderer::drawState(uint16_t nodeId) const {
     if (r && r->kSet) { st.scaleX = r->kx; st.scaleY = r->ky; }
     else if (st.scale != 1.0f) { st.scaleX = st.scale; st.scaleY = st.scale; }
     if (r && r->rotSet) st.rotateDeg = r->rot;
+    // v0.16.8：opacity 返回**级联后**的值（自己 × 祖先）—— 三个后端与 GDI 都直接用 st.opacity
+    // 去乘颜色，所以一处改完，父元素的 opacity 就能衰减整棵子树。
+    st.opacity = ownOpacity(nodeId) * ancestorOpacity(nodeId);
     return st;
 }
 
@@ -3797,7 +3805,19 @@ uint32_t BinUIRenderer::drawColor(uint16_t nodeId) const {
     return (ni == nodeIndexById_.end()) ? 0xFFFFFFFF : nodes_[ni->second].color;
 }
 
-float BinUIRenderer::drawOpacity(uint16_t nodeId) const {
+float BinUIRenderer::staticOpacity(uint16_t nodeId) const {
+    if (!paintIdx_.empty()) {
+        auto it = paintIdx_.find(nodeId);
+        if (it != paintIdx_.end()) {
+            const BinUIPaintNode& p = paints_[it->second];
+            if (p.flags & PAINT_OPACITY) return static_cast<float>(p.reserve[0]) / 255.0f;
+        }
+    }
+    return 1.0f;
+}
+
+// 只看 v7 动画给的不透明度（没有动画 = 1）
+float BinUIRenderer::animatedOpacity(uint16_t nodeId) const {
     auto ar = animResult_.find(nodeId);
     if (ar != animResult_.end() && ar->second.opSet) return ar->second.opacity;
     auto it = animState_.find(nodeId);
@@ -3806,6 +3826,32 @@ float BinUIRenderer::drawOpacity(uint16_t nodeId) const {
         if (f != it->second.floatTargets.end()) return f->second;
     }
     return 1.0f;
+}
+
+// 自己的 opacity = 静态 × 动画
+float BinUIRenderer::ownOpacity(uint16_t nodeId) const {
+    return staticOpacity(nodeId) * animatedOpacity(nodeId);
+}
+
+float BinUIRenderer::ancestorOpacity(uint16_t nodeId) const {
+    // 快路径：整页既没有静态 opacity 也没有动画 → 级联恒为 1（绝大多数页面）
+    if (!anyStaticOpacity_ && animState_.empty() && animResult_.empty()) return 1.0f;
+    const size_t idx = nodeIndexOf(nodeId);
+    if (idx == static_cast<size_t>(-1)) return 1.0f;
+    float prod = 1.0f;
+    uint16_t pid = nodes_[idx].parentId;
+    for (int guard = 0; pid != 0xFFFF && guard < 512; guard++) {
+        prod *= ownOpacity(pid);
+        if (prod <= 0.0001f) return 0.0f;
+        const size_t pi = nodeIndexOf(pid);
+        if (pi == static_cast<size_t>(-1)) break;
+        pid = nodes_[pi].parentId;
+    }
+    return prod;
+}
+
+float BinUIRenderer::drawOpacity(uint16_t nodeId) const {
+    return ownOpacity(nodeId) * ancestorOpacity(nodeId);
 }
 
 float BinUIRenderer::drawOffsetX(uint16_t nodeId) const {

@@ -550,7 +550,17 @@ public:
 
     // 绘制查询：节点当前应显示的颜色（含 hover/按下 tint、过渡与关键帧动画）
     uint32_t drawColor(uint16_t nodeId) const;
-    float drawOpacity(uint16_t nodeId) const;   // 1 = 不透明
+    // v0.16.8：返回**级联后**的不透明度（自己 × 所有祖先），1 = 完全不透明。
+    // CSS 的 opacity 是"组"语义：父元素半透明时整棵子树一起淡。以前只作用于元素自己
+    // （静态 opacity 干脆在编译期折进了颜色），于是卡片 fade 时文字/子块纹丝不动。
+    float drawOpacity(uint16_t nodeId) const;
+    // 该节点自己的静态 opacity（PAINT_OPACITY / reserve[0]；没声明返回 1）
+    float staticOpacity(uint16_t nodeId) const;
+    // 祖先的 opacity 乘积（不含自己；根返回 1）
+    float ancestorOpacity(uint16_t nodeId) const;
+    // 只看 v7 动画 / 自己的（静态 × 动画）—— 上面三个都建立在它们之上
+    float animatedOpacity(uint16_t nodeId) const;
+    float ownOpacity(uint16_t nodeId) const;
     float drawOffsetX(uint16_t nodeId) const;   // 视觉平移 x
     float drawOffsetY(uint16_t nodeId) const;   // 视觉平移 y
     float drawScale(uint16_t nodeId) const;     // 1 = 原尺寸（绕中心缩放）
@@ -661,6 +671,9 @@ private:
     // 每次都从这份原始值算，避免多次 setSize 累乘
     std::vector<std::array<uint8_t, 4>> designBorderW_;
     std::unordered_set<uint16_t> clipOnly_;              // PAINT_CLIP_ONLY 的节点（overflow:hidden）
+    // v0.16.8：有没有任何节点声明了静态 opacity。没有的话 drawOpacity/ancestorOpacity
+    // 走常数快路径（绝大多数页面都是这样，别让"级联"给每帧多出几千次哈希探测）。
+    bool anyStaticOpacity_ = false;
     std::unordered_set<uint16_t> mountedAnchors_;        // 已挂载组件的锚点（幂等）
     uint16_t nextNodeId_ = 0;                            // v8 动态节点 id 分配
     std::unordered_map<std::string, ImageResource> images_;

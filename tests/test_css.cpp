@@ -1095,6 +1095,9 @@ int run() {
     {
         auto res = CompileBinUIEx(
             "<html><body>"
+            "<div id=\"opwrap\" style=\"height:60px;opacity:0.5\">"
+            "  <div id=\"opchild\" style=\"height:20px;background:#0000FF\"></div>"
+            "</div>"
             "<div id=\"op\" style=\"height:20px;background:#FF0000;opacity:0.5\"></div>"
             "<div id=\"op0\" style=\"height:20px;background:#00FF00;opacity:0\"></div>"
             "</body></html>");
@@ -1105,8 +1108,22 @@ int run() {
             for (const auto& nd : r.getNodes()) if (nd.id == nid) return nd.color;
             return 0xDEADBEEFu;
         };
-        TEST("opacity: folded into alpha (0.5 -> 0x80)", colorOf("op") == 0x80FF0000u);
-        TEST("opacity: zero -> fully transparent", colorOf("op0") == 0x0000FF00u);
+        auto opacityOf = [&](const char* name) -> float {
+            return r.drawOpacity(r.findNodeByName(name));
+        };
+        auto ownOpOf = [&](const char* name) -> float {
+            return r.staticOpacity(r.findNodeByName(name));
+        };
+        // 0.16.8：静态 opacity 不再折进颜色（那样**子节点完全不受影响**），
+        // 改成存进扩展绘制段的 reserve[0]，由 drawOpacity() 按祖先链级联。
+        TEST("opacity: 颜色保持完全不透明", colorOf("op") == 0xFFFF0000u);
+        TEST("opacity: 0.5 存进 reserve[0]=128", std::fabs(ownOpOf("op") - 0.5f) < 0.005f);
+        TEST("opacity: 0 存成 0", ownOpOf("op0") <= 0.001f);
+        TEST("opacity: drawOpacity 自己是 0.5", std::fabs(opacityOf("op") - 0.5f) < 0.005f);
+        // 关键：父元素 opacity:0.5，子元素没有 opacity —— 子元素也要被衰减（CSS 组语义）
+        TEST("opacity: 级联到子节点（父 0.5 → 子 0.5）",
+             std::fabs(opacityOf("opchild") - 0.5f) < 0.005f);
+        TEST("opacity: 子节点自己的静态 opacity 仍是 1", std::fabs(ownOpOf("opchild") - 1.0f) < 0.001f);
     }
     {
         auto res = CompileBinUIEx(

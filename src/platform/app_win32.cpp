@@ -757,7 +757,15 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         // 节点当前生效颜色直接问渲染器：CSS 状态样式（:hover/:active/:focus/:checked）、
         // transition 过渡与 @keyframes 动画都在渲染器里算好（与 GL/D3D11 后端一致）。
         // 以前这里自己按 hover/按下做 tint —— 作者写的颜色被无视，动画也不生效。
-        const uint32_t dc = renderer.drawColor(node.id);
+        // 0.16.8：静态 opacity 已经不再折进颜色（那样子节点完全不受影响），
+        // 改成运行时按"自己 × 祖先"折进 alpha —— GDI 没有 alpha 合成，下面 FillPaintBands
+        // 会拿它去和底色 BlendOver，效果与 GL/VK/D3D11 一致。
+        const float nodeOp = renderer.drawOpacity(node.id);
+        uint32_t dc = renderer.drawColor(node.id);
+        if (nodeOp < 1.0f) {
+            const uint32_t oa = (uint32_t)(((dc >> 24) & 0xFFu) * nodeOp + 0.5f);
+            dc = (oa << 24) | (dc & 0x00FFFFFFu);
+        }
         // v13 扩展绘制段：文字色 / 边框 / 渐变 / 字重 / 行高 / 文字装饰
         const BinUIPaintNode* pt = renderer.paintOf(node.id);
         const bool hasBorder = pt && (pt->flags & PAINT_BORDER);
@@ -849,7 +857,16 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         {
             auto pit = byId.find(node.parentId);
             if (pit != byId.end()) {
-                const uint32_t pbg = renderer.drawColor(nodes[pit->second].id);
+                const uint16_t pid = nodes[pit->second].id;
+                uint32_t pbg = renderer.drawColor(pid);
+                // 0.16.8：父元素可能被 opacity 淡过（自己或祖先）。GDI 没有 alpha 合成，
+                // 这里先把它的"看起来的颜色"近似算出来（与页面底色混合），子元素再往上叠，
+                // 否则半透明父容器里的子元素会按"父元素的原始饱和色"去混合，明显偏深。
+                const float pop = renderer.drawOpacity(pid);
+                if (pop < 1.0f) {
+                    const uint32_t oa = (uint32_t)(((pbg >> 24) & 0xFFu) * pop + 0.5f);
+                    pbg = BlendOver((oa << 24) | (pbg & 0x00FFFFFFu), pageBg);
+                }
                 if ((pbg >> 24) & 0xFF) underBg = pbg | 0xFF000000u;
             }
         }
@@ -859,6 +876,12 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         const bool placeholder = pt && (pt->textFlags & TEXT_PLACEHOLDER) != 0;
         auto fadeOver = [&](uint32_t c, int alpha) -> uint32_t {
             return BlendOver((c & 0x00FFFFFFu) | ((uint32_t)alpha << 24), underBg);
+        };
+        // 0.16.8：级联后的 opacity 折进颜色（GDI 没有分层合成，按与底色混合近似）
+        auto fadeOpac = [&](uint32_t c) -> uint32_t {
+            if (nodeOp >= 1.0f) return c;
+            const int a = (int)(((c >> 24) & 0xFFu) * nodeOp + 0.5f);
+            return fadeOver(c, a);
         };
         auto fillNodeBg = [&](uint32_t color, float radius) {
             binui::PaintBand bands[binui::kMaxPaintBands];
@@ -910,7 +933,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                     fillNodeBg(dc, (float)node.radius);
                 if (node.text.empty()) break;
                 const int fs = node.fontSize ? node.fontSize : 14;
-                SetTextColor(hdc, RGB((tcol >> 16) & 0xFF, (tcol >> 8) & 0xFF, tcol & 0xFF));
+                SetTextColor(hdc, RGB((fadeOpac(tcol) >> 16) & 0xFF, (fadeOpac(tcol) >> 8) & 0xFF, fadeOpac(tcol) & 0xFF));
                 HFONT font = CreateFontA(
                     -fs, 0, 0, 0, fw >= 600 ? FW_BOLD : FW_NORMAL,
                     italic ? TRUE : FALSE, FALSE, FALSE, DEFAULT_CHARSET,
@@ -986,7 +1009,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                     uint32_t tcol = (pt && (pt->flags & PAINT_TEXT_COLOR))
                                           ? pt->textColor : 0xFFFFFFFFu;
                     if (disabled) tcol = fadeOver(tcol, 140);
-                    SetTextColor(hdc, RGB((tcol >> 16) & 0xFF, (tcol >> 8) & 0xFF, tcol & 0xFF));
+                    SetTextColor(hdc, RGB((fadeOpac(tcol) >> 16) & 0xFF, (fadeOpac(tcol) >> 8) & 0xFF, fadeOpac(tcol) & 0xFF));
                     // 字重：作者声明了 font-weight 就用声明值（取法与 LABEL / LIST 同一套
                     // PaintWeightOf → FW_* 换算）；没声明才回落 700 粗体，
                     // 以前写死 FW_BOLD，font-weight 写了也没效果。
@@ -1109,7 +1132,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
                                               ? pt->textColor
                                               : binui::PaintContrastText(dc | 0xFF000000u);
                     if (disabled) tcol = fadeOver(tcol, 140);
-                    SetTextColor(hdc, RGB((tcol >> 16) & 0xFF, (tcol >> 8) & 0xFF, tcol & 0xFF));
+                    SetTextColor(hdc, RGB((fadeOpac(tcol) >> 16) & 0xFF, (fadeOpac(tcol) >> 8) & 0xFF, fadeOpac(tcol) & 0xFF));
                     const int fw = binui::PaintWeightOf(pt);
                     HFONT font = CreateFontA(-(node.fontSize ? node.fontSize : 14), 0, 0, 0,
                         fw >= 600 ? FW_BOLD : FW_NORMAL,
@@ -1497,3 +1520,4 @@ bool isTitlebarDrag(const BinUIRenderer& renderer, float x, float y) {
             return true;
     return false;
 }
+

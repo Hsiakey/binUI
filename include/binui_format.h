@@ -409,6 +409,12 @@ enum BinUIPaintFlag : uint16_t {
     PAINT_OVERLINE    = 1 << 12, // 文字上划线
     PAINT_CLIP_ONLY   = 1 << 13, // 只裁剪不滚动（CSS overflow:hidden 与 auto/scroll 的区别）
     PAINT_RESIZE      = 1 << 14, // resizeMask 有效（CSS resize：贴边拖动改盒子尺寸）
+    // 0.16.8：元素的静态 opacity 存在 `reserve[0]`（0..255，255 = 1.0）。
+    // 以前是编译期折进颜色的 alpha —— 那样**子节点完全不受影响**（一个卡片 fade 时背景在淡、
+    // 文字和子块纹丝不动），和 CSS 的"组透明度"语义相反。现在留给运行期，
+    // 由渲染器按祖先链乘下去（`drawOpacity` / `drawState().opacity` 都返回**级联后**的值）。
+    // 旧二进制这一位恒为 0（那时已经折进颜色了），行为不变，所以不升 BINUI_VERSION。
+    PAINT_OPACITY     = 1 << 15, // reserve[0] = 静态 opacity（0..255）
 };
 
 // 渐变方向（PAINT_GRADIENT 且非 RADIAL 时有效）

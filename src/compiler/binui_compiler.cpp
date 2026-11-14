@@ -6041,24 +6041,20 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             }
         }
 
-        // 静态 opacity：编译期折进节点颜色 alpha（binUI 没有合成组，子节点不受影响；
-        // 动画里的 opacity 仍走 v7 动画系统）。必须在 n.color 赋值之后处理。
+        // 静态 opacity（0.16.8）：**不再折进颜色**，改成存进扩展绘制段的 reserve[0]，
+        // 由渲染器按祖先链级联（CSS 的组透明度语义）—— 以前折进颜色等于"子节点完全不受影响"：
+        // 一个卡片 fade 时背景在淡、文字和子块纹丝不动（docs/future.md P1-7）。
+        // 动画里的 opacity 仍走 v7 动画系统；两者在 drawState() 里相乘。
         {
             auto oit = style.find("opacity");
             if (oit != style.end()) {
                 float op = parseLen(oit->second, 1.0f, "opacity");
                 if (op < 0.0f) op = 0.0f;
                 if (op > 1.0f) op = 1.0f;
-                auto fade = [&](uint32_t c) {
-                    uint32_t a = (uint32_t)(((c >> 24) & 0xFFu) * op + 0.5f);
-                    return (a << 24) | (c & 0x00FFFFFFu);
-                };
-                n.color = fade(n.color);
-                // 扩展绘制段里的颜色同一个语义：整块淡出时文字/边框/渐变都要跟着淡
-                if (pflags & PAINT_TEXT_COLOR)  paint.textColor = fade(paint.textColor);
-                if (pflags & PAINT_BORDER)      for (int k = 0; k < 4; k++) paint.borderColor[k] = fade(paint.borderColor[k]);
-                if (pflags & PAINT_GRADIENT) { paint.gradFrom = fade(paint.gradFrom);
-                                               paint.gradTo = fade(paint.gradTo); }
+                if (op < 1.0f) {
+                    pflags |= PAINT_OPACITY;
+                    paint.reserve[0] = (uint8_t)(op * 255.0f + 0.5f);
+                }
             }
         }
 
