@@ -1,7 +1,7 @@
 # binUI - 跨平台描述式 UI 核心
 
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.16.30-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.16.31-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
 [![Format v29](https://img.shields.io/badge/binUI%20format-v29-orange.svg)](include/binui_format.h)
@@ -610,16 +610,16 @@ DetachVideoEngine();   // 进程退出前停止全部解码/输出线程
 
 绘制后端是独立模块，可随时替换：GDI 与 D3D11 后端共享同一份节点树与交互语义，D3D11 额外提供彩色 emoji。**文本层已是跨平台实现**（FreeType + HarfBuzz，灰度/COLR 均与平台无关）；换平台时只需替换"窗口 + 事件 + 交换链"外壳（Linux 对应 X11/Wayland + OpenGL，macOS 对应 Cocoa + Metal），字体发现接 fontconfig / CoreText。
 
-## 生态：bin2d / bin3d / binGPU（同级目录；binGPU 0.2.0，bin2d/bin3d 0.1.0）
+## 生态：bin2d / bin3d / binGPU（同级目录；binGPU 0.2.1，bin2d/bin3d 0.1.1）
 
 binUI 的边界只有四件事：**布局 + 事件 + 文本 + 描述式绘制**。边界之外的三层单独做成了仓库，
 放在本仓库的**同级目录**（不在这个仓库里，GitHub 上看不到）：
 
 | 项目 | 语言 | 一句话 | 现状 |
 |---|---|---|---|
-| `../binGPU` | **C++17 / C 兼容 ABI** | 设备 / 交换链 / 资源 / 管线 / 命令 / 呈现（实现 C++17，对外 ABI 仍 C 兼容、ABI 1 不变） | v0.2.0：NULL 后端（只校验）+ **CPU 参考后端**（五种混合、采样器、离屏、float 深度、网格、反预乘回读）；573 条断言 + `abi-check`；VK / D3D12 / GL 登记为未实现 |
-| `../bin2D` | C++17 | 保留模式 2D 画布：场景图 + 图层 + 合成 + 光栅数学 | 覆盖率 AA 填充/描边、路径、渐变、圆角、九宫格、盒式模糊、组透明度离屏、5 种混合；94 条断言；与 binGPU CPU 后端**逐像素往返 0 差** |
-| `../bin3D` | C++17 | 小型实时 3D：相机 + 裁剪 + 深度 + 光照（先软光栅） | 六平面齐次裁剪、1/w 透视校正、z-buffer、Lambert；164 条断言；720p 一帧 ≈22.6 ms |
+| `../binGPU` | **C++17 / C 兼容 ABI** | 设备 / 交换链 / 资源 / 管线 / 命令 / 呈现（实现 C++17，对外 ABI 仍 C 兼容、ABI 1 不变） | v0.2.1：NULL 后端（只校验）+ **CPU 参考后端**（五种混合、采样器、离屏、float 深度、网格、反预乘回读）；573 条断言 + `abi-check`；纯色填充 420 MPix/s（0.2.1 性能轮 7.3×）；VK / D3D12 / GL 登记为未实现 |
+| `../bin2D` | C++17 | 保留模式 2D 画布：场景图 + 图层 + 合成 + 光栅数学 | 覆盖率 AA 填充/描边、路径、渐变、圆角、九宫格、盒式模糊、组透明度离屏、5 种混合；94 条断言；与 binGPU CPU 后端**逐像素往返 0 差**；0.1.1 光栅/合成基准合计 4.43× |
+| `../bin3D` | C++17 | 小型实时 3D：相机 + 裁剪 + 深度 + 光照（先软光栅） | 六平面齐次裁剪、1/w 透视校正、z-buffer、Lambert；164 条断言；720p 一帧 ≈10.1 ms（0.1.1 性能轮 2.1~2.4×） |
 
 四个仓库共用一份光栅数学的**方向**、语言分工为什么最底层是 C、以及各自的开工条件与验收线，
 都写在 [`docs/future.md`](docs/future.md)。**binUI 至今没有改一行代码去用它们**：`.bui` 布局与

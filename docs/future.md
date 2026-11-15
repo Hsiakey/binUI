@@ -1,9 +1,9 @@
 # 未来计划：bin2d / bin3d / binGPU
 
 > **状态（2026-11-15）：三个项目的地基已落地**，代码放在 binUI 的**同级目录**（独立仓库，
-> 不在本仓库里，所以下面的路径是本地磁盘路径、GitHub 上点不开）：`../binGPU` v0.2.0
-> （C++17 实现 / C 兼容 ABI，NULL + CPU 参考后端）、`../bin2D` v0.1.0（C++17，场景图 / 图层 / 合成 +
-> 覆盖率 AA 光栅）、`../bin3D` v0.1.0（C++17，软光栅 + 相机 / 裁剪 / 深度 / 光照）。
+> 不在本仓库里，所以下面的路径是本地磁盘路径、GitHub 上点不开）：`../binGPU` v0.2.1
+> （C++17 实现 / C 兼容 ABI，NULL + CPU 参考后端）、`../bin2D` v0.1.1（C++17，场景图 / 图层 / 合成 +
+> 覆盖率 AA 光栅）、`../bin3D` v0.1.1（C++17，软光栅 + 相机 / 裁剪 / 深度 / 光照）。
 > 本文继续作为**方向与分工**的记录；具体做法、验收数字与欠账以各仓库自己的 `docs/` 为准。
 > **binUI 本体为此一行代码都没改**（`.bui` 布局与 `BINUI_VERSION` 不变），三个项目各自
 > 发布自己的版本号，互不冻结。
@@ -95,11 +95,11 @@ master 问过：bin2d/bin3d 是图形 API，写成纯 C 是不是更快、"引�
 三个仓库都是"能编、能测、能出图"的地基，不是空壳：**头文件是定稿的公开接口，实现是最小可用集**，
 故意没做的部分写在各自的 `docs/roadmap.md` 里（附开工条件）。
 
-| 项目 | 语言 | v0.1.0 里已经有的 | 验收（本机实测） |
+| 项目 | 语言 | 现在有的 | 验收（本机实测） |
 |---|---|---|---|
-| **binGPU** | C++17 / C 兼容 ABI | `bingpu.h` 定稿 ABI（句柄 `uint64_t`、`struct_size` 版本化 POD、无回调、`bingpu_poll` 轮询）；**NULL** 后端（只校验+计数）与 **CPU 参考后端**（五种混合 / 采样器 / scissor / viewport / affine / 离屏 / float 深度 / 网格 / 反预乘回读）；后端注册表（VK、D3D12、GL 登记为"未实现"） | `make test` **573 条断言**（ABI 239 + CPU 像素 334）、`make abi-check`（纯 C 编头 + 禁 C++ 设施）、零警告 |
-| **bin2D** | C++17 | 四个 header-only 地基头（`core`/`surface`/`transform`/`png`）+ `paint`/`path`（命令级 + 自适应展平 + 精确包围盒）/`raster`（覆盖率 AA 填充与描边、圆角、渐变、位图、九宫格、盒式模糊）/`canvas`（变换栈 + 裁剪栈 + 图层栈 + 5 种混合）/`scene`（Group/Shape/ImageShape + 投影）/`image`；`gpu.h` 是 binGPU 桥 | `make test` **94 条断言**、`make demo` 出图、`make layers` 边界检查；**与 binGPU CPU 后端逐像素往返 0 差**（最大通道差 0） |
-| **bin3D** | C++17 | `math`（列主序 Mat4 / Vec）+ `camera` + `mesh`（**36 字节顶点，与 `BgpuMeshVertex` 逐字段同布局**）+ `scene`（节点级联 / 材质 / 平行光 + 环境光）+ `SoftRenderer`（六平面齐次裁剪、1/w 透视校正、z-buffer、Lambert、统计）；`gpu.h` 是 GPU 阶段的桩（全部返回 false 并给出原因） | `make test` **164 条断言**、`make demo` 出三格并排图、`make layers`；1280×720 一帧 ≈22.6 ms（≈24 ns/像素，瓶颈在像素不在三角形） |
+| **binGPU** | C++17 / C 兼容 ABI | `bingpu.h` 定稿 ABI（句柄 `uint64_t`、`struct_size` 版本化 POD、无回调、`bingpu_poll` 轮询）；**NULL** 后端（只校验+计数）与 **CPU 参考后端**（五种混合 / 采样器 / scissor / viewport / affine / 离屏 / float 深度 / 网格 / 反预乘回读）；**0.2.1 性能轮**：纯色填充 7.3×（420 MPix/s）、裁剪切批 6.5×、纹理 1.6~2.3×，13 个校验和逐位不变；后端注册表（VK、D3D12、GL 登记为"未实现"） | `make test` **573 条断言**（ABI 239 + CPU 像素 334）、`make abi-check`（纯 C 编头 + 禁 C++ 设施）、零警告 |
+| **bin2D** | C++17 | 四个 header-only 地基头（`core`/`surface`/`transform`/`png`）+ `paint`/`path`（命令级 + 自适应展平 + 精确包围盒）/`raster`（覆盖率 AA 填充与描边、圆角、渐变、位图、九宫格、盒式模糊）/`canvas`（变换栈 + 裁剪栈 + 图层栈 + 5 种混合）/`scene`（Group/Shape/ImageShape + 投影）/`image`；`gpu.h` 是 binGPU 桥 | `make test` **94 条断言**、`make demo` 出图（**0.1.1 性能轮**：六项基准合计 4.43×）、`make layers` 边界检查；**与 binGPU CPU 后端逐像素往返 0 差**（最大通道差 0） |
+| **bin3D** | C++17 | `math`（列主序 Mat4 / Vec）+ `camera` + `mesh`（**36 字节顶点，与 `BgpuMeshVertex` 逐字段同布局**）+ `scene`（节点级联 / 材质 / 平行光 + 环境光）+ `SoftRenderer`（六平面齐次裁剪、1/w 透视校正、z-buffer、Lambert、统计）；`gpu.h` 是 GPU 阶段的桩（全部返回 false 并给出原因） | `make test` **164 条断言**、`make demo` 出三格并排图、`make layers`；1280×720 一帧 ≈10.1 ms（≈11 ns/像素；**0.1.1 性能轮 2.1~2.4×**，瓶颈在像素不在三角形） |
 
 **迁移状态（重要，别误读）**：binUI 现在**仍然用自己那份光栅数学**（`binui_paint.h` 的条带 +
 `binui_path.h` 的几何），bin2d **还没有**被 binUI 消费 —— 那是 bin2d 的**第②步**，验收线照旧：
