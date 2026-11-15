@@ -119,9 +119,51 @@ inline float PaintRoundInset(float dy, float radius) {
     return radius - std::sqrt(rr - dd);
 }
 
+// 节点（含阴影等"画到盒子外面"的外扩 pad）是否与裁剪矩形**相交**。
+// 判据只允许一种写法：**四边都"完全在外"才算剔除**。
+//   右：x + w + padX <= clipL（节点整个在裁剪区左边）
+//   左：x - padX >= clipR（整个在右边）
+//   下：y + h + padY <= clipT（整个在上边）
+//   上：y - padY >= clipB（整个在下边）
+//
+// 为什么值得单独立一个函数：v0.16.31 及以前，绘制遍历里把右/下两条写成了
+// `x + padX >= clipR` / `y + padY >= clipB` —— 那判的是"节点的左/上边**进入**了
+// 裁剪区右/下边 pad 以内"，于是**紧贴裁剪边缘、明明有一部分可见**的节点被整块丢掉。
+// 整帧重绘时裁剪区 = 整屏，四边的差别碰不到任何节点，所以像素基准一直没抓到；
+// 一旦走局部重绘（hover 只重画一个节点的脏矩形），脏矩形边缘那一圈兄弟节点的
+// 底色/阴影就凭空消失，沿着脏矩形留下一圈硬边 —— 看起来像"hover 之后多出一块影子/边框"。
+// 这类判据必须只有一份实现 + 单测（tests/test_elements.cpp 的"局部重绘剔除"小节）。
+inline bool PaintNodeInClip(float x, float y, float w, float h,
+                            float padX, float padY,
+                            float clipL, float clipT, float clipR, float clipB) {
+    if (x + w + padX <= clipL) return false;
+    if (x - padX >= clipR) return false;
+    if (y + h + padY <= clipT) return false;
+    if (y - padY >= clipB) return false;
+    return true;
+}
+
+// box-shadow 会画到盒子外面：外扩量 = |spread| + 3σ + 1（与 BuildShadowRings 的裁断距离
+// 一致），再叠上偏移。**这一份必须只有一处实现** —— 绘制（决定裁剪/剔除）和
+// 失效（决定脏矩形多大）用的是同一组数字，两边算不一样就会出现"重绘没盖住阴影"
+// 的残影（v0.16.32 之前 invalidRect 完全没算阴影，局部重绘后按钮阴影边缘留一圈旧像素）。
+inline void PaintShadowPad(const BinUIShadow& s, float scale, float& padX, float& padY) {
+    const float sig = s.blur > 0.0f ? s.blur * 0.5f : 0.0f;
+    const float pad = (std::fabs(s.spread) + sig * 3.0f + 1.0f) * scale;
+    padX = std::max(padX, pad + std::fabs(s.offsetX) * scale);
+    padY = std::max(padY, pad + std::fabs(s.offsetY) * scale);
+}
+
+// text-shadow 同理：字形模糊会溢出节点盒（CSS 的 text-shadow 不受盒子边界约束）。
+inline void PaintTextShadowPad(const BinUITextShadow& t, float& padX, float& padY) {
+    const float sig = t.blur > 0.0f ? t.blur * 0.5f : 0.0f;
+    const float pad = sig * 3.0f + 1.0f;
+    padX = std::max(padX, pad + std::fabs(t.offsetX));
+    padY = std::max(padY, pad + std::fabs(t.offsetY));
+}
+
 // 按比例缩放颜色的 alpha（用于边缘部分覆盖：抗锯齿）
-inline uint32_t PaintScaleAlpha(uint32_t c, float k) {
-    if (k >= 0.999f) return c;
+inline uint32_t PaintScaleAlpha(uint32_t c, float k) {    if (k >= 0.999f) return c;
     if (k <= 0.0f) return c & 0x00FFFFFFu;
     uint32_t a = (uint32_t)((float)((c >> 24) & 0xFFu) * k + 0.5f);
     if (a > 255u) a = 255u;

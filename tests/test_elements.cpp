@@ -2907,6 +2907,70 @@ static int run() {
     r.invalidRect(static_cast<uint16_t>(id), x3, y3, w3, h3);
     CHECK(w3 >= 210.0f,
           "hover-dirty: 缩回那一帧的失效矩形仍覆盖放大过的范围（否则边缘留残影）");
+
+    // ------------------------------------------------------------------
+    // 局部重绘剔除判据（docs/issues/10：hover 之后冒出一块"影子/边框"的根因）
+    //
+    // 判据只能有一种写法：**四边都"完全在外"才剔除**。曾经右/下两侧写成
+    // `节点左/上边 + pad >= clip 右/下边`，那会把"紧贴脏矩形边缘、明明有一部分
+    // 可见"的节点整块丢掉 —— 整帧重绘时 clip = 整屏，碰不到任何节点，所以像素
+    // 基准一直没抓到；一进局部重绘（hover 只重画一个脏矩形），脏矩形边缘那圈
+    // 兄弟节点的底色/阴影就消失，沿脏矩形留下硬边。
+    // ------------------------------------------------------------------
+    {
+        using binui::PaintNodeInClip;
+        // 节点 100×40 在 (100,100)，无外扩：与 clip(150..350, 90..200) 相交
+        CHECK(PaintNodeInClip(100, 100, 100, 40, 0, 0, 150, 90, 350, 200),
+              "局部重绘剔除: 部分重叠要画");
+        // 左边完全在 clip 左边 → 剔除（boundary 相等也算"完全在外"）
+        CHECK(!PaintNodeInClip(0, 100, 100, 40, 0, 0, 100, 90, 350, 200),
+              "局部重绘剔除: 整块在左边界外要剔");
+        // 右边界：节点左 100 < clip 右 100？这里节点左=100、clip 右=100 → 完全在外
+        CHECK(!PaintNodeInClip(100, 100, 100, 40, 0, 0, 0, 0, 100, 200),
+              "局部重绘剔除: 整块在右边界外要剔");
+        // ★ 回归点：节点左边只进 clip 右边界以内 5px（以前被 pad 判据整块剔掉）
+        CHECK(PaintNodeInClip(95, 100, 100, 40, 0, 0, 0, 0, 100, 200),
+              "局部重绘剔除: 紧贴右边界、有一列可见 → 必须画（旧判据在这里错）");
+        // ★ 回归点：节点上边只进 clip 下边界以内 5px
+        CHECK(PaintNodeInClip(100, 195, 100, 40, 0, 0, 0, 0, 300, 200),
+              "局部重绘剔除: 紧贴下边界、有一行可见 → 必须画（旧判据在这里错）");
+        // 外扩：节点完全在外，但阴影外扩刚好伸进 clip → 必须画
+        CHECK(PaintNodeInClip(0, 100, 100, 40, 4, 0, 100, 90, 350, 200),
+              "局部重绘剔除: 阴影外扩伸进脏矩形 → 必须画");
+        CHECK(!PaintNodeInClip(0, 100, 100, 40, 2, 0, 102, 90, 350, 200),
+              "局部重绘剔除: 外扩也不够到边界 → 剔除");
+        // 下边完全在 clip 上边之上
+        CHECK(!PaintNodeInClip(100, 0, 100, 40, 0, 0, 0, 40, 300, 200),
+              "局部重绘剔除: 整块在上边界外要剔");
+        CHECK(PaintNodeInClip(100, 36, 100, 40, 0, 0, 0, 40, 300, 200),
+              "局部重绘剔除: 压着上边界 4px → 必须画");
+    }
+
+    // box-shadow 画在盒子外面：失效矩形必须把它算进去，否则局部重绘盖不住阴影边。
+    // （0.16.31 及以前 invalidRect 完全没算阴影外扩，hover 之后阴影边缘留一圈旧像素。）
+    {
+        const char* html2 = R"HTML(<html width="600" height="300" bg="#FFFFFF"><body>
+          <div id="card" style="position:absolute;left:100;top:100;width:200;height:60;
+               background:#FFFFFF;border-radius:12;box-shadow:0 3px 10px rgba(31,42,55,0.14)"></div>
+        </body></html>)HTML";
+        auto res2 = CompileBinUIEx(html2);
+        BinUIRenderer r2;
+        CHECK(!res2.layout.empty() && r2.loadLayout(res2.layout.data(), res2.layout.size()),
+              "hover-dirty: 阴影用例编译 / 加载");
+        int id2 = -1;
+        for (const auto& n : r2.getNodes())
+            if (n.width > 199.0f && n.width < 201.0f && n.height > 59.0f && n.height < 61.0f) id2 = n.id;
+        CHECK(id2 >= 0, "hover-dirty: 找到带阴影的盒子");
+        if (id2 >= 0) {
+            float sx = 0, sy = 0, sw = 0, sh = 0;
+            r2.invalidRect(static_cast<uint16_t>(id2), sx, sy, sw, sh);
+            // 盒子 200×60 + 阴影外扩（σ=5 → 3σ+1=16，再加 |offsetY|=3 与 1px 余量）
+            CHECK(sw >= 200.0f + 2.0f * 16.0f, "hover-dirty: 失效矩形含 box-shadow 外扩（宽）");
+            CHECK(sh >= 60.0f + 2.0f * 16.0f, "hover-dirty: 失效矩形含 box-shadow 外扩（高）");
+            CHECK(sx <= 100.0f - 16.0f, "hover-dirty: 失效矩形向左扩到阴影边");
+            CHECK(sy <= 100.0f - 16.0f, "hover-dirty: 失效矩形向上扩到阴影边");
+        }
+    }
     return g_fail;
 }
 

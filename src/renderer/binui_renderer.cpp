@@ -4208,8 +4208,33 @@ bool BinUIRenderer::invalidRect(uint16_t nodeId, float& x, float& y, float& w, f
         b += std::max(0.0f, e.dymax);
     }
 
-    l -= pad; t -= pad; r += pad; b += pad;
-    x = l; y = t; w = r - l; h = b - t;    return true;
+    // 阴影画在盒子外面：脏矩形必须把外扩算进去，否则局部重绘盖不住阴影边 ——
+    // 表现为 hover 之后按钮/卡片周围留一圈"旧阴影"，边界是脏矩形的硬边
+    // （v0.16.32 之前这里完全没算 box-shadow / text-shadow 的外扩）。
+    // 外扩公式与绘制侧共用 binui_paint.h 的 PaintShadowPad / PaintTextShadowPad。
+    float padX = pad, padY = pad;
+    {
+        // 阴影外扩要跟着缩放动画一起放大：绘制侧用 drawScale 当 shScale，这里必须
+        // 用同一个值（否则过渡途中脏矩形比真实阴影小 1~2px，边缘留一道旧阴影）。
+        const float sPad = (s > 0.0f) ? s : 1.0f;
+        int shN = 0;
+        const BinUIShadow* shs = shadowsOf(nodeId, shN);
+        for (int k = 0; k < shN; k++) PaintShadowPad(shs[k], sPad, padX, padY);
+        int tsN = 0;
+        const BinUITextShadow* ts = textShadowsOf(nodeId, tsN);
+        if (ts && tsN > 0) PaintTextShadowPad(ts[0], padX, padY);
+        // 有阴影时再多给 1px：调用方（外壳）最后会把矩形截断成整数像素，
+        // 外扩量若正好落在阴影最外一圈上，边界那几个像素会被切掉半个覆盖率
+        // （实测 6 个像素差 1）。多 1px 换来"局部重绘 = 整帧"的逐位一致。
+        if (shN > 0 || (ts && tsN > 0)) { padX += 1.0f; padY += 1.0f; }
+    }
+    l -= padX; t -= padY; r += padX; b += padY;
+    // 输出**整像素**矩形：外壳拿到之后会 `(int)` 截断，浮点值 202.7 截成 202 就少
+    // 盖 0.7px（实测脏矩形最外一圈阴影因此差 1）。这里直接向外取整，调用方截断变成
+    // 无操作，脏矩形永远是保守的。
+    const float lf = std::floor(l), tf = std::floor(t);
+    x = lf; y = tf; w = std::ceil(r) - lf; h = std::ceil(b) - tf;
+    return true;
 }
 
 } // namespace binui

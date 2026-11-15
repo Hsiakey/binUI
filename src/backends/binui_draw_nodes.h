@@ -704,35 +704,37 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         if (!affine && animGeo && scale != 1.0f) effRadius *= scale;
 
         // v23 阴影（box-shadow）：阴影露在盒子**外面**，所以剔除与裁剪都得把外扩算进去。
-        // 外扩 = |spread| + 3σ + 1（与 BuildShadowRings 裁断的距离一致），再叠上偏移。
+        // 外扩公式在 binui_paint.h 的 PaintShadowPad —— 失效矩形（invalidRect）用的是
+        // 同一份，两边不能各算一套（否则局部重绘盖不住阴影边）。
         int shN = 0;
         float shScale = 1.0f;                  // 等比缩放动画下阴影整体跟着缩放
         const BinUIShadow* shs = renderer.shadowsOf(node.id, shN);
         if (animGeo && scale > 0.0f) shScale = scale;
         float shPadX = 0.0f, shPadY = 0.0f;
-        for (int k = 0; k < shN; k++) {
-            const float sig = shs[k].blur > 0.0f ? shs[k].blur * 0.5f : 0.0f;
-            const float pad = (std::fabs(shs[k].spread) + sig * 3.0f + 1.0f) * shScale;
-            shPadX = std::max(shPadX, pad + std::fabs(shs[k].offsetX) * shScale);
-            shPadY = std::max(shPadY, pad + std::fabs(shs[k].offsetY) * shScale);
-        }
+        for (int k = 0; k < shN; k++) binui::PaintShadowPad(shs[k], shScale, shPadX, shPadY);
 
         // v24 文字阴影：字形模糊会溢出节点盒（CSS 的 text-shadow 不受盒子边界约束），
         // 所以自身裁剪矩形要按阴影外扩量放大，否则贴边文字的阴影会被切出一道直边。
         int tsCount = 0;
         const BinUITextShadow* ts = renderer.textShadowsOf(node.id, tsCount);
         float tsPadX = 0.0f, tsPadY = 0.0f;
-        if (ts && tsCount > 0) {
-            const float tSig = ts[0].blur > 0.0f ? ts[0].blur * 0.5f : 0.0f;
-            const float tPad = tSig * 3.0f + 1.0f;
-            tsPadX = tPad + std::fabs(ts[0].offsetX);
-            tsPadY = tPad + std::fabs(ts[0].offsetY);
-        }
+        if (ts && tsCount > 0) binui::PaintTextShadowPad(ts[0], tsPadX, tsPadY);
 
-        if (x - shPadX + nw <= clipL || x + shPadX >= clipR ||
-            y - shPadY + nh <= clipT || y + shPadY >= clipB) continue;
-        if (hasVp[i] && (x - shPadX + nw <= vpL[i] || x + shPadX >= vpR[i] ||
-                         y - shPadY + nh <= vpT[i] || y + shPadY >= vpB[i])) continue;
+        // 脏矩形 / 视口剔除：四边一律"**完全在外**才剔除"（见 binui_paint.h 的
+        // PaintNodeInClip）。这里曾经把右/下两侧写成 `x + pad >= clipR`、
+        // `y + pad >= clipB` —— 判定的是"节点左/上边**进入** clip 右/下边 pad 以内"，
+        // 于是紧贴 clip 右/下边缘的那一排节点被整块丢掉：局部重绘（hover 只重画
+        // 一个节点的脏矩形）时，脏矩形边缘附近的兄弟节点不画 → 它们的底色/阴影
+        // 凭空消失，脏矩形边界上留下一圈"硬边亮块"。v0.16.32 修。
+        const float padX = std::max(shPadX, tsPadX), padY = std::max(shPadY, tsPadY);
+        if (!binui::PaintNodeInClip(x, y, nw, nh, padX, padY,
+                                    static_cast<float>(clipL), static_cast<float>(clipT),
+                                    static_cast<float>(clipR), static_cast<float>(clipB)))
+            continue;
+        if (hasVp[i] && !binui::PaintNodeInClip(x, y, nw, nh, padX, padY,
+                                                static_cast<float>(vpL[i]), static_cast<float>(vpT[i]),
+                                                static_cast<float>(vpR[i]), static_cast<float>(vpB[i])))
+            continue;
 
         // 裁剪链：自身 + 祖先 + 本次重绘范围（scissor 求交）。
         // 关键：持久离屏上节点重绘若不做脏矩形裁剪，会把整个节点矩形重涂，

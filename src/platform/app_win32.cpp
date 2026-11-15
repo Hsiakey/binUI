@@ -1194,7 +1194,7 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             shPadX = std::max(shPadX, pad + std::fabs(shs[k].offsetX) * nodeScale);
             shPadY = std::max(shPadY, pad + std::fabs(shs[k].offsetY) * nodeScale);
         }
-        const int shPadXi = (int)std::ceil(shPadX), shPadYi = (int)std::ceil(shPadY);
+        // （外扩整数化留给下面的剔除/裁剪，两者都吃 float）
 
         // v24 文字阴影：本节点的状态（GDI 侧自己烘覆盖率位图，见 TextShadowBmpGet）。
         // 颜色 alpha 折入元素 opacity —— GDI 没有分层合成，阴影也得跟着一起淡。
@@ -1221,13 +1221,19 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         }
 
 
-        // 与脏矩形不相交的节点快速跳过（GDI 裁剪链较贵，仅在相交节点上做）
-        if (x - shPadXi + nw <= clip.left || x + shPadXi >= clip.right ||
-            y - shPadYi + nh <= clip.top || y + shPadYi >= clip.bottom)
+        // 与脏矩形不相交的节点快速跳过（GDI 裁剪链较贵，仅在相交节点上做）。
+        // 判据与三个 GPU 后端共用 binui_paint.h 的 PaintNodeInClip：四边一律
+        // "完全在外才剔除"。以前右/下两侧写成 `x + pad >= clip.right`（节点边进入
+        // clip 边 pad 以内就剔），局部重绘时紧贴脏矩形边缘的那排节点会整块消失 ——
+        // 见 docs/issues/10-partial-redraw-cull.md。
+        if (!binui::PaintNodeInClip(x, y, nw, nh, shPadX, shPadY,
+                                    static_cast<float>(clip.left), static_cast<float>(clip.top),
+                                    static_cast<float>(clip.right), static_cast<float>(clip.bottom)))
             continue;
         // 滚动容器内：视口外的节点（内容溢出/未滚动到）纯整数裁剪，避免 GDI 链
-        if (hasVp[i] && (x - shPadXi + nw <= vpL[i] || x + shPadXi >= vpR[i] ||
-                         y - shPadYi + nh <= vpT[i] || y + shPadYi >= vpB[i]))
+        if (hasVp[i] && !binui::PaintNodeInClip(x, y, nw, nh, shPadX, shPadY,
+                                                static_cast<float>(vpL[i]), static_cast<float>(vpT[i]),
+                                                static_cast<float>(vpR[i]), static_cast<float>(vpB[i])))
             continue;
         // BINUI_LINE：x,y = 起点；width,height = 终点；radius = 线宽。
         // 这条分支以前在 GDI 后端是缺的 —— SVG 的 line / polyline / polygon 在 GDI

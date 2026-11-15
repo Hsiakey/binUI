@@ -374,6 +374,7 @@ TOOL_BINS := \
     $(BIN_DIR)/binui_export$(EXT) \
     $(BIN_DIR)/offscreen_render$(EXT) \
     $(BIN_DIR)/gl_shot$(EXT) \
+    $(BIN_DIR)/partial_shot$(EXT) \
     $(BIN_DIR)/window_capture$(EXT) \
     $(BIN_DIR)/enum_windows$(EXT) \
     $(BIN_DIR)/pixel_diff$(EXT) \
@@ -417,6 +418,18 @@ $(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -o $@ $< \
 	    $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
+
+# partial_shot：局部重绘一致性检查（hover 脏矩形 vs 整帧）。走 .o + -MMD，
+# 免得改了 binui_draw_nodes.h / binui_paint.h 之后工具还跑旧行为（这个仓库在
+# gl_shot 上踩过两次，见下文注释）。
+$(BUILD_DIR)/partial_shot.o: tools/partial_shot.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
+
+$(BIN_DIR)/partial_shot$(EXT): $(BUILD_DIR)/partial_shot.o $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^ \
+	    -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
 
 # ★ 工具的 .o 必须**单独成规则**：以前把编译写进 exe 的 recipe，于是 -MMD 生成的
 #   build-mingw/vk_window.d 谁都不依赖，结果"改了共享头（binui_draw_nodes.h 等）但工具
@@ -467,6 +480,20 @@ $(BIN_DIR)/pixel_diff$(EXT): tools/pixel_diff.cpp
 
 .PHONY: tools
 tools: $(TOOL_BINS)
+
+# 局部重绘一致性（P0 回归）：hover 只重画脏矩形后，画面必须与"同样状态的整帧重绘"
+# 逐像素一致。这类错在整帧像素基准里看不见（clip=整屏时剔除判据的边缘情况碰不到
+# 任何节点），只能靠这里。见 docs/issues/10-partial-redraw-cull.md。
+PARTIAL_CASES := 278,222 358,221 99,116 830,117
+.PHONY: partial
+partial: $(BIN_DIR)/partial_shot$(EXT)
+	@fail=0; for c in $(PARTIAL_CASES); do \
+	    x=$$(echo $$c | cut -d, -f1); y=$$(echo $$c | cut -d, -f2); \
+	    echo "--- buttonshow hover ($$x,$$y) ---"; \
+	    $(BIN_DIR)/partial_shot$(EXT) --check $(EXA_DIR)/buttonshow/main.html - $$x $$y 40 || fail=1; \
+	done; \
+	echo "--- svgdemo hover (屏内任意按钮) ---"; \
+	exit $$fail
 	@echo "tools -> $(TOOL_BINS)"
 
 # =============================================

@@ -101,3 +101,30 @@ python tools/verify_shots.py docs/img/features.png
 ```
 
 需要 Pillow（`pip install pillow`）。
+
+## partial_shot —— 局部重绘一致性（hover 脏矩形 vs 整帧）
+
+窗口只重画变化的节点时，同一帧画面由**两条路径**产生：整帧重绘、以及"只清 + 只画一个脏矩形"。
+两条路必须逐像素一致 —— 不一致就是 hover 之后沿脏矩形冒出来的那圈"影子 / 边框"
+（见 [docs/issues/10](../docs/issues/10-partial-redraw-cull.md)）。
+
+```bash
+make tools
+# 出图：先整帧画一帧，再 hover (278,222)，只重画它的脏矩形，把结果存下来
+build-mingw/bin/partial_shot.exe examples/buttonshow/main.html build-mingw/tmp/before.png 278 222 40
+# 对拍（非 0 退出 = 两条路不一致）
+build-mingw/bin/partial_shot.exe --check examples/buttonshow/main.html - 278 222 40
+# 一键跑 4 个 hover 点
+make partial
+```
+
+参数：`<ui> <out.png|-> <x> <y> [frames] [W] [H]`。`frames` 是 hover 后推进动画的步数
+（每步 8ms，40 步覆盖 0.16s 过渡）。
+
+阈值：`diff<=64 且 max<=1`。残差是 MSAA 解析在脏矩形边界上的 1 单位噪声；
+真出问题（判据写错、脏矩形漏算阴影）时差的是整块区域的底色/阴影，`diff` 上千、`max` 十几，
+一眼就能分开（v0.16.32 修的就是这一类，修前同一用例 `diff=5502 max=16`）。
+
+为什么它对拍的不是"基准图"：比较对象是**同一状态下的整帧渲染**，所以不需要维护金标准图，
+样式改了也不会失效。
+
