@@ -1396,6 +1396,10 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         if (affineLocal) gfx.setAffine(nullptr);   // v0.16.18：恢复轴对齐
 
         // v0.16.24：裁剪擦除。补集 = 图层矩形 + 裁剪路径（even-odd），在擦除混合下画一遍。
+        // 为什么必须补集：dst *= (1-srcA) 只作用在**画了东西的像素**上，想让路径外归零，
+        // 就必须把"路径外"真的画出来 —— 图层矩形 + 路径 even-odd 正好是那个补集。
+        // 已知边界：填充规则固定 even-odd，所以自交路径（五角星那种 10 点交叉多边形）
+        // 的重叠区会被当成"外"。nonzero 语义要补集几何，得靠模板缓冲（见 docs/future.md）。
         if (clipLayer) {
             const BinUIClipEntry& chd = clipRec->head;   // 注意别叫 ch：外层 ch 是图层高度
             const float bx = chd.x, by = chd.y;
@@ -1447,7 +1451,8 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             }
             if (gfx.setEraseBlend(true)) {
                 BinUIPathEntry ph = {};
-                ph.flags = PATH_FILL | PATH_EVENODD;   // 补集要 even-odd，否则矩形内部的路径区也被擦掉
+                // 补集要 even-odd（矩形内部的路径区不能擦掉）；见上面的已知边界
+                ph.flags = PATH_FILL | PATH_EVENODD;
                 ph.fillColor = 0xFFFFFFFFu;
                 ph.designW = cwL;
                 ph.designH = chL;

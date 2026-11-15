@@ -109,6 +109,57 @@ GDI 文字阴影 `AlphaBlend` 源位图未选中导致阴影整块不出现）�
   每行宽度之和 = 盒宽、横向 UV 首尾相接、首末块 UV 到 0/1、内缩钳到源图半张、
   盒比内缩小不出现负宽、退化输入返回 0。
 
+## [0.16.25] - 2026-11-15
+
+SVG `<pattern>`（P1-10 第三条）：图案填充。之前 `fill="url(#p)"` 命中 pattern 时只会告警
+"不支持"，现在条纹、棋盘、点阵这类图案能填进任意形状，而且**格式不变、三个后端零改动**。
+
+### 做 — 编译期平铺展开 + 复用 v27 裁剪
+
+pattern 的内容是**静态几何**：铺几块、每块落在哪，编译期就能算死。所以整件事在编译期做完：
+
+1. 元素照常编成路径节点，但**自己不再填充**（填充交给 tile）；`<rect>`/`<circle>` 因为
+   `fill="url(#…)"` 自动升级成路径（轻量映射只能表达一个颜色）。
+2. 按**用户空间**扫网格：`width/height` 是 tile 尺寸（`patternUnits="objectBoundingBox"`
+   时按元素盒比例放大），整块落在元素包围盒外的 tile 跳过。
+3. 每块内容过 `M = svgX · T(tile 原点) · [viewBox meet 居中] · [OBB 缩放]` 落到设备空间。
+4. **同色同笔的 tile 合成一个路径节点** —— 一块一个节点的话，100 块就是 100 次
+   "进图层 → 擦除 → 出图层"，而图层池只有 4 层。每个展开节点再挂一条"元素自身轮廓"的
+   裁剪记录（复用 v0.16.24 的补集擦除），所以图案**不会溢出**到形状外（星形、曲线都能填）。
+
+支持：`width/height/x/y`、`patternUnits`、`patternContentUnits`、`viewBox`（等比 meet 居中）、
+`patternTransform`（平移 + 缩放）；内容支持 `path`/`rect`/`circle`/`ellipse`/`polygon`/
+`polyline`/`line` 各自的 `fill`/`stroke`/`stroke-width`/`stroke-linecap`/`stroke-linejoin`。
+
+### 踩到的坑
+
+1. **`<pattern>` 的属性全被当成"未实现"告警**：`patternunits` / `patterncontentunits` /
+   `patterntransform` 没进 `UsedHtmlAttrs()` 白名单。
+2. **补集擦除只认 even-odd 区域**：五角星那种 10 点**自交**写法，重叠区会被当成"外"，
+   图案中间空一块。试过把擦除改成 `dst *= srcA`（不受填充规则影响），但那个混合只作用在
+   "画了东西的像素"上，路径外根本不会被清零（整层都留下来了）—— 结论是**补集几何是必需的**，
+   于是把边界写进文档：轮廓按 even-odd 解释，星形请写不交叉的 10 点。
+3. **裁剪层里的奇数宽度描边**：`anim/svg-pattern` 第一版 GL vs VK 差 496 像素（0.16%），
+   定位到"`stroke-width=3` 的线条，VK 每段末端多 1px"（GL 与 D3D11 逐像素相同，偶数宽度
+   零差异）。图案线条改用偶数宽度后 **0 不同像素**；根因未定位，按已知差异记录在
+   `docs/future.md`。
+
+### 验收
+
+- `test_css` 新增 16.25（15 条断言）：元素自身不填、同色 tile 合成一个节点、tile 节点是纯填充、
+  100 块都铺上、每个展开节点挂了裁剪记录且裁剪盒 = 元素盒、`objectBoundingBox` 的 tile 放大到
+  元素盒尺度、引用了不存在的 id 要告警且退回纯色、`width=0` 要告警且不填。
+- 新用例 `anim/svg-pattern`（竖条 / 棋盘 / 星形 + viewBox / objectBoundingBox /
+  `patternTransform` / 开放曲线）：`pixels-vk` / `pixels-d3d11` **0 不同像素（最大通道差 0）**。
+- `make pixels` 16/16 零差异、`make test` 全绿、`check_examples` 16 示例 0 问题。
+- 格式仍是 **v27**（pattern 只复用裁剪段，没有新段）。
+
+### 已知边界
+
+pattern 内容**不裁到 tile 框**（tile 里的形状别越界，否则会盖到隔壁 tile）；`<g>` 不展开；
+内容渐变按中间色；平铺块数 > 400 或点数超预算时退回"首色实填"并告警；
+`mask` 仍未做（要片元级采样）。
+
 ## [0.16.24] - 2026-11-15 【格式 v27】
 
 SVG `clipPath` / `clip-path`（P1-10 第二条）：任意形状裁剪。之前只有矩形 scissor，圆角、

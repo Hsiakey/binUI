@@ -853,6 +853,116 @@ static void TestIssueRegressions() {
              clipOfName("c4") == nullptr);
     }
 
+    // ---- 16.25：SVG <pattern>（v0.16.25，编译期平铺展开） ----
+    // 钉住五件事：
+    //   1. 引用 pattern 的元素**自己不再填充**（填充交给展开出来的 tile 节点）——
+    //      否则下面会垫一整块实色，图案就白铺了；
+    //   2. tile 展开成子路径节点，同色同笔合成一个（100 块 10×10 的 tile 只出一个节点）；
+    //   3. 每个展开节点都挂一条"元素自身轮廓"的裁剪记录（靠 v27 的补集擦除兜住溢出）；
+    //   4. patternUnits=objectBoundingBox 时 tile 尺寸按元素盒比例放大；
+    //   5. 引用了不存在的 id / width=0 → 告警，并且**不留空白**（退回纯色 / 明确不填）。
+    {
+        const char* html = R"HTML(<app_window width="300" height="200" bg="#101014">
+<html width="300" height="200" bg="#101014">
+<body>
+  <svg width="290" height="190" style="position:absolute; left:0; top:0">
+    <defs>
+      <pattern id="p1" width="10" height="10" patternUnits="userSpaceOnUse">
+        <rect x="0" y="0" width="5" height="10" fill="#1D4ED8" />
+      </pattern>
+      <pattern id="p2" width="0.5" height="0.5" patternUnits="objectBoundingBox"
+               patternContentUnits="objectBoundingBox">
+        <rect x="0" y="0" width="0.5" height="0.5" fill="#B45309" />
+      </pattern>
+      <pattern id="pzero" width="0" height="10">
+        <rect x="0" y="0" width="4" height="4" fill="#0F766E" />
+      </pattern>
+    </defs>
+    <rect id="a1" x="0" y="0" width="100" height="100" fill="url(#p1)" />
+    <rect id="a2" x="110" y="0" width="100" height="100" fill="url(#p2)" />
+    <rect id="a3" x="0" y="120" width="100" height="50" fill="url(#nope)" />
+    <rect id="a4" x="110" y="120" width="100" height="50" fill="url(#pzero)" />
+  </svg>
+</body></html>
+</app_window>)HTML";
+        const auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("16.25: pattern 布局可解析", ParseInto(r, res.layout));
+
+        auto kidsOf = [&](const char* name) {
+            std::vector<uint16_t> out;
+            const uint16_t pid = r.findNodeByName(name);
+            for (const auto& ni : r.getNodes())
+                if (ni.parentId == pid && ni.type == BINUI_PATH) out.push_back(ni.id);
+            return out;
+        };
+        // 1) 元素自己变成路径节点但不再填充
+        const uint16_t a1 = r.findNodeByName("a1");
+        TEST("16.25: 引用 pattern 的 <rect> 升级成路径", a1 != 0 && r.pathOf(a1) != nullptr);
+        {
+            const auto* pr = r.pathOf(a1);
+            TEST("16.25: 元素自身不填充（填充交给 tile）",
+                 pr && !(pr->head.flags & PATH_FILL));
+        }
+        // 2) tile 展开：100 个 10×10 的同色 tile → 一个子路径节点
+        {
+            const auto kids = kidsOf("a1");
+            TEST("16.25: 同色 tile 合成一个子节点", kids.size() == 1);
+            if (kids.size() == 1) {
+                const auto* kp = r.pathOf(kids[0]);
+                TEST("16.25: tile 节点是纯填充", kp && (kp->head.flags & PATH_FILL) &&
+                     !(kp->head.flags & PATH_STROKE));
+                // 每块 1 个矩形子路径 → 100 块 → 至少 100 个点
+                TEST("16.25: 100 块 tile 都铺上了（点数 >= 100）",
+                     kp && kp->head.pointCount >= 100);
+                // 3) 裁剪记录：包围盒 = 元素盒（设备空间），闭合
+                const auto* cr = r.clipPathOf(kids[0]);
+                TEST("16.25: tile 节点挂了元素轮廓的裁剪记录", cr != nullptr);
+                if (cr) {
+                    TEST("16.25: 裁剪盒 = 元素盒（100×100）",
+                         std::fabs(cr->head.w - 100.0f) < 2.0f &&
+                         std::fabs(cr->head.h - 100.0f) < 2.0f);
+                    TEST("16.25: 裁剪点闭合且够用",
+                         !cr->pts.empty() && !cr->closed.empty() && cr->closed[0] == 1);
+                }
+            }
+        }
+        // 4) objectBoundingBox：tile = 元素盒的 50% → 4 块，且几何被放大到 50×50
+        {
+            const auto kids = kidsOf("a2");
+            TEST("16.25: objectBoundingBox 的 tile 也展开了", kids.size() == 1);
+            if (kids.size() == 1) {
+                const auto* kp = r.pathOf(kids[0]);
+                // 4 块 × 4 点 = 16 点；如果没放大就是 0.5 单位的小点，点数一样但节点盒会很小
+                TEST("16.25: 4 块 tile（点数 >= 16）", kp && kp->head.pointCount >= 16);
+                const auto* ni = NodeById(r, kids[0]);
+                TEST("16.25: OBB 的 tile 被放大到元素盒尺度（>= 40px）",
+                     ni && ni->width >= 40 && ni->height >= 40);
+            }
+        }
+        // 5) 引用不存在的 id：告警 + 退回纯色（不留空白）
+        {
+            bool warned = false;
+            for (const auto& w : res.warnings)
+                if (w.find("nope") != std::string::npos) warned = true;
+            TEST("16.25: 引用不存在的 pattern 要告警", warned);
+            // 没有渐变/描边的 <rect> 走轻量映射（不是路径节点），所以两种形态都算"看得见"
+            const uint16_t a3id = r.findNodeByName("a3");
+            const auto* pr = r.pathOf(a3id);
+            const auto* na = NodeById(r, a3id);
+            TEST("16.25: 找不到 pattern 时退回纯色（元素仍然可见）",
+                 (pr && (pr->head.flags & PATH_FILL)) || (na && na->color != 0u));
+        }
+        // 6) width=0：告警，并且不凭空填色
+        {
+            bool warned = false;
+            for (const auto& w : res.warnings)
+                if (w.find("width/height") != std::string::npos) warned = true;
+            TEST("16.25: pattern 尺寸为 0 要告警", warned);
+            TEST("16.25: pattern 尺寸为 0 → 不填充", kidsOf("a4").empty());
+        }
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

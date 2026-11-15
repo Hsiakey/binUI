@@ -185,8 +185,18 @@ virtual void popLayer() {}
 | 7 | **组透明度是错的**（这是 bug，不是缺功能） | ✅ **已修（0.16.8 级联 + 0.16.9 GL / 0.16.10 D3D11 / 0.16.12 VK 图层）**：0.16.8 让父元素 opacity 级联到子树（`drawOpacity()`/`drawState().opacity` 返回级联值）；三个 GPU 后端都有真正的离屏图层（`pushLayer/popLayer`），重叠区不再叠深 —— 实测重叠区是纯蓝 @50%，逐元素模式是 `(99,35,163)` 混色；三端像素逐位相同。**剩下的**：GDI 后端仍是逐元素近似（GDI 没有离屏合成面），层缓存（P0-1）也没做 | binUI → bin2d（离屏合成，和 P0-1 是同一套设施） |
 | 8 | 图片能力薄 | ✅ **主体已做（0.16.15，P1-8）**：圆角裁剪（横条 + UV，前端不改几何模型）、mip（GL `glGenerateMipmap` / D3D11 `GenerateMips` / VK CPU 2×2 链）、染色（`filter: brightness()` → 顶点色乘）。九宫格图片（`image-slice`，0.16.19 / v25 绘制附加段）**也已做**：`BuildNineSlice` 三端共用、切分点在后端算（它才知道源图像素尺寸），与 `border-radius` 互斥。程序化纹理/视频帧的 mip **也已做（0.16.20）**：判据是"同一个 generation 第二次出现"（视频帧永远不命中，零开销），CPU 链抽成 `binui_mip.h` 并单测。**`filter` 的颜色矩阵也已做（0.16.22 / v26）**：`grayscale/sepia/saturate/hue-rotate/invert/contrast` 编译期合成 3×3+偏移（`binui_filter.h`，单测钉住）、后端解码时逐像素应用、按 `(imageIndex, 矩阵)` 缓存纹理变体，三端逐像素相同；`brightness` 仍走顶点色。**剩下的**：`filter: blur()/drop-shadow()/url(#f)`（要离屏合成）、九宫格的 `repeat`/`round`（目前只有 stretch） | binUI |
 | 9 | 文字/图片不参与仿射 | ✅ **已做（0.16.18）**：新增 `IBinUIGfx::setAffine(xf)` **状态**（不是逐四边形参数）—— 设置后所有原语的四边形都过同一个 2×3 矩阵，于是旋转卡片的文字/图标/边框/阴影一起转。`drawNodes` 在仿射节点里整段改用**节点局部坐标**，后端 `emitQuad` 把四角过矩阵（三个 GPU 后端各一处，复用已有的 `emitQuadUV`）。`setAffine` 返回 false（GDI 没有任意四边形）→ 退回"只转盒子"的老行为，老页面像素一位不变。GL/VK/D3D11 逐像素相同（新用例 `anim/affine-text`，容差 0%）。**剩下的**：字形是**位图旋转**，Bilinear 采样，大角度下边缘略糊（真"矢量旋转"要 GPU 栅格化字形，属 bin2d/binGPU 的事）。**级联也已做（0.16.21）**：矩阵沿祖先链复合（`M[局部] = M[父] ∘ 平移 ∘ 自身变换`，工具在 `binui_paint.h` 并单测），`transform` 现在作用在**整棵子树**上（含嵌套 `transform` 与 `<line>`），与浏览器一致；静态页面走 `anyTransformAnim()` 快速开关，零开销 | binUI |
-| 10 | SVG 语义缺一半 | `mask` / `pattern` / `filter` 不支持（`docs/svg.md` 已列，编译告警）。**`clipPath` 已做（0.16.24 / v27）**：编译期把裁剪几何折算到设备空间写进裁剪路径段，运行期"离屏图层 + even-odd 补集擦除"（`dst *= 1-srcA`），支持 userSpaceOnUse / objectBoundingBox，三端逐像素相同（VK 是管线变体）。**`marker` 已做（0.16.23）**：编译期按"顶点 + 切线方向"展开成引用路径的**子节点**（纯填充视图），支持 marker-start/mid/end、viewBox、refX/refY、markerUnits、orient，运行期与三端零改动；带 marker 的 `<line>` 自动升级成路径 | 部分不做（见 P2） |
+| 10 | SVG 语义缺一半 | `mask` / `filter` 不支持（`docs/svg.md` 已列，编译告警）。**`clipPath` 已做（0.16.24 / v27）**：编译期把裁剪几何折算到设备空间写进裁剪路径段，运行期"离屏图层 + even-odd 补集擦除"（`dst *= 1-srcA`），支持 userSpaceOnUse / objectBoundingBox，三端逐像素相同（VK 是管线变体）。**`marker` 已做（0.16.23）**：编译期按"顶点 + 切线方向"展开成引用路径的**子节点**（纯填充视图），支持 marker-start/mid/end、viewBox、refX/refY、markerUnits、orient，运行期与三端零改动；带 marker 的 `<line>` 自动升级成路径。**`pattern` 也已做（0.16.25）**：`fill="url(#p)"` 命中 `<pattern>` 时 tile 在**编译期平铺展开**成普通路径（同色同笔合成一个节点，每个展开节点挂"元素轮廓"裁剪记录复用 v27 补集擦除），支持 width/height/x/y、patternUnits、patternContentUnits、viewBox、patternTransform（平移+缩放），三端逐像素相同、格式不变；超过 400 块或点数超预算退回"首色实填"。**剩下的**：`mask`（要片元级采样，VK 得先解决 SPIR-V 预编译问题）；`pattern` 内容不裁到 tile 框、`patternTransform` 旋转/斜切按轴对齐近似 | 部分不做（见 P2） |
 | 11 | 字形只有整像素位图 | ✅ **已做（0.16.16）**：x 的小数部分量化成 **¼ 像素相位**，每份相位是一张独立字形位图（`FT_Set_Transform` 的 delta 先把轮廓右移 `phase/4`），图集按 `(码点, 相位)` 懒加载、整表缓存 key 含相位。advance 仍是整数 ⇒ 布局/测宽不变、静态位置相位恒为 0（15 条老基准逐位不变）。实测同页 A/B：单位墨量边缘梯度能量 **+7.6%**、中间调像素 **−12%**、总墨量差 0.02%。**剩下的**：只有横向（纵向 4×4 变体不划算，DirectWrite/Chrome 同样只做横向） | binUI |
+
+### 已知差异（尚未定位根因）
+
+- **裁剪层里的奇数宽度描边**：`clip-path` 图层内，`stroke-width` 为**奇数**时
+  VK 比 GL/D3D11 在每段描边的**末端**多 1px（GL 与 D3D11 逐像素相同）。
+  偶数宽度、或者不在图层内都没有差异。pattern 用奇数宽度画线条会被放大成
+  "每条线整行差"（`anim/svg-pattern` 第一版 0.16%）。最小复现：一条
+  `stroke-width="3"` 的路径挂 `clip-path` → 3 段 = 9 个像素不同。
+  **规避**：图案/裁剪里的线条用偶数宽度。**待查**：层内单采样光栅化与 GL 层内
+  坐标取整是否有一处 floor/ceil 不一致。
 
 ### P2 — 明确不填（附理由）
 

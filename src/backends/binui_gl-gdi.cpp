@@ -1429,7 +1429,7 @@ bool BinUIGLGdi::setEraseBlend(bool on) {
     if (!impl_ || !impl_->ready) return false;
     impl_->flushAll();
     // GL 1.1 头里没有 glBlendFuncSeparate；两种状态下 color/alpha 因子相同，一个够了
-    if (on) glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+    if (on) glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);   // dst *= (1-srcA)：擦掉补集
     else    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     return true;
 }

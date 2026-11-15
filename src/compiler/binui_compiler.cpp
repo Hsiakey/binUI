@@ -2565,6 +2565,8 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         // v0.16.23：SVG <marker>（编译期展开）
         "marker", "marker-start", "marker-mid", "marker-end",
         "clip-path", "clippathunits",
+        // v0.16.25：SVG <pattern>
+        "patternunits", "patterncontentunits", "patterntransform",
         "markerwidth", "markerheight", "markerunits", "refx", "refy", "orient",
         "gradientunits", "gradienttransform", "spreadmethod", "text-anchor",
     };
@@ -5168,6 +5170,152 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         svgClips[cid] = std::move(cd);
     }
 
+    // ============ v0.16.25：SVG <pattern>（编译期平铺展开） ============
+    // 和 marker / clipPath 一条路：pattern 的内容是**静态几何**，铺几块、每块落在哪，
+    // 编译期就能算死 —— 于是展开成若干条普通路径，运行期与三个后端零改动。
+    // tile 必须被元素自身轮廓裁掉（否则图案会溢出到元素外），这里直接借 v27 的裁剪
+    // 路径段：每个展开出来的节点挂一条"元素轮廓"的裁剪记录。
+    // 支持 width/height/x/y、patternUnits、patternContentUnits、viewBox（meet 居中）、
+    //   patternTransform（平移+缩放）；内容支持 path/polygon/polyline/line/rect/
+    //   circle/ellipse 各自的 fill/stroke。
+    // 已知边界（都会告警）：patternTransform 的旋转/斜切按轴对齐近似；内容里的 <g> 不
+    //   展开；内容渐变按中间色；平铺块数或点数超预算时退回"首色实填"。
+    struct SvgPatternChild {
+        PathShape shape;
+        bool hasFill = true;    uint32_t fill = 0xFF000000u;
+        bool hasStroke = false; uint32_t stroke = 0xFF000000u; float strokeW = 0.0f;
+        uint8_t cap = BINUI_CAP_BUTT, join = BINUI_JOIN_ROUND;
+    };
+    struct SvgPatternDef {
+        bool  found = false;
+        float x = 0.0f, y = 0.0f, w = 0.0f, h = 0.0f;
+        int   units = 0;         // 0 = userSpaceOnUse（默认）  1 = objectBoundingBox
+        int   contentUnits = 0;  // 同上
+        bool  hasViewBox = false;
+        float vbX = 0.0f, vbY = 0.0f, vbW = 0.0f, vbH = 0.0f;
+        bool  hasTf = false;
+        PathMatrix tf;
+        std::vector<SvgPatternChild> kids;
+    };
+    std::unordered_map<std::string, SvgPatternDef> svgPatterns;
+    for (size_t qi = 0; qi < elems.size(); qi++) {
+        if (lowerStr(elems[qi].tag) != "pattern") continue;
+        const HNode& pe = elems[qi];
+        std::string pid = pe.attrs.count("id") ? TrimCopy(pe.attrs.at("id")) : "";
+        if (pid.empty()) {
+            Warn("<pattern> 没有 id，无法被 fill=\"url(#…)\" 引用（已忽略）");
+            continue;
+        }
+        SvgPatternDef pd;
+        pd.found = true;
+        auto pnum = [&](const char* a, float dflt) -> float {
+            auto it = pe.attrs.find(a);
+            return it == pe.attrs.end() ? dflt : parseLen(it->second, dflt);
+        };
+        pd.x = pnum("x", 0.0f);
+        pd.y = pnum("y", 0.0f);
+        pd.w = pnum("width", 0.0f);
+        pd.h = pnum("height", 0.0f);
+        {
+            auto it = pe.attrs.find("patternunits");
+            if (it != pe.attrs.end())
+                pd.units = lowerStr(TrimCopy(it->second)) == "objectboundingbox" ? 1 : 0;
+        }
+        {
+            auto it = pe.attrs.find("patterncontentunits");
+            if (it != pe.attrs.end())
+                pd.contentUnits = lowerStr(TrimCopy(it->second)) == "objectboundingbox" ? 1 : 0;
+        }
+        if (pe.attrs.count("viewbox")) {
+            std::string vb = TrimCopy(pe.attrs.at("viewbox")) + " ";
+            float v[4] = { 0, 0, -1, -1 };
+            int got = 0;
+            std::string cur;
+            for (char ch : vb) {
+                if (ch == ' ' || ch == ',' || ch == '\t') {
+                    if (!cur.empty() && got < 4) v[got++] = parseLen(cur, 0.0f);
+                    cur.clear();
+                } else {
+                    cur += ch;
+                }
+            }
+            if (!cur.empty() && got < 4) v[got++] = parseLen(cur, 0.0f);
+            if (got >= 4 && v[2] > 0.0f && v[3] > 0.0f) {
+                pd.hasViewBox = true;
+                pd.vbX = v[0]; pd.vbY = v[1]; pd.vbW = v[2]; pd.vbH = v[3];
+            } else {
+                Warn("<pattern id=\"" + pid + "\"> 的 viewBox 无效（已忽略）");
+            }
+        }
+        {
+            auto it = pe.attrs.find("patterntransform");
+            if (it != pe.attrs.end() && !it->second.empty()) {
+                std::string terr;
+                if (ParseSvgTransform(it->second, pd.tf, &terr)) pd.hasTf = true;
+                else Warn("<pattern id=\"" + pid + "\"> 的 patternTransform 解析失败：" + terr);
+            }
+        }
+        auto patCol = [&](const std::string& v, uint32_t dflt) -> uint32_t {
+            std::string gid2;
+            if (ParseUrlId(v, gid2)) {
+                auto gi2 = svgGrads.find(gid2);
+                if (gi2 != svgGrads.end() && gi2->second.found && !gi2->second.stops.empty()) {
+                    Warn("<pattern id=\"" + pid + "\"> 的内容不支持渐变（按中间色）");
+                    return gi2->second.stops[gi2->second.stops.size() / 2].color;
+                }
+                Warn("<pattern id=\"" + pid + "\"> 里的 url(#" + gid2 + ") 找不到定义（按黑色）");
+                return dflt;
+            }
+            return parseColorWith(v, dflt, "SVG 颜色");
+        };
+        for (size_t qj = 0; qj < elems.size(); qj++) {
+            if (elems[qj].parentIdx != qi) continue;
+            const HNode& ce = elems[qj];
+            const std::string ct = lowerStr(ce.tag);
+            if (ct == "g") {
+                Warn("<pattern id=\"" + pid + "\"> 里的 <g> 不展开（把形状直接写在 <pattern> 下）");
+                continue;
+            }
+            SvgPatternChild kid;
+            if (!shapeOf(ce, kid.shape, 0.1f)) continue;
+            auto ft = ce.attrs.find("fill");
+            if (ft != ce.attrs.end()) {
+                const std::string fv = TrimCopy(ft->second);
+                const std::string fl = lowerStr(fv);
+                if (fl == "none") kid.hasFill = false;
+                else if (fl != "currentcolor") kid.fill = patCol(fv, 0xFF000000u);
+            }
+            auto st = ce.attrs.find("stroke");
+            if (st != ce.attrs.end()) {
+                const std::string sv2 = TrimCopy(st->second);
+                const std::string sl = lowerStr(sv2);
+                if (sl != "none" && !sv2.empty()) {
+                    kid.hasStroke = true;
+                    kid.stroke = patCol(sv2, 0xFF000000u);
+                    kid.strokeW = ce.attrs.count("stroke-width")
+                                      ? parseLen(ce.attrs.at("stroke-width"), 0.0f) : 1.0f;
+                    const std::string lc = ce.attrs.count("stroke-linecap")
+                                               ? lowerStr(TrimCopy(ce.attrs.at("stroke-linecap"))) : "";
+                    if (lc == "square") kid.cap = BINUI_CAP_SQUARE;
+                    else if (lc == "round") kid.cap = BINUI_CAP_ROUND;
+                    const std::string lj = ce.attrs.count("stroke-linejoin")
+                                               ? lowerStr(TrimCopy(ce.attrs.at("stroke-linejoin"))) : "";
+                    if (lj == "miter") kid.join = BINUI_JOIN_MITER;
+                    else if (lj == "bevel") kid.join = BINUI_JOIN_BEVEL;
+                }
+            }
+            // <line>/<polyline> 这类"只有描边才看得见"的形状：没写 fill 时别给它黑填充
+            if ((ct == "line" || ct == "polyline") && ft == ce.attrs.end()) kid.hasFill = false;
+            if (!kid.hasFill && !kid.hasStroke) continue;
+            pd.kids.push_back(std::move(kid));
+        }
+        if (pd.kids.empty()) {
+            Warn("<pattern id=\"" + pid + "\"> 里没有可绘制的形状（引用它的元素不填充）");
+            continue;
+        }
+        svgPatterns[pid] = std::move(pd);
+    }
+
     {
         static const std::unordered_set<std::string> kKnownTags = {
             // 结构/包裹
@@ -5216,7 +5364,6 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             
             { "tspan", "SVG <tspan> 不支持富文本：把文字写进 <text> 本体，或拆成多个 <text>" },
             { "mask", "SVG <mask> 不支持" },
-            { "pattern", "SVG <pattern> 不支持" },
         };
         // 真正被编译器消费的属性（其余一律视为"写了没效果"）
         const auto& kUsedAttrs = UsedHtmlAttrs();
@@ -5460,6 +5607,10 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         bool eAA = pc.aa;          // v19：shape-rendering 的继承值
         std::string fillGradId = pc.fillGradId;   // v16：继承下来的渐变填充（空 = 纯色）
         std::string strokeGradId = pc.strokeGradId;  // v17：继承下来的渐变描边（空 = 纯色）
+        // v0.16.25：pattern 填充（空 = 不是 pattern）。平铺网格必须按**用户空间**算，
+        // 所以另外留一份"过 svgX 之前"的包围盒。
+        std::string patternFillId;
+        float patUBx = 0.0f, patUBy = 0.0f, patUBw = 0.0f, patUBh = 0.0f;
         bool eFillStated = pc.fillStated;         // v18：颜料是否被显式给过（含祖先）
         bool eFillMentioned = pc.fillMentioned;   // fill 被提到过（含 fill="none"）
         bool eStrokeStated = pc.strokeStated;
@@ -5489,9 +5640,15 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                     eFillStated = false;          // fill="none" 不算"给了颜料"
                     fillGradId.clear();
                 } else if (ParseUrlId(f, gid)) {
+                    auto pit = svgPatterns.find(gid);
                     auto git = svgGrads.find(gid);
-                    if (git == svgGrads.end() || !git->second.found || git->second.stops.empty()) {
-                        Warn("fill=\"url(#" + gid + ")\" 找不到渐变定义（按纯色填充，"
+                    if (pit != svgPatterns.end() && pit->second.found) {
+                        patternFillId = gid;          // v0.16.25：编译期平铺（不占格式版本）
+                        fillGradId.clear();
+                        eFillStated = true;
+                        eHasFill = true;              // 元素本身不填，展开出来的 tile 才填
+                    } else if (git == svgGrads.end() || !git->second.found || git->second.stops.empty()) {
+                        Warn("fill=\"url(#" + gid + ")\" 找不到渐变或 <pattern> 定义（按纯色填充，"
                              "请检查 id 拼写或色标是否写在 <linearGradient> 里）");
                         fillGradId.clear();
                         eFillStated = true;
@@ -5625,7 +5782,8 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         const bool shapeAsPath = (e.tag == "path" || e.tag == "ellipse" || e.tag == "polyline" ||
                                   e.tag == "polygon" || lineNeedsPath) ||
                                  ((e.tag == "circle" || e.tag == "rect") &&
-                                  ((eHasStroke && eStrokeW > 0) || !fillGradId.empty()));
+                                  ((eHasStroke && eStrokeW > 0) || !fillGradId.empty() ||
+                                   !patternFillId.empty()));
         if (shapeAsPath) {
             if (e.tag == "path") {
                 const std::string d = e.attrs.count("d") ? e.attrs.at("d") : "";
@@ -5687,6 +5845,13 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             if (svgPathShape.truncated)
                 Warn("<path> 细分点数超过上限已截断：简化路径或拆成多段");
             if (!svgPathShape.Empty()) {
+                // v0.16.25：pattern 网格在用户空间算，先留一份未过 svgX 的包围盒
+                if (!patternFillId.empty()) {
+                    patUBx = svgPathShape.minX;
+                    patUBy = svgPathShape.minY;
+                    patUBw = svgPathShape.Width();
+                    patUBh = svgPathShape.Height();
+                }
                 // viewBox / <g transform>（含自己的 transform）一次性映射完
                 TransformShape(svgPathShape, svgX);
                 // fill / stroke 走继承链（见上面的 SVG 颜料块），none = 不画
@@ -7158,7 +7323,7 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         if (hasSvgPath) {
             PendingPath pp;
             pp.head.nodeId = n.id;
-            pp.head.flags = (pathFill ? PATH_FILL : 0) |
+            pp.head.flags = ((pathFill && patternFillId.empty()) ? PATH_FILL : 0) |
                             (pathStroke ? PATH_STROKE : 0) |
                             (pathEvenOdd ? PATH_EVENODD : 0) |
                             (pathHasGrad ? PATH_FILL_GRAD : 0) |
@@ -7222,6 +7387,196 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             } else {
                 nodes.pop_back();
                 id--;
+            }
+        }
+
+
+        // ---- v0.16.25：pattern 平铺展开 ----
+        // 同色同笔的 tile 合成**一个**路径节点：一块一个节点的话，几十块就是几十次
+        // "进图层 → 擦除 → 出图层"，而图层池只有 4 层、视频内存也按层算。
+        // 每个展开节点都挂一条"元素自身轮廓"的裁剪记录（复用 v27 的补集擦除），
+        // 于是任意形状都能被图案填满而不溢出。
+        if (hasSvgPath && !patternFillId.empty()) {
+            auto pit = svgPatterns.find(patternFillId);
+            const bool defOk = pit != svgPatterns.end() && pit->second.found &&
+                               !pit->second.kids.empty();
+            const float ubw = patUBw > 0.0f ? patUBw : 1.0f;
+            const float ubh = patUBh > 0.0f ? patUBh : 1.0f;
+            float tw = 0.0f, th = 0.0f, gx = 0.0f, gy = 0.0f;
+            if (defOk) {
+                const SvgPatternDef& pd2 = pit->second;
+                if (pd2.units == 1) {
+                    tw = pd2.w * ubw; th = pd2.h * ubh;
+                    gx = patUBx + pd2.x * ubw;
+                    gy = patUBy + pd2.y * ubh;
+                } else {
+                    tw = pd2.w; th = pd2.h; gx = pd2.x; gy = pd2.y;
+                }
+            }
+            if (!defOk) {
+                Warn("fill=\"url(#" + patternFillId + ")\" 的 <pattern> 无内容（元素不填充）");
+            } else if (tw <= 0.0f || th <= 0.0f) {
+                Warn("<pattern id=\"" + patternFillId + "\"> 的 width/height 必须大于 0"
+                     "（元素不填充）");
+            } else {
+                const SvgPatternDef& pd2 = pit->second;
+                if (pd2.hasTf) {
+                    if (pd2.tf.b != 0.0f || pd2.tf.c != 0.0f)
+                        Warn("patternTransform 的旋转/斜切不支持（按轴对齐近似）");
+                    const PathPointF go = PathApply(pd2.tf, gx, gy);
+                    gx = go.x; gy = go.y;
+                    tw *= pd2.tf.a; th *= pd2.tf.d;
+                }
+                const float txa = std::fabs(tw), tya = std::fabs(th);
+                const int k0 = (int)std::floor((patUBx - gx) / txa);
+                const int k1 = (int)std::ceil((patUBx + ubw - gx) / txa);
+                const int l0 = (int)std::floor((patUBy - gy) / tya);
+                const int l1 = (int)std::ceil((patUBy + ubh - gy) / tya);
+                const long long ntiles = (long long)(k1 - k0 + 1) * (long long)(l1 - l0 + 1);
+                size_t ptsPerTile = 0;
+                for (const SvgPatternChild& kid : pd2.kids) ptsPerTile += kid.shape.pts.size();
+                const long long kMaxTiles = 400;
+                const long long kMaxPts = 60000;
+                bool fallback = false;
+                if (ntiles > kMaxTiles || (long long)ptsPerTile * ntiles > kMaxPts) {
+                    Warn("<pattern id=\"" + patternFillId + "\"> 平铺展开太大（" +
+                         std::to_string(ntiles) + " 块 × " + std::to_string(ptsPerTile) +
+                         " 点），退回用第一种颜色实填（把 tile 调大或平铺区域调小）");
+                    fallback = true;
+                }
+                struct PatGroup {
+                    bool stroke = false;
+                    uint32_t color = 0;
+                    float w = 0.0f;
+                    uint8_t cap = BINUI_CAP_BUTT, join = BINUI_JOIN_ROUND;
+                    PathShape shape;
+                };
+                std::vector<PatGroup> groups;
+                auto groupOf = [&](const SvgPatternChild& kid, bool stroke) -> size_t {
+                    const uint32_t col = stroke ? kid.stroke : kid.fill;
+                    for (size_t gi2 = 0; gi2 < groups.size(); gi2++) {
+                        const PatGroup& g = groups[gi2];
+                        if (g.stroke != stroke || g.color != col) continue;
+                        if (stroke && (std::fabs(g.w - kid.strokeW) > 0.01f ||
+                                       g.cap != kid.cap || g.join != kid.join)) continue;
+                        return gi2;
+                    }
+                    PatGroup g;
+                    g.stroke = stroke;
+                    g.color = col;
+                    if (stroke) { g.w = kid.strokeW; g.cap = kid.cap; g.join = kid.join; }
+                    groups.push_back(g);
+                    return groups.size() - 1;
+                };
+                auto appendTo = [](PathShape& dst, const PathShape& src2) {
+                    const uint32_t base2 = (uint32_t)dst.pts.size();
+                    for (const PathPointF& q3 : src2.pts) dst.pts.push_back(q3);
+                    for (const PathShape::Contour& sc2 : src2.contours) {
+                        PathShape::Contour nc2;
+                        nc2.first = base2 + sc2.first;
+                        nc2.count = sc2.count;
+                        nc2.closed = sc2.closed;
+                        dst.contours.push_back(nc2);
+                    }
+                };
+                float strokeK = 1.0f;   // 内容用户单位 → 设备像素
+                if (fallback) {
+                    PatGroup g;
+                    g.stroke = false;
+                    g.color = pd2.kids[0].hasFill ? pd2.kids[0].fill : pd2.kids[0].stroke;
+                    g.shape = svgPathShape;
+                    groups.push_back(g);
+                } else {
+                    // 内容映射：objectBoundingBox 缩放 · viewBox（meet 居中）
+                    PathMatrix cb;
+                    if (pd2.contentUnits == 1) cb = PathScale(txa, tya);
+                    if (pd2.hasViewBox) {
+                        const float kk = std::min(txa / pd2.vbW, tya / pd2.vbH);
+                        PathMatrix vb = PathMul(PathScale(kk, kk),
+                                                PathTranslate(-pd2.vbX, -pd2.vbY));
+                        vb.e += (txa - pd2.vbW * kk) * 0.5f;
+                        vb.f += (tya - pd2.vbH * kk) * 0.5f;
+                        cb = PathMul(vb, cb);
+                    }
+                    strokeK = PathScaleFactor(svgX) * PathScaleFactor(cb);
+                    for (int kk = k0; kk <= k1; kk++) {
+                        for (int ll = l0; ll <= l1; ll++) {
+                            const float ox2 = gx + kk * txa;
+                            const float oy2 = gy + ll * tya;
+                            // 整块落在元素包围盒外 → 裁掉也看不见，直接跳过
+                            if (ox2 + txa <= patUBx || oy2 + tya <= patUBy ||
+                                ox2 >= patUBx + ubw || oy2 >= patUBy + ubh) continue;
+                            const PathMatrix md = PathMul(svgX,
+                                PathMul(PathTranslate(ox2, oy2), cb));
+                            for (const SvgPatternChild& kid : pd2.kids) {
+                                PathShape tmp = kid.shape;
+                                TransformShape(tmp, md);
+                                if (tmp.Empty()) continue;
+                                if (kid.hasFill) appendTo(groups[groupOf(kid, false)].shape, tmp);
+                                if (kid.hasStroke && kid.strokeW > 0.0f)
+                                    appendTo(groups[groupOf(kid, true)].shape, tmp);
+                            }
+                        }
+                    }
+                }
+                // 元素轮廓：归一化一次，复制给每个展开节点（运行期补集擦除要闭包）
+                PendingClip clipTmpl;
+                bool hasClip = false;
+                {
+                    PathShape outline = svgPathShape;
+                    outline.RecomputeBounds();
+                    PathNormData cnd2;
+                    if (!outline.Empty() && NormalizeShape(outline, cnd2)) {
+                        clipTmpl.flags = pathEvenOdd ? 1 : 0;
+                        clipTmpl.x = outline.minX + pc.ox;
+                        clipTmpl.y = outline.minY + pc.oy;
+                        clipTmpl.w = outline.Width();
+                        clipTmpl.h = outline.Height();
+                        clipTmpl.first = std::move(cnd2.contourFirst);
+                        clipTmpl.closed = std::move(cnd2.contourClosed);
+                        clipTmpl.pts = std::move(cnd2.pts);
+                        hasClip = true;
+                    }
+                }
+                for (PatGroup& g : groups) {
+                    if (g.shape.Empty()) continue;
+                    g.shape.RecomputeBounds();
+                    PathNormData nd3;
+                    if (!NormalizeShape(g.shape, nd3)) continue;
+                    BinUINode mn = {};
+                    mn.id = id++;
+                    mn.type = BINUI_PATH;
+                    mn.parentId = n.id;
+                    mn.zIndex = n.zIndex;
+                    mn.flags = BINUI_VISIBLE | BINUI_ABSOLUTE;
+                    mn.x = static_cast<int32_t>(std::lround(pc.ox + g.shape.minX));
+                    mn.y = static_cast<int32_t>(std::lround(pc.oy + g.shape.minY));
+                    mn.width = static_cast<int32_t>(std::lround(std::max(1.0f, g.shape.Width())));
+                    mn.height = static_cast<int32_t>(std::lround(std::max(1.0f, g.shape.Height())));
+                    nodes.push_back(mn);
+                    PendingPath pp2;
+                    pp2.head.nodeId = mn.id;
+                    pp2.head.flags = (g.stroke ? PATH_STROKE : PATH_FILL) |
+                                     ((eAA && !g.stroke) ? PATH_AA : 0);
+                    pp2.head.fillColor = g.color;
+                    pp2.head.strokeColor = g.color;
+                    pp2.head.designW = g.shape.Width();
+                    pp2.head.designH = g.shape.Height();
+                    pp2.head.strokeW = (uint8_t)std::min(255.0f, g.w * strokeK);
+                    pp2.head.join = g.join;
+                    pp2.head.cap = g.cap;
+                    pp2.head.pointCount = (uint16_t)std::min<size_t>(65535, nd3.pts.size() / 2);
+                    pp2.head.contourCount = (uint16_t)std::min<size_t>(65535, nd3.contourFirst.size());
+                    pp2.pts = std::move(nd3.pts);
+                    pp2.first = std::move(nd3.contourFirst);
+                    pp2.closed = std::move(nd3.contourClosed);
+                    pendingPaths.push_back(std::move(pp2));
+                    if (hasClip) {
+                        PendingClip cp2 = clipTmpl;
+                        cp2.nodeId = mn.id;
+                        clipNodes.push_back(std::move(cp2));
+                    }
+                }
             }
         }
 
