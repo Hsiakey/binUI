@@ -134,6 +134,7 @@ struct BinUID3D::Impl {
     ID3D11SamplerState* samLinear = nullptr;
     ID3D11BlendState* blend = nullptr;
     ID3D11BlendState* blendErase = nullptr;   // v27：clip-path 的 dst *= 1-srcA
+    ID3D11BlendState* blendKeep = nullptr;    // v28：mask 保留趟的 dst *= srcA
     ID3D11RasterizerState* ras = nullptr;
     ID3D11ShaderResourceView* whiteSrv = nullptr; // 1×1 纯白（纯色四边形）
     // 持久离屏帧缓冲：局部重绘只更新脏区，present 时整帧 blit 到交换链
@@ -416,6 +417,17 @@ struct BinUID3D::Impl {
         UINT offset = 0;
         float blendFactor[4] = { 0, 0, 0, 0 };
         ctx->OMSetBlendState(blend, blendFactor, 0xFFFFFFFF);
+    // v28 遮罩保留趟：color/alpha 都按 dst *= srcA 混合（掩码内保留）
+    D3D11_BLEND_DESC bd3 = {};
+    bd3.RenderTarget[0].BlendEnable = TRUE;
+    bd3.RenderTarget[0].SrcBlend = D3D11_BLEND_ZERO;
+    bd3.RenderTarget[0].DestBlend = D3D11_BLEND_SRC_ALPHA;
+    bd3.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bd3.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+    bd3.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_SRC_ALPHA;
+    bd3.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bd3.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    device->CreateBlendState(&bd3, &blendKeep);
     // v27 裁剪擦除：color/alpha 都按 dst *= (1-srcA) 混合
     D3D11_BLEND_DESC bd2 = {};
     bd2.RenderTarget[0].BlendEnable = TRUE;
@@ -1537,6 +1549,17 @@ bool BinUID3D::setEraseBlend(bool on) {
     if (!impl_ || !impl_->ready) return false;
     impl_->flushAll();
     ID3D11BlendState* want = on ? impl_->blendErase : impl_->blend;
+    if (!want) return false;
+    float bf[4] = { 0, 0, 0, 0 };
+    impl_->ctx->OMSetBlendState(want, bf, 0xFFFFFFFF);
+    return true;
+}
+
+// v28 遮罩保留趟：dst *= srcA
+bool BinUID3D::setKeepBlend(bool on) {
+    if (!impl_ || !impl_->ready) return false;
+    impl_->flushAll();
+    ID3D11BlendState* want = on ? impl_->blendKeep : impl_->blend;
     if (!want) return false;
     float bf[4] = { 0, 0, 0, 0 };
     impl_->ctx->OMSetBlendState(want, bf, 0xFFFFFFFF);

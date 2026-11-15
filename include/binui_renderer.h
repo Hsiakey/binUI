@@ -172,6 +172,23 @@ public:
         return it == clipPaths_.end() ? nullptr : &it->second;
     }
 
+    // v28 遮罩段：一条 = 一组"同亮度"的几何（同一 nodeId 可以有多条，按顺序两趟画）。
+    struct MaskRecord {
+        BinUIMaskEntry head{};
+        std::vector<uint32_t> first;
+        std::vector<uint8_t>  closed;
+        std::vector<uint16_t> pts;
+    };
+
+    // v28 遮罩段：节点的遮罩几何（空 vector = 没有遮罩）。
+    // 运行期画法：离屏图层（框 = head 的 rx/ry/rw/rh）→ 保留趟（dst *= srcA）→
+    //   补集趟（图层矩形 ∪ 全部几何 even-odd，dst *= 1-srcA）。
+    const std::vector<MaskRecord>& maskOf(uint16_t nodeId) const {
+        static const std::vector<MaskRecord> kEmpty;
+        auto it = masks_.find(nodeId);
+        return it == masks_.end() ? kEmpty : it->second;
+    }
+
 
     // v15 路径段：BINUI_PATH 节点的折线（归一化坐标 + 子路径表；无条目返回 nullptr）
     struct PathRecord {
@@ -719,6 +736,7 @@ private:
     std::unordered_map<uint16_t, BinUIImageFilter> imgFilter_;  // v26 图片滤镜段（一个节点一条）
     // v27 裁剪路径段
     std::unordered_map<uint16_t, ClipRecord> clipPaths_;
+    std::unordered_map<uint16_t, std::vector<MaskRecord>> masks_;   // v28 遮罩段
     // nodeId -> (textShadows_ 起始下标, 条数)
     std::unordered_map<uint16_t, std::pair<size_t, uint32_t>> textShadowIdx_;
     // v19 路径条带的跨帧缓存（条带数量有上限，条目数也封顶）。

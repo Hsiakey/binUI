@@ -139,6 +139,14 @@ public:
     // 注意：实现必须在**切换混合状态前**把手上的批次刷掉，否则那批几何会用错混合。
     virtual bool setEraseBlend(bool on) { (void)on; return false; }
 
+    // ---- 遮罩保留混合（v28：SVG <mask>）----
+    // 语义：dst *= srcA（GL: ZERO/SRC_ALPHA）。只作用在"画了东西的像素"上，所以它单独
+    // 清不掉"掩码外"—— 掩罩要点两趟：先保留趟（本函数）、再补集趟（setEraseBlend）。
+    // 与 setEraseBlend 同样要求：切换前先 flush，否则那批几何会用错混合。
+    virtual bool setKeepBlend(bool on) { (void)on; return false; }
+    // 掩罩需要两种混合状态 + 离屏图层；GDI 遗留路径返回 false（调用方退回"不遮罩"）。
+    virtual bool supportsMask() const { return false; }
+
     // ---- 文字阴影（v24：CSS text-shadow）----
     // 在画一个节点的文字**之前**设好，节点画完用 alpha=0 清掉（或下个节点重设）。
     // color 的 alpha 已折入元素 opacity；blur < 0.5px 由实现按"硬阴影"（偏移一份字形）处理。

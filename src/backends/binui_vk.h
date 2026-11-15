@@ -74,6 +74,8 @@ public:
     bool setAffine(const float xf[6]) override;
     void setImageFilter(const BinUIImageFilter* f) override;   // v26：CSS filter 颜色矩阵
     bool setEraseBlend(bool on) override;                       // v27：clip-path 擦除
+    bool setKeepBlend(bool on) override;                        // v28：mask 保留趟
+    bool supportsMask() const override { return true; }         // v28：mask 可用
 
     bool prepareImage(uint16_t index, const uint8_t* data, size_t size,
                       uint32_t generation) override;

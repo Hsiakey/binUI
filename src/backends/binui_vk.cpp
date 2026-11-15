@@ -533,7 +533,11 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // 同一份着色器多建两条管线（主目标 / 图层目标各一条）。
     VkPipeline pipelineErase = VK_NULL_HANDLE;
     VkPipeline pipelineLayerErase = VK_NULL_HANDLE;
+    // v28 遮罩保留趟（dst *= srcA）：第三种混合状态，同样建两条变体
+    VkPipeline pipelineKeep = VK_NULL_HANDLE;
+    VkPipeline pipelineLayerKeep = VK_NULL_HANDLE;
     bool eraseOn = false;
+    bool keepOn = false;
     VkPipeline activePipeline = VK_NULL_HANDLE;
     VkDescriptorPool dsPool = VK_NULL_HANDLE;
 
@@ -2026,6 +2030,16 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             if (pr == VK_SUCCESS && useDynamic)
                 pr = build(VK_SAMPLE_COUNT_1_BIT, pipelineLayerErase);
         }
+        // v28 遮罩保留趟变体：dst *= srcA
+        if (pr == VK_SUCCESS) {
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+            pr = build(samples, pipelineKeep);
+            if (pr == VK_SUCCESS && useDynamic)
+                pr = build(VK_SAMPLE_COUNT_1_BIT, pipelineLayerKeep);
+        }
         g_vk.vkDestroyShaderModule(device, vs, nullptr);
         g_vk.vkDestroyShaderModule(device, fs, nullptr);
         if (pr != VK_SUCCESS) {
@@ -2174,9 +2188,10 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
 
     // v27：按 (是否在图层, 是否擦除) 选管线
     void refreshPipeline() {
-        if (eraseOn) activePipeline = layerStack.empty() ? pipelineErase : pipelineLayerErase;
-        else         activePipeline = layerStack.empty() ? pipeline : pipelineLayer;
-        if (!activePipeline) activePipeline = pipeline;   // 擦除管线建失败就退回普通混合
+        if (keepOn)       activePipeline = layerStack.empty() ? pipelineKeep : pipelineLayerKeep;
+        else if (eraseOn) activePipeline = layerStack.empty() ? pipelineErase : pipelineLayerErase;
+        else              activePipeline = layerStack.empty() ? pipeline : pipelineLayer;
+        if (!activePipeline) activePipeline = pipeline;   // 变体管线建失败就退回普通混合
     }
 
     void flush() {
@@ -2692,6 +2707,9 @@ void BinUIVK::shutdown() {
     if (d.pipelineErase) g_vk.vkDestroyPipeline(d.device, d.pipelineErase, nullptr);
     if (d.pipelineLayerErase)
         g_vk.vkDestroyPipeline(d.device, d.pipelineLayerErase, nullptr);
+    if (d.pipelineKeep) g_vk.vkDestroyPipeline(d.device, d.pipelineKeep, nullptr);
+    if (d.pipelineLayerKeep)
+        g_vk.vkDestroyPipeline(d.device, d.pipelineLayerKeep, nullptr);
     if (d.pipeLayout) g_vk.vkDestroyPipelineLayout(d.device, d.pipeLayout, nullptr);
     if (d.dsLayout) g_vk.vkDestroyDescriptorSetLayout(d.device, d.dsLayout, nullptr);
     // 双槽：每槽自己一套顶点缓冲 / fence / 信号量
@@ -3311,6 +3329,15 @@ bool BinUIVK::setEraseBlend(bool on) {
     if (!impl_ || !impl_->ready) return false;
     impl_->flush();
     impl_->eraseOn = on;
+    impl_->refreshPipeline();
+    return true;
+}
+
+// v28 遮罩保留趟：dst *= srcA（同样先 flush 再换管线）
+bool BinUIVK::setKeepBlend(bool on) {
+    if (!impl_ || !impl_->ready) return false;
+    impl_->flush();
+    impl_->keepOn = on;
     impl_->refreshPipeline();
     return true;
 }

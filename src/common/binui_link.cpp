@@ -26,6 +26,14 @@ struct ClipRec {
     std::vector<uint16_t> pts;
 };
 
+// v28 遮罩段的一条记录（节点 + 区域 + 一组同亮度几何）
+struct MaskRec {
+    BinUIMaskEntry head{};
+    std::vector<uint32_t> first;
+    std::vector<uint8_t>  closed;
+    std::vector<uint16_t> pts;
+};
+
 struct DocPath {
     BinUIPathEntry head{};
     bool hasGrad = false;
@@ -65,6 +73,7 @@ struct Doc {
     std::vector<BinUIImageFilter> imgFilter;   // v26 图片滤镜段（CSS filter 颜色矩阵）
 
     std::vector<ClipRec> clips;   // v27 裁剪路径段
+    std::vector<MaskRec> masks;   // v28 遮罩段
     std::vector<std::pair<uint16_t, std::string>> names;
 };
 
@@ -601,6 +610,54 @@ bool ParseDoc(const void* data, size_t size, Doc& d) {
         }
         if (!ok) r.rewind(mark);
     }
+    // ---- 遮罩段（v28）：uint32 bytes + uint32 count + 每条（头 + 子路径表 + 点表） ----
+    {
+        const uint8_t* mark = r.cur();
+        uint32_t bytes = 0;
+        bool ok = false;
+        if (r.u32(bytes)) {
+            if (bytes == 0) {
+                ok = true;
+            } else {
+                const uint8_t* sp = nullptr;
+                if (r.blob(bytes, sp)) {
+                    Reader s(sp, sp + bytes);
+                    uint32_t sc = 0;
+                    if (s.u32(sc)) {
+                        ok = true;
+                        for (uint32_t k = 0; k < sc && ok; k++) {
+                            MaskRec mr;
+                            if (!s.left() || s.left() < sizeof(BinUIMaskEntry)) { ok = false; break; }
+                            const uint8_t* hp = nullptr;
+                            if (!s.blob(sizeof(BinUIMaskEntry), hp)) { ok = false; break; }
+                            memcpy(&mr.head, hp, sizeof(BinUIMaskEntry));
+                            const size_t nc = mr.head.contourCount;
+                            const size_t np = static_cast<size_t>(mr.head.pointCount) * 2;
+                            mr.first.resize(nc);
+                            mr.closed.resize(nc);
+                            mr.pts.resize(np);
+                            if (nc) {
+                                const uint8_t* fp = nullptr;
+                                if (!s.blob(nc * sizeof(uint32_t), fp)) { ok = false; break; }
+                                memcpy(mr.first.data(), fp, nc * sizeof(uint32_t));
+                                const uint8_t* cp2 = nullptr;
+                                if (!s.blob(nc, cp2)) { ok = false; break; }
+                                memcpy(mr.closed.data(), cp2, nc);
+                            }
+                            if (np) {
+                                const uint8_t* pp = nullptr;
+                                if (!s.blob(np * sizeof(uint16_t), pp)) { ok = false; break; }
+                                memcpy(mr.pts.data(), pp, np * sizeof(uint16_t));
+                            }
+                            d.masks.push_back(std::move(mr));
+                        }
+                    }
+                }
+                if (!ok) { d.masks.clear(); r.rewind(mark); }
+            }
+        }
+        if (!ok) r.rewind(mark);
+    }
 
     // ---- 名称段（v8，缺失 = 无命名节点） ----
     {
@@ -798,6 +855,22 @@ std::vector<uint8_t> EmitDoc(Doc& d) {
             if (!cr.pts.empty())    put(cr.pts.data(),    cr.pts.size()    * sizeof(uint16_t));
         }
         PutSection(b, p2);
+    }
+    // 遮罩段（v28，恒定写出）
+    {
+        std::vector<uint8_t> p3;
+        auto put = [&](const void* b, size_t n) {
+            const uint8_t* q = static_cast<const uint8_t*>(b);
+            p3.insert(p3.end(), q, q + n);
+        };
+        PutU32(p3, static_cast<uint32_t>(d.masks.size()));
+        for (const MaskRec& mr : d.masks) {
+            put(&mr.head, sizeof(mr.head));
+            if (!mr.first.empty())  put(mr.first.data(),  mr.first.size()  * sizeof(uint32_t));
+            if (!mr.closed.empty()) put(mr.closed.data(), mr.closed.size());
+            if (!mr.pts.empty())    put(mr.pts.data(),    mr.pts.size()    * sizeof(uint16_t));
+        }
+        PutSection(b, p3);
     }
     // 名称段（非空才写）
     if (!namePairs.empty()) {
@@ -1081,6 +1154,15 @@ bool MergeLayout(std::vector<uint8_t>& host, const void* comp, size_t compSize,
         ClipRec r2 = cr;
         r2.head.nodeId = static_cast<uint16_t>(idMap[it->second]);
         h.clips.push_back(std::move(r2));
+    }
+
+    // ---- 遮罩段（v28）：同样按 nodeId 重映射 ----
+    for (const MaskRec& mr : c.masks) {
+        auto it = compIdx.find(mr.head.nodeId);
+        if (it == compIdx.end() || it->second == 0) continue;
+        MaskRec r3 = mr;
+        r3.head.nodeId = static_cast<uint16_t>(idMap[it->second]);
+        h.masks.push_back(std::move(r3));
     }
 
     // ---- 组件引用段（组件内再外挂组件时递归） ----

@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<app_window width="660" height="470" resizable="false">
+<html width="660" height="470">
+<head>
+<style>
+    body { background: #EEF2F7; color: #16202C; }
+    .cap { position: absolute; width: 170; height: 18; font-size: 12px; color: #5A6B80; }
+</style>
+</head>
+<body>
+    <!-- 1) 白色圆形遮罩：色块只剩圆形 -->
+    <svg width="150" height="150" style="position:absolute; left:20; top:24">
+        <defs>
+            <mask id="mCircle"><circle cx="75" cy="75" r="62" fill="#FFFFFF" /></mask>
+        </defs>
+        <rect x="0" y="0" width="150" height="150" fill="#0B5FA5" mask="url(#mCircle)" />
+    </svg>
+    <span class="cap" style="left:20; top:4">白圆遮罩（色块只剩圆）</span>
+
+    <!-- 2) 灰阶形状：亮度直接当 alpha（灰 = 半透明，黑 = 通透） -->
+    <svg width="150" height="150" style="position:absolute; left:196; top:24">
+        <defs>
+            <mask id="mGray">
+                <rect x="0" y="0" width="75" height="150" fill="#FFFFFF" />
+                <rect x="75" y="0" width="40" height="150" fill="#B4B4B4" />
+                <rect x="115" y="0" width="35" height="150" fill="#4A4A4A" />
+            </mask>
+        </defs>
+        <rect x="0" y="0" width="150" height="150" fill="#C2410C" mask="url(#mGray)" />
+    </svg>
+    <span class="cap" style="left:196; top:4">灰阶遮罩（灰 = 半透）</span>
+
+    <!-- 3) 阶梯衰减：多条不同亮度的横条 → 逐段变淡（渐变的离散近似） -->
+    <svg width="150" height="150" style="position:absolute; left:382; top:24">
+        <defs>
+            <mask id="mFade">
+                <rect x="0" y="0"   width="150" height="25"  fill="#FFFFFF" />
+                <rect x="0" y="25"  width="150" height="25"  fill="#DCDCDC" />
+                <rect x="0" y="50"  width="150" height="25"  fill="#B0B0B0" />
+                <rect x="0" y="75"  width="150" height="25"  fill="#808080" />
+                <rect x="0" y="100" width="150" height="25"  fill="#4E4E4E" />
+                <rect x="0" y="125" width="150" height="25"  fill="#1E1E1E" />
+            </mask>
+        </defs>
+        <rect x="0" y="0" width="150" height="150" fill="#0F766E" mask="url(#mFade)" />
+    </svg>
+    <span class="cap" style="left:382; top:4">阶梯衰减（亮度 = 不透明度）</span>
+
+    <!-- 4) 画在一张图上：只留下圆内部分 -->
+    <svg width="150" height="150" style="position:absolute; left:20; top:196">
+        <defs>
+            <mask id="mImg"><circle cx="75" cy="75" r="58" fill="#FFFFFF" /></mask>
+        </defs>
+        <image x="10" y="10" width="130" height="130" href="image-round-img.png"
+               mask="url(#mImg)" />
+    </svg>
+    <span class="cap" style="left:20; top:176">遮罩 + 图片</span>
+
+    <!-- 5) mask + clip-path 嵌套：先按三角形裁，再用横条遮罩压暗下半 -->
+    <svg width="150" height="150" style="position:absolute; left:196; top:196">
+        <defs>
+            <clipPath id="cTri"><polygon points="75,10 140,130 10,130" /></clipPath>
+            <mask id="mFade2">
+                <rect x="0" y="0"   width="150" height="70"  fill="#FFFFFF" />
+                <rect x="0" y="70"  width="150" height="30"  fill="#999999" />
+                <rect x="0" y="100" width="150" height="50"  fill="#333333" />
+            </mask>
+        </defs>
+        <rect x="0" y="0" width="150" height="150" fill="#7C3AED"
+              clip-path="url(#cTri)" mask="url(#mFade2)" />
+    </svg>
+    <span class="cap" style="left:196; top:176">mask + clip-path 嵌套</span>
+
+    <!-- 6) objectBoundingBox 单位：区域与内容都按元素盒比例写 -->
+    <svg width="150" height="150" style="position:absolute; left:382; top:196">
+        <defs>
+            <mask id="mObb" maskUnits="objectBoundingBox" maskContentUnits="objectBoundingBox"
+                  x="0" y="0" width="1" height="1">
+                <circle cx="0.5" cy="0.5" r="0.45" fill="#FFFFFF" />
+            </mask>
+        </defs>
+        <rect x="10" y="20" width="130" height="110" fill="#B45309" mask="url(#mObb)" />
+    </svg>
+    <span class="cap" style="left:382; top:176">objectBoundingBox 单位</span>
+
+    <span style="position:absolute; left:20; top:392; width:620; height:52; font-size:12px; color:#7A8798">v0.16.26：&lt;mask&gt; 在图层里画两趟 —— 保留趟（dst *= srcA）把掩码几何按亮度乘上去，补集趟（dst *= 1-srcA）把掩码外清零；亮度在编译期折进 alpha，三端零着色器改动</span>
+</body>
+</html>
+</app_window>

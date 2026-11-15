@@ -963,6 +963,109 @@ static void TestIssueRegressions() {
         }
     }
 
+    // ---- 16.26：SVG <mask>（v0.16.26，格式 v28 遮罩段） ----
+    // 钉住六件事：
+    //   1. mask="url(#id)" 落进遮罩段（renderer.maskOf），每个条目带"亮度折成的 alpha"；
+    //   2. 亮度口径（白 = 255、0xB4 = 180），纯黑形状直接不参与（= 全透明）；
+    //   3. 区域默认是 bbox 的 -10%..120%，maskUnits=objectBoundingBox 时按元素盒取；
+    //   4. 条目几何是**设备空间**包围盒（圆 → 10..90）；
+    //   5. 引用不存在的 id / 内容全黑 → 告警且没有条目（不会把元素画没）；
+    //   6. 没有 mask 的元素不受影响。
+    {
+        const char* html = R"HTML(<app_window width="300" height="200" bg="#101014">
+<html width="300" height="200" bg="#101014">
+<body>
+  <svg width="290" height="190" style="position:absolute; left:0; top:0">
+    <defs>
+      <mask id="mw"><circle cx="50" cy="50" r="40" fill="#FFFFFF" /></mask>
+      <mask id="mg"><rect x="0" y="0" width="50" height="100" fill="#B4B4B4" /></mask>
+      <mask id="mobb" maskUnits="objectBoundingBox" x="0" y="0" width="1" height="1">
+        <rect x="0" y="0" width="1" height="1" fill="#FFFFFF" />
+      </mask>
+      <mask id="mblack"><rect x="0" y="0" width="10" height="10" fill="#000000" /></mask>
+    </defs>
+    <rect id="k1" x="0" y="0" width="100" height="100" fill="#0B5FA5" mask="url(#mw)" />
+    <rect id="k2" x="110" y="0" width="100" height="100" fill="#C2410C" mask="url(#mg)" />
+    <rect id="k3" x="0" y="120" width="100" height="50" fill="#0F766E" mask="url(#mobb)" />
+    <rect id="k4" x="110" y="120" width="100" height="50" fill="#0F766E" mask="url(#nope)" />
+    <rect id="k5" x="220" y="0" width="60" height="60" fill="#0F766E" mask="url(#mblack)" />
+    <rect id="k6" x="220" y="70" width="60" height="60" fill="#0F766E" />
+  </svg>
+</body></html>
+</app_window>)HTML";
+        const auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("16.26: mask 布局可解析", ParseInto(r, res.layout));
+
+        auto masksOfName = [&](const char* name) -> std::vector<BinUIRenderer::MaskRecord> {
+            const uint16_t id = r.findNodeByName(name);
+            if (!id) return {};
+            return r.maskOf(id);
+        };
+        // 1) 白圆遮罩：一条条目，alpha = 255，几何盒 = 圆的外接方块
+        {
+            auto ms = masksOfName("k1");
+            TEST("16.26: 白圆遮罩进段（1 条）", ms.size() == 1);
+            if (ms.size() == 1) {
+                TEST("16.26: 白色 → alpha 255", ((ms[0].head.color >> 24) & 0xFFu) == 255);
+                TEST("16.26: 条目几何是设备空间的圆外接盒（80×80）",
+                     std::fabs(ms[0].head.w - 80.0f) < 1.5f &&
+                     std::fabs(ms[0].head.h - 80.0f) < 1.5f);
+                TEST("16.26: 条目几何原点在 (10,10)",
+                     std::fabs(ms[0].head.x - 10.0f) < 1.5f &&
+                     std::fabs(ms[0].head.y - 10.0f) < 1.5f);
+                // 2) 区域默认 = bbox 的 -10%..120%
+                TEST("16.26: 默认区域 = bbox 外扩 10%（120×120 @ -10,-10）",
+                     std::fabs(ms[0].head.rx + 10.0f) < 1.5f &&
+                     std::fabs(ms[0].head.ry + 10.0f) < 1.5f &&
+                     std::fabs(ms[0].head.rw - 120.0f) < 1.5f &&
+                     std::fabs(ms[0].head.rh - 120.0f) < 1.5f);
+                TEST("16.26: 点表非空且闭合",
+                     !ms[0].pts.empty() && !ms[0].closed.empty() && ms[0].closed[0] == 1);
+            }
+        }
+        // 2) 灰 = 半透明
+        {
+            auto ms = masksOfName("k2");
+            TEST("16.26: 灰阶遮罩进段（1 条）", ms.size() == 1);
+            if (ms.size() == 1) {
+                const int a = (int)((ms[0].head.color >> 24) & 0xFFu);
+                TEST("16.26: 0xB4 的亮度 → alpha 180（±2）", a >= 178 && a <= 182);
+            }
+        }
+        // 3) objectBoundingBox 的区域 = 元素盒本身
+        {
+            auto ms = masksOfName("k3");
+            TEST("16.26: objectBoundingBox 遮罩进段", ms.size() == 1);
+            if (ms.size() == 1) {
+                TEST("16.26: 区域 = 元素盒（0,120 100×50）",
+                     std::fabs(ms[0].head.rx - 0.0f) < 1.5f &&
+                     std::fabs(ms[0].head.ry - 120.0f) < 1.5f &&
+                     std::fabs(ms[0].head.rw - 100.0f) < 1.5f &&
+                     std::fabs(ms[0].head.rh - 50.0f) < 1.5f);
+            }
+        }
+        // 4) 引用不存在的 id：告警 + 无条目
+        {
+            bool warned = false;
+            for (const auto& w : res.warnings)
+                if (w.find("nope") != std::string::npos) warned = true;
+            TEST("16.26: 引用不存在的 mask 要告警", warned);
+            TEST("16.26: 引用不存在的 mask → 无条目（元素照常画）",
+                 masksOfName("k4").empty());
+        }
+        // 5) 内容全黑：告警 + 无条目（不把元素画没）
+        {
+            bool warned = false;
+            for (const auto& w : res.warnings)
+                if (w.find("没有可见形状") != std::string::npos) warned = true;
+            TEST("16.26: 掩码内容全黑要告警", warned);
+            TEST("16.26: 掩码内容全黑 → 无条目", masksOfName("k5").empty());
+        }
+        // 6) 没写 mask 的元素不受影响
+        TEST("16.26: 没写 mask → 无条目", masksOfName("k6").empty());
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

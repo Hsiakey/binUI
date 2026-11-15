@@ -1434,6 +1434,17 @@ bool BinUIGLGdi::setEraseBlend(bool on) {
     return true;
 }
 
+// v28 遮罩保留趟：dst *= srcA（掩码内保留、掩码外先不动 —— 由补集趟清零）
+bool BinUIGLGdi::setKeepBlend(bool on) {
+    if (!impl_ || !impl_->ready) return false;
+    impl_->flushAll();
+    if (on) glBlendFunc(GL_ZERO, GL_SRC_ALPHA);
+    else    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+    return true;
+}
+
+
+
 void BinUIGLGdi::setTextShadow(float dx, float dy, float blur, uint32_t color) {
     if (impl_) impl_->atlas.setTextShadow(dx, dy, blur, color);
 }

@@ -1240,6 +1240,49 @@ static void AppendClipSection(std::vector<uint8_t>& buf, const std::vector<Pendi
     memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
 
+// v28 遮罩：一条 = 一组"同亮度"的掩码几何（同一个节点可以有多条，运行期按顺序两趟画）
+struct PendingMask {
+    uint16_t nodeId = 0;
+    uint32_t color = 0xFFFFFFFFu;             // AARRGGBB：alpha = 亮度，RGB 恒白
+    float rx = 0, ry = 0, rw = 0, rh = 0;     // mask 区域（设备空间，= 图层框）
+    float x = 0, y = 0, w = 0, h = 0;         // 本组几何包围盒（归一化基准）
+    std::vector<uint32_t> first;
+    std::vector<uint8_t>  closed;
+    std::vector<uint16_t> pts;
+};
+
+// 追加遮罩段（v28）：uint32 bytes + uint32 count + 每条（定长头 + 子路径表 + 点表）
+static void AppendMaskSection(std::vector<uint8_t>& buf, const std::vector<PendingMask>& masks) {
+    std::vector<uint8_t> data;
+    auto wbytes = [&](const void* b, size_t n) {
+        const uint8_t* q = static_cast<const uint8_t*>(b);
+        data.insert(data.end(), q, q + n);
+    };
+    if (!masks.empty()) {
+        uint32_t count = (uint32_t)masks.size();
+        wbytes(&count, sizeof(count));
+        for (const PendingMask& m : masks) {
+            BinUIMaskEntry e = {};
+            e.nodeId = m.nodeId;
+            e.flags = 0;
+            e.color = m.color;
+            e.rx = m.rx; e.ry = m.ry; e.rw = m.rw; e.rh = m.rh;
+            e.x = m.x; e.y = m.y; e.w = m.w; e.h = m.h;
+            e.pointCount = (uint16_t)std::min<size_t>(65535, m.pts.size() / 2);
+            e.contourCount = (uint16_t)std::min<size_t>(65535, m.first.size());
+            wbytes(&e, sizeof(e));
+            if (!m.first.empty())  wbytes(m.first.data(),  m.first.size()  * sizeof(uint32_t));
+            if (!m.closed.empty()) wbytes(m.closed.data(), m.closed.size());
+            if (!m.pts.empty())    wbytes(m.pts.data(),    m.pts.size()    * sizeof(uint16_t));
+        }
+    }
+    uint32_t nbytes = (uint32_t)data.size();
+    size_t start = buf.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    if (!data.empty()) memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
+
 // 点用 uint16 归一化存（0..65535 映射包围盒），比 float 省一半且精度远超显示能力。
 struct PendingPath {
     BinUIPathEntry head = {};
@@ -1963,6 +2006,7 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     AppendPaintExSection(buf, {});  // v25：XML 路径无九宫格图片
     AppendFilterSection(buf, {});     // v26：这条路径没有图片滤镜
     AppendClipSection(buf, {});       // v27：这条路径没有裁剪路径
+    AppendMaskSection(buf, {});       // v28：XML 路径没有 mask
     AppendNameSection(buf, nodeNames, offsets);
 
     return buf;
@@ -2567,6 +2611,8 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "clip-path", "clippathunits",
         // v0.16.25：SVG <pattern>
         "patternunits", "patterncontentunits", "patterntransform",
+        // v0.16.26：SVG <mask>
+        "mask", "maskunits", "maskcontentunits",
         "markerwidth", "markerheight", "markerunits", "refx", "refy", "orient",
         "gradientunits", "gradienttransform", "spreadmethod", "text-anchor",
     };
@@ -4495,6 +4541,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::vector<BinUIPaintEx> paintExNodes;        // v25 绘制附加段（九宫格图片等）
     std::vector<BinUIImageFilter> filterNodes;     // v26 图片滤镜段（CSS filter 的颜色矩阵）
     std::vector<PendingClip> clipNodes;            // v27 裁剪路径段（clip-path）
+    std::vector<PendingMask> maskNodes;            // v28 遮罩段（<mask>）
     std::vector<PendingPath> pendingPaths;     // v15 路径段（SVG <path>/<ellipse> 的折线）
     std::vector<std::string> strings;
     strings.push_back(""); // 字符串表首位 = 空串：无文本节点的 textOffset=0 指向空串
@@ -5316,6 +5363,137 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         svgPatterns[pid] = std::move(pd);
     }
 
+    // ============ v0.16.26：SVG <mask>（编译期折算 + 运行期两趟混合） ============
+    // 掩码是"逐像素乘一次 alpha"。做法与裁剪同一套离屏图层，只是多一趟：
+    //   ① 保留趟：把掩码几何按 alpha 用 dst *= srcA 画一遍（白保留、灰压暗）；
+    //   ② 补集趟：图层矩形 ∪ 全部掩码几何（even-odd）用 dst *= 1-srcA 画一遍，把掩码
+    //      没盖到的像素清零（SVG 语义：mask 内容之外 = 黑 = 透明）。
+    // 亮度在编译期折进 alpha（sRGB 系数 0.2126/0.7152/0.0722 × fill-opacity × opacity），
+    // 所以运行期只需要"几何 + 一个 32 位颜色"，三端零着色器改动。
+    // 已知边界（都会告警）：内容渐变按中间色（不产生渐变过渡）；内容里的 <g> 不展开；
+    //   多个形状**重叠**时保留趟会乘两次（重叠区更暗），补集趟的 even-odd 也会把重叠区
+    //   当成"外"—— 掩码内容请写不重叠的形状。
+    struct SvgMaskChild {
+        PathShape shape;
+        uint32_t  color = 0xFFFFFFFFu;   // 已折好亮度
+    };
+    struct SvgMaskDef {
+        bool  found = false;
+        int   units = 1;          // maskUnits：0 = userSpaceOnUse  1 = objectBoundingBox（默认）
+        int   contentUnits = 0;   // maskContentUnits：0 = userSpaceOnUse（默认） 1 = objectBoundingBox
+        bool  hasX = false, hasY = false, hasW = false, hasH = false;
+        float x = -0.1f, y = -0.1f, w = 1.2f, h = 1.2f;
+        bool  xPct = false, yPct = false, wPct = false, hPct = false;
+        std::vector<SvgMaskChild> kids;
+    };
+    std::unordered_map<std::string, SvgMaskDef> svgMasks;
+    for (size_t mi2 = 0; mi2 < elems.size(); mi2++) {
+        if (lowerStr(elems[mi2].tag) != "mask") continue;
+        const HNode& me2 = elems[mi2];
+        std::string mid2 = me2.attrs.count("id") ? TrimCopy(me2.attrs.at("id")) : "";
+        if (mid2.empty()) {
+            Warn("<mask> 没有 id，无法被 mask=\"url(#…)\" 引用（已忽略）");
+            continue;
+        }
+        SvgMaskDef md2;
+        md2.found = true;
+        {
+            auto it = me2.attrs.find("maskunits");
+            if (it != me2.attrs.end())
+                md2.units = lowerStr(TrimCopy(it->second)) == "userspaceonuse" ? 0 : 1;
+        }
+        {
+            auto it = me2.attrs.find("maskcontentunits");
+            if (it != me2.attrs.end())
+                md2.contentUnits = lowerStr(TrimCopy(it->second)) == "objectboundingbox" ? 1 : 0;
+        }
+        // 区域：缺省 -10% .. 120%（SVG 规范默认值）；百分比按元素盒的比例算
+        auto region = [&](const char* key, float& out, bool& has, bool& pct) {
+            auto it = me2.attrs.find(key);
+            if (it == me2.attrs.end()) return;
+            std::string v = TrimCopy(it->second);
+            if (!v.empty() && v.back() == '%') {
+                pct = true;
+                out = parseLen(v.substr(0, v.size() - 1), 0.0f) / 100.0f;
+            } else {
+                out = parseLen(v, 0.0f);
+            }
+            has = true;
+        };
+        region("x", md2.x, md2.hasX, md2.xPct);
+        region("y", md2.y, md2.hasY, md2.yPct);
+        region("width", md2.w, md2.hasW, md2.wPct);
+        region("height", md2.h, md2.hasH, md2.hPct);
+        if (md2.units == 0 && (md2.xPct || md2.yPct || md2.wPct || md2.hPct))
+            Warn("<mask id=\"" + mid2 + "\" maskUnits=\"userSpaceOnUse\"> 的区域写了百分比："
+                 "按元素包围盒的比例折算（SVG 规范是相对视口）");
+        for (size_t mj = 0; mj < elems.size(); mj++) {
+            if (elems[mj].parentIdx != mi2) continue;
+            const HNode& ce2 = elems[mj];
+            const std::string ct2 = lowerStr(ce2.tag);
+            if (ct2 == "g") {
+                Warn("<mask id=\"" + mid2 + "\"> 里的 <g> 不展开（把形状直接写在 <mask> 下）");
+                continue;
+            }
+            SvgMaskChild kid2;
+            // objectBoundingBox 的内容坐标是 0..1：容差要跟着缩，否则圆会被切成多边形
+            //（与 clipPath 的 objectBoundingBox 同一个坑，见 14.2）
+            const float mtol = (md2.contentUnits == 1) ? 0.002f : 0.1f;
+            if (!shapeOf(ce2, kid2.shape, mtol)) continue;
+            // 亮度：SVG 规范默认 luminance 掩码（白 = 可见）
+            uint32_t fc = 0xFF000000u;
+            float opa = 1.0f;
+            auto ft2 = ce2.attrs.find("fill");
+            if (ft2 != ce2.attrs.end()) {
+                const std::string fv2 = TrimCopy(ft2->second);
+                const std::string fl2 = lowerStr(fv2);
+                if (fl2 == "none") continue;                 // 不填 = 不参与遮罩
+                std::string gid3;
+                if (ParseUrlId(fv2, gid3)) {
+                    auto gi3 = svgGrads.find(gid3);
+                    if (gi3 != svgGrads.end() && gi3->second.found && !gi3->second.stops.empty()) {
+                        Warn("<mask id=\"" + mid2 + "\"> 的内容不支持渐变（按中间色；"
+                             "要渐变蒙版请拆成多条不同亮度的形状）");
+                        fc = gi3->second.stops[gi3->second.stops.size() / 2].color;
+                    } else {
+                        Warn("<mask id=\"" + mid2 + "\"> 里的 url(#" + gid3 + ") 找不到定义"
+                             "（按白色）");
+                        fc = 0xFF000000u | 0x00FFFFFFu;
+                    }
+                } else if (fl2 == "currentcolor") {
+                    fc = 0xFFFFFFFFu;
+                } else {
+                    fc = parseColorWith(fv2, 0xFFFFFFFFu, "SVG 颜色");
+                }
+            } else {
+                fc = 0xFFFFFFFFu;    // 缺省白色（= 全保留）
+            }
+            auto opOf = [&](const char* key) -> float {
+                auto it = ce2.attrs.find(key);
+                if (it == ce2.attrs.end()) return 1.0f;
+                float v = parseLen(it->second, 1.0f);
+                return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+            };
+            opa = opOf("fill-opacity") * opOf("opacity");
+            const float r2 = (float)((fc >> 16) & 0xFFu);
+            const float g2 = (float)((fc >> 8) & 0xFFu);
+            const float b2 = (float)(fc & 0xFFu);
+            const float a2 = (float)((fc >> 24) & 0xFFu) / 255.0f;
+            float lum = (0.2126f * r2 + 0.7152f * g2 + 0.0722f * b2) / 255.0f;
+            float alpha = lum * opa * a2;
+            if (alpha <= 0.002f) continue;                   // 纯黑 = 完全透明，不用画
+            const uint32_t av = (uint32_t)(alpha * 255.0f + 0.5f);
+            kid2.color = (av << 24) | 0x00FFFFFFu;
+            md2.kids.push_back(std::move(kid2));
+        }
+        if (md2.kids.empty()) {
+            Warn("<mask id=\"" + mid2 + "\"> 里没有可见形状（引用它的元素会被完全遮住；"
+                 "已按\"不遮罩\"处理，见文档）");
+            continue;
+        }
+        svgMasks[mid2] = std::move(md2);
+    }
+
     {
         static const std::unordered_set<std::string> kKnownTags = {
             // 结构/包裹
@@ -5363,7 +5541,6 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             // v15 起 path/ellipse 已实现，从这张表里移出（kKnownTags 里有了）。
             
             { "tspan", "SVG <tspan> 不支持富文本：把文字写进 <text> 本体，或拆成多个 <text>" },
-            { "mask", "SVG <mask> 不支持" },
         };
         // 真正被编译器消费的属性（其余一律视为"写了没效果"）
         const auto& kUsedAttrs = UsedHtmlAttrs();
@@ -7317,6 +7494,127 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             }
         }
 
+        // ---- v0.16.26：<mask>（v28 遮罩段） ----
+        // 掩码几何在编译期折算到设备空间并按"亮度分组"，运行期只做两趟混合。
+        // 元素自己照常画（不像 pattern 要交给 tile），只是画完在图层里被乘一次 alpha。
+        if (!svgMasks.empty()) {
+            std::string mv = style.count("mask") ? TrimCopy(style.at("mask")) : "";
+            if (mv.empty() && e.attrs.count("mask")) mv = TrimCopy(e.attrs.at("mask"));
+            if (!mv.empty() && lowerStr(mv) != "none") {
+                std::string mgid;
+                if (!ParseUrlId(mv, mgid)) {
+                    Warn("mask 只支持 url(#id) 写法（" + mv + "）");
+                } else {
+                    auto mit = svgMasks.find(mgid);
+                    if (mit == svgMasks.end()) {
+                        Warn("mask=\"url(#" + mgid + ")\" 找不到 <mask> 定义（元素不遮罩）");
+                    } else if (!mit->second.kids.empty()) {
+                        const SvgMaskDef& md3 = mit->second;
+                        // 元素包围盒（设备空间、不含页面偏移）：SVG 图形用几何盒，
+                        // 其它元素用节点盒
+                        float bx3 = 0, by3 = 0, bw3 = 0, bh3 = 0;
+                        if (hasSvgPath) {
+                            bx3 = svgPathShape.minX; by3 = svgPathShape.minY;
+                            bw3 = svgPathShape.Width(); bh3 = svgPathShape.Height();
+                        } else {
+                            bx3 = (float)n.x - pc.ox; by3 = (float)n.y - pc.oy;
+                            bw3 = (float)n.width; bh3 = (float)n.height;
+                        }
+                        const float ubw3 = bw3 > 0.0f ? bw3 : 1.0f;
+                        const float ubh3 = bh3 > 0.0f ? bh3 : 1.0f;
+                        // 区域 → 设备空间
+                        // 没写 x/y/width/height → 用 SVG 默认的 -10%..120%（按元素盒算，
+                        // 直接落在设备空间）；写了就按 maskUnits 解析：
+                        //   objectBoundingBox → 元素盒的比例；userSpaceOnUse → 用户坐标（过 svgX）
+                        float r0 = 0, r1 = 0, r2b = 0, r3b = 0;
+                        const bool anyRegion = md3.hasX || md3.hasY || md3.hasW || md3.hasH;
+                        if (!anyRegion) {
+                            r0 = bx3 - 0.1f * ubw3;
+                            r1 = by3 - 0.1f * ubh3;
+                            r2b = r0 + 1.2f * ubw3;
+                            r3b = r1 + 1.2f * ubh3;
+                        } else {
+                            auto regVal = [&](float v, bool pct, float ref, bool obb) -> float {
+                                if (pct) return v * ref;      // 百分比一律按元素盒算（见告警）
+                                return obb ? v * ref : v;
+                            };
+                            const float ox3 = regVal(md3.x, md3.xPct, ubw3, md3.units == 1);
+                            const float oy3 = regVal(md3.y, md3.yPct, ubh3, md3.units == 1);
+                            const float ww3 = regVal(md3.w, md3.wPct, ubw3, true);
+                            const float hh3 = regVal(md3.h, md3.hPct, ubh3, true);
+                            // objectBoundingBox 的坐标本来就相对元素盒，直接加包围盒原点；
+                            // userSpaceOnUse 的是用户坐标，要过 svgX（非 SVG 元素过元素原点）
+                            PathMatrix Mreg = (md3.units == 1)
+                                ? PathMatrix{}
+                                : (hasSvgPath ? svgX : PathTranslate(bx3, by3));
+                            if (Mreg.b != 0.0f || Mreg.c != 0.0f)
+                                Warn("<mask id=\"" + mgid + "\"> 的区域遇到旋转/斜切："
+                                     "按轴对齐包围盒近似");
+                            const float ux0 = md3.units == 1 ? bx3 + ox3 : ox3;
+                            const float uy0 = md3.units == 1 ? by3 + oy3 : oy3;
+                            PathPointF c0 = PathApply(Mreg, ux0, uy0);
+                            PathPointF c1 = PathApply(Mreg, ux0 + ww3, uy0 + hh3);
+                            r0 = std::min(c0.x, c1.x); r1 = std::min(c0.y, c1.y);
+                            r2b = std::max(c0.x, c1.x); r3b = std::max(c0.y, c1.y);
+                        }
+                        const float rw3 = r2b - r0, rh3 = r3b - r1;
+                        if (rw3 <= 0.0f || rh3 <= 0.0f) {
+                            Warn("<mask id=\"" + mgid + "\"> 的区域宽高必须大于 0（元素不遮罩）");
+                        } else {
+                            // 内容矩阵：userSpaceOnUse → 元素用户空间；objectBoundingBox → 元素盒
+                            const PathMatrix Mc = (md3.contentUnits == 1)
+                                ? PathMul(PathTranslate(bx3, by3), PathScale(ubw3, ubh3))
+                                : (hasSvgPath ? svgX : PathTranslate(bx3, by3));
+                            // 按亮度分组：同一个 alpha 的几何合成一条（运行期每条一次 draw）
+                            struct MaskGroup { uint32_t color = 0; PathShape shape; };
+                            std::vector<MaskGroup> mgroups;
+                            for (const SvgMaskChild& kid3 : md3.kids) {
+                                size_t gi3 = mgroups.size();
+                                for (size_t g4 = 0; g4 < mgroups.size(); g4++)
+                                    if (mgroups[g4].color == kid3.color) { gi3 = g4; break; }
+                                if (gi3 == mgroups.size()) {
+                                    MaskGroup g5;
+                                    g5.color = kid3.color;
+                                    mgroups.push_back(std::move(g5));
+                                }
+                                PathShape tmp3 = kid3.shape;
+                                TransformShape(tmp3, Mc);
+                                PathShape& dst3 = mgroups[gi3].shape;
+                                const uint32_t base3 = (uint32_t)dst3.pts.size();
+                                for (const PathPointF& q4 : tmp3.pts) dst3.pts.push_back(q4);
+                                for (const PathShape::Contour& sc3 : tmp3.contours) {
+                                    PathShape::Contour nc3;
+                                    nc3.first = base3 + sc3.first;
+                                    nc3.count = sc3.count;
+                                    nc3.closed = sc3.closed;
+                                    dst3.contours.push_back(nc3);
+                                }
+                            }
+                            for (MaskGroup& g6 : mgroups) {
+                                if (g6.shape.Empty()) continue;
+                                g6.shape.RecomputeBounds();
+                                PathNormData nd4;
+                                if (!NormalizeShape(g6.shape, nd4)) continue;
+                                PendingMask pm;
+                                pm.nodeId = n.id;
+                                pm.color = g6.color;
+                                pm.rx = r0 + pc.ox; pm.ry = r1 + pc.oy;
+                                pm.rw = rw3;        pm.rh = rh3;
+                                pm.x = g6.shape.minX + pc.ox;
+                                pm.y = g6.shape.minY + pc.oy;
+                                pm.w = g6.shape.Width();
+                                pm.h = g6.shape.Height();
+                                pm.first = std::move(nd4.contourFirst);
+                                pm.closed = std::move(nd4.contourClosed);
+                                pm.pts = std::move(nd4.pts);
+                                maskNodes.push_back(std::move(pm));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         nodes.push_back(n);
 
         // v15 路径段：把折线存进来（节点盒已经是几何包围盒，见上面的 <path> 分支）
@@ -8034,6 +8332,7 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
     AppendPaintExSection(buf, paintExNodes);
     AppendFilterSection(buf, filterNodes);
     AppendClipSection(buf, clipNodes);
+    AppendMaskSection(buf, maskNodes);   // v28 遮罩段
     AppendNameSection(buf, nodeNames, offsets);
 
     // ---- 6. 二进制组件：编译期离线合并 ----
@@ -8241,6 +8540,7 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     AppendPaintExSection(buf, {});  // v25：默认布局没有九宫格图片
     AppendFilterSection(buf, {});     // v26：这条路径没有图片滤镜
     AppendClipSection(buf, {});       // v27：这条路径没有裁剪路径
+    AppendMaskSection(buf, {});       // v28：这条路径没有 mask
 
     return buf;
 }

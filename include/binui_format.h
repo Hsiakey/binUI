@@ -26,7 +26,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v25: 绘制附加段（九宫格图片），见 BinUIPaintEx
 // v26: 图片滤镜段（CSS filter 的颜色矩阵），见 BinUIImageFilter
 // v27: 裁剪路径段（SVG <clipPath> / clip-path），见 BinUIClipEntry
-constexpr uint32_t BINUI_VERSION    = 27;
+// v28: 遮罩段（SVG <mask> / mask），见 BinUIMaskEntry
+constexpr uint32_t BINUI_VERSION    = 28;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -617,6 +618,39 @@ struct BinUIClipEntry {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIClipEntry) == 24, "BinUIClipEntry must be 24 bytes");
+
+// ============================================================
+// 遮罩段（v28）：SVG <mask> / CSS mask: url(#id)
+//
+// 布局：uint32 mBytes（0 = 无）+ uint32 mCount + 每条：
+//     BinUIMaskEntry                    定长头（44 字节）
+//     uint32 contourFirst[contourCount] 每条子路径的起始点下标
+//     uint8  contourClosed[contourCount]
+//     uint16 points[2*pointCount]       归一化点（0..65535 映射**本组几何**包围盒 x/y/w/h）
+// 恒定写出，位于裁剪路径段之后、名称段之前。
+//
+// 语义：带 mask 的节点先画进**离屏图层**（图层框 = mask 区域 rx/ry/rw/rh），然后两趟：
+//   ① 保留趟：把掩码几何按 color 的 alpha 用"dst *= srcA"画一遍（白 = 保留、灰 = 压暗）；
+//   ② 补集趟：把"图层矩形 ∪ 所有掩码几何（even-odd）"用"dst *= 1-srcA"画一遍 ——
+//      掩码没盖到的像素被清零（SVG 语义：mask 内容之外 = 黑 = 透明）。
+// 两趟都只用到混合状态，三端零着色器改动（VK 是管线变体，SPIR-V 不动）。
+//
+// 与裁剪段的区别：裁剪段是"一条几何 + 一个填充规则"，遮罩段是"多组几何 + 每组一个
+//   alpha"（同一组 = 同样的亮度，编译期已把 RGB 亮度折进 alpha）。
+// 亮度口径：sRGB 系数 0.2126R + 0.7152G + 0.0722B，再乘 fill-opacity / opacity。
+// ============================================================
+#pragma pack(push, 1)
+struct BinUIMaskEntry {
+    uint16_t nodeId;       // 被遮罩的元素
+    uint16_t flags;        // 保留（目前恒 0）
+    uint32_t color;        // AARRGGBB：alpha = 掩码亮度，RGB 恒白
+    float    rx, ry, rw, rh;   // mask 区域（图层框，设备空间）
+    float    x, y, w, h;       // 本组几何的包围盒（归一化基准，设备空间）
+    uint16_t pointCount;
+    uint16_t contourCount;
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUIMaskEntry) == 44, "BinUIMaskEntry must be 44 bytes");
 
 // ============================================================
 // 路径段（v15，恒定写出，位于扩展绘制段之后、名称段之前）

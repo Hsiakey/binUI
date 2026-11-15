@@ -858,6 +858,28 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                              (int)gfx.setEraseBlend(true));
         }
 
+        // ---- v0.16.26：mask（v28 遮罩段）----
+        // 掩码 = "图层里再乘一次 alpha"：① 保留趟（dst *= srcA）把掩码几何画一遍
+        //   （白 = 保留、灰 = 压暗）；② 补集趟（图层矩形 ∪ 全部掩码几何，even-odd，
+        //   dst *= 1-srcA）把掩码没盖到的像素清零（SVG 语义：掩码外 = 黑 = 透明）。
+        // 与裁剪嵌套的顺序：外层是裁剪层、内层是遮罩层 —— 掩码作用在内容上，
+        //   裁剪作用在合成后的结果上，与 SVG 语义一致（两个图层都来自同一个池）。
+        const std::vector<BinUIRenderer::MaskRecord>* maskRecs = nullptr;
+        if (draw) {
+            const auto& mrs = renderer.maskOf(node.id);
+            if (!mrs.empty() && gfx.supportsMask()) maskRecs = &mrs;
+        }
+        bool maskLayer = false;
+        if (maskRecs) {
+            const BinUIMaskEntry& mh = (*maskRecs)[0].head;
+            maskLayer = gfx.pushLayer(mh.rx, mh.ry, mh.rw, mh.rh, 1.0f);
+            if (std::getenv("BINUI_DEBUG_CLIPMASK"))
+                std::fprintf(stderr, "[mask] node=%u entries=%d region=(%.1f,%.1f %.1fx%.1f)"
+                                    " layer=%s\n", (unsigned)node.id, (int)maskRecs->size(),
+                             (double)mh.rx, (double)mh.ry, (double)mh.rw, (double)mh.rh,
+                             maskLayer ? "ok" : "FAIL");
+        }
+
         // v0.16.18 仿射文字/图片：后端支持时整段改用**节点局部坐标**，由 setAffine 转到屏幕；
         // GDI 返回 false → 保持 AABB（"只转盒子"的老行为，像素不变）。
         bool affineLocal = false;
@@ -1394,6 +1416,144 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         }
 
         if (affineLocal) gfx.setAffine(nullptr);   // v0.16.18：恢复轴对齐
+
+        // v0.16.26：遮罩两趟（必须先于裁剪擦除：裁剪要作用在"遮罩之后的合成结果"上）
+        if (maskLayer) {
+            const BinUIMaskEntry& mh = (*maskRecs)[0].head;
+            const float mx0 = mh.rx, my0 = mh.ry;
+            const float mw0 = mh.rw > 0.0f ? mh.rw : 1.0f;
+            const float mh0 = mh.rh > 0.0f ? mh.rh : 1.0f;
+            static thread_local std::vector<uint16_t> mpts;
+            static thread_local std::vector<uint32_t> mfirst;
+            static thread_local std::vector<uint8_t> mclosed;
+            static thread_local std::vector<uint32_t> mcount;
+            static thread_local binui::PathRenderBuffers mbuf;
+            auto normM = [&](float px, float py, uint16_t& ux, uint16_t& uy) {
+                float u = (px - mx0) / mw0;
+                float v = (py - my0) / mh0;
+                u = u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+                v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                ux = static_cast<uint16_t>(u * 65535.0f + 0.5f);
+                uy = static_cast<uint16_t>(v * 65535.0f + 0.5f);
+            };
+            auto appendRec = [&](const BinUIRenderer::MaskRecord& mr) {
+                const float bx = mr.head.x, by = mr.head.y;
+                const float bw = mr.head.w > 0.0f ? mr.head.w : 1.0f;
+                const float bh = mr.head.h > 0.0f ? mr.head.h : 1.0f;
+                for (size_t k = 0; k < mr.first.size(); k++) {
+                    const uint32_t start = mr.first[k];
+                    const uint32_t end = (k + 1 < mr.first.size())
+                                             ? mr.first[k + 1]
+                                             : static_cast<uint32_t>(mr.head.pointCount);
+                    mfirst.push_back(static_cast<uint32_t>(mpts.size() / 2));
+                    mclosed.push_back(1);
+                    for (uint32_t q = start; q < end; q++) {
+                        const float px = bx + (mr.pts[q * 2]) / 65535.0f * bw;
+                        const float py = by + (mr.pts[q * 2 + 1]) / 65535.0f * bh;
+                        uint16_t ux = 0, uy = 0;
+                        normM(px, py, ux, uy);
+                        mpts.push_back(ux);
+                        mpts.push_back(uy);
+                    }
+                }
+            };
+            auto drawMaskPath = [&](uint32_t color) {
+                if (mfirst.empty()) return;
+                mcount.clear();
+                for (size_t k = 0; k < mfirst.size(); k++) {
+                    const uint32_t endPts = (k + 1 < mfirst.size())
+                                                ? mfirst[k + 1]
+                                                : static_cast<uint32_t>(mpts.size() / 2);
+                    mcount.push_back(endPts - mfirst[k]);
+                }
+                BinUIPathEntry ph = {};
+                ph.flags = PATH_FILL;    // 掩码几何一律 even-odd？不：单条几何用 nonzero，
+                                         // 补集趟另外打开 PATH_EVENODD（见下）
+                ph.fillColor = color;
+                ph.designW = mw0;
+                ph.designH = mh0;
+                ph.pointCount = static_cast<uint16_t>(std::min<size_t>(65535, mpts.size() / 2));
+                ph.contourCount = static_cast<uint16_t>(std::min<size_t>(65535, mfirst.size()));
+                binui::PathPaintSpec mspec;
+                mspec.fillColor = color;
+                mspec.strokeColor = 0;
+                mspec.opacity = 1.0f;
+                binui::PaintPathNode(ph, mpts.data(), mfirst.data(), mcount.data(),
+                                     mclosed.data(), static_cast<int>(mfirst.size()),
+                                     mx0, my0, mw0, mh0, mspec, nullptr, 0, 0, mbuf,
+                                     [&](const binui::PaintBand* b, int n) {
+                                         for (int q = 0; q < n; q++)
+                                             gfx.fillRect(b[q].x, b[q].y, b[q].w, b[q].h,
+                                                          b[q].color);
+                                     },
+                                     [&](float x0, float y0, float x1, float y1, float lw2,
+                                         uint32_t lc) {
+                                         gfx.fillLine(x0, y0, x1, y1, lw2, lc);
+                                     },
+                                     [&](float rx, float ry, float rw, float rh, float rr,
+                                         uint32_t dcc) {
+                                         gfx.fillRounded(rx, ry, rw, rh, rr, dcc);
+                                     });
+            };
+            // ① 保留趟：逐条（每条一个 alpha）
+            if (gfx.setKeepBlend(true)) {
+                for (const BinUIRenderer::MaskRecord& mr : *maskRecs) {
+                    mpts.clear(); mfirst.clear(); mclosed.clear();
+                    appendRec(mr);
+                    drawMaskPath(mr.head.color);
+                }
+                gfx.setKeepBlend(false);
+            }
+            // ② 补集趟：图层矩形 + 全部几何（even-odd）→ 掩码外的像素清零
+            if (gfx.setEraseBlend(true)) {
+                mpts.clear(); mfirst.clear(); mclosed.clear();
+                mfirst.push_back(0);
+                mclosed.push_back(1);
+                mpts.insert(mpts.end(), { (uint16_t)0, (uint16_t)0, (uint16_t)65535, (uint16_t)0,
+                                          (uint16_t)65535, (uint16_t)65535, (uint16_t)0,
+                                          (uint16_t)65535 });
+                for (const BinUIRenderer::MaskRecord& mr : *maskRecs) appendRec(mr);
+                // 补集必须 even-odd：矩形内部的掩码区不能被擦掉
+                if (!mfirst.empty()) {
+                    mcount.clear();
+                    for (size_t k = 0; k < mfirst.size(); k++) {
+                        const uint32_t endPts = (k + 1 < mfirst.size())
+                                                    ? mfirst[k + 1]
+                                                    : static_cast<uint32_t>(mpts.size() / 2);
+                        mcount.push_back(endPts - mfirst[k]);
+                    }
+                    BinUIPathEntry ph = {};
+                    ph.flags = PATH_FILL | PATH_EVENODD;
+                    ph.fillColor = 0xFFFFFFFFu;
+                    ph.designW = mw0;
+                    ph.designH = mh0;
+                    ph.pointCount = static_cast<uint16_t>(std::min<size_t>(65535, mpts.size() / 2));
+                    ph.contourCount = static_cast<uint16_t>(std::min<size_t>(65535, mfirst.size()));
+                    binui::PathPaintSpec cspec2;
+                    cspec2.fillColor = 0xFFFFFFFFu;
+                    cspec2.strokeColor = 0;
+                    cspec2.opacity = 1.0f;
+                    binui::PaintPathNode(ph, mpts.data(), mfirst.data(), mcount.data(),
+                                         mclosed.data(), static_cast<int>(mfirst.size()),
+                                         mx0, my0, mw0, mh0, cspec2, nullptr, 0, 0, mbuf,
+                                         [&](const binui::PaintBand* b, int n) {
+                                             for (int q = 0; q < n; q++)
+                                                 gfx.fillRect(b[q].x, b[q].y, b[q].w, b[q].h,
+                                                              b[q].color);
+                                         },
+                                         [&](float x0, float y0, float x1, float y1, float lw2,
+                                             uint32_t lc) {
+                                             gfx.fillLine(x0, y0, x1, y1, lw2, lc);
+                                         },
+                                         [&](float rx, float ry, float rw, float rh, float rr,
+                                             uint32_t dcc) {
+                                             gfx.fillRounded(rx, ry, rw, rh, rr, dcc);
+                                         });
+                }
+                gfx.setEraseBlend(false);
+            }
+            gfx.popLayer();
+        }
 
         // v0.16.24：裁剪擦除。补集 = 图层矩形 + 裁剪路径（even-odd），在擦除混合下画一遍。
         // 为什么必须补集：dst *= (1-srcA) 只作用在**画了东西的像素**上，想让路径外归零，
