@@ -714,6 +714,92 @@ static void TestIssueRegressions() {
         }
     }
 
+    // ---- 16.23：SVG <marker>（v0.16.23，编译期展开成路径子路径） ----
+    // 钉住四件事：
+    //   1. marker-end / mid / start 都在编译期展开：几何变成引用路径的**兄弟节点**
+    //      （BINUI_PATH + PATH_FILL），运行期/后端零改动；
+    //   2. 引用路径 fill:none 时不会被填上（第一版把开放折线整块填了色，实拍抓到的）；
+    //   3. 带 marker 的 <line> 升级成路径（BINUI_LINE 只有两个端点，画不了 marker）；
+    //   4. 没有 marker 的 SVG 完全不受影响（节点数不变）。
+    {
+        const char* html = R"HTML(<app_window width="300" height="200" bg="#101014">
+<html width="300" height="200" bg="#101014">
+<body>
+  <svg width="280" height="180" style="position:absolute; left:0; top:0">
+    <defs>
+      <marker id="arr" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 z" fill="#0B5FA5" />
+      </marker>
+      <marker id="dot" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+        <circle cx="3" cy="3" r="2.5" fill="#0F766E" />
+      </marker>
+    </defs>
+    <path id="p1" d="M10,20 L120,20" fill="none" stroke="#0B5FA5" stroke-width="2"
+          marker-end="url(#arr)" />
+    <polyline id="p2" points="10,60 60,40 110,60" fill="none" stroke="#0F766E"
+              stroke-width="2" marker-mid="url(#dot)" />
+    <line id="l1" x1="10" y1="100" x2="120" y2="100" stroke="#C2410C" stroke-width="2"
+          marker-end="url(#arr)" />
+    <path id="plain" d="M10,140 L120,140" fill="none" stroke="#888888" stroke-width="2" />
+  </svg>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("16.23: marker 布局可解析", ParseInto(r, bin));
+
+        auto countPaths = [&](void) {
+            int n = 0;
+            for (const auto& ni : r.getNodes())
+                if (ni.type == BINUI_PATH) n++;
+            return n;
+        };
+        // 4 条图形：p1 / p2 / l1（line 升级）/ plain；marker 每个引用处多一个子节点：
+        //   p1 → 1（end）、p2 → 1（mid 两个点但合成一个节点）、l1 → 1 = 共 3 个
+        TEST("16.23: marker 展开成额外路径节点（4 + 3）", countPaths() == 7);
+
+        const uint16_t id1 = r.findNodeByName("p1");
+        TEST("16.23: 引用路径仍然存在", id1 != 0);
+        int childCount = 0;
+        for (const auto& ni : r.getNodes())
+            if (ni.parentId == id1 && ni.type == BINUI_PATH) childCount++;
+        TEST("16.23: marker 节点挂在引用路径下（子节点 = 后画 = 压在线上）", childCount == 1);
+
+        // 引用路径自己 fill:none → 不能因为 marker 被填上
+        {
+            const auto* pr = r.pathOf(id1);
+            TEST("16.23: 引用路径仍是 fill:none（没有被 marker 的填充污染）",
+                 pr && !(pr->head.flags & PATH_FILL));
+        }
+        // marker 节点是纯填充
+        {
+            const BinUIRenderer::PathRecord* mr = nullptr;
+            for (const auto& ni : r.getNodes())
+                if (ni.parentId == id1 && ni.type == BINUI_PATH) mr = r.pathOf(ni.id);
+            TEST("16.23: marker 节点是纯填充（PATH_FILL，无描边）",
+                 mr && (mr->head.flags & PATH_FILL) && !(mr->head.flags & PATH_STROKE));
+            // 三角形 3 个点（细分后仍闭合）
+            TEST("16.23: marker 几何至少 3 个点且闭合",
+                 mr && mr->pts.size() >= 6 && !mr->closed.empty() && mr->closed[0] == 1);
+        }
+        // 带 marker 的 <line> 必须升级成路径
+        {
+            const uint16_t lid = r.findNodeByName("l1");
+            bool isPath = false;
+            for (const auto& ni : r.getNodes())
+                if (ni.id == lid) isPath = (ni.type == BINUI_PATH);
+            TEST("16.23: 带 marker 的 <line> 升级成路径", lid != 0 && isPath);
+        }
+        // 没有 marker 的路径不受影响：没有子节点
+        {
+            const uint16_t pid = r.findNodeByName("plain");
+            int kids = 0;
+            for (const auto& ni : r.getNodes())
+                if (ni.parentId == pid) kids++;
+            TEST("16.23: 没写 marker 的路径不生成子节点", pid != 0 && kids == 0);
+        }
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

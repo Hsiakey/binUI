@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<app_window width="640" height="420" resizable="false">
+<html width="640" height="420">
+<head>
+<style>
+    body { background: #F2F5FA; color: #16202C; }
+    .cap { position: absolute; width: 280; height: 18; font-size: 12px; color: #5A6B80; }
+</style>
+</head>
+<body>
+    <!-- 1) 经典箭头：折线只描边，marker-end 画填充箭头（context-stroke 取描边色） -->
+    <svg width="280" height="90" style="position:absolute; left:16; top:24; overflow:visible">
+        <defs>
+            <marker id="arrow" markerWidth="8" markerHeight="8" refX="6" refY="4" orient="auto">
+                <path d="M0,0 L8,4 L0,8 z" fill="#0B5FA5" />
+            </marker>
+        </defs>
+        <path d="M10,45 L90,45 L170,25 L250,45" fill="none" stroke="#0B5FA5" stroke-width="3"
+              marker-end="url(#arrow)" />
+    </svg>
+    <span class="cap" style="left:16; top:4">marker-end（auto 方向）</span>
+
+    <!-- 2) 两端箭头 + auto-start-reverse：起点那个应该指向反方向 -->
+    <svg width="280" height="90" style="position:absolute; left:330; top:24; overflow:visible">
+        <defs>
+            <marker id="arrow2" markerWidth="10" markerHeight="10" refX="8" refY="5"
+                    orient="auto-start-reverse" markerUnits="userSpaceOnUse">
+                <path d="M0,0 L10,5 L0,10 z" fill="#C2410C" />
+            </marker>
+        </defs>
+        <line x1="20" y1="45" x2="250" y2="45" stroke="#C2410C" stroke-width="3"
+              marker-start="url(#arrow2)" marker-end="url(#arrow2)" />
+    </svg>
+    <span class="cap" style="left:330; top:4">start + end（auto-start-reverse）</span>
+
+    <!-- 3) marker-mid：每个中间顶点放一个圆点 -->
+    <svg width="280" height="110" style="position:absolute; left:16; top:130; overflow:visible">
+        <defs>
+            <marker id="dot" markerWidth="6" markerHeight="6" refX="3" refY="3" orient="auto">
+                <circle cx="3" cy="3" r="2.5" fill="#0F766E" />
+            </marker>
+        </defs>
+        <polyline points="20,80 80,20 140,80 200,20 255,80" fill="none" stroke="#0F766E"
+                  stroke-width="2" marker-mid="url(#dot)" marker-start="url(#dot)" marker-end="url(#dot)" />
+    </svg>
+    <span class="cap" style="left:16; top:110">marker-mid（顶点圆点，含 start/end）</span>
+
+    <!-- 4) viewBox + refX/refY 对齐 + 固定角度 orient=90 -->
+    <svg width="280" height="90" style="position:absolute; left:330; top:150; overflow:visible">
+        <defs>
+            <marker id="tick" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="8" markerHeight="8"
+                    orient="90">
+                <rect x="4" y="0" width="2" height="10" fill="#7C3AED" />
+            </marker>
+        </defs>
+        <line x1="20" y1="60" x2="250" y2="60" stroke="#7C3AED" stroke-width="2" />
+        <line x1="20" y1="60" x2="70" y2="20" stroke="#7C3AED" stroke-width="2"
+              marker-end="url(#tick)" />
+    </svg>
+    <span class="cap" style="left:330; top:130">viewBox + orient=90（固定角度）</span>
+
+    <!-- 5) markerUnits=strokeWidth（默认）：线越粗箭头越大 -->
+    <svg width="600" height="90" style="position:absolute; left:16; top:250; overflow:visible">
+        <defs>
+            <marker id="a3" markerWidth="4" markerHeight="4" refX="2" refY="2" orient="auto">
+                <path d="M0,0 L4,2 L0,4 z" fill="#1E293B" />
+            </marker>
+        </defs>
+        <line x1="20" y1="25" x2="240" y2="25" stroke="#1E293B" stroke-width="2" marker-end="url(#a3)" />
+        <line x1="20" y1="55" x2="240" y2="55" stroke="#1E293B" stroke-width="6" marker-end="url(#a3)" />
+        <line x1="320" y1="25" x2="560" y2="25" stroke="#1E293B" stroke-width="1" marker-end="url(#a3)" />
+    </svg>
+    <span class="cap" style="left:16; top:340" >markerUnits=strokeWidth（默认）：线宽 2 / 6 / 1 的箭头随之缩放</span>
+
+    <span style="position:absolute; left:16; top:380; width:608; height:20; font-size:12px; color:#7A8798">v0.16.23：&lt;marker&gt; 在编译期展开成路径的子路径（顶点位置 + 切线方向），运行期/后端零改动</span>
+</body>
+</html>
+</app_window>

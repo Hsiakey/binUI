@@ -109,7 +109,44 @@ GDI 文字阴影 `AlphaBlend` 源位图未选中导致阴影整块不出现）�
   每行宽度之和 = 盒宽、横向 UV 首尾相接、首末块 UV 到 0/1、内缩钳到源图半张、
   盒比内缩小不出现负宽、退化输入返回 0。
 
+## [0.16.23] - 2026-11-15
+
+SVG `<marker>`（P1-10 的第一条）：`marker-start` / `marker-mid` / `marker-end` 从"告警忽略"
+变成真支持。箭头、圆点、刻度这类"路径上的装饰"终于能画了。
+
+### 做 — 编译期展开，运行期零改动
+
+marker 是**静态几何**：每个实例只取决于顶点位置与切线方向。所以整件事在编译期做完 ——
+按 `M = T(顶点) · R(切角) · S(markerUnits) · T(-refPoint) · V(viewBox)` 把 marker 内容
+（path/polygon/polyline/line/rect/circle/ellipse）换算成设备空间，**追加成引用路径的子节点**
+（纯填充的普通 `BINUI_PATH`）。三个后端与格式段一行没改，`anim/svg-marker` 三端 0 差异。
+
+支持：`viewBox` + `refX`/`refY` 对齐、`markerWidth`/`markerHeight`、`markerUnits`
+（`strokeWidth` 默认 / `userSpaceOnUse`）、`orient`（`auto` / `auto-start-reverse` / 固定角度）、
+CSS 简写 `marker`。带 marker 的 `<line>` 自动升级成路径（`BINUI_LINE` 只有两个端点）。
+
+### 踩到并修掉的两个坑
+
+1. **不能并进引用路径自己的节点**：第一版把 marker 几何追加进 `svgPathShape` 并强行打开
+   `PATH_FILL`，于是 `fill:none` 的折线被**整条填成实心块**（实拍图里那支"箭头线"变成了
+   一大片蓝色三角形）。一个节点只有一个填充色 —— marker 必须单独成节点，颜色取引用路径的
+   描边色（SVG 的 `context-stroke` 语义）。
+2. **`<line>` 陷阱**：`<line>` 平时编成 `BINUI_LINE`（两个端点、省节点），marker 展开只
+   发生在路径分支里 —— 所以"线上加箭头"最初什么都不出现。现在带 marker 的 `<line>` 和虚线/
+   渐变描边一样自动升级成路径。
+
+### 验收
+
+- `test_css` 新增 16.23（9 条断言）：marker 展开成额外节点、挂在引用路径下、引用路径仍是
+  `fill:none`、marker 节点是纯填充且几何闭合、带 marker 的 `<line>` 升级成路径、没写 marker
+  的路径不生成子节点。
+- 新用例 `anim/svg-marker`（5 组：折线箭头 / 两端 auto-start-reverse / 顶点圆点 / viewBox +
+  orient=90 / markerUnits 随线宽缩放）：`pixels-vk` / `pixels-d3d11` **0 不同像素**。
+- `make pixels` 16/16 零差异、`make test` 全绿、`check_examples` 16 示例 0 问题、
+  `vk-window` / `vk-stress` 通过。
+
 ## [0.16.22] - 2026-11-15 【格式 v26】
+
 
 `filter` 补齐（P1-8 的最后一条）：`grayscale` / `sepia` / `saturate` / `hue-rotate` /
 `invert` / `contrast` 六个函数从"告警忽略"变成真支持，三端逐像素相同。

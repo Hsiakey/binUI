@@ -2514,6 +2514,9 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "viewbox", "preserveaspectratio", "xlink:href",
         // v16 SVG 渐变：端点/圆心/焦点/色标/单位/变换/spread（x1/y1/x2/y2/cx/cy/r 上面已有）
         "fx", "fy", "offset", "stop-color", "stop-opacity",
+        // v0.16.23：SVG <marker>（编译期展开）
+        "marker", "marker-start", "marker-mid", "marker-end",
+        "markerwidth", "markerheight", "markerunits", "refx", "refy", "orient",
         "gradientunits", "gradienttransform", "spreadmethod", "text-anchor",
     };
     return kSet;
@@ -3183,7 +3186,8 @@ static void MarkSvgDefinitions(std::vector<HNode>& elems) {
             const std::string& t = elems[k].tag;
             // 渐变定义（含 <stop>）也是模板：即使写在 <defs> 外面，也不该画出一个空盒子
             if (t == "defs" || t == "symbol" || t == "lineargradient" ||
-                t == "radialgradient" || t == "stop") {
+                t == "radialgradient" || t == "stop" || t == "marker" || t == "clippath" ||
+                t == "pattern" || t == "mask") {
                 elems[i].attrs["_def"] = "1";
                 break;
             }
@@ -4904,6 +4908,169 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     // 这里只做体检、不改行为：不改 HTML 的容错性（未知标签照样按容器处理）。
     // 每个标签/属性全文档只报一次，避免刷屏。
     // ============================================================
+    // ============ v0.16.23：SVG <marker>（编译期展开） ============
+    // marker 是**静态几何**：每个实例的形状只取决于顶点位置与切线方向，所以在编译期
+    // 把它换算成引用路径节点里的**额外子路径** —— 运行期与三个后端零改动。
+    // 支持 marker-start / marker-mid / marker-end（含 CSS 简写 marker）、viewBox、
+    //   refX/refY、markerWidth/markerHeight、markerUnits、orient（auto /
+    //   auto-start-reverse / 固定角度）；marker 内容支持 path / polygon / polyline /
+    //   line / rect / circle / ellipse。
+    // 已知边界：preserveAspectRatio 按非等比拉伸（不是 meet 居中）；marker 里的 <g>
+    //   不展开；一条路径只有一个 fill/stroke，所以各实例统一用引用路径的颜料
+    //   （marker 内容自带 fill 时忽略并告警）。
+    struct SvgMarkerChild {
+        PathShape shape;
+        bool hasFill = false;   uint32_t fill = 0;   bool fillCurrent = false;
+        bool hasStroke = false; uint32_t stroke = 0; bool strokeCurrent = false;
+        float strokeW = 0.0f;
+    };
+    struct SvgMarkerDef {
+        bool found = false;
+        float vbX = 0, vbY = 0, vbW = -1, vbH = -1;
+        float refX = 0, refY = 0;
+        float mw = 3, mh = 3;
+        bool  userUnits = false;
+        int   orient = 0;        // 0=auto  1=auto-start-reverse  2=固定角度
+        float angle = 0;
+        std::vector<SvgMarkerChild> kids;
+    };
+    std::unordered_map<std::string, SvgMarkerDef> svgMarkers;
+    for (size_t mi = 0; mi < elems.size(); mi++) {
+        if (lowerStr(elems[mi].tag) != "marker") continue;
+        const HNode& me = elems[mi];
+        std::string mid = me.attrs.count("id") ? TrimCopy(me.attrs.at("id")) : "";
+        if (mid.empty()) {
+            Warn("<marker> 没有 id，无法被 marker-start/mid/end 引用（已忽略）");
+            continue;
+        }
+        SvgMarkerDef md;
+        md.found = true;
+        auto num = [&](const char* a, float dflt) -> float {
+            auto it = me.attrs.find(a);
+            return it == me.attrs.end() ? dflt : parseLen(it->second, dflt);
+        };
+        md.refX = num("refx", 0.0f);
+        md.refY = num("refy", 0.0f);
+        md.mw = std::max(0.0f, num("markerwidth", 3.0f));
+        md.mh = std::max(0.0f, num("markerheight", 3.0f));
+        {
+            auto it = me.attrs.find("markerunits");
+            md.userUnits = it != me.attrs.end() &&
+                           lowerStr(TrimCopy(it->second)) == "userspaceonuse";
+        }
+        if (me.attrs.count("viewbox")) {
+            std::string vb = TrimCopy(me.attrs.at("viewbox")) + " ";
+            float v[4] = { 0, 0, -1, -1 };
+            int got = 0;
+            std::string cur;
+            for (char ch : vb) {
+                if (ch == ' ' || ch == ',' || ch == '\t') {
+                    if (!cur.empty() && got < 4) v[got++] = parseLen(cur, 0.0f);
+                    cur.clear();
+                } else cur += ch;
+            }
+            if (got >= 4 && v[2] > 0.0f && v[3] > 0.0f) {
+                md.vbX = v[0]; md.vbY = v[1]; md.vbW = v[2]; md.vbH = v[3];
+            } else {
+                Warn("<marker id=\"" + mid + "\"> 的 viewBox 解析失败（按无 viewBox 处理）");
+            }
+        }
+        {
+            auto it = me.attrs.find("orient");
+            const std::string o = it == me.attrs.end() ? "" : lowerStr(TrimCopy(it->second));
+            if (o == "auto-start-reverse") md.orient = 1;
+            else if (o == "auto" || o.empty()) md.orient = 0;
+            else { md.orient = 2; md.angle = parseLen(o, 0.0f, "orient"); }
+        }
+        for (size_t ci = 0; ci < elems.size(); ci++) {
+            if (elems[ci].parentIdx != mi) continue;
+            const HNode& ce = elems[ci];
+            const std::string ct = lowerStr(ce.tag);
+            if (ct == "g") {
+                Warn("<marker id=\"" + mid + "\"> 里的 <g> 不展开（把形状直接写在 <marker> 下）");
+                continue;
+            }
+            PathShape cs;
+            std::string perr;
+            if (ct == "path") {
+                const std::string d = ce.attrs.count("d") ? ce.attrs.at("d") : "";
+                if (d.empty() || !ParsePathData(d, 0.1f, cs, &perr)) continue;
+            } else if (ct == "polyline" || ct == "polygon") {
+                const std::string pts = ce.attrs.count("points") ? ce.attrs.at("points") : "";
+                if (pts.empty()) continue;
+                ParsePathData("M" + pts + (ct == "polygon" ? " Z" : ""), 0.1f, cs, &perr);
+            } else if (ct == "line") {
+                const float x1 = parseLen(ce.attrs.count("x1") ? ce.attrs.at("x1") : "", 0);
+                const float y1 = parseLen(ce.attrs.count("y1") ? ce.attrs.at("y1") : "", 0);
+                const float x2 = parseLen(ce.attrs.count("x2") ? ce.attrs.at("x2") : "", 0);
+                const float y2 = parseLen(ce.attrs.count("y2") ? ce.attrs.at("y2") : "", 0);
+                PathShape::Contour c2;
+                c2.first = 0; c2.count = 2; c2.closed = false;
+                cs.pts.push_back({ x1, y1 });
+                cs.pts.push_back({ x2, y2 });
+                cs.contours.push_back(c2);
+                cs.RecomputeBounds();
+            } else if (ct == "ellipse" || ct == "circle") {
+                const float cx = parseLen(ce.attrs.count("cx") ? ce.attrs.at("cx") : "", 0);
+                const float cy = parseLen(ce.attrs.count("cy") ? ce.attrs.at("cy") : "", 0);
+                const float rx = ct == "circle"
+                    ? parseLen(ce.attrs.count("r") ? ce.attrs.at("r") : "", 0)
+                    : parseLen(ce.attrs.count("rx") ? ce.attrs.at("rx") : "", 0);
+                const float ry = ct == "circle" ? rx
+                    : parseLen(ce.attrs.count("ry") ? ce.attrs.at("ry") : "", 0);
+                if (rx > 0.0f && ry > 0.0f) AppendEllipse(cs, cx, cy, rx, ry, 0.1f);
+            } else if (ct == "rect") {
+                const float rx0 = parseLen(ce.attrs.count("x") ? ce.attrs.at("x") : "", 0);
+                const float ry0 = parseLen(ce.attrs.count("y") ? ce.attrs.at("y") : "", 0);
+                const float rw0 = parseLen(ce.attrs.count("width") ? ce.attrs.at("width") : "", 0);
+                const float rh0 = parseLen(ce.attrs.count("height") ? ce.attrs.at("height") : "", 0);
+                float cr = 0.0f;
+                if (ce.attrs.count("rx")) cr = parseLen(ce.attrs.at("rx"), 0);
+                else if (ce.attrs.count("ry")) cr = parseLen(ce.attrs.at("ry"), 0);
+                if (rw0 > 0.0f && rh0 > 0.0f)
+                    AppendRoundedRect(cs, rx0, ry0, rw0, rh0, cr, 0.1f);
+            } else {
+                continue;
+            }
+            if (cs.Empty()) continue;
+            auto ctIt = ce.attrs.find("transform");
+            if (ctIt != ce.attrs.end() && !ctIt->second.empty()) {
+                PathMatrix cm;
+                if (ParseSvgTransform(ctIt->second, cm, nullptr)) TransformShape(cs, cm);
+            }
+            SvgMarkerChild kid;
+            kid.shape = std::move(cs);
+            auto ft = ce.attrs.find("fill");
+            if (ft != ce.attrs.end() && !TrimCopy(ft->second).empty()) {
+                const std::string fv = TrimCopy(ft->second);
+                const std::string fl = lowerStr(fv);
+                if (fl == "currentcolor" || fl == "context-stroke" || fl == "context-fill") {
+                    kid.hasFill = true; kid.fillCurrent = true;
+                } else if (fl != "none") {
+                    kid.hasFill = true;
+                    kid.fill = parseColorWith(fv, 0xFF000000u, "SVG 颜色");
+                }
+            } else {
+                kid.hasFill = true; kid.fillCurrent = true;   // 不写 = 沿用引用处颜料
+            }
+            auto st = ce.attrs.find("stroke");
+            if (st != ce.attrs.end()) {
+                const std::string sv = TrimCopy(st->second);
+                if (lowerStr(sv) != "none" && !sv.empty()) {
+                    kid.hasStroke = true;
+                    kid.strokeCurrent = lowerStr(sv) == "currentcolor";
+                    if (!kid.strokeCurrent) kid.stroke = parseColorWith(sv, 0xFF000000u, "SVG 颜色");
+                    kid.strokeW = parseLen(ce.attrs.count("stroke-width")
+                                               ? ce.attrs.at("stroke-width") : "", 0.0f);
+                }
+            }
+            md.kids.push_back(std::move(kid));
+        }
+        if (md.kids.empty())
+            Warn("<marker id=\"" + mid + "\"> 里没有可绘制的形状（marker 为空）");
+        svgMarkers[mid] = std::move(md);
+    }
+
     {
         static const std::unordered_set<std::string> kKnownTags = {
             // 结构/包裹
@@ -4922,6 +5089,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             "svg", "canvas", "line", "circle", "rect", "polyline", "polygon",
             "path", "ellipse", "g", "defs", "symbol", "text", "image",
             "lineargradient", "radialgradient", "stop",
+            "marker", "clippath", "pattern", "mask",
         };
         // 认得但只能糊弄过去的标签：明确说清楚会变成什么，别让人以为生效了
         static const std::unordered_map<std::string, const char*> kShimTags = {
@@ -4953,7 +5121,6 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             { "mask", "SVG <mask> 不支持" },
             { "clippath", "SVG <clipPath> 不支持" },
             { "pattern", "SVG <pattern> 不支持" },
-            { "marker", "SVG <marker> 不支持" },
         };
         // 真正被编译器消费的属性（其余一律视为"写了没效果"）
         const auto& kUsedAttrs = UsedHtmlAttrs();
@@ -4990,7 +5157,8 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                          "translate/scale/rotate/matrix 会编译进坐标）：请直接改坐标");
                     continue;
                 }
-                if (k == "viewbox" && e.tag != "svg" && e.tag != "symbol") {
+                if (k == "viewbox" && e.tag != "svg" && e.tag != "symbol" &&
+                    e.tag != "marker" && e.tag != "pattern") {
                     Warn("viewBox 只对 <svg>/<symbol> 有效（当前写在 <" + e.tag + "> 上，已忽略）");
                     continue;
                 }
@@ -5321,6 +5489,13 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // 细分容差 0.1 用户单位：24 单位的图标 ≈ 0.1px，放大 3 倍也就 0.3px。
         // 归一化点由路径段存，运行期只做"归一化点 × 节点盒"，不重算曲线。
         PathShape svgPathShape;
+        // v0.16.23：marker 几何单独攒一份，编译完再**单独成节点**。为什么不能直接并进
+        // svgPathShape：引用路径可能是 fill:none（典型箭头），而 marker 是填充形状，
+        // 一个节点只有一个填充色 —— 混在一起会把开放路径也填上（第一版实拍就画成了
+        // 一整块蓝色三角形）。
+        PathShape svgMarkerShape;
+        uint32_t svgMarkerFill = 0xFF000000u;
+        bool svgMarkerFillSet = false;
         bool hasSvgPath = false;
         bool pathFill = true, pathEvenOdd = false, pathStroke = false;
         uint32_t pathFillColor = 0xFF000000u, pathStrokeColor = 0xFF000000u;
@@ -5334,9 +5509,16 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         BinUIPathGradient pathStrokeGrad = {};
         // <line>：只有两个端点，平时用 BINUI_LINE 更省（一个节点、命中测试也简单）；
         // 但虚线 / 渐变描边 / 端帽 / 连接样式这四样 LINE 节点表达不了，遇到就升级成 2 点开放路径。
+        // v0.16.23：带 marker 的 <line> 也必须升级成路径 —— marker 的展开只发生在路径
+        // 分支（要顶点 + 切线方向），BINUI_LINE 节点只有两个端点、不参与 marker。
+        const bool lineHasMarker = (e.tag == "line") &&
+            (style.count("marker") || e.attrs.count("marker") ||
+             style.count("marker-start") || e.attrs.count("marker-start") ||
+             style.count("marker-mid") || e.attrs.count("marker-mid") ||
+             style.count("marker-end") || e.attrs.count("marker-end"));
         const bool lineNeedsPath = (e.tag == "line") &&
             (style.count("stroke-dasharray") || e.attrs.count("stroke-dasharray") ||
-             !strokeGradId.empty() ||
+             !strokeGradId.empty() || lineHasMarker ||
              style.count("stroke-linecap") || e.attrs.count("stroke-linecap") ||
              style.count("stroke-linejoin") || e.attrs.count("stroke-linejoin"));
         // <path>/<ellipse>/<polyline>/<polygon>：永远是路径；<line> 按需升级。
@@ -5508,6 +5690,135 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                             Warn("stroke-miterlimit 不能小于 1，已按 1 处理（规范要求 ≥1）");
                         pathMiterLimit = (uint8_t)std::min(255.0f, std::max(1.0f, lim));
                     }
+                }
+                // ---- v0.16.23：marker-start / marker-mid / marker-end ----
+                // 顶点与方向都取**设备空间**的点（已过 svgX），所以旋转/缩放的路径方向天然正确。
+                // 实例几何直接追加进 svgPathShape：一条路径仍是一个节点、一份颜料，
+                // 运行期照旧"归一化点 × 节点盒"，没有新格式段、没有后端改动。
+                if (!svgMarkers.empty()) {
+                    auto markerRef = [&](const char* attr, int slot) -> std::string {
+                        std::string v = style.count(attr) ? TrimCopy(style.at(attr)) : "";
+                        if (v.empty() && e.attrs.count(attr)) v = TrimCopy(e.attrs.at(attr));
+                        if (v.empty()) {   // CSS 简写 marker: <start> <mid> <end>
+                            std::string sh = style.count("marker") ? TrimCopy(style.at("marker")) : "";
+                            if (sh.empty() && e.attrs.count("marker"))
+                                sh = TrimCopy(e.attrs.at("marker"));
+                            if (!sh.empty()) {
+                                std::vector<std::string> parts;
+                                std::string cur;
+                                for (char ch : sh) {
+                                    if (ch == ' ' || ch == '\t') {
+                                        if (!cur.empty()) { parts.push_back(cur); cur.clear(); }
+                                    } else cur += ch;
+                                }
+                                if (!cur.empty()) parts.push_back(cur);
+                                if (parts.size() == 1) v = parts[0];
+                                else if (static_cast<int>(parts.size()) > slot) v = parts[slot];
+                            }
+                        }
+                        if (v.empty() || lowerStr(v) == "none") return "";
+                        std::string gid;
+                        if (!ParseUrlId(v, gid)) {
+                            Warn("marker 属性不是 url(#id) 写法，已忽略：" + v);
+                            return "";
+                        }
+                        return gid;
+                    };
+                    bool warnedFill = false;
+                    int totalInst = 0;
+                    auto placeSlot = [&](const std::string& gid, int slot) {
+                        if (gid.empty()) return;
+                        auto mit = svgMarkers.find(gid);
+                        if (mit == svgMarkers.end()) {
+                            Warn("marker 引用 \"url(#" + gid + ")\" 找不到 <marker> 定义");
+                            return;
+                        }
+                        const SvgMarkerDef& md = mit->second;
+                        if (md.kids.empty()) return;
+                        const float unit = md.userUnits ? 1.0f
+                                       : (pathStrokeW > 0.0f ? pathStrokeW : 1.0f);
+                        PathMatrix V;                       // 默认单位阵
+                        PathPointF pref{ md.refX, md.refY };
+                        if (md.vbW > 0.0f && md.vbH > 0.0f) {
+                            V = PathMul(PathScale(md.mw / md.vbW, md.mh / md.vbH),
+                                        PathTranslate(-md.vbX, -md.vbY));
+                            pref = PathApply(V, md.refX, md.refY);
+                        }
+                        struct Hit { float x, y, ang; };
+                        std::vector<Hit> hits;
+                        const size_t nc = svgPathShape.contours.size();
+                        for (size_t ci2 = 0; ci2 < nc; ci2++) {
+                            const PathShape::Contour& ct2 = svgPathShape.contours[ci2];
+                            if (ct2.count < 2) continue;
+                            auto pt = [&](size_t k) -> PathPointF {
+                                return svgPathShape.pts[ct2.first + (k % ct2.count)];
+                            };
+                            if (slot == 0 && ci2 == 0) {
+                                const PathPointF a = pt(0), bq = pt(1);
+                                hits.push_back({ a.x, a.y,
+                                    std::atan2(bq.y - a.y, bq.x - a.x) * 57.29577951308232f });
+                            } else if (slot == 2 && ci2 + 1 == nc) {
+                                const PathPointF a = pt(ct2.count - 2), bq = pt(ct2.count - 1);
+                                hits.push_back({ bq.x, bq.y,
+                                    std::atan2(bq.y - a.y, bq.x - a.x) * 57.29577951308232f });
+                            } else if (slot == 1) {
+                                for (uint32_t k = 1; k + 1 < ct2.count; k++) {
+                                    const PathPointF p0 = pt(k), p1 = pt(k + 1);
+                                    hits.push_back({ p0.x, p0.y,
+                                        std::atan2(p1.y - p0.y, p1.x - p0.x) * 57.29577951308232f });
+                                }
+                            }
+                        }
+                        for (const Hit& h : hits) {
+                            if (++totalInst > 4000) {
+                                Warn("marker 实例超过 4000 个，其余已丢弃（路径顶点太多）");
+                                break;
+                            }
+                            float ang = (md.orient == 2) ? md.angle : h.ang;
+                            if (md.orient == 1 && slot == 0) ang += 180.0f;
+                            // 内容 → viewBox(V) → 对齐参考点 → 单位缩放 → 旋转 → 平移到顶点
+                            PathMatrix M = PathMul(PathTranslate(-pref.x, -pref.y), V);
+                            if (unit != 1.0f) M = PathMul(PathScale(unit, unit), M);
+                            if (ang != 0.0f) M = PathMul(PathRotate(ang), M);
+                            M = PathMul(PathTranslate(h.x, h.y), M);
+                            M = PathMul(svgX, M);          // 用户空间 → 设备空间
+                            for (const SvgMarkerChild& kid : md.kids) {
+                                if (!kid.hasFill && !kid.hasStroke) continue;
+                                // 填充色：marker 内容自己写了实色就用它（多个 marker 各写各的
+                                // 颜色时只认第一个并告警）；没写 / currentColor / context-stroke
+                                // 就用引用路径的描边色（SVG 的 context-stroke 语义）。
+                                if (!svgMarkerFillSet) {
+                                    if (kid.hasFill && !kid.fillCurrent) {
+                                        svgMarkerFill = kid.fill;
+                                    } else if (pathStroke) {
+                                        svgMarkerFill = pathStrokeColor;
+                                    } else {
+                                        svgMarkerFill = pathFillColor;
+                                    }
+                                    svgMarkerFillSet = true;
+                                } else if (kid.hasFill && !kid.fillCurrent &&
+                                           kid.fill != svgMarkerFill && !warnedFill) {
+                                    Warn("marker 只有一种填充色：后续实例声明的 fill 已被忽略");
+                                    warnedFill = true;
+                                }
+                                const uint32_t base = static_cast<uint32_t>(svgMarkerShape.pts.size());
+                                for (const PathPointF& sp : kid.shape.pts)
+                                    svgMarkerShape.pts.push_back(PathApply(M, sp.x, sp.y));
+                                for (const PathShape::Contour& sc : kid.shape.contours) {
+                                    PathShape::Contour nc2;
+                                    nc2.first = base + sc.first;
+                                    nc2.count = sc.count;
+                                    nc2.closed = sc.closed;
+                                    svgMarkerShape.contours.push_back(nc2);
+                                }
+                            }
+                        }
+                    };
+                    placeSlot(markerRef("marker-start", 0), 0);
+                    placeSlot(markerRef("marker-mid", 1), 1);
+                    placeSlot(markerRef("marker-end", 2), 2);
+                    if (totalInst > 0 && !svgMarkerShape.Empty())
+                        svgMarkerShape.RecomputeBounds();
                 }
                 // 几何盒（不含描边）：渐变 objectBoundingBox 与"斜接撑盒"都以它为基准
                 const float geomMinX = svgPathShape.minX, geomMinY = svgPathShape.minY;
@@ -6703,6 +7014,44 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 pp.first = std::move(nd.contourFirst);
                 pp.closed = std::move(nd.contourClosed);
                 pendingPaths.push_back(std::move(pp));
+            }
+        }
+
+        // ---- v0.16.23：marker 的几何单独成一个子节点 ----
+        // 挂在路径节点下（子节点天然后画 = 压在路径上），只填充不描边。
+        // 三个后端一行都不用改：它仍然只是一条普通 BINUI_PATH。
+        if (hasSvgPath && !svgMarkerShape.Empty()) {
+            BinUINode mn = {};
+            mn.id = id++;
+            mn.type = BINUI_PATH;
+            mn.parentId = n.id;
+            mn.zIndex = n.zIndex;
+            mn.flags = BINUI_VISIBLE | BINUI_ABSOLUTE;
+            mn.x = static_cast<int32_t>(std::lround(pc.ox + svgMarkerShape.minX));
+            mn.y = static_cast<int32_t>(std::lround(pc.oy + svgMarkerShape.minY));
+            mn.width = static_cast<int32_t>(std::lround(std::max(1.0f, svgMarkerShape.Width())));
+            mn.height = static_cast<int32_t>(std::lround(std::max(1.0f, svgMarkerShape.Height())));
+            nodes.push_back(mn);
+            PendingPath mp;
+            mp.head.nodeId = mn.id;
+            mp.head.flags = PATH_FILL;      // 只填充：marker 的形状是"实心块"
+            mp.head.fillColor = svgMarkerFill;
+            mp.head.designW = svgMarkerShape.Width();
+            mp.head.designH = svgMarkerShape.Height();
+            mp.head.strokeW = 0;
+            mp.head.join = BINUI_JOIN_ROUND;
+            mp.head.cap = BINUI_CAP_BUTT;
+            PathNormData mnd;
+            if (NormalizeShape(svgMarkerShape, mnd)) {
+                mp.head.pointCount = (uint16_t)std::min<size_t>(65535, mnd.pts.size() / 2);
+                mp.head.contourCount = (uint16_t)std::min<size_t>(65535, mnd.contourFirst.size());
+                mp.pts = std::move(mnd.pts);
+                mp.first = std::move(mnd.contourFirst);
+                mp.closed = std::move(mnd.contourClosed);
+                pendingPaths.push_back(std::move(mp));
+            } else {
+                nodes.pop_back();
+                id--;
             }
         }
 
