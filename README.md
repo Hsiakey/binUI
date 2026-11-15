@@ -1,10 +1,10 @@
 # binUI - 跨平台描述式 UI 核心
 
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.9.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.16.29-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
-[![Format v18](https://img.shields.io/badge/binUI%20format-v19-orange.svg)](include/binui_format.h)
+[![Format v29](https://img.shields.io/badge/binUI%20format-v29-orange.svg)](include/binui_format.h)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](#跨平台方向)
 
 把 **UI 描述源码（XML / HTML5）编译为紧凑的二进制布局（binUI），再解析为节点树供任何渲染后端绘制**。纯 C++17，核心（编译/解析/命中测试/事件）无平台 API 依赖；字体渲染基于 FreeType + HarfBuzz（`third_party` 静态源码，跨平台一致）。
@@ -609,4 +609,19 @@ DetachVideoEngine();   // 进程退出前停止全部解码/输出线程
 **应用形态**：当前采纳「原生可执行文件 + 外挂散件资源」，布局与资源解析规则见 [`docs/app_layout.md`](docs/app_layout.md)；单文件打包（`.bex` = binUI execute）已归档为备选方案（[`docs/bex_container.md`](docs/bex_container.md)），核心库对两者均不感知。
 
 绘制后端是独立模块，可随时替换：GDI 与 D3D11 后端共享同一份节点树与交互语义，D3D11 额外提供彩色 emoji。**文本层已是跨平台实现**（FreeType + HarfBuzz，灰度/COLR 均与平台无关）；换平台时只需替换"窗口 + 事件 + 交换链"外壳（Linux 对应 X11/Wayland + OpenGL，macOS 对应 Cocoa + Metal），字体发现接 fontconfig / CoreText。
+
+## 生态：bin2d / bin3d / binGPU（同级目录，各 v0.1.0）
+
+binUI 的边界只有四件事：**布局 + 事件 + 文本 + 描述式绘制**。边界之外的三层单独做成了仓库，
+放在本仓库的**同级目录**（不在这个仓库里，GitHub 上看不到）：
+
+| 项目 | 语言 | 一句话 | v0.1.0 现状 |
+|---|---|---|---|
+| `../binGPU` | **C11 / C ABI** | 设备 / 交换链 / 资源 / 管线 / 命令 / 呈现 | NULL 后端（只校验）+ **CPU 参考后端**（五种混合、采样器、离屏、float 深度、网格、反预乘回读）；573 条断言 + `abi-check`；VK / D3D12 / GL 登记为未实现 |
+| `../bin2D` | C++17 | 保留模式 2D 画布：场景图 + 图层 + 合成 + 光栅数学 | 覆盖率 AA 填充/描边、路径、渐变、圆角、九宫格、盒式模糊、组透明度离屏、5 种混合；94 条断言；与 binGPU CPU 后端**逐像素往返 0 差** |
+| `../bin3D` | C++17 | 小型实时 3D：相机 + 裁剪 + 深度 + 光照（先软光栅） | 六平面齐次裁剪、1/w 透视校正、z-buffer、Lambert；164 条断言；720p 一帧 ≈22.6 ms |
+
+四个仓库共用一份光栅数学的**方向**、语言分工为什么最底层是 C、以及各自的开工条件与验收线，
+都写在 [`docs/future.md`](docs/future.md)。**binUI 至今没有改一行代码去用它们**：`.bui` 布局与
+`BINUI_VERSION` 不变，三个项目也各自发布版本号，互不阻塞。
 

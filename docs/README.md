@@ -11,6 +11,7 @@
 | [vulkan.md](vulkan.md) | **Vulkan 后端调研（结论：现在 NO-GO）**：本机实测（loader 1.4.341 / RTX 4060 Ti）、三份节点遍历的重复（749/694/530 行）与 `IBinUIGfx` 抽取方案、Windows 独立翻转对 GL/Vulkan 同样生效、透明窗口只能读回、局部重绘必须用持久累积帧、原语映射表、20~30 人日估算、GO/NO-GO 条件 |
 | [vulkan_design.md](vulkan_design.md) | **Vulkan 后端设计（P1~P5）**：六条后端契约、`IBinUIGfx` 接口全文与三份遍历的合并步骤、Vulkan 模块/同步模型/交换链协商表、字节序与色卡验收线、三路 present、鲁棒性清单、12~17 人日时间线与回滚点；P3 落地记录（共享字形图集、帧内上传、`vkCmdClearColorImage` 陷阱、14 个用例的 VK↔GL↔GDI 三方 diff 表）见 §5.9；P2b 窗口/交换链/三路 present 见 §5.10；P4 鲁棒性压测见 §6.1；P5 共享窗口外壳与 `GPU=vk` 见 §7.1 |
 | [bex_container.md](bex_container.md) | **`.bex` 单文件容器规范（设计归档，暂不实现）**：ELF 自定义段 / PE 资源节承载 binUI 布局、节布局与 trailer |
+| [future.md](future.md) | **未来计划：bin2d / bin3d / binGPU**（同级目录三个独立仓库，**v0.1.0 地基已落地**）：四层关系、语言分工（binGPU = C11 / 其余 C++17）、各自已有的东西与验收数字、**验收口径差异**（3D 不能用 0 diff）、以及迁移状态（binUI 目前仍用自己的 `binui_paint.h` 数学） |
 | [img/](img/) | 文档用图：默认布局渲染、字体渲染对比、伪类演示、语言绑定演示 |
 | [../tests/README.md](../tests/README.md) | **测试用例**：四个主题套件（CSS / 元素 / 字体与输入法 / C ABI）、无窗口能测什么、历史合并记录 |
 | [mockups/](mockups/) | 演示的**设计稿/对照稿**（HTML，不参与构建，允许出现未支持的写法）：`galgamechat.html`、`singlewindow.html`。以前把它们临时编成 demo（`galgamechat`/`singlewindow`/`multiwindow`/`videodemo`）的草稿程序与产物已删除，看设计稿直接开 HTML |
