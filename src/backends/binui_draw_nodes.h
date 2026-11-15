@@ -1024,8 +1024,13 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             // 底色/边框叠在上面 —— 这才是毛玻璃；如果反过来先画底色再模糊，糊掉的
             // 就是元素自己。仿射节点不做（旋转矩形的背景取样没有意义）。
             if (draw && !affine) {
-                if (const BinUIBackdropEntry* bd = renderer.backdropOf(node.id))
-                    gfx.backdropBlur(x, y, nw, nh, effRadius, bd->blur);
+                if (const BinUIBackdropEntry* bd = renderer.backdropOf(node.id)) {
+                    // flags：bit0 = 颗粒开关，bit8..15 = 强度 0..255
+                    float grain = 0.0f;
+                    if (bd->flags & 1u)
+                        grain = static_cast<float>((bd->flags >> 8) & 0xFFu) / 255.0f;
+                    gfx.backdropBlur(x, y, nw, nh, effRadius, bd->blur, grain);
+                }
             }
 
             switch (node.type) {

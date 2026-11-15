@@ -85,6 +85,7 @@ struct Batch {
     uint32_t count = 0;  // 四边形数
     int sx = 0, sy = 0, sw = 0, sh = 0;
     uint8_t linear = 0;  // 0=点采样(字形/纯色) 1=线性(圆角/图片)
+    uint8_t wrap = 0;    // v0.16.28：1 = REPEAT 采样（颗粒噪声平铺）
     ID3D11ShaderResourceView* srv = nullptr;
 };
 
@@ -132,6 +133,8 @@ struct BinUID3D::Impl {
     size_t vbCapVerts = 0;              // vb 目前能装多少顶点（扩容后跟着变大）
     ID3D11SamplerState* samPoint = nullptr;
     ID3D11SamplerState* samLinear = nullptr;
+    ID3D11SamplerState* samPointWrap = nullptr;   // v0.16.28：颗粒噪声平铺（REPEAT + POINT）
+    ID3D11ShaderResourceView* noiseSrv = nullptr; // v0.16.28：64×64 确定性噪声
     ID3D11BlendState* blend = nullptr;
     ID3D11BlendState* blendErase = nullptr;   // v27：clip-path 的 dst *= 1-srcA
     ID3D11BlendState* blendKeep = nullptr;    // v28：mask 保留趟的 dst *= srcA
@@ -157,6 +160,7 @@ struct BinUID3D::Impl {
     int scissor[4] = { 0, 0, 0, 0 };
     int scissorDepth = 0;
     uint8_t curLinear = 0;
+    uint8_t curWrap = 0;   // v0.16.28：这块批次要不要 REPEAT 采样
     // v0.16.18 仿射状态：设置后 emitQuad/emitQuadRot 的四角都过这个 2×3 矩阵
     bool affineOn = false;
     float aff[6] = { 1.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f };
@@ -369,6 +373,18 @@ struct BinUID3D::Impl {
             std::fprintf(stderr, "[d3d11] sampler linear failed hr=0x%08X removed=0x%08X\n",
                          (unsigned)shr, (unsigned)device->GetDeviceRemovedReason());
             return false;
+        }
+        {
+            D3D11_SAMPLER_DESC swd = {};
+            swd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+            swd.AddressU = D3D11_TEXTURE_ADDRESS_WRAP;
+            swd.AddressV = D3D11_TEXTURE_ADDRESS_WRAP;
+            swd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+            swd.MaxLOD = D3D11_FLOAT32_MAX;
+            if (FAILED(device->CreateSamplerState(&swd, &samPointWrap))) {
+                std::fprintf(stderr, "[d3d11] sampler wrap failed\n");
+                return false;
+            }
         }
 
         D3D11_BLEND_DESC bd = {};
@@ -814,7 +830,8 @@ struct BinUID3D::Impl {
         if (curBatch != static_cast<size_t>(-1) &&
             batches[curBatch].sx == scissor[0] && batches[curBatch].sy == scissor[1] &&
             batches[curBatch].sw == scissor[2] - scissor[0] && batches[curBatch].sh == scissor[3] - scissor[1] &&
-            batches[curBatch].linear == curLinear && batches[curBatch].srv == curSrv)
+            batches[curBatch].linear == curLinear && batches[curBatch].srv == curSrv &&
+            batches[curBatch].wrap == curWrap)
             return;
         Batch b;
         b.first = static_cast<uint32_t>(vcount); // 起始顶点索引
@@ -825,6 +842,7 @@ struct BinUID3D::Impl {
         b.sh = scissor[3] - scissor[1];
         b.linear = curLinear;
         b.srv = curSrv;
+        b.wrap = curWrap;
         batches.push_back(b);
         curBatch = batches.size() - 1;
     }
@@ -1035,6 +1053,38 @@ struct BinUID3D::Impl {
         return true;
     }
 
+    // v0.16.28：颗粒噪声（64×64、确定性 LCG、预乘白）。三端同一种子 → 同一张图。
+    bool ensureNoise() {
+        if (noiseSrv) return true;
+        const int N = 64;
+        std::vector<uint8_t> px(static_cast<size_t>(N) * N * 4);
+        uint32_t st = 0x9E3779B9u;
+        for (int i = 0; i < N * N; i++) {
+            st = st * 1664525u + 1013904223u;
+            const uint8_t a = static_cast<uint8_t>((st >> 16) & 0xFFu);
+            const size_t o = static_cast<size_t>(i) * 4;
+            px[o + 0] = a; px[o + 1] = a; px[o + 2] = a; px[o + 3] = a;   // BGRA：预乘白
+        }
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = static_cast<UINT>(N);
+        td.Height = static_cast<UINT>(N);
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA init = {};
+        init.pSysMem = px.data();
+        init.SysMemPitch = static_cast<UINT>(N) * 4;
+        ID3D11Texture2D* tex = nullptr;
+        if (FAILED(device->CreateTexture2D(&td, &init, &tex)) || !tex) return false;
+        const HRESULT hr = device->CreateShaderResourceView(tex, nullptr, &noiseSrv);
+        tex->Release();
+        if (FAILED(hr)) { noiseSrv = nullptr; return false; }
+        return true;
+    }
+
     void popLayer() {
         if (layerStack.empty()) return;
         flushAll();                     // 层内容落盘（flushAll 会按层框裁剪）
@@ -1089,7 +1139,8 @@ struct BinUID3D::Impl {
             if (r.right <= r.left || r.bottom <= r.top) continue;
             ctx->RSSetScissorRects(1, &r);
             ctx->PSSetShaderResources(0, 1, &b.srv);
-            ctx->PSSetSamplers(0, 1, b.linear ? &samLinear : &samPoint);
+            ctx->PSSetSamplers(0, 1, b.wrap ? &samPointWrap
+                                             : (b.linear ? &samLinear : &samPoint));
             ctx->Draw(b.count * 6, b.first);
         }
         // 本帧绘制完毕，淘汰的模板现在才 Release（见 roundFor 里的淘汰注释）
@@ -1224,6 +1275,8 @@ struct BinUID3D::Impl {
         if (vs) { vs->Release(); vs = nullptr; }
         if (ps) { ps->Release(); ps = nullptr; }
         if (blendReplace) { blendReplace->Release(); blendReplace = nullptr; }
+    if (samPointWrap) { samPointWrap->Release(); samPointWrap = nullptr; }
+    if (noiseSrv) { noiseSrv->Release(); noiseSrv = nullptr; }
     for (BlurLevel& bl : blurLv) releaseBlurLevel(bl);
     blurLv.clear();
     if (capTex) { capTex->Release(); capTex = nullptr; }
@@ -1651,7 +1704,7 @@ bool BinUID3D::setKeepBlend(bool on) {
 // 算法与 GL 参考实现逐字一致（同一套 UV 公式），这是三端像素一致的前提。
 // D3D11 的纹理行 0 = 区域顶部（与屏幕同向），所以四边形 UV 正着来，**不做 V 翻转**。
 bool BinUID3D::backdropBlur(float x, float y, float w, float h, float radius,
-                            float blurPx) {
+                            float blurPx, float grain) {
     if (!impl_ || !impl_->ready) return false;
     Impl& d = *impl_;
     if (blurPx <= 0.0f || w < 2.0f || h < 2.0f) return false;
@@ -1761,10 +1814,34 @@ bool BinUID3D::backdropBlur(float x, float y, float w, float h, float radius,
         d.flushAll();
     }
 
-    // 恢复：混合回到预乘、纹理回到白色（fillRect 用）
-    d.ctx->OMSetBlendState(d.blend, bf, 0xFFFFFFFF);
+    // 4) 颗粒（grain）：极淡的确定性噪声，压 banding。一个纹素 = 一个屏幕像素，
+    //    REPEAT + POINT，屏幕锚定（元素移动时颗粒不滑）。
+    d.ctx->OMSetBlendState(d.blend, bf, 0xFFFFFFFF);   // 颗粒要"加"，不是覆盖
+    if (chainOk && grain > 0.001f && d.ensureNoise()) {
+        d.curSrv = d.noiseSrv;
+        d.curLinear = 0;
+        d.curWrap = 1;
+        const uint32_t av = static_cast<uint32_t>(grain * 3.0f + 0.5f);
+        const uint32_t ncol = (av << 24) | 0x00FFFFFFu;
+        binui::PaintImageBand nb2[binui::kMaxImageBands];
+        const int nnb = binui::BuildImageBands(x, y, w, h, radius, nb2);
+        const float k = 1.0f / 64.0f;
+        for (int q = 0; q < nnb; q++) {
+            const binui::PaintImageBand& b = nb2[q];
+            if (b.w <= 0.0f || b.h <= 0.0f) continue;
+            // 不加半个纹素：像素中心（+0.5）正好落在纹素中心，见 GL 那边的说明
+            d.emitQuad(b.x, b.y, b.x + b.w, b.y + b.h,
+                       b.x * k, b.y * k,
+                       (b.x + b.w) * k, (b.y + b.h) * k, ncol);
+        }
+        d.flushAll();
+        d.curWrap = 0;
+    }
+
+    // 恢复：纹理回到白色（fillRect 用）
     d.curSrv = d.whiteSrv;
     d.curLinear = 0;
+    d.curWrap = 0;
     return chainOk;
 }
 

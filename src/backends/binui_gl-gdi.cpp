@@ -369,6 +369,34 @@ struct BinUIGLGdi::Impl {
         int w = 0, h = 0;
     };
     std::vector<BlurLevel> blurLv;
+
+    // v0.16.28：毛玻璃的颗粒（grain）—— 64×64 可平铺噪声，确定性 LCG 生成。
+    // 采样用 NEAREST + REPEAT，并且按"一个噪声纹素 = 一个屏幕像素"打，
+    // 于是三端取到的是**同一个纹素**，一致不依赖各家的双线性精度。
+    GLuint noiseTex = 0;
+    GLuint ensureNoiseTex() {
+        if (noiseTex) return noiseTex;
+        const int N = 64;
+        std::vector<uint8_t> px(static_cast<size_t>(N) * N * 4);
+        uint32_t st = 0x9E3779B9u;   // 固定种子：三端同一张噪声
+        for (int i = 0; i < N * N; i++) {
+            st = st * 1664525u + 1013904223u;
+            const uint8_t a = static_cast<uint8_t>((st >> 16) & 0xFFu);
+            const size_t o = static_cast<size_t>(i) * 4;
+            px[o + 0] = a;   // 预乘白：rgb 跟着 alpha 走
+            px[o + 1] = a;
+            px[o + 2] = a;
+            px[o + 3] = a;
+        }
+        noiseTex = CreateTexture2D(N, N, px.data(), false);   // false = NEAREST
+        if (noiseTex) {
+            glBindTexture(GL_TEXTURE_2D, noiseTex);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+            glBindTexture(GL_TEXTURE_2D, whiteTex);
+        }
+        return noiseTex;
+    }
     // 降采样趟把图元画进小 FBO 时，坐标是"小图局部"的，不能再用层框去裁
     bool ignoreLayerClip = false;
 
@@ -1009,6 +1037,7 @@ struct BinUIGLGdi::Impl {
         for (auto& kv : images)
             if (kv.second) glDeleteTextures(1, &kv.second);
         images.clear();
+        if (noiseTex) { glDeleteTextures(1, &noiseTex); noiseTex = 0; }
         for (BlurLevel& bl : blurLv) {
             if (bl.fbo) { glDeleteFramebuffersP(1, &bl.fbo); bl.fbo = 0; }
             if (bl.tex) { glDeleteTextures(1, &bl.tex); bl.tex = 0; }
@@ -1451,7 +1480,7 @@ void BinUIGLGdi::setTextSubpixel(bool on) {
 //   目标像素中心 = 上一级 2×2 的平均），链起来逼近高斯；
 //   合成用 BuildImageBands 的圆角条带 + replace 混合（背景被糊掉，不是叠一层模糊）。
 bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
-                              float blurPx) {
+                              float blurPx, float grain) {
     if (!impl_ || !impl_->ready || !impl_->makeCurrent()) return false;
     Impl& d = *impl_;
     if (blurPx <= 0.0f || w < 2.0f || h < 2.0f) return false;
@@ -1531,8 +1560,34 @@ bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
         }
         d.flushAll();
     }
+    // 4) 颗粒（grain）：一层极淡的确定性噪声，压住大块模糊面的 banding。
+    //    屏幕锚定 + 一个纹素 = 一个屏幕像素（u = x/64, v = y/64），元素移动时颗粒
+    //    不跟着滑；NEAREST 采样保证三端取到同一个纹素。
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // 颗粒要"加"，不是覆盖
+    if (chainOk && grain > 0.001f) {
+        const GLuint nt = d.ensureNoiseTex();
+        if (nt) {
+            d.curTex = nt;
+            // 顶点色 alpha：最大 15/255 ≈ 6%（再乘噪声自身 alpha，实际平均 ~3%）
+            const uint32_t av = static_cast<uint32_t>(grain * 3.0f + 0.5f);
+            const uint32_t ncol = (av << 24) | 0x00FFFFFFu;
+            binui::PaintImageBand nb2[binui::kMaxImageBands];
+            const int nnb = binui::BuildImageBands(x, y, w, h, radius, nb2);
+            for (int q = 0; q < nnb; q++) {
+                const binui::PaintImageBand& b = nb2[q];
+                if (b.w <= 0.0f || b.h <= 0.0f) continue;
+                const float k = 1.0f / 64.0f;
+                // 不要再加 0.5 纹素：光栅化时取的是**像素中心**（x+0.5），
+                // u = x/64 时像素中心正好落在纹素中心；再加半个纹素就落到边界上，
+                // NEAREST 取哪个纹素由实现决定（GL 与 D3D11 会不一致 —— 实测过）。
+                d.emitQuad(b.x, b.y, b.x + b.w, b.y + b.h,
+                           b.x * k, b.y * k,
+                           (b.x + b.w) * k, (b.y + b.h) * k, ncol);
+            }
+            d.flushAll();
+        }
+    }
     d.curTex = d.whiteTex;
-    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // 恢复预乘混合
     if (scissorWas) glEnable(GL_SCISSOR_TEST);
     return chainOk;
 }

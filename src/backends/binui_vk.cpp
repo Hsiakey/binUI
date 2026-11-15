@@ -568,6 +568,11 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         VkImageLayout layout = VK_IMAGE_LAYOUT_UNDEFINED;
     };
     Tex white;
+    // v0.16.28：毛玻璃颗粒（grain）的 64×64 可平铺噪声。确定性 LCG（种子 0x9E3779B9）、
+    // 预乘白，**三端同一张图** —— 种子/递推顺序不能改，否则 GL/D3D11/VK 的颗粒点对不上。
+    // 采样用 NEAREST + REPEAT（见 samplerRepeat）：一个纹素 = 一个屏幕像素，屏幕锚定。
+    Tex noise;
+    VkSampler samplerRepeat = VK_NULL_HANDLE;
     struct RoundTex {
         Tex tex;
         int t = 0;
@@ -1578,11 +1583,13 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         return false;
     }
 
-    void writeTexDs(Tex& t) {
+    // 描述符里的采样器是按纹理挑的（线性/最近 + 平铺方式）。默认按 Tex::linear 选；
+    // v0.16.28 的颗粒噪声要 NEAREST + REPEAT，走显式版本。
+    void writeTexDsWith(Tex& t, VkSampler sampler) {
         VkDescriptorImageInfo dii{};
         dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         dii.imageView = t.view;
-        dii.sampler = t.linear ? samplerLinear : samplerNearest;
+        dii.sampler = sampler;
         VkWriteDescriptorSet wr{};
         wr.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         wr.dstSet = t.ds;
@@ -1591,6 +1598,10 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         wr.pImageInfo = &dii;
         g_vk.vkUpdateDescriptorSets(device, 1, &wr, 0, nullptr);
+    }
+
+    void writeTexDs(Tex& t) {
+        writeTexDsWith(t, t.linear ? samplerLinear : samplerNearest);
     }
 
     // 释放一个纹理（图像/view/descriptor set）。调用前它不能再被本帧的顶点引用。
@@ -1809,7 +1820,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     }
 
     bool createSamplers() {
-        auto make = [this](bool linear, VkSampler& out) {
+        auto make = [this](bool linear, VkSamplerAddressMode wrap, VkSampler& out) {
             VkSamplerCreateInfo si{};
             si.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
             si.magFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
@@ -1818,9 +1829,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             // （字形图集/圆角模板/视频帧）没有 mip 链，采样会被钳到第 0 级，行为不变。
             si.mipmapMode = linear ? VK_SAMPLER_MIPMAP_MODE_LINEAR
                                   : VK_SAMPLER_MIPMAP_MODE_NEAREST;
-            si.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-            si.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
-            si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+            si.addressModeU = wrap;
+            si.addressModeV = wrap;
+            si.addressModeW = wrap;
             si.maxLod = linear ? VK_LOD_CLAMP_NONE : 0.0f;
             if (g_vk.vkCreateSampler(device, &si, nullptr, &out) != VK_SUCCESS) {
                 std::fprintf(stderr, "[vk] createSamplers: vkCreateSampler 失败 (linear=%d)\n",
@@ -1829,7 +1840,10 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             }
             return true;
         };
-        return make(false, samplerNearest) && make(true, samplerLinear);
+        // 第三个是毛玻璃颗粒专用的 NEAREST + REPEAT（UV = x/64 会超出 0..1，必须平铺）
+        return make(false, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, samplerNearest) &&
+               make(true, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, samplerLinear) &&
+               make(false, VK_SAMPLER_ADDRESS_MODE_REPEAT, samplerRepeat);
     }
 
     bool createWhite() {
@@ -1838,6 +1852,30 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         return oneShot([&] {
             white.needClear = false;       // 整张上传，不用再清零
             stageUpload(white, 0, 0, 1, 1, &px, 4);
+        });
+    }
+
+    // v0.16.28 颗粒噪声：64×64、确定性 LCG、预乘白（rgb == alpha）。
+    // 与 GL 的 ensureNoiseTex / D3D11 的 ensureNoise **逐字相同**的像素生成；
+    // 唯一差别是采样器：VK 的 REPEAT 要单独建一个 sampler 对象（描述符里带）。
+    bool createNoise() {
+        const int N = 64;
+        if (!createTexImage(noise, N, N, false)) return false;   // NEAREST
+        writeTexDsWith(noise, samplerRepeat);                    // + REPEAT
+        std::vector<uint8_t> px(static_cast<size_t>(N) * N * 4);
+        uint32_t st = 0x9E3779B9u;   // 固定种子：三端同一张噪声
+        for (int i = 0; i < N * N; i++) {
+            st = st * 1664525u + 1013904223u;
+            const uint8_t a = static_cast<uint8_t>((st >> 16) & 0xFFu);
+            const size_t o = static_cast<size_t>(i) * 4;
+            px[o + 0] = a;   // 预乘白：rgb 跟着 alpha 走
+            px[o + 1] = a;
+            px[o + 2] = a;
+            px[o + 3] = a;
+        }
+        return oneShot([&] {
+            noise.needClear = false;   // 整张覆盖，不用先清零
+            stageUpload(noise, 0, 0, N, N, px.data(), N * 4);
         });
     }
 
@@ -2662,7 +2700,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
 
     // 毛玻璃主流程（算法见 binui_gfx.h 与 GL 后端的同名函数，这里逐条对应：
     //   1) 区域取整裁窗口  2) 抓背景到 level0  3) 逐级 2× 降采样  4) 圆角条带 replace 合成）
-    bool blurBackdrop(float x, float y, float fw, float fh, float radius, float blurPx) {
+    bool blurBackdrop(float x, float y, float fw, float fh, float radius, float blurPx,
+                      float grain) {
         if (!ready || !useDynamic || !cmdOpen) return false;
         if (!(blurPx > 0.0f) || fw < 2.0f || fh < 2.0f) return false;
         int rx = static_cast<int>(std::floor(x));
@@ -2758,8 +2797,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             flush();
         }
 
-        // 4) 恢复：混合回预乘 ONE/INV_SRC_ALPHA、裁剪与忽略开关复位、批次纹理回纯白、
-        //    当前目标与 pass 复原 —— 之后的绘制与没调用过时完全一样。
+        // 4) 先把混合恢复成正常预乘（ONE / ONE_MINUS_SRC_ALPHA）：颗粒是"叠上去"的，
+        //    留在 replace 混合里画会把整块玻璃**替换**成噪声（实拍：卡片变成近乎透明的
+        //    白点，alpha 掉到 0.45 左右）。GL/D3D11 都是把恢复提前到颗粒趟之前。
         blurReplace = false;
         blurForceSingle = false;
         refreshPipeline();
@@ -2768,14 +2808,38 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         clipT = st;
         clipR = sr;
         clipB = sb;
-        if (!chainOk) resumeTarget();   // 链失败时当前目标还没恢复
+        if (!chainOk) {
+            resumeTarget();   // 链失败时当前目标还没恢复
+        } else if (grain > 0.001f && noise.image) {
+            // 5) 颗粒（grain）：一层极淡的确定性噪声，压住大块模糊面的 banding。
+            //    屏幕锚定 + 一个纹素 = 一个屏幕像素（u = x/64, v = y/64），元素移动时
+            //    颗粒不跟着滑；NEAREST + REPEAT 采样保证三端取到同一个纹素。
+            const float k = 1.0f / 64.0f;
+            // 顶点色：alpha = grain * 3.0（三端同一个常数），rgb = 白。与 GL / D3D11 的
+            // ncol 逐字一致 —— 注意**不做预乘**（两端都是直接 (av<<24)|0x00FFFFFF）。
+            const uint32_t av = static_cast<uint32_t>(grain * 3.0f + 0.5f);
+            const uint32_t ncol = (av << 24) | 0x00FFFFFFu;
+            binui::PaintImageBand gb[binui::kMaxImageBands];
+            const int ng = binui::BuildImageBands(x, y, fw, fh, radius, gb);
+            for (int q = 0; q < ng; q++) {
+                const binui::PaintImageBand& b = gb[q];
+                if (b.w <= 0.0f || b.h <= 0.0f) continue;
+                // 不要再加 0.5 纹素：光栅化取的是**像素中心**（x+0.5），u = x/64 时像素
+                // 中心正好落在纹素中心；再加半个纹素就落到边界上，NEAREST 取哪个纹素
+                // 由实现决定（GL 与 D3D11 会整块不一致 —— 实测过）。
+                emitQuad(b.x, b.y, b.x + b.w, b.y + b.h, b.x * k, b.y * k,
+                         (b.x + b.w) * k, (b.y + b.h) * k, ncol, &noise);
+            }
+            flush();
+        }
         switchBatch(&white);
 
         static const bool trace = std::getenv("BINUI_VK_TRACE") != nullptr;
         if (trace)
             std::fprintf(stderr,
-                         "[vk][trace] backdropBlur: 区域 %d,%d %dx%d 级数 %d 结果 %d（%s目标）\n",
-                         rx, ry, rw, rh, levels, chainOk ? 1 : 0, inLayer ? "层" : "主");
+                         "[vk][trace] backdropBlur: 区域 %d,%d %dx%d 级数 %d 颗粒 %.2f "
+                         "结果 %d（%s目标）\n",
+                         rx, ry, rw, rh, levels, grain, chainOk ? 1 : 0, inLayer ? "层" : "主");
         return chainOk;
     }
 
@@ -3041,6 +3105,8 @@ bool BinUIVK::init(void* hwnd, int width, int height, bool vsync) {
 
     // 建白纹理（一次性提交，此时还没有帧在录制）
     if (!d.createWhite()) { std::fprintf(stderr, "[vk] createWhite 返回 false\n"); return false; }
+    // v0.16.28 颗粒噪声（一次性提交）。失败不致命：毛玻璃照画，只是没有颗粒。
+    if (!d.createNoise()) std::fprintf(stderr, "[vk] createNoise 返回 false（毛玻璃颗粒将缺席）\n");
 
     // 字形图集：排版/光栅化在共享头里，本类自己当纹理宿主
     d.atlas.setHost(&d);
@@ -3089,13 +3155,15 @@ void BinUIVK::shutdown() {
     d.rawMips.clear();
     d.pendingUploads.clear();
     d.freeTex(d.white);
+    d.freeTex(d.noise);   // v0.16.28：颗粒噪声图
     for (VkDescriptorPool p : d.dsPools)
         if (p) g_vk.vkDestroyDescriptorPool(d.device, p, nullptr);
     d.dsPools.clear();
     d.dsPool = VK_NULL_HANDLE;
     if (d.samplerNearest) g_vk.vkDestroySampler(d.device, d.samplerNearest, nullptr);
     if (d.samplerLinear) g_vk.vkDestroySampler(d.device, d.samplerLinear, nullptr);
-    d.samplerNearest = d.samplerLinear = VK_NULL_HANDLE;
+    if (d.samplerRepeat) g_vk.vkDestroySampler(d.device, d.samplerRepeat, nullptr);
+    d.samplerNearest = d.samplerLinear = d.samplerRepeat = VK_NULL_HANDLE;
     if (d.pipeline) g_vk.vkDestroyPipeline(d.device, d.pipeline, nullptr);
     if (d.pipelineLayer) g_vk.vkDestroyPipeline(d.device, d.pipelineLayer, nullptr);
     if (d.pipelineErase) g_vk.vkDestroyPipeline(d.device, d.pipelineErase, nullptr);
@@ -3905,8 +3973,10 @@ void BinUIVK::popLayer() {
 }
 
 // v29 毛玻璃：完整流程在 Impl::blurBackdrop（与 GL 后端逐条对应）。这里只做转发。
-bool BinUIVK::backdropBlur(float x, float y, float w, float h, float radius, float blurPx) {
-    return impl_ ? impl_->blurBackdrop(x, y, w, h, radius, blurPx) : false;
+// v0.16.28：多一个 grain 参数（颗粒强度 0..1，0 = 不撒）。
+bool BinUIVK::backdropBlur(float x, float y, float w, float h, float radius, float blurPx,
+                           float grain) {
+    return impl_ ? impl_->blurBackdrop(x, y, w, h, radius, blurPx, grain) : false;
 }
 
 int BinUIVK::pushClip(float x, float y, float w, float h) {

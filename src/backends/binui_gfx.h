@@ -153,9 +153,12 @@ public:
     // 混合画回同一位置 —— 背景被"糊掉"而不是叠一层模糊。调用方随后照常画元素自己的
     // 半透明底色/边框，两者合起来就是毛玻璃。
     // 返回 false = 不支持（GDI）或参数退化 → 调用方什么都不做（退回"只有半透明底色"）。
+    // grain：0 = 不撒颗粒，1 = 最强。实现方式是一张 64×64 可平铺噪声，按
+    //   一个纹素 = 一个屏幕像素（NEAREST + REPEAT）叠一层极淡的白，压住大块
+    //   模糊面的 banding。噪声的生成种子固定，三端是同一张图。
     virtual bool backdropBlur(float x, float y, float w, float h, float radius,
-                              float blurPx) {
-        (void)x; (void)y; (void)w; (void)h; (void)radius; (void)blurPx;
+                              float blurPx, float grain) {
+        (void)x; (void)y; (void)w; (void)h; (void)radius; (void)blurPx; (void)grain;
         return false;
     }
 

@@ -2632,7 +2632,7 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         // v0.16.26：SVG <mask>
         "mask", "maskunits", "maskcontentunits",
         // v0.16.27：CSS backdrop-filter
-        "backdrop-filter",
+        "backdrop-filter", "material",
         "markerwidth", "markerheight", "markerunits", "refx", "refy", "orient",
         "gradientunits", "gradienttransform", "spreadmethod", "text-anchor",
     };
@@ -3680,6 +3680,45 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         auto it = e.attrs.find("style");                   // 内联覆盖一切
         if (it != e.attrs.end()) {
             for (auto& kv : ParseDeclBlock(it->second)) out[kv.first] = kv.second;
+        }
+        // v0.16.28：材质预设（material: glass / smoked / thin）——
+        // 只补**作者没写**的声明，所以想微调哪条就写哪条（CSS 的"层叠"直觉）。
+        // 预设只是把毛玻璃 + 半透明底 + 1px 高光边 + 圆角 + 投影打包成一句，
+        // 落地仍然是 backdrop-filter 那一套，不需要任何新的格式/后端能力。
+        {
+            auto mit = out.find("material");
+            if (mit != out.end()) {
+                const std::string mv = lowerStr(TrimCopy(mit->second));
+                const char* pbg = nullptr;
+                const char* pbd = nullptr;
+                const char* pfl = nullptr;
+                if (mv == "glass" || mv == "frosted") {
+                    pbg = "linear-gradient(180deg, rgba(255,255,255,0.56), rgba(255,255,255,0.26))";
+                    pbd = "1px solid rgba(255,255,255,0.62)";
+                    pfl = "blur(24px) grain(0.7)";
+                } else if (mv == "smoked") {
+                    pbg = "linear-gradient(180deg, rgba(22,24,28,0.58), rgba(22,24,28,0.36))";
+                    pbd = "1px solid rgba(255,255,255,0.20)";
+                    pfl = "blur(20px) grain(0.5)";
+                } else if (mv == "thin") {
+                    pbg = "linear-gradient(180deg, rgba(255,255,255,0.34), rgba(255,255,255,0.16))";
+                    pbd = "1px solid rgba(255,255,255,0.42)";
+                    pfl = "blur(12px) grain(0.4)";
+                } else {
+                    Warn("material: " + mv +
+                         " 不是支持的材质预设（glass / smoked / thin），已忽略");
+                }
+                if (pbg) {
+                    auto putIfAbsent = [&](const char* key, const char* val) {
+                        if (out.find(key) == out.end()) out[key] = val;
+                    };
+                    putIfAbsent("background", pbg);
+                    putIfAbsent("border", pbd);
+                    putIfAbsent("border-radius", "24");
+                    putIfAbsent("backdrop-filter", pfl);
+                    putIfAbsent("box-shadow", "0 10 34 0 rgba(12,18,28,0.22)");
+                }
+            }
         }
         return out;
     };
@@ -7653,6 +7692,31 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                 bfv = TrimCopy(e.attrs.at("backdrop-filter"));
             if (!bfv.empty() && lowerStr(bfv) != "none") {
                 float blurPx = 0.0f;
+                float grain = -1.0f;   // <0 = 作者没写 grain
+                // grain(<0..1>) 是本库的扩展记号：先单独抽出来，再从待解析串里删掉
+                //（否则括号里的数字会被当成未知函数参数报"只支持 blur()"）
+                {
+                    const std::string scan = lowerStr(bfv);
+                    size_t gp = scan.find("grain(");
+                    if (gp != std::string::npos) {
+                        size_t e = scan.find(')', gp);
+                        if (e == std::string::npos || e <= gp + 6) {
+                            grain = 1.0f;
+                            bfv.erase(gp, (e == std::string::npos ? std::string::npos
+                                                                 : e - gp + 1));
+                        } else {
+                            grain = parseLen(TrimCopy(bfv.substr(gp + 6, e - gp - 6)), 1.0f);
+                            if (grain < 0.0f) grain = 0.0f;
+                            if (grain > 1.0f) grain = 1.0f;
+                            bfv.erase(gp, e - gp + 1);
+                        }
+                    } else if (scan.find("grain") != std::string::npos) {
+                        // 裸写 grain = 默认强度
+                        grain = 1.0f;
+                        size_t gp2 = scan.find("grain");
+                        bfv.erase(gp2, 5);
+                    }
+                }
                 bool anyBlur = false, otherFn = false;
                 std::string cur2;
                 for (size_t k = 0; k <= bfv.size(); k++) {
@@ -7681,7 +7745,13 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                 if (anyBlur && blurPx > 0.0f) {
                     BinUIBackdropEntry be = {};
                     be.nodeId = n.id;
+                    // flags：bit0 = 颗粒（grain），bit8..15 = 颗粒强度 0..255
                     be.flags = 0;
+                    if (grain > 0.0f) {
+                        const float g = grain > 1.0f ? 1.0f : grain;
+                        be.flags = static_cast<uint16_t>(
+                            1u | (static_cast<uint32_t>(g * 255.0f + 0.5f) << 8));
+                    }
                     // 缩放口径：SVG 子树里按 svgX 的缩放折算（同一用户单位体系），
                     // HTML 元素按 1:1（窗口的 ui_scale 由运行期 setSize 统一缩节点，
                     // 模糊半径跟着矩形走，不需要编译期再乘一次）

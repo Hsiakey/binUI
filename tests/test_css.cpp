@@ -1135,6 +1135,84 @@ static void TestIssueRegressions() {
         TEST("16.27: 没写 backdrop-filter → 无条目", bdOfName("a6") == nullptr);
     }
 
+    // ---- 16.28：材质预设 material: glass/smoked/thin + 颗粒 grain（v0.16.28） ----
+    // 预设只补"作者没写"的声明（可局部覆盖），颗粒强度打包进毛玻璃记录的 flags。
+    {
+        const char* html = R"HTML(<app_window width="300" height="300" bg="#101014">
+<html width="300" height="300" bg="#101014">
+<body>
+  <div id="g1" style="position:absolute; left:20; top:20; width:120; height:80;
+       material: glass"></div>
+  <div id="g2" style="position:absolute; left:160; top:20; width:120; height:80;
+       material: smoked; border-radius: 40"></div>
+  <div id="g3" style="position:absolute; left:20; top:120; width:120; height:80;
+       material: nope"></div>
+  <div id="g4" style="position:absolute; left:160; top:120; width:120; height:80;
+       backdrop-filter: blur(9px) grain(0.5)"></div>
+  <div id="g5" style="position:absolute; left:20; top:220; width:120; height:60;
+       backdrop-filter: blur(6px)"></div>
+</body></html>
+</app_window>)HTML";
+        const auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("16.28: 材质预设布局可解析", ParseInto(r, res.layout));
+
+        auto bdOf = [&](const char* name) -> const BinUIBackdropEntry* {
+            const uint16_t id = r.findNodeByName(name);
+            return id ? r.backdropOf(id) : nullptr;
+        };
+        auto strengthOf = [](const BinUIBackdropEntry* b) -> int {
+            return b ? static_cast<int>((b->flags >> 8) & 0xFFu) : -1;
+        };
+        // 1) glass 预设：blur 24 + 圆角 24 + 颗粒 0.7
+        {
+            const BinUIBackdropEntry* b = bdOf("g1");
+            TEST("16.28: material: glass 带出毛玻璃", b != nullptr);
+            if (b) {
+                TEST("16.28: 预设模糊 = 24", std::fabs(b->blur - 24.0f) < 0.01f);
+                TEST("16.28: 预设圆角 = 24", std::fabs(b->radius - 24.0f) < 0.01f);
+                TEST("16.28: 预设开颗粒（bit0）", (b->flags & 1u) != 0);
+                TEST("16.28: 颗粒强度 ≈ 0.7（179±2）", strengthOf(b) >= 177 && strengthOf(b) <= 181);
+            }
+            // 预设还补了渐变底 + 边框 + 投影
+            const uint16_t id = r.findNodeByName("g1");
+            const BinUIPaintNode* pn = r.paintOf(id);
+            TEST("16.28: 预设补了渐变底", pn && (pn->flags & PAINT_GRADIENT));
+            TEST("16.28: 预设补了 1px 边框", pn && (pn->flags & PAINT_BORDER));
+        }
+        // 2) 局部覆盖：只有 border-radius 被改成 40，其余沿用预设
+        {
+            const BinUIBackdropEntry* b = bdOf("g2");
+            TEST("16.28: smoked 预设存在", b != nullptr);
+            if (b) {
+                TEST("16.28: 作者写的 border-radius 覆盖预设（40）",
+                     std::fabs(b->radius - 40.0f) < 0.01f);
+                TEST("16.28: smoked 的模糊 = 20", std::fabs(b->blur - 20.0f) < 0.01f);
+                TEST("16.28: smoked 颗粒 ≈ 0.5（128±2）",
+                     strengthOf(b) >= 126 && strengthOf(b) <= 130);
+            }
+        }
+        // 3) 未知预设：告警 + 不产生毛玻璃
+        {
+            bool warned = false;
+            for (const auto& w : res.warnings)
+                if (w.find("不是支持的材质预设") != std::string::npos) warned = true;
+            TEST("16.28: 未知材质预设要告警", warned);
+            TEST("16.28: 未知预设 → 无毛玻璃", bdOf("g3") == nullptr);
+        }
+        // 4) 手写 grain(0.5)
+        {
+            const BinUIBackdropEntry* b = bdOf("g4");
+            TEST("16.28: grain(0.5) 进段", b && std::fabs(b->blur - 9.0f) < 0.01f);
+            TEST("16.28: grain(0.5) 强度 ≈ 128", strengthOf(b) >= 126 && strengthOf(b) <= 130);
+        }
+        // 5) 没写 grain：flags = 0（不撒颗粒）
+        {
+            const BinUIBackdropEntry* b = bdOf("g5");
+            TEST("16.28: 没写 grain → flags=0", b && b->flags == 0);
+        }
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

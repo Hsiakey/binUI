@@ -1,54 +1,56 @@
 <!DOCTYPE html>
-<app_window width="640" height="420" resizable="false">
-<html width="640" height="420">
+<app_window width="660" height="470" resizable="false">
+<html width="660" height="470">
 <head>
 <style>
     body { background: #EEF2F7; color: #16202C; }
-    .cap { position: absolute; font-size: 12px; color: #5A6B80; }
+    .cap { position: absolute; font-size: 12px; color: #E8EEF6; }
 </style>
 </head>
 <body>
-    <!-- 背景：彩色色块 + 大字，用来"透过玻璃看" -->
-    <div style="position:absolute; left:0; top:0; width:640; height:420;
+    <!-- 背景：渐变 + 大字 + 色块，用来"透过玻璃看" -->
+    <div style="position:absolute; left:0; top:0; width:660; height:470;
                 background: linear-gradient(135deg, #1E3A8A, #0B5FA5 45%, #14B8A6)">
     </div>
-    <div style="position:absolute; left:0; top:0; width:640; height:420;
-                background: linear-gradient(0deg, rgba(196,65,12,200), rgba(196,65,12,0))">
+    <div style="position:absolute; left:0; top:0; width:660; height:470;
+                background: linear-gradient(0deg, rgba(196,65,12,220), rgba(196,65,12,0))">
     </div>
-    <div style="position:absolute; left:24; top:30; width:600; height:90; font-size:64;
-                color: #FFFFFF; background: transparent">FROSTED GLASS 毛玻璃</div>
-    <div style="position:absolute; left:24; top:130; width:600; height:90; font-size:64;
-                color: #FFFFFF; background: transparent">background blur</div>
-    <div style="position:absolute; left:40; top:250; width:120; height:120; border-radius: 24;
+    <div style="position:absolute; left:20; top:20; width:620; height:70; font-size:56;
+                color: #FFFFFF; background: transparent">FROSTED 毛玻璃</div>
+    <div style="position:absolute; left:20; top:96; width:620; height:60; font-size:48;
+                color: #FFFFFF; background: transparent">material: glass</div>
+    <div style="position:absolute; left:30; top:300; width:110; height:110; border-radius: 24;
                 background: #F59E0B"></div>
-    <div style="position:absolute; left:480; top:250; width:120; height:120; border-radius: 60;
+    <div style="position:absolute; left:520; top:300; width:110; height:110; border-radius: 55;
                 background: #22C55E"></div>
 
-    <!-- 毛玻璃卡片：backdrop-filter: blur(24px) + 半透明白底 + 1px 高光边 -->
-    <div style="position:absolute; left:60; top:210; width:250; height:160; border-radius: 28;
-                backdrop-filter: blur(24px);
-                background: rgba(255,255,255,0.38);
-                border: 1; border-color: rgba(255,255,255,0.65)"></div>
-    <span class="cap" style="left:76; top:232; color:#12324F">blur(24px) 卡片</span>
+    <!-- 1) 预设：一句 material 就是一块玻璃（毛玻璃 + 半透明底 + 1px 高光边 + 圆角 + 投影） -->
+    <div style="position:absolute; left:30; top:180; width:280; height:150; material: glass"></div>
+    <span class="cap" style="left:46; top:200">material: glass</span>
 
-    <!-- 小半径 -->
-    <div style="position:absolute; left:340; top:210; width:250; height:160; border-radius: 28;
-                backdrop-filter: blur(8px);
-                background: rgba(255,255,255,0.42);
-                border: 1; border-color: rgba(255,255,255,0.7)"></div>
-    <span class="cap" style="left:356; top:232; color:#12324F">blur(8px) 卡片</span>
+    <!-- 2) 预设 + 局部覆盖：半径/模糊改了，其余沿用预设 -->
+    <div style="position:absolute; left:350; top:180; width:280; height:150;
+                material: glass; border-radius: 40; backdrop-filter: blur(10px) grain(0.9)"></div>
+    <span class="cap" style="left:366; top:200">glass + blur(10) grain(0.9)</span>
 
-    <!-- 圆形玻璃按钮 -->
-    <div style="position:absolute; left:346; top:262; width:56; height:56; border-radius: 28;
-                backdrop-filter: blur(16px);
-                background: rgba(255,255,255,0.28);
-                border: 1; border-color: rgba(255,255,255,0.75)"></div>
+    <!-- 3) 深色烟熏 -->
+    <div style="position:absolute; left:30; top:350; width:200; height:56; material: smoked"></div>
+    <span class="cap" style="left:46; top:366">smoked</span>
 
-    <!-- 深色玻璃：烟熏 -->
-    <div style="position:absolute; left:60; top:300; width:150; height:52; border-radius: 26;
-                backdrop-filter: blur(20px);
-                background: rgba(16,18,22,0.45);
-                border: 1; border-color: rgba(255,255,255,0.25)"></div>
+    <!-- 4) thin：轻量玻璃（小半径模糊） -->
+    <div style="position:absolute; left:250; top:350; width:200; height:56; material: thin"></div>
+    <span class="cap" style="left:266; top:366">thin</span>
+
+    <!-- 5) 圆形玻璃按钮：预设 + 圆形覆盖 -->
+    <div style="position:absolute; left:470; top:350; width:64; height:64;
+                material: glass; border-radius: 32"></div>
+
+    <!-- 6) 手写对照：不开颗粒（能看出颗粒差异） -->
+    <div style="position:absolute; left:552; top:350; width:80; height:64;
+                border-radius: 20; backdrop-filter: blur(16px);
+                background: rgba(255,255,255,0.34);
+                border: 1px solid rgba(255,255,255,0.5)"></div>
+    <span class="cap" style="left:552; top:418">无颗粒</span>
 </body>
 </html>
 </app_window>
