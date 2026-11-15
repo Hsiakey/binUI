@@ -25,7 +25,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v24: 文字阴影段（text-shadow），见 BinUITextShadow
 // v25: 绘制附加段（九宫格图片），见 BinUIPaintEx
 // v26: 图片滤镜段（CSS filter 的颜色矩阵），见 BinUIImageFilter
-constexpr uint32_t BINUI_VERSION    = 26;
+// v27: 裁剪路径段（SVG <clipPath> / clip-path），见 BinUIClipEntry
+constexpr uint32_t BINUI_VERSION    = 27;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -589,6 +590,33 @@ struct BinUIImageFilter {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIImageFilter) == 52, "BinUIImageFilter must be 52 bytes");
+
+// ============================================================
+// 裁剪路径段（v27）：SVG <clipPath> / CSS clip-path: url(#id)
+//
+// 布局：uint32 cBytes（0 = 无）+ uint32 cCount + 每条：
+//     BinUIClipEntry                    定长头（24 字节）
+//     uint32 contourFirst[contourCount] 每条子路径的起始点下标
+//     uint8  contourClosed[contourCount]
+//     uint16 points[2*pointCount]       归一化点（0..65535 映射包围盒）
+// 恒定写出，位于图片滤镜段之后、名称段之前。
+//
+// 语义：带裁剪的节点先画进**离屏图层**，再用"图层矩形 + 这条路径"的 even-odd 填充
+//   把路径外的一切**擦除**（混合 dst *= 1-srcA）—— 任意形状的裁剪都能量表达，而且
+//   三个后端只需要一个额外的混合状态（VK 是管线变体，不动 SPIR-V）。
+// 坐标：x/y/w/h 是**设备空间**的包围盒（编译期已过 svgX 与页面偏移），点按同一个
+//   盒子归一化 —— 运行期不需要再知道 SVG 变换链。
+// ============================================================
+#pragma pack(push, 1)
+struct BinUIClipEntry {
+    uint16_t nodeId;
+    uint16_t flags;        // bit0 = even-odd（clip-rule="evenodd"）
+    float    x, y, w, h;   // 设备空间包围盒
+    uint16_t pointCount;
+    uint16_t contourCount;
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUIClipEntry) == 24, "BinUIClipEntry must be 24 bytes");
 
 // ============================================================
 // 路径段（v15，恒定写出，位于扩展绘制段之后、名称段之前）

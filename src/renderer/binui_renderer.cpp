@@ -790,7 +790,47 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         }
     }
 
-    if (const uint8_t* np = sectionAt(12)) {
+    // ---- 裁剪路径段（v27）：uint32 cBytes + uint32 cCount + 每条（头 + 表 + 点） ----
+    // 段序（v27）：… / 绘制附加 / 图片滤镜 / 裁剪路径 / 名称。
+    clipPaths_.clear();
+    if (const uint8_t* cp = sectionAt(12)) {
+        uint32_t cb = 0;
+        memcpy(&cb, cp, sizeof(cb));
+        if (cb >= sizeof(uint32_t) &&
+            size - static_cast<size_t>(cp - data) >= sizeof(uint32_t) + cb) {
+            const uint8_t* q = cp + sizeof(uint32_t);
+            uint32_t cc = 0;
+            memcpy(&cc, q, sizeof(cc));
+            q += sizeof(cc);
+            const uint8_t* qend = cp + sizeof(uint32_t) + cb;
+            for (uint32_t i = 0; i < cc && q + sizeof(BinUIClipEntry) <= qend; i++) {
+                ClipRecord cr;
+                memcpy(&cr.head, q, sizeof(BinUIClipEntry));
+                q += sizeof(BinUIClipEntry);
+                const size_t nc = cr.head.contourCount;
+                const size_t np = static_cast<size_t>(cr.head.pointCount) * 2;
+                if (q + nc * sizeof(uint32_t) + nc > qend) break;
+                cr.first.resize(nc);
+                cr.closed.resize(nc);
+                if (nc) {
+                    memcpy(cr.first.data(), q, nc * sizeof(uint32_t));
+                    q += nc * sizeof(uint32_t);
+                    memcpy(cr.closed.data(), q, nc);
+                    q += nc;
+                }
+                if (q + np * sizeof(uint16_t) > qend) break;
+                cr.pts.resize(np);
+                if (np) {
+                    memcpy(cr.pts.data(), q, np * sizeof(uint16_t));
+                    q += np * sizeof(uint16_t);
+                }
+                if (!nodeIndexById_.count(cr.head.nodeId)) continue;
+                clipPaths_[cr.head.nodeId] = std::move(cr);
+            }
+        }
+    }
+
+    if (const uint8_t* np = sectionAt(13)) {
         uint32_t nbytes = 0;
         memcpy(&nbytes, np, sizeof(uint32_t));
         if (nbytes > 0 && size - static_cast<size_t>(np - data) >= sizeof(uint32_t) + nbytes) {

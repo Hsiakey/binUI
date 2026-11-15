@@ -800,6 +800,59 @@ static void TestIssueRegressions() {
         }
     }
 
+    // ---- 16.24：SVG <clipPath> / clip-path（v27 裁剪路径段） ----
+    // 钉住四件事：
+    //   1. clip-path: url(#id) 落进裁剪段（renderer.clipPathOf），包围盒是**设备空间**的；
+    //   2. clipPathUnits=objectBoundingBox 把 0..1 坐标放大到元素盒；
+    //   3. 没写 / 写了但不存在的 id → 没有条目（不画坏，只是不裁）；
+    //   4. 裁剪路径的归一化点都在 [0,65535] 且闭合（运行期补集擦除要它闭）。
+    {
+        const char* html = R"HTML(<app_window width="300" height="200" bg="#101014">
+<html width="300" height="200" bg="#101014">
+<body>
+  <svg width="290" height="190" style="position:absolute; left:0; top:0">
+    <defs>
+      <clipPath id="circ"><circle cx="60" cy="60" r="40" /></clipPath>
+      <clipPath id="obb" clipPathUnits="objectBoundingBox">
+        <rect x="0" y="0" width="1" height="1" rx="0.25" />
+      </clipPath>
+    </defs>
+    <rect id="c1" x="0" y="0" width="120" height="120" fill="#0B5FA5" clip-path="url(#circ)" />
+    <rect id="c2" x="150" y="0" width="100" height="100" fill="#C2410C" clip-path="url(#obb)" />
+    <rect id="c3" x="0" y="130" width="100" height="50" fill="#0F766E" />
+    <rect id="c4" x="150" y="130" width="100" height="50" fill="#0F766E" clip-path="url(#nope)" />
+  </svg>
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("16.24: clip-path 布局可解析", ParseInto(r, bin));
+        auto clipOfName = [&](const char* name) -> const BinUIRenderer::ClipRecord* {
+            const uint16_t id = r.findNodeByName(name);
+            return id ? r.clipPathOf(id) : nullptr;
+        };
+        const BinUIRenderer::ClipRecord* c1 = clipOfName("c1");
+        TEST("16.24: circle 裁剪进段（有条目）", c1 != nullptr);
+        if (c1) {
+            TEST("16.24: 包围盒 = 圆的外接方块（40 半径 → 80×80）",
+                 std::fabs(c1->head.w - 80.0f) < 1.5f && std::fabs(c1->head.h - 80.0f) < 1.5f);
+            TEST("16.24: 包围盒是设备空间（x≈20, y≈20）",
+                 std::fabs(c1->head.x - 20.0f) < 1.5f && std::fabs(c1->head.y - 20.0f) < 1.5f);
+            bool allIn = !c1->pts.empty();
+            for (uint16_t v : c1->pts) (void)v;   // uint16 天然在范围内，这里只验非空
+            TEST("16.24: 点表非空且闭合", allIn && !c1->closed.empty() && c1->closed[0] == 1);
+        }
+        const BinUIRenderer::ClipRecord* c2 = clipOfName("c2");
+        TEST("16.24: objectBoundingBox 裁剪进段", c2 != nullptr);
+        if (c2) {
+            TEST("16.24: objectBoundingBox 放大到元素盒（100×100）",
+                 std::fabs(c2->head.w - 100.0f) < 2.0f && std::fabs(c2->head.h - 100.0f) < 2.0f);
+        }
+        TEST("16.24: 没写 clip-path → 无条目", clipOfName("c3") == nullptr);
+        TEST("16.24: 引用不存在的 id → 无条目（不裁也不报错画坏）",
+             clipOfName("c4") == nullptr);
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

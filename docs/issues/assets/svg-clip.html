@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<app_window width="640" height="420" resizable="false">
+<html width="640" height="420">
+<head>
+<style>
+    body { background: #EEF2F7; color: #16202C; }
+    .cap { position: absolute; width: 280; height: 18; font-size: 12px; color: #5A6B80; }
+</style>
+</head>
+<body>
+    <!-- 1) 圆形裁剪：一张彩色图裁成圆 -->
+    <svg width="140" height="140" style="position:absolute; left:24; top:24">
+        <defs>
+            <clipPath id="circleClip"><circle cx="70" cy="70" r="60" /></clipPath>
+        </defs>
+        <image x="10" y="10" width="120" height="120" href="image-round-img.png"
+               clip-path="url(#circleClip)" />
+    </svg>
+    <span class="cap" style="left:24; top:4">circle 裁剪（图片）</span>
+
+    <!-- 2) 圆角矩形裁剪 + 边框/底色 -->
+    <svg width="140" height="140" style="position:absolute; left:200; top:24">
+        <defs>
+            <clipPath id="rectClip"><rect x="10" y="10" width="120" height="120" rx="28" /></clipPath>
+        </defs>
+        <rect x="0" y="0" width="140" height="140" fill="#0B5FA5" clip-path="url(#rectClip)" />
+    </svg>
+    <span class="cap" style="left:200; top:4">圆角矩形裁剪（纯色块）</span>
+
+    <!-- 3) 路径裁剪（星形/多边形） -->
+    <svg width="140" height="140" style="position:absolute; left:376; top:24">
+        <defs>
+            <clipPath id="triClip"><polygon points="70,8 132,128 8,128" /></clipPath>
+        </defs>
+        <rect x="0" y="0" width="140" height="140" fill="#C2410C" clip-path="url(#triClip)" />
+        <rect x="0" y="0" width="140" height="70" fill="#F59E0B" clip-path="url(#triClip)" />
+    </svg>
+    <span class="cap" style="left:376; top:4">多边形裁剪（两层色块）</span>
+
+    <!-- 4) 文字被裁剪（文字是图集四边形，也要一起裁） -->
+    <svg width="280" height="120" style="position:absolute; left:24; top:180">
+        <defs>
+            <clipPath id="halfClip"><circle cx="60" cy="60" r="52" /></clipPath>
+        </defs>
+        <text x="10" y="60" font-size="34" fill="#16202C" clip-path="url(#halfClip)">CLIP 裁剪</text>
+    </svg>
+    <span class="cap" style="left:24; top:160">文字裁剪（字形也走同一条路）</span>
+
+    <!-- 5) objectBoundingBox 单位 -->
+    <svg width="140" height="120" style="position:absolute; left:376; top:180">
+        <defs>
+            <clipPath id="obbClip" clipPathUnits="objectBoundingBox"><circle cx="0.5" cy="0.5" r="0.5" /></clipPath>
+        </defs>
+        <rect x="20" y="10" width="100" height="100" fill="#0F766E" clip-path="url(#obbClip)" />
+    </svg>
+    <span class="cap" style="left:376; top:160">objectBoundingBox 单位</span>
+
+    <span style="position:absolute; left:24; top:330; width:592; height:40; font-size:12px; color:#7A8798">v27：clip-path 走"离屏图层 + even-odd 补集擦除"（dst *= 1-srcA），任意形状都能裁；三端只多一个混合状态，VK 是管线变体不改 SPIR-V</span>
+</body>
+</html>
+</app_window>

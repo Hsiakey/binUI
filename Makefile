@@ -523,7 +523,7 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # roundtex-lru（v0.12.8）：一页里 >48 种圆角半径，专门压"圆角模板 LRU 淘汰"——
 # 淘汰时如果当场删纹理，本帧已经录进批次的四边形还在引用它，跨后端比对会看到某几块
 # 圆角被画成整块纯色。这条用例只进跨后端比对（GL vs VK / D3D11），不建 GDI 基准图。
-ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker
+ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 

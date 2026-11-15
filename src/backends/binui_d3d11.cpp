@@ -133,6 +133,7 @@ struct BinUID3D::Impl {
     ID3D11SamplerState* samPoint = nullptr;
     ID3D11SamplerState* samLinear = nullptr;
     ID3D11BlendState* blend = nullptr;
+    ID3D11BlendState* blendErase = nullptr;   // v27：clip-path 的 dst *= 1-srcA
     ID3D11RasterizerState* ras = nullptr;
     ID3D11ShaderResourceView* whiteSrv = nullptr; // 1×1 纯白（纯色四边形）
     // 持久离屏帧缓冲：局部重绘只更新脏区，present 时整帧 blit 到交换链
@@ -415,6 +416,17 @@ struct BinUID3D::Impl {
         UINT offset = 0;
         float blendFactor[4] = { 0, 0, 0, 0 };
         ctx->OMSetBlendState(blend, blendFactor, 0xFFFFFFFF);
+    // v27 裁剪擦除：color/alpha 都按 dst *= (1-srcA) 混合
+    D3D11_BLEND_DESC bd2 = {};
+    bd2.RenderTarget[0].BlendEnable = TRUE;
+    bd2.RenderTarget[0].SrcBlend = D3D11_BLEND_ZERO;
+    bd2.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    bd2.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bd2.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+    bd2.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_INV_SRC_ALPHA;
+    bd2.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bd2.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    device->CreateBlendState(&bd2, &blendErase);
         ctx->RSSetState(ras);
         D3D11_VIEWPORT vp = { 0, 0, static_cast<float>(winW), static_cast<float>(winH), 0, 1 };
         ctx->RSSetViewports(1, &vp);
@@ -914,7 +926,7 @@ struct BinUID3D::Impl {
     }
 
     bool pushLayer(float x, float y, float w, float h, float alpha) {
-        if (!ready || w <= 0.0f || h <= 0.0f || alpha >= 0.999f) return false;
+        if (!ready || w <= 0.0f || h <= 0.0f || alpha <= 0.0f) return false;   // v27：alpha=1 也允许（裁剪用容器层）
         if (static_cast<int>(layerStack.size()) >= kMaxLayers) { warnLayerLimit(); return false; }
         flushAll();                     // 先把手头的图元画到当前目标（此时还没换 RT）
         const int idx = acquireLayer();
@@ -1518,6 +1530,17 @@ void BinUID3D::setImageFilter(const BinUIImageFilter* f) {
     if (!impl_->imgFilterKey) return;
     for (int i = 0; i < 9; i++) impl_->imgFilter.m[i] = f->m[i];
     for (int i = 0; i < 3; i++) impl_->imgFilter.o[i] = f->offset[i];
+}
+
+// v27 裁剪擦除
+bool BinUID3D::setEraseBlend(bool on) {
+    if (!impl_ || !impl_->ready) return false;
+    impl_->flushAll();
+    ID3D11BlendState* want = on ? impl_->blendErase : impl_->blend;
+    if (!want) return false;
+    float bf[4] = { 0, 0, 0, 0 };
+    impl_->ctx->OMSetBlendState(want, bf, 0xFFFFFFFF);
+    return true;
 }
 
 bool BinUID3D::setAffine(const float* xf) {

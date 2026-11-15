@@ -1193,6 +1193,53 @@ static void AppendFilterSection(std::vector<uint8_t>& buf,
     memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
 
+// v27 裁剪路径：节点 + 设备空间包围盒 + 归一化点（与路径段同一个口径）
+struct PendingClip {
+    uint16_t nodeId = 0;
+    uint16_t flags = 0;
+    float x = 0, y = 0, w = 0, h = 0;
+    std::vector<uint32_t> first;
+    std::vector<uint8_t>  closed;
+    std::vector<uint16_t> pts;
+};
+
+// 追加裁剪路径段（v27）：uint32 bytes + uint32 count + 每条（定长头 + 子路径表 + 点表）
+static void AppendClipSection(std::vector<uint8_t>& buf, const std::vector<PendingClip>& clips) {
+    if (clips.empty()) {
+        uint32_t zero = 4;
+        size_t start = buf.size();
+        buf.resize(start + 8, 0);
+        memcpy(buf.data() + start, &zero, sizeof(zero));
+        uint32_t c0 = 0;
+        memcpy(buf.data() + start + 4, &c0, sizeof(c0));
+        return;
+    }
+    std::vector<uint8_t> data;
+    auto wbytes = [&](const void* b, size_t n) {
+        const uint8_t* p2 = static_cast<const uint8_t*>(b);
+        data.insert(data.end(), p2, p2 + n);
+    };
+    uint32_t count = (uint32_t)clips.size();
+    wbytes(&count, sizeof(count));
+    for (const PendingClip& c : clips) {
+        BinUIClipEntry e = {};
+        e.nodeId = c.nodeId;
+        e.flags = c.flags;
+        e.x = c.x; e.y = c.y; e.w = c.w; e.h = c.h;
+        e.pointCount = (uint16_t)std::min<size_t>(65535, c.pts.size() / 2);
+        e.contourCount = (uint16_t)std::min<size_t>(65535, c.first.size());
+        wbytes(&e, sizeof(e));
+        if (!c.first.empty())  wbytes(c.first.data(),  c.first.size()  * sizeof(uint32_t));
+        if (!c.closed.empty()) wbytes(c.closed.data(), c.closed.size());
+        if (!c.pts.empty())    wbytes(c.pts.data(),    c.pts.size()    * sizeof(uint16_t));
+    }
+    uint32_t nbytes = (uint32_t)data.size();
+    size_t start = buf.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
+
 // 点用 uint16 归一化存（0..65535 映射包围盒），比 float 省一半且精度远超显示能力。
 struct PendingPath {
     BinUIPathEntry head = {};
@@ -1915,6 +1962,7 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     AppendTextShadowSection(buf, {}); // v24：XML 路径无 text-shadow，段同样恒定写出
     AppendPaintExSection(buf, {});  // v25：XML 路径无九宫格图片
     AppendFilterSection(buf, {});     // v26：这条路径没有图片滤镜
+    AppendClipSection(buf, {});       // v27：这条路径没有裁剪路径
     AppendNameSection(buf, nodeNames, offsets);
 
     return buf;
@@ -2516,6 +2564,7 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "fx", "fy", "offset", "stop-color", "stop-opacity",
         // v0.16.23：SVG <marker>（编译期展开）
         "marker", "marker-start", "marker-mid", "marker-end",
+        "clip-path", "clippathunits",
         "markerwidth", "markerheight", "markerunits", "refx", "refy", "orient",
         "gradientunits", "gradienttransform", "spreadmethod", "text-anchor",
     };
@@ -4443,6 +4492,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::vector<BinUITextShadow> textShadowNodes;  // v24 文字阴影段（text-shadow）
     std::vector<BinUIPaintEx> paintExNodes;        // v25 绘制附加段（九宫格图片等）
     std::vector<BinUIImageFilter> filterNodes;     // v26 图片滤镜段（CSS filter 的颜色矩阵）
+    std::vector<PendingClip> clipNodes;            // v27 裁剪路径段（clip-path）
     std::vector<PendingPath> pendingPaths;     // v15 路径段（SVG <path>/<ellipse> 的折线）
     std::vector<std::string> strings;
     strings.push_back(""); // 字符串表首位 = 空串：无文本节点的 textOffset=0 指向空串
@@ -4908,6 +4958,61 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     // 这里只做体检、不改行为：不改 HTML 的容错性（未知标签照样按容器处理）。
     // 每个标签/属性全文档只报一次，避免刷屏。
     // ============================================================
+// 把一个 SVG 形状元素（path/polyline/polygon/line/rect/circle/ellipse）解析成折线，
+// 并应用它自己的 transform。<marker> 内容与 <clipPath> 内容共用这一份。
+auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
+    const std::string ct = lowerStr(ce.tag);
+    std::string perr;
+    if (ct == "path") {
+        const std::string d = ce.attrs.count("d") ? ce.attrs.at("d") : "";
+        if (d.empty() || !ParsePathData(d, tol, cs, &perr)) return false;
+    } else if (ct == "polyline" || ct == "polygon") {
+        const std::string pts = ce.attrs.count("points") ? ce.attrs.at("points") : "";
+        if (pts.empty()) return false;
+        ParsePathData("M" + pts + (ct == "polygon" ? " Z" : ""), tol, cs, &perr);
+    } else if (ct == "line") {
+        const float x1 = parseLen(ce.attrs.count("x1") ? ce.attrs.at("x1") : "", 0);
+        const float y1 = parseLen(ce.attrs.count("y1") ? ce.attrs.at("y1") : "", 0);
+        const float x2 = parseLen(ce.attrs.count("x2") ? ce.attrs.at("x2") : "", 0);
+        const float y2 = parseLen(ce.attrs.count("y2") ? ce.attrs.at("y2") : "", 0);
+        PathShape::Contour c2;
+        c2.first = 0; c2.count = 2; c2.closed = false;
+        cs.pts.push_back({ x1, y1 });
+        cs.pts.push_back({ x2, y2 });
+        cs.contours.push_back(c2);
+        cs.RecomputeBounds();
+    } else if (ct == "ellipse" || ct == "circle") {
+        const float cx = parseLen(ce.attrs.count("cx") ? ce.attrs.at("cx") : "", 0);
+        const float cy = parseLen(ce.attrs.count("cy") ? ce.attrs.at("cy") : "", 0);
+        const float rx = ct == "circle"
+            ? parseLen(ce.attrs.count("r") ? ce.attrs.at("r") : "", 0)
+            : parseLen(ce.attrs.count("rx") ? ce.attrs.at("rx") : "", 0);
+        const float ry = ct == "circle" ? rx
+            : parseLen(ce.attrs.count("ry") ? ce.attrs.at("ry") : "", 0);
+        if (rx <= 0.0f || ry <= 0.0f) return false;
+        AppendEllipse(cs, cx, cy, rx, ry, tol);
+    } else if (ct == "rect") {
+        const float rx0 = parseLen(ce.attrs.count("x") ? ce.attrs.at("x") : "", 0);
+        const float ry0 = parseLen(ce.attrs.count("y") ? ce.attrs.at("y") : "", 0);
+        const float rw0 = parseLen(ce.attrs.count("width") ? ce.attrs.at("width") : "", 0);
+        const float rh0 = parseLen(ce.attrs.count("height") ? ce.attrs.at("height") : "", 0);
+        float cr = 0.0f;
+        if (ce.attrs.count("rx")) cr = parseLen(ce.attrs.at("rx"), 0);
+        else if (ce.attrs.count("ry")) cr = parseLen(ce.attrs.at("ry"), 0);
+        if (rw0 <= 0.0f || rh0 <= 0.0f) return false;
+        AppendRoundedRect(cs, rx0, ry0, rw0, rh0, cr, tol);
+    } else {
+        return false;
+    }
+    if (cs.Empty()) return false;
+    auto tfIt = ce.attrs.find("transform");
+    if (tfIt != ce.attrs.end() && !tfIt->second.empty()) {
+        PathMatrix cm;
+        if (ParseSvgTransform(tfIt->second, cm, nullptr)) TransformShape(cs, cm);
+    }
+    return true;
+};
+
     // ============ v0.16.23：SVG <marker>（编译期展开） ============
     // marker 是**静态几何**：每个实例的形状只取决于顶点位置与切线方向，所以在编译期
     // 把它换算成引用路径节点里的**额外子路径** —— 运行期与三个后端零改动。
@@ -4991,53 +5096,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                 continue;
             }
             PathShape cs;
-            std::string perr;
-            if (ct == "path") {
-                const std::string d = ce.attrs.count("d") ? ce.attrs.at("d") : "";
-                if (d.empty() || !ParsePathData(d, 0.1f, cs, &perr)) continue;
-            } else if (ct == "polyline" || ct == "polygon") {
-                const std::string pts = ce.attrs.count("points") ? ce.attrs.at("points") : "";
-                if (pts.empty()) continue;
-                ParsePathData("M" + pts + (ct == "polygon" ? " Z" : ""), 0.1f, cs, &perr);
-            } else if (ct == "line") {
-                const float x1 = parseLen(ce.attrs.count("x1") ? ce.attrs.at("x1") : "", 0);
-                const float y1 = parseLen(ce.attrs.count("y1") ? ce.attrs.at("y1") : "", 0);
-                const float x2 = parseLen(ce.attrs.count("x2") ? ce.attrs.at("x2") : "", 0);
-                const float y2 = parseLen(ce.attrs.count("y2") ? ce.attrs.at("y2") : "", 0);
-                PathShape::Contour c2;
-                c2.first = 0; c2.count = 2; c2.closed = false;
-                cs.pts.push_back({ x1, y1 });
-                cs.pts.push_back({ x2, y2 });
-                cs.contours.push_back(c2);
-                cs.RecomputeBounds();
-            } else if (ct == "ellipse" || ct == "circle") {
-                const float cx = parseLen(ce.attrs.count("cx") ? ce.attrs.at("cx") : "", 0);
-                const float cy = parseLen(ce.attrs.count("cy") ? ce.attrs.at("cy") : "", 0);
-                const float rx = ct == "circle"
-                    ? parseLen(ce.attrs.count("r") ? ce.attrs.at("r") : "", 0)
-                    : parseLen(ce.attrs.count("rx") ? ce.attrs.at("rx") : "", 0);
-                const float ry = ct == "circle" ? rx
-                    : parseLen(ce.attrs.count("ry") ? ce.attrs.at("ry") : "", 0);
-                if (rx > 0.0f && ry > 0.0f) AppendEllipse(cs, cx, cy, rx, ry, 0.1f);
-            } else if (ct == "rect") {
-                const float rx0 = parseLen(ce.attrs.count("x") ? ce.attrs.at("x") : "", 0);
-                const float ry0 = parseLen(ce.attrs.count("y") ? ce.attrs.at("y") : "", 0);
-                const float rw0 = parseLen(ce.attrs.count("width") ? ce.attrs.at("width") : "", 0);
-                const float rh0 = parseLen(ce.attrs.count("height") ? ce.attrs.at("height") : "", 0);
-                float cr = 0.0f;
-                if (ce.attrs.count("rx")) cr = parseLen(ce.attrs.at("rx"), 0);
-                else if (ce.attrs.count("ry")) cr = parseLen(ce.attrs.at("ry"), 0);
-                if (rw0 > 0.0f && rh0 > 0.0f)
-                    AppendRoundedRect(cs, rx0, ry0, rw0, rh0, cr, 0.1f);
-            } else {
-                continue;
-            }
-            if (cs.Empty()) continue;
-            auto ctIt = ce.attrs.find("transform");
-            if (ctIt != ce.attrs.end() && !ctIt->second.empty()) {
-                PathMatrix cm;
-                if (ParseSvgTransform(ctIt->second, cm, nullptr)) TransformShape(cs, cm);
-            }
+            if (!shapeOf(ce, cs)) continue;
             SvgMarkerChild kid;
             kid.shape = std::move(cs);
             auto ft = ce.attrs.find("fill");
@@ -5069,6 +5128,44 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         if (md.kids.empty())
             Warn("<marker id=\"" + mid + "\"> 里没有可绘制的形状（marker 为空）");
         svgMarkers[mid] = std::move(md);
+    }
+
+    // ============ v0.16.24：SVG <clipPath> ============
+    // clipPath 的内容是**静态几何**，所以和 marker 一样在编译期折算成"设备空间里的一条
+    // 折线"，写进裁剪路径段（v27）。运行期只做两件事：把节点画进离屏图层，再用
+    // "图层矩形 + 这条路径"的 even-odd 填充把外面擦掉 —— 任意形状都能裁。
+    struct SvgClipDef {
+        bool evenOdd = false;
+        int  units = 0;          // 0 = userSpaceOnUse（默认）  1 = objectBoundingBox
+        std::vector<size_t> kids;   // 子形状下标：用到时按 units 选容差解析
+    };
+    std::unordered_map<std::string, SvgClipDef> svgClips;
+    for (size_t ci = 0; ci < elems.size(); ci++) {
+        if (lowerStr(elems[ci].tag) != "clippath") continue;
+        const HNode& ce2 = elems[ci];
+        std::string cid = ce2.attrs.count("id") ? TrimCopy(ce2.attrs.at("id")) : "";
+        if (cid.empty()) {
+            Warn("<clipPath> 没有 id，无法被 clip-path 引用（已忽略）");
+            continue;
+        }
+        SvgClipDef cd;
+        {
+            auto it = ce2.attrs.find("clippathunits");
+            if (it != ce2.attrs.end())
+                cd.units = lowerStr(TrimCopy(it->second)) == "objectboundingbox" ? 1 : 0;
+        }
+        for (size_t cc = 0; cc < elems.size(); cc++) {
+            if (elems[cc].parentIdx != ci) continue;
+            const std::string ct = lowerStr(elems[cc].tag);
+            if (ct == "g") {
+                Warn("<clipPath id=\"" + cid + "\"> 里的 <g> 不展开（把形状直接写在 <clipPath> 下）");
+                continue;
+            }
+            cd.kids.push_back(cc);
+        }
+        if (cd.kids.empty())
+            Warn("<clipPath id=\"" + cid + "\"> 里没有可用的形状（裁剪路径为空）");
+        svgClips[cid] = std::move(cd);
     }
 
     {
@@ -5119,11 +5216,11 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             
             { "tspan", "SVG <tspan> 不支持富文本：把文字写进 <text> 本体，或拆成多个 <text>" },
             { "mask", "SVG <mask> 不支持" },
-            { "clippath", "SVG <clipPath> 不支持" },
             { "pattern", "SVG <pattern> 不支持" },
         };
         // 真正被编译器消费的属性（其余一律视为"写了没效果"）
         const auto& kUsedAttrs = UsedHtmlAttrs();
+
         bool inlineNestedWarned = false;   // 行内嵌套警告全文档只报一次
         for (size_t idx = 0; idx < elems.size(); idx++) {
             const auto& e = elems[idx];
@@ -6982,6 +7079,79 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             videoDescs.push_back(vd);
         }
 
+        // ---- v0.16.24：clip-path（v27 裁剪路径段） ----
+        // clipPath 的几何在编译期换算到设备空间、按自己的包围盒归一化；运行期只要
+        // "画进离屏图层 → 用 even-odd 互补区擦掉外面"。
+        if (!svgClips.empty()) {
+            std::string cpv = style.count("clip-path") ? TrimCopy(style.at("clip-path")) : "";
+            if (cpv.empty() && e.attrs.count("clip-path"))
+                cpv = TrimCopy(e.attrs.at("clip-path"));
+            if (!cpv.empty() && lowerStr(cpv) != "none") {
+                std::string cgid;
+                if (!ParseUrlId(cpv, cgid)) {
+                    Warn("clip-path 只支持 url(#id) 写法（" + cpv + "）");
+                } else {
+                    auto cit = svgClips.find(cgid);
+                    if (cit == svgClips.end()) {
+                        Warn("clip-path=\"url(#" + cgid + ")\" 找不到 <clipPath> 定义");
+                    } else if (!cit->second.kids.empty()) {
+                        // 元素包围盒（设备空间、不含页面偏移）：objectBoundingBox 用它放大单位坐标
+                        float bx = 0, by = 0, bw = 0, bh = 0;
+                        if (hasSvgPath) {
+                            bx = svgPathShape.minX; by = svgPathShape.minY;
+                            bw = svgPathShape.Width(); bh = svgPathShape.Height();
+                        } else {
+                            bx = parseLen(sx, 0); by = parseLen(sy, 0);
+                            bw = parseLen(sw, 0); bh = parseLen(sh, 0);
+                        }
+                        PathMatrix M;
+                        if (cit->second.units == 1) {
+                            M = PathMul(PathTranslate(bx, by),
+                                        PathScale(bw > 0.0f ? bw : 1.0f, bh > 0.0f ? bh : 1.0f));
+                            if (svgX.b != 0.0f || svgX.c != 0.0f)
+                                Warn("clipPathUnits=objectBoundingBox 遇到旋转/斜切："
+                                     "按轴对齐包围盒近似");
+                        } else {
+                            M = svgX;
+                        }
+                        PathShape merged;
+                        // objectBoundingBox 的坐标是 0..1：容差跟着缩（0.1 会切出多边形）
+                        const float tol = (cit->second.units == 1) ? 0.002f : 0.1f;
+                        for (size_t ki : cit->second.kids) {
+                            PathShape tmp;
+                            if (!shapeOf(elems[ki], tmp, tol)) continue;
+                            TransformShape(tmp, M);
+                            const uint32_t base = static_cast<uint32_t>(merged.pts.size());
+                            for (const PathPointF& q2 : tmp.pts)
+                                merged.pts.push_back(q2);
+                            for (const PathShape::Contour& sc : tmp.contours) {
+                                PathShape::Contour nc;
+                                nc.first = base + sc.first;
+                                nc.count = sc.count;
+                                nc.closed = sc.closed;
+                                merged.contours.push_back(nc);
+                            }
+                        }
+                        merged.RecomputeBounds();
+                        PathNormData cnd;
+                        if (!merged.Empty() && NormalizeShape(merged, cnd)) {
+                            PendingClip cp;
+                            cp.nodeId = n.id;
+                            cp.flags = cit->second.evenOdd ? 1 : 0;
+                            cp.x = merged.minX + pc.ox;
+                            cp.y = merged.minY + pc.oy;
+                            cp.w = merged.Width();
+                            cp.h = merged.Height();
+                            cp.first = std::move(cnd.contourFirst);
+                            cp.closed = std::move(cnd.contourClosed);
+                            cp.pts = std::move(cnd.pts);
+                            clipNodes.push_back(std::move(cp));
+                        }
+                    }
+                }
+            }
+        }
+
         nodes.push_back(n);
 
         // v15 路径段：把折线存进来（节点盒已经是几何包围盒，见上面的 <path> 分支）
@@ -7508,6 +7678,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     AppendTextShadowSection(buf, textShadowNodes);
     AppendPaintExSection(buf, paintExNodes);
     AppendFilterSection(buf, filterNodes);
+    AppendClipSection(buf, clipNodes);
     AppendNameSection(buf, nodeNames, offsets);
 
     // ---- 6. 二进制组件：编译期离线合并 ----
@@ -7714,6 +7885,7 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     AppendTextShadowSection(buf, {}); // v24：默认布局没有 text-shadow
     AppendPaintExSection(buf, {});  // v25：默认布局没有九宫格图片
     AppendFilterSection(buf, {});     // v26：这条路径没有图片滤镜
+    AppendClipSection(buf, {});       // v27：这条路径没有裁剪路径
 
     return buf;
 }

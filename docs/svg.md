@@ -50,7 +50,7 @@ D3D 见 `src/backends/binui_d3d11.cpp:1280-1565`）。
 - `<svg>` 正确裁剪子元素（顺手修掉 format.h 里那句错误的注释）
 - 命中测试与现有节点一致（包围盒口径）
 
-**明确不做（P1）**：`filter` / `mask` / `clipPath` / `pattern` / / `symbol` /
+**明确不做（P1）**：`filter` / `mask` / `pattern` / `symbol` /
 `<use>` / 渐变 / `stroke-dasharray` / SMIL 动画 / `<text>` / `<image>`。
 这些继续按"不支持 + 说清楚换什么"告警（`kShimTags`，`binui_compiler.cpp:3988-4026`）。
 
@@ -267,7 +267,7 @@ P1 里这个降级不做，但文档要写清"圆/矩形没有独立描边"。
   径向焦点 `fx/fy`、`userSpaceOnUse` 下的百分比 —— 见第 11 节。
 - **P3 已完成（v19）**：`userSpaceOnUse` 下的百分比按视口折算、路径条带跨帧缓存 —— 见第 12 节。
 - **P4 已完成（v19）**：`shape-rendering` 的**边缘抗锯齿**（opt-in，默认仍是硬边）—— 见第 13 节。
-- **明确不做**：`mask` / `clipPath` / `pattern` / `filter` / SMIL 动画 /
+- **明确不做**：`mask` / `pattern` / `filter` / SMIL 动画 /
   `<tspan>` 富文本 / 字形描边（`<text stroke>`）。这些都有明确告警，不会静默失效。
 - **P3**：精确命中（点在路径内，可选）、span 缓存、命令级存储 + 运行时再细分、可选灰度抗锯齿
   （只对 path 边缘，全库仍走硬边）。

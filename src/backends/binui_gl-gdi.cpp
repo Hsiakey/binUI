@@ -339,7 +339,7 @@ struct BinUIGLGdi::Impl {
     }
 
     bool pushLayer(float x, float y, float w, float h, float alpha) {
-        if (!ready || w <= 0.0f || h <= 0.0f || alpha >= 0.999f) return false;
+        if (!ready || w <= 0.0f || h <= 0.0f || alpha <= 0.0f) return false;   // v27：alpha=1 也允许（裁剪用的纯容器层）
         if (static_cast<int>(layerStack.size()) >= kMaxLayers) { warnLayerLimit(); return false; }
         // 顺序很重要：先把"当前目标"和手头的图元收拾干净，再去碰层缓冲 ——
         // acquireLayer 会顺手把新 FBO 绑上，先 flush 的话那些图元会画进空层里再被清掉。
@@ -1421,6 +1421,16 @@ bool BinUIGLGdi::setAffine(const float* xf) {
     }
     for (int i = 0; i < 6; i++) impl_->aff[i] = xf[i];
     impl_->affineOn = true;
+    return true;
+}
+
+// v27 裁剪擦除：切换混合前先 flush（批次是延迟提交的，状态必须跟着批次走）
+bool BinUIGLGdi::setEraseBlend(bool on) {
+    if (!impl_ || !impl_->ready) return false;
+    impl_->flushAll();
+    // GL 1.1 头里没有 glBlendFuncSeparate；两种状态下 color/alpha 因子相同，一个够了
+    if (on) glBlendFunc(GL_ZERO, GL_ONE_MINUS_SRC_ALPHA);
+    else    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
     return true;
 }
 

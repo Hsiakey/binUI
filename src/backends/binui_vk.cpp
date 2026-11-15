@@ -529,6 +529,11 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // 层管线：与主管线只差"采样数"（层目标是单采样）和 render pass 绑定方式。
     // flush() 里按 activePipeline 绑，所以同一套 vertex/descriptor 代码两边共用。
     VkPipeline pipelineLayer = VK_NULL_HANDLE;
+    // v27：clip-path 的擦除混合管线（dst *= 1-srcA）。混合是管线状态，SPIR-V 不用动 ——
+    // 同一份着色器多建两条管线（主目标 / 图层目标各一条）。
+    VkPipeline pipelineErase = VK_NULL_HANDLE;
+    VkPipeline pipelineLayerErase = VK_NULL_HANDLE;
+    bool eraseOn = false;
     VkPipeline activePipeline = VK_NULL_HANDLE;
     VkDescriptorPool dsPool = VK_NULL_HANDLE;
 
@@ -2011,6 +2016,16 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         };
         VkResult pr = build(samples, pipeline);
         if (pr == VK_SUCCESS && useDynamic) pr = build(VK_SAMPLE_COUNT_1_BIT, pipelineLayer);
+        // v27 擦除变体
+        if (pr == VK_SUCCESS) {
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+            pr = build(samples, pipelineErase);
+            if (pr == VK_SUCCESS && useDynamic)
+                pr = build(VK_SAMPLE_COUNT_1_BIT, pipelineLayerErase);
+        }
         g_vk.vkDestroyShaderModule(device, vs, nullptr);
         g_vk.vkDestroyShaderModule(device, fs, nullptr);
         if (pr != VK_SUCCESS) {
@@ -2157,6 +2172,13 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         cur.count += 2;
     }
 
+    // v27：按 (是否在图层, 是否擦除) 选管线
+    void refreshPipeline() {
+        if (eraseOn) activePipeline = layerStack.empty() ? pipelineErase : pipelineLayerErase;
+        else         activePipeline = layerStack.empty() ? pipeline : pipelineLayer;
+        if (!activePipeline) activePipeline = pipeline;   // 擦除管线建失败就退回普通混合
+    }
+
     void flush() {
         // 每帧一次也要提成 static：UCRT 的 getenv 要遍历环境表，~0.5 µs/次，
         // 和本文件 fillRect 里同一个坑（§7.3）。
@@ -2276,7 +2298,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
 
     // resume=true：本帧内第二次进入主目标（从图层回来）—— 内容要保住，加一条依赖
     void beginMainPass(bool resume = false) {
-        activePipeline = pipeline;
+        refreshPipeline();
         if (!useDynamic) {
             VkRenderPassBeginInfo rpb{};
             rpb.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
@@ -2400,7 +2422,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         // 层框外既没人写也没人采样（合成四边形按层框 scissor），所以不用管它。
         VkRenderingInfo ri = makeRenderingInfo(&ca, f.l, f.t, f.r, f.b);
         g_vk.vkCmdBeginRendering(cmd, &ri);
-        activePipeline = pipelineLayer;
+        refreshPipeline();
         setPassState();
     }
 
@@ -2411,7 +2433,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // 那正是 v0.16.8 留下、v0.16.9/v0.16.10 用图层修掉的近似。
     bool pushLayer(float x, float y, float lw, float lh, float alpha) {
         if (!ready || !useDynamic || !cmdOpen) return false;
-        if (!(lw > 0.0f) || !(lh > 0.0f) || alpha >= 0.999f) return false;
+        if (!(lw > 0.0f) || !(lh > 0.0f) || alpha <= 0.0f) return false;   // v27：alpha=1 也允许（裁剪用容器层）
         if (static_cast<int>(layerStack.size()) >= kMaxLayers) { warnLayerLimit(); return false; }
         // 顺序很重要：先把主目标上攒着的图元录到**当前**目标，再去切目标 ——
         // 反过来的话它们会画进刚清空的层里，然后被合成四边形整块盖掉。
@@ -2667,6 +2689,9 @@ void BinUIVK::shutdown() {
     d.samplerNearest = d.samplerLinear = VK_NULL_HANDLE;
     if (d.pipeline) g_vk.vkDestroyPipeline(d.device, d.pipeline, nullptr);
     if (d.pipelineLayer) g_vk.vkDestroyPipeline(d.device, d.pipelineLayer, nullptr);
+    if (d.pipelineErase) g_vk.vkDestroyPipeline(d.device, d.pipelineErase, nullptr);
+    if (d.pipelineLayerErase)
+        g_vk.vkDestroyPipeline(d.device, d.pipelineLayerErase, nullptr);
     if (d.pipeLayout) g_vk.vkDestroyPipelineLayout(d.device, d.pipeLayout, nullptr);
     if (d.dsLayout) g_vk.vkDestroyDescriptorSetLayout(d.device, d.dsLayout, nullptr);
     // 双槽：每槽自己一套顶点缓冲 / fence / 信号量
@@ -3279,6 +3304,15 @@ void BinUIVK::setImageFilter(const BinUIImageFilter* f) {
     if (!impl_->imgFilterKey) return;
     for (int i = 0; i < 9; i++) impl_->imgFilter.m[i] = f->m[i];
     for (int i = 0; i < 3; i++) impl_->imgFilter.o[i] = f->offset[i];
+}
+
+// v27 裁剪擦除：先 flush（批次延迟提交），再换管线
+bool BinUIVK::setEraseBlend(bool on) {
+    if (!impl_ || !impl_->ready) return false;
+    impl_->flush();
+    impl_->eraseOn = on;
+    impl_->refreshPipeline();
+    return true;
 }
 
 bool BinUIVK::setAffine(const float* xf) {

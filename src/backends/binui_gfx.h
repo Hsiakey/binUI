@@ -131,6 +131,14 @@ public:
     // 注意：brightness() 不走这里（它等价于乘一个顶点色，见 paint.reserve[2]）。
     virtual void setImageFilter(const BinUIImageFilter* f) { (void)f; }
 
+    // ---- 裁剪擦除（v27：clip-path）----
+    // 打开后，接下来画的几何按 `dst *= (1 - srcA)` 混合（预乘 alpha 下的"擦除"）。
+    // 用法：节点画进离屏图层 → 打开擦除 → 用 even-odd 补集（图层矩形 + 裁剪路径）
+    // 画一遍 → 关掉 → 弹层。路径外被清零、边缘按覆盖率淡出 = 任意形状裁剪。
+    // 返回 false = 不支持（GDI 遗留路径），调用方退回"不裁剪"。
+    // 注意：实现必须在**切换混合状态前**把手上的批次刷掉，否则那批几何会用错混合。
+    virtual bool setEraseBlend(bool on) { (void)on; return false; }
+
     // ---- 文字阴影（v24：CSS text-shadow）----
     // 在画一个节点的文字**之前**设好，节点画完用 alpha=0 清掉（或下个节点重设）。
     // color 的 alpha 已折入元素 opacity；blur < 0.5px 由实现按"硬阴影"（偏移一份字形）处理。

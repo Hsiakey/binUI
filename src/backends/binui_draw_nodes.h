@@ -837,6 +837,27 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             gfx.pushClip(par.x - offX[ai], par.y - offY[ai], par.width, par.height);
         }
 
+        // ---- v0.16.24：clip-path（v27 裁剪路径段）----
+        // 内容先画进**离屏图层**，画完再用"图层矩形 + 裁剪路径"的 even-odd 补集把路径外
+        // 擦掉（dst *= 1-srcA）。这样任意形状的裁剪都成立，而且只需要一个额外的混合状态。
+        // 后端不支持擦除（GDI 遗留路径）或图层池满了 → 退回不裁剪，不会画坏。
+        const BinUIRenderer::ClipRecord* clipRec = draw ? renderer.clipPathOf(node.id) : nullptr;
+        if (std::getenv("BINUI_DEBUG_CLIPMASK") && clipRec)
+            std::fprintf(stderr, "[clipmask] node=%u pts=%d contours=%d box=(%.1f,%.1f %.1fx%.1f)\n",
+                         (unsigned)node.id, (int)clipRec->head.pointCount,
+                         (int)clipRec->head.contourCount, (double)clipRec->head.x,
+                         (double)clipRec->head.y, (double)clipRec->head.w,
+                         (double)clipRec->head.h);
+        bool clipLayer = false;
+        if (clipRec && clipRec->head.pointCount >= 3 && !clipRec->first.empty()) {
+            clipLayer = gfx.pushLayer(cl, ct, cw, ch, 1.0f);
+            if (std::getenv("BINUI_DEBUG_CLIPMASK"))
+                std::fprintf(stderr, "[clipmask]   pushLayer(%s) layer=(%.1f,%.1f %.1fx%.1f)"
+                                    " erase-ok=%d\n", clipLayer ? "ok" : "FAIL",
+                             (double)cl, (double)ct, (double)cw, (double)ch,
+                             (int)gfx.setEraseBlend(true));
+        }
+
         // v0.16.18 仿射文字/图片：后端支持时整段改用**节点局部坐标**，由 setAffine 转到屏幕；
         // GDI 返回 false → 保持 AABB（"只转盒子"的老行为，像素不变）。
         bool affineLocal = false;
@@ -1373,6 +1394,91 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         }
 
         if (affineLocal) gfx.setAffine(nullptr);   // v0.16.18：恢复轴对齐
+
+        // v0.16.24：裁剪擦除。补集 = 图层矩形 + 裁剪路径（even-odd），在擦除混合下画一遍。
+        if (clipLayer) {
+            const BinUIClipEntry& chd = clipRec->head;   // 注意别叫 ch：外层 ch 是图层高度
+            const float bx = chd.x, by = chd.y;
+            const float bw = chd.w > 0.0f ? chd.w : 1.0f;
+            const float bh = chd.h > 0.0f ? chd.h : 1.0f;
+            // 点先按裁剪盒反归一化，再按**图层矩形**重新归一化（补集要在图层坐标里填）
+            static thread_local std::vector<uint16_t> cpts;
+            static thread_local std::vector<uint32_t> cfirst;
+            static thread_local std::vector<uint8_t> cclosed;
+            static thread_local std::vector<uint32_t> ccount;
+            cpts.clear(); cfirst.clear(); cclosed.clear(); ccount.clear();
+            const float cwL = cw > 0.0f ? cw : 1.0f;
+            const float chL = ch > 0.0f ? ch : 1.0f;
+            auto norm = [&](float px, float py, uint16_t& ux, uint16_t& uy) {
+                float u = (px - cl) / cwL;
+                float v = (py - ct) / chL;
+                u = u < 0.0f ? 0.0f : (u > 1.0f ? 1.0f : u);
+                v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+                ux = static_cast<uint16_t>(u * 65535.0f + 0.5f);
+                uy = static_cast<uint16_t>(v * 65535.0f + 0.5f);
+            };
+            // 外层矩形（顺时针）＝ 图层矩形
+            cfirst.push_back(0);
+            cclosed.push_back(1);
+            const uint16_t q0 = 0, q1 = 65535;
+            cpts.insert(cpts.end(), { q0, q0, q1, q0, q1, q1, q0, q1 });
+            // 裁剪路径各子路径（按裁剪盒反归一化后再落到图层矩形）
+            for (size_t k = 0; k < clipRec->first.size(); k++) {
+                const uint32_t start = clipRec->first[k];
+                const uint32_t end = (k + 1 < clipRec->first.size())
+                                         ? clipRec->first[k + 1]
+                                         : static_cast<uint32_t>(chd.pointCount);
+                cfirst.push_back(static_cast<uint32_t>(cpts.size() / 2));
+                cclosed.push_back(1);
+                for (uint32_t q = start; q < end; q++) {
+                    const float px = bx + (clipRec->pts[q * 2]) / 65535.0f * bw;
+                    const float py = by + (clipRec->pts[q * 2 + 1]) / 65535.0f * bh;
+                    uint16_t ux = 0, uy = 0;
+                    norm(px, py, ux, uy);
+                    cpts.push_back(ux);
+                    cpts.push_back(uy);
+                }
+            }
+            for (size_t k = 0; k < cfirst.size(); k++) {
+                const uint32_t endPts = (k + 1 < cfirst.size())
+                                            ? cfirst[k + 1]
+                                            : static_cast<uint32_t>(cpts.size() / 2);
+                ccount.push_back(endPts - cfirst[k]);
+            }
+            if (gfx.setEraseBlend(true)) {
+                BinUIPathEntry ph = {};
+                ph.flags = PATH_FILL | PATH_EVENODD;   // 补集要 even-odd，否则矩形内部的路径区也被擦掉
+                ph.fillColor = 0xFFFFFFFFu;
+                ph.designW = cwL;
+                ph.designH = chL;
+                ph.pointCount = static_cast<uint16_t>(std::min<size_t>(65535, cpts.size() / 2));
+                ph.contourCount = static_cast<uint16_t>(std::min<size_t>(65535, cfirst.size()));
+                static thread_local binui::PathRenderBuffers cbuf;
+                binui::PathPaintSpec cspec;
+                cspec.fillColor = 0xFFFFFFFFu;
+                cspec.strokeColor = 0;
+                cspec.opacity = 1.0f;
+                binui::PaintPathNode(ph, cpts.data(), cfirst.data(), ccount.data(),
+                                     cclosed.data(), static_cast<int>(cfirst.size()),
+                                     static_cast<float>(cl), static_cast<float>(ct), cwL, chL,
+                                     cspec, nullptr, 0, 0, cbuf,
+                                     [&](const binui::PaintBand* b, int n) {
+                                         for (int q = 0; q < n; q++)
+                                             gfx.fillRect(b[q].x, b[q].y, b[q].w, b[q].h,
+                                                          b[q].color);
+                                     },
+                                     [&](float x0, float y0, float x1, float y1, float lw2,
+                                         uint32_t lc) {
+                                         gfx.fillLine(x0, y0, x1, y1, lw2, lc);
+                                     },
+                                     [&](float rx, float ry, float rw, float rh, float rr,
+                                         uint32_t dcc) {
+                                         gfx.fillRounded(rx, ry, rw, rh, rr, dcc);
+                                     });
+                gfx.setEraseBlend(false);
+            }
+            gfx.popLayer();
+        }
         gfx.popClipTo(savedDepth);
     }
     // 收尾：图层必须成对弹出（正常不会剩下，防御性兜底）

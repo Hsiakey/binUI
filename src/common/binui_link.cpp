@@ -18,6 +18,14 @@ namespace {
 // 布局文档：把二进制拆成可合并的结构，再按 v12 段序重新写出
 // ============================================================
 // 路径段（v15）的一条子记录：定长头 +（v16）渐变 + 三条变长表
+// v27 裁剪路径段的一条记录（节点 + 设备空间包围盒 + 归一化点）
+struct ClipRec {
+    BinUIClipEntry head{};
+    std::vector<uint32_t> first;
+    std::vector<uint8_t>  closed;
+    std::vector<uint16_t> pts;
+};
+
 struct DocPath {
     BinUIPathEntry head{};
     bool hasGrad = false;
@@ -55,6 +63,8 @@ struct Doc {
     std::vector<BinUITextShadow> textShadows;   // v24 文字阴影段
     std::vector<BinUIPaintEx> paintEx;         // v25 绘制附加段（九宫格图片）
     std::vector<BinUIImageFilter> imgFilter;   // v26 图片滤镜段（CSS filter 颜色矩阵）
+
+    std::vector<ClipRec> clips;   // v27 裁剪路径段
     std::vector<std::pair<uint16_t, std::string>> names;
 };
 
@@ -543,6 +553,55 @@ bool ParseDoc(const void* data, size_t size, Doc& d) {
         }
         if (!ok) r.rewind(mark);
     }
+    // ---- 裁剪路径段（v27）：uint32 bytes + uint32 count + 每条（头 + 子路径表 + 点表） ----
+    {
+        const uint8_t* mark = r.cur();
+        uint32_t bytes = 0;
+        bool ok = false;
+        if (r.u32(bytes)) {
+            if (bytes == 0) {
+                ok = true;
+            } else {
+                const uint8_t* sp = nullptr;
+                if (r.blob(bytes, sp)) {
+                    Reader s(sp, sp + bytes);
+                    uint32_t sc = 0;
+                    if (s.u32(sc)) {
+                        ok = true;
+                        for (uint32_t k = 0; k < sc && ok; k++) {
+                            ClipRec cr;
+                            if (!s.left() || s.left() < sizeof(BinUIClipEntry)) { ok = false; break; }
+                            const uint8_t* hp = nullptr;
+                            if (!s.blob(sizeof(BinUIClipEntry), hp)) { ok = false; break; }
+                            memcpy(&cr.head, hp, sizeof(BinUIClipEntry));
+                            const size_t nc = cr.head.contourCount;
+                            const size_t np = static_cast<size_t>(cr.head.pointCount) * 2;
+                            cr.first.resize(nc);
+                            cr.closed.resize(nc);
+                            cr.pts.resize(np);
+                            if (nc) {
+                                const uint8_t* fp = nullptr;
+                                if (!s.blob(nc * sizeof(uint32_t), fp)) { ok = false; break; }
+                                memcpy(cr.first.data(), fp, nc * sizeof(uint32_t));
+                                const uint8_t* cp = nullptr;
+                                if (!s.blob(nc, cp)) { ok = false; break; }
+                                memcpy(cr.closed.data(), cp, nc);
+                            }
+                            if (np) {
+                                const uint8_t* pp = nullptr;
+                                if (!s.blob(np * sizeof(uint16_t), pp)) { ok = false; break; }
+                                memcpy(cr.pts.data(), pp, np * sizeof(uint16_t));
+                            }
+                            d.clips.push_back(std::move(cr));
+                        }
+                    }
+                }
+                if (!ok) { d.clips.clear(); r.rewind(mark); }
+            }
+        }
+        if (!ok) r.rewind(mark);
+    }
+
     // ---- 名称段（v8，缺失 = 无命名节点） ----
     {
         uint32_t bytes = 0;
@@ -724,7 +783,23 @@ std::vector<uint8_t> EmitDoc(Doc& d) {
         if (!d.imgFilter.empty())
             PutRaw(p, d.imgFilter.data(), d.imgFilter.size() * sizeof(BinUIImageFilter));
         PutSection(b, p);
-    }    // 名称段（非空才写）
+    }    // 裁剪路径段（v27，恒定写出）
+    {
+        std::vector<uint8_t> p2;
+        auto put = [&](const void* b, size_t n) {
+            const uint8_t* q = static_cast<const uint8_t*>(b);
+            p2.insert(p2.end(), q, q + n);
+        };
+        PutU32(p2, static_cast<uint32_t>(d.clips.size()));
+        for (const ClipRec& cr : d.clips) {
+            put(&cr.head, sizeof(cr.head));
+            if (!cr.first.empty())  put(cr.first.data(),  cr.first.size()  * sizeof(uint32_t));
+            if (!cr.closed.empty()) put(cr.closed.data(), cr.closed.size());
+            if (!cr.pts.empty())    put(cr.pts.data(),    cr.pts.size()    * sizeof(uint16_t));
+        }
+        PutSection(b, p2);
+    }
+    // 名称段（非空才写）
     if (!namePairs.empty()) {
         std::vector<uint8_t> p;
         PutU32(p, static_cast<uint32_t>(namePairs.size()));
@@ -999,6 +1074,15 @@ bool MergeLayout(std::vector<uint8_t>& host, const void* comp, size_t compSize,
         f2.nodeId = idMap[it->second];
         h.imgFilter.push_back(f2);
     }
+    // ---- 裁剪路径段（v27）：几何跟着 nodeId 重映射搬过来 ----
+    for (const ClipRec& cr : c.clips) {
+        auto it = compIdx.find(cr.head.nodeId);
+        if (it == compIdx.end() || it->second == 0) continue;
+        ClipRec r2 = cr;
+        r2.head.nodeId = static_cast<uint16_t>(idMap[it->second]);
+        h.clips.push_back(std::move(r2));
+    }
+
     // ---- 组件引用段（组件内再外挂组件时递归） ----
     for (auto& ref : c.comps) {
         ComponentRef r2 = ref;

@@ -71,6 +71,7 @@ public:
     void setTextShadow(float dx, float dy, float blur, uint32_t color) override;
     bool setAffine(const float xf[6]) override;
     void setImageFilter(const BinUIImageFilter* f) override;   // v26：CSS filter 颜色矩阵
+    bool setEraseBlend(bool on) override;                       // v27：clip-path 擦除
     // v0.16.10：组透明度的离屏合成（见 binui_gfx.h 的 pushLayer 注释）
     bool pushLayer(float x, float y, float w, float h, float alpha) override;
     void popLayer() override;

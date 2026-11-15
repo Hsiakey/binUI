@@ -156,6 +156,22 @@ public:
         auto it = imgFilter_.find(nodeId);
         return it == imgFilter_.end() ? nullptr : &it->second;
     }
+    // v27 裁剪路径段：裁剪几何（**设备空间**包围盒 + 归一化点）。与路径段同一个口径，
+    // 只是盒子由编译期算好，运行期不再需要 SVG 变换链。
+    struct ClipRecord {
+        BinUIClipEntry head{};
+        std::vector<uint32_t> first;
+        std::vector<uint8_t>  closed;
+        std::vector<uint16_t> pts;
+    };
+
+    // v27 裁剪路径段：节点的裁剪几何（设备空间包围盒 + 归一化点）。
+    // 运行期画法：离屏图层 + "图层矩形 ∪ 这条路径"的 even-odd 擦除。
+    const ClipRecord* clipPathOf(uint16_t nodeId) const {
+        auto it = clipPaths_.find(nodeId);
+        return it == clipPaths_.end() ? nullptr : &it->second;
+    }
+
 
     // v15 路径段：BINUI_PATH 节点的折线（归一化坐标 + 子路径表；无条目返回 nullptr）
     struct PathRecord {
@@ -701,6 +717,8 @@ private:
     std::vector<BinUITextShadow> textShadows_;   // v24 文字阴影段（同一节点多条连续存放）
     std::unordered_map<uint16_t, BinUIPaintEx> paintEx_;   // v25 绘制附加段（一个节点一条）
     std::unordered_map<uint16_t, BinUIImageFilter> imgFilter_;  // v26 图片滤镜段（一个节点一条）
+    // v27 裁剪路径段
+    std::unordered_map<uint16_t, ClipRecord> clipPaths_;
     // nodeId -> (textShadows_ 起始下标, 条数)
     std::unordered_map<uint16_t, std::pair<size_t, uint32_t>> textShadowIdx_;
     // v19 路径条带的跨帧缓存（条带数量有上限，条目数也封顶）。
