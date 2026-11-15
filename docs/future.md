@@ -1,8 +1,8 @@
 # 未来计划：bin2d / bin3d / binGPU
 
 > **状态（2026-11-15）：三个项目的地基已落地**，代码放在 binUI 的**同级目录**（独立仓库，
-> 不在本仓库里，所以下面的路径是本地磁盘路径、GitHub 上点不开）：`../binGPU` v0.1.0
-> （C11 / C ABI，NULL + CPU 参考后端）、`../bin2D` v0.1.0（C++17，场景图 / 图层 / 合成 +
+> 不在本仓库里，所以下面的路径是本地磁盘路径、GitHub 上点不开）：`../binGPU` v0.2.0
+> （C++17 实现 / C 兼容 ABI，NULL + CPU 参考后端）、`../bin2D` v0.1.0（C++17，场景图 / 图层 / 合成 +
 > 覆盖率 AA 光栅）、`../bin3D` v0.1.0（C++17，软光栅 + 相机 / 裁剪 / 深度 / 光照）。
 > 本文继续作为**方向与分工**的记录；具体做法、验收数字与欠账以各仓库自己的 `docs/` 为准。
 > **binUI 本体为此一行代码都没改**（`.bui` 布局与 `BINUI_VERSION` 不变），三个项目各自
@@ -13,44 +13,47 @@
 > 还有最底下一层**设备与呈现**（binGPU）。
 > 三者都不改 `BINUI_VERSION`（不碰 `.bui` 布局，纯新增目标）。
 >
-> **语言分工（master 定）**：bin3d = C++，bin2d = C++，**binGPU = C**。bin2d/bin3d 跟 binUI
-> 同为 C++17；只有最底下的 binGPU 是 C11、导出 C ABI —— 理由见下一节。
+> **语言分工（master 定，2026-11-15 修订）**：**四层实现全部 C++17**；唯一保留的边界是 binGPU
+> 的**对外 ABI 仍是 C 兼容的扁平函数**（`bingpu.h` 里只有定长 POD + `uint64_t` 句柄，必须能被
+> 纯 C 编译器单独编过）。"语言"和"ABI"是两件事，下一节说清为什么分开。
 
-## 语言分工：binGPU 用 C，上面两层用 C++
+## 语言分工：实现全是 C++17，最底下那一圈 ABI 仍保持 C
 
-| 项目 | 语言 | 对外边界 |
+| 项目 | 实现语言 | 对外边界 |
 |---|---|---|
-| binGPU | **C11** | 头文件只有定长 POD + `uint64_t` 句柄 + 扁平函数；`.h` 里不能出现任何 C++ 类型 |
+| binGPU | **C++17** | `.cpp` 实现（RAII / 容器 / 内部异常）；`bingpu.h` 是**C 兼容**的扁平 ABI，C 与 C++ 都能 include |
 | bin2d | **C++17** | 对外是 C++ 头（`bin2d/*.h`）；对下调 binGPU 的 C 头 |
 | bin3d | **C++17** | 对外是 C++ 头；对下调 binGPU，横向直连 bin2d（C++ 对 C++） |
 
-**为什么偏偏最底层是 C**（这不是妥协，是三件事凑出来的结论）：
+**为什么 ABI 用 C 而实现用 C++**（这两件事一开始被绑在一起，2026-11-15 分开）：
 
-1. **它下面那三套 API 本来就是 C**：`vulkan.h` 是 C；D3D12 是 COM —— C 风格的 vtable，从 C
-   里自己声明接口也能调；GL 是 C。用 C 写这一层是顺着接口走，用 C++ 写反而是给 C 接口套一层
-   C++ 壳、再让上层隔着 `extern "C"` 打回来。
-2. **它是最可能被别人直接绑的一层**：`bindings/` 现在有 Python / Go / Rust 三条绑定，它们全都
-   只吃 `include/binui_c.h`，绕开 binUI 的 C++ 接口。GPU 层是 C ABI，意味着 **Rust / Go 想画
-   2D/3D 可以直接绑 binGPU，不必等 binUI 的 C ABI 扩到"绘制"那一大片**。
-3. **形状合适**：GPU 层传的全是数字和句柄 —— 没有字符串、没有回调、没有可变长结构。正好落在
-   [`docs/bindings.md`](bindings.md) 那三条约束（定长 POD / 无回调 / UTF-8）里最省事的位置；
-   反过来，场景图、图层、矩阵、容器这些是 C++ 的主场，硬用 C 写等于自己造 vector 和 unique_ptr。
+1. **ABI 的选择看"谁要 include 它"**：`bindings/` 里 Python / Go / Rust 只吃 C 接口。binGPU 是
+   C ABI，意味着它们想画 2D/3D 可以直接绑，不必等 binUI 的 C ABI 扩到"绘制"那一大片。这个理由
+   跟**用什么语言实现**无关 —— C++ 写、导出 C 符号是 Vulkan loader / HarfBuzz / bgfx / Skia 的
+   常规做法。
+2. **实现语言按表达力选**：这一层要的是句柄表、容器、生命周期、错误串拼接，在 C 里全是手写样板
+   （`std::vector` 换成手动 realloc + 容量字段、两条销毁路线各写一遍析构）。收益为零，维护成本
+   却压在每一处；四层统一 C++17 之后，工具链、静态链接参数、风格也一致了。
+3. **"C 更快"不成立**（见本节末的实测）：语言本身不改变汇编，差别只在"能不能把取样器内联掉"。
 
-**C 带来的硬约束（写在这，别让实现时才吵）**：
+**硬约束（ABI 面与实现面分开写）**：
 
-- 没有异常、没有 RAII：设备 / 缓冲 / 管线 / 交换链全是 `uint64_t` 句柄（**不是指针** —— 跨语言
-  传指针是被绑语言的噩梦），创建失败返回错误码，错误串走 `bingpu_last_error()` 那种静态缓冲。
-- 销毁顺序由调用方保证（C 没有析构）。bin2d / bin3d 各包一层 C++ RAII（`Device` 持有句柄、
-  析构里 destroy），把"先销毁子资源再销毁设备"收在**一处**，别让每个调用点自己记。
-- 不搞跨线程回调：device lost / resize 这类事件用显式轮询（`bingpu_poll()`）在渲染线程上取。
-  一旦有回调，就要处理"回调里再进 GPU 层"的可重入问题，C ABI 上这是最贵的那种 bug。
-- 实现可以是 `.c`（纯 C11），也可以按 `src/binui_c.cpp` 的老办法用 C++ 实现 C 接口 —— 但**导出
-  的头文件和 ABI 必须是 C**，且不依赖 libstdc++（否则 Rust/Go 那条路直接断）。
-- 构建没障碍：`CMakeLists.txt` 已经是 `LANGUAGES C CXX`，加一个 `add_library(bingpu STATIC ...)`
-  即可；注意 MinGW 下 `.c` 走 C 编译器，头文件里混进 C++ 语法会在那一步炸出来。
+- **ABI 面**（`include/bingpu.h`）：只有定长 POD + `uint64_t` 句柄 + 扁平函数，**必须能被纯 C
+  编译器单独编过**（`make abi-check` 用 `gcc -x c` 编一遍，并 grep 禁掉 `namespace` / `class` /
+  `template` / `std::`）。句柄是 `uint64_t` 而不是指针 —— 跨语言传指针是被绑语言的噩梦。
+- **实现面**（`.cpp`）：C++ 抽象后端接口 + RAII，内部随便用 `std::vector` / `std::string` /
+  `std::unique_ptr` / 异常；但**异常绝不越过 ABI** —— 每个 `extern "C"` 入口 `noexcept` + 顶层
+  try/catch，`bad_alloc` → `BGPU_ERR_OUT_OF_MEMORY`，其余 → `BGPU_ERR_BACKEND_FAILED` 并把
+  `what()` 写进 `bingpu_last_error()`。
+- **没有回调**：device lost / resize 这类事件用显式轮询（`bingpu_poll()`）在渲染线程上取。一旦
+  有回调，就要处理"回调里再进 GPU 层"的可重入问题 —— 那是最贵的一类 bug。
+- **销毁顺序仍由调用方保证**（C ABI 上没有析构）：bin2d / bin3d 各包一层 C++ RAII（`Device`
+  持有句柄、析构里 destroy），把"先销毁子资源再销毁设备"收在**一处**、别让每个调用点自己记。
+- **唯一的对外代价**：静态库会带 libstdc++。用 C ABI 绑它的语言在链接时要么让它把运行时静态
+  链进去、要么自己带一份；这条写进了 binGPU 的 `docs/abi.md`，不藏着。
 
-**方向是单向的**：bin2d / bin3d / binUI 都只**消费** binGPU 的 C 头，谁也不把自己的 C++ 类型
-泄回那一层。哪天发现要往 binGPU 里塞 `std::string` 或模板，就说明那一层被放错了东西。
+**方向仍是单向的**：bin2d / bin3d / binUI 都只**消费** binGPU 的头，谁也不把自己的 C++ 类型
+泄回那一层。
 
 ### 附：「纯 C 会不会更快」——实测过，不会
 
@@ -83,18 +86,18 @@ master 问过：bin2d/bin3d 是图形 API，写成纯 C 是不是更快、"引�
    语言实现无关）；想少写容器/生命周期样板，就用 C++ 写、C ABI 导 —— Vulkan loader、
    HarfBuzz、bgfx、Skia 都是这个套路。
 
-落到这三个项目上就是：**binGPU 用 C（它是 ABI 面，底下三套 API 本来就是 C），bin2d/bin3d 用
-C++17 写、需要时再挂一层 `extern "C"` 的 C 入口**。"是 API 就得用 C"不成立，
-"是引擎就得用 C++"也不成立 —— 真正的分界线是"这一层要不要给别人直接 include"。
+落到这三个项目上就是：**四层都用 C++17 写**，而 binGPU 对外挂一层 C 兼容 ABI（它是最可能被别的
+语言直接 include 的一层，所以边界用 C）。"是 API 就得用 C"不成立，"是引擎就得用 C++"也不成立 ——
+真正的分界线是"这一层要不要给别人直接 include"，以及"那道边界是不是 C 兼容"。
 
-## 地基落地清单（v0.1.0，2026-11-15）
+## 地基落地清单（2026-11-15 落地；binGPU 已到 0.2.0，bin2d / bin3d 仍是 0.1.0）
 
 三个仓库都是"能编、能测、能出图"的地基，不是空壳：**头文件是定稿的公开接口，实现是最小可用集**，
 故意没做的部分写在各自的 `docs/roadmap.md` 里（附开工条件）。
 
 | 项目 | 语言 | v0.1.0 里已经有的 | 验收（本机实测） |
 |---|---|---|---|
-| **binGPU** | C11 | `bingpu.h` 定稿 ABI（句柄 `uint64_t`、`struct_size` 版本化 POD、无回调、`bingpu_poll` 轮询）；**NULL** 后端（只校验+计数）与 **CPU 参考后端**（五种混合 / 采样器 / scissor / viewport / affine / 离屏 / float 深度 / 网格 / 反预乘回读）；后端注册表（VK、D3D12、GL 登记为"未实现"） | `make test` **573 条断言**（ABI 239 + CPU 像素 334）、`make abi-check`（纯 C 编头 + 禁 C++ 设施）、零警告 |
+| **binGPU** | C++17 / C 兼容 ABI | `bingpu.h` 定稿 ABI（句柄 `uint64_t`、`struct_size` 版本化 POD、无回调、`bingpu_poll` 轮询）；**NULL** 后端（只校验+计数）与 **CPU 参考后端**（五种混合 / 采样器 / scissor / viewport / affine / 离屏 / float 深度 / 网格 / 反预乘回读）；后端注册表（VK、D3D12、GL 登记为"未实现"） | `make test` **573 条断言**（ABI 239 + CPU 像素 334）、`make abi-check`（纯 C 编头 + 禁 C++ 设施）、零警告 |
 | **bin2D** | C++17 | 四个 header-only 地基头（`core`/`surface`/`transform`/`png`）+ `paint`/`path`（命令级 + 自适应展平 + 精确包围盒）/`raster`（覆盖率 AA 填充与描边、圆角、渐变、位图、九宫格、盒式模糊）/`canvas`（变换栈 + 裁剪栈 + 图层栈 + 5 种混合）/`scene`（Group/Shape/ImageShape + 投影）/`image`；`gpu.h` 是 binGPU 桥 | `make test` **94 条断言**、`make demo` 出图、`make layers` 边界检查；**与 binGPU CPU 后端逐像素往返 0 差**（最大通道差 0） |
 | **bin3D** | C++17 | `math`（列主序 Mat4 / Vec）+ `camera` + `mesh`（**36 字节顶点，与 `BgpuMeshVertex` 逐字段同布局**）+ `scene`（节点级联 / 材质 / 平行光 + 环境光）+ `SoftRenderer`（六平面齐次裁剪、1/w 透视校正、z-buffer、Lambert、统计）；`gpu.h` 是 GPU 阶段的桩（全部返回 false 并给出原因） | `make test` **164 条断言**、`make demo` 出三格并排图、`make layers`；1280×720 一帧 ≈22.6 ms（≈24 ns/像素，瓶颈在像素不在三角形） |
 
@@ -405,8 +408,9 @@ bin2d 里出现 `BinUINode`、`flex`、"节点盒"这些字眼就说明抽错了
 **定位**：一份"设备 / 交换链 / 资源 / 管线 / 命令 / 呈现"的抽象，Vulkan 与 D3D12 各一个实现。
 binUI、bin2d、bin3d 只写"怎么画"，不再各自维护一份交换链。
 
-**语言**：**C11**，导出 C ABI —— 头文件里只有定长 POD + `uint64_t` 句柄 + 扁平函数，没有回调、
-没有异常、没有 C++ 类型（理由与硬约束见上文「语言分工」）。
+**语言**：**实现 C++17**（RAII、容器、内部异常），**对外是 C 兼容的 ABI** —— 头文件里只有定长
+POD + `uint64_t` 句柄 + 扁平函数，没有回调；C 与 C++ 都能直接 include（理由与硬约束见上文
+「语言分工」，以及 binGPU 仓库自己的 `docs/abi.md`）。
 
 **为什么看起来该做**：同一件事现在写了三遍，而且每一遍都是完整的一份生命周期：
 
@@ -468,7 +472,7 @@ bin3d  (C++17) ──►  bin2d 核 (C++17)（场景图 / 图层 / 合成 / 光�
 binUI  (C++17) ───────────┘（并排的消费者：布局 + 事件 + 文本，用 2D 核画自己）
                           │
                           ▼
-                binGPU (C11 / C ABI)（设备 / 交换链 / 管线 / 呈现）
+                binGPU (C++17 / C 兼容 ABI)（设备 / 交换链 / 管线 / 呈现）
                           │
                           ▼
                 GL（兜底）/ VK / D3D12 —— 这三套 API 自己也是 C
@@ -478,7 +482,7 @@ binUI  (C++17) ───────────┘（并排的消费者：布�
 语言边界只有**一条**：`binGPU` 的 C 头。上面三层都是 C++，谁都可以 `#include "bingpu.h"`；
 下面的 GL/VK/D3D12 本来也是 C 接口，所以整条链上没有"语言转换层"这种东西。
 
-**顺带的好处**：binGPU 是 C ABI，`bindings/` 里那三条语言（Python / Go / Rust）将来可以直接绑它
+**顺带的好处**：binGPU 是 C 兼容 ABI，`bindings/` 里那三条语言（Python / Go / Rust）将来可以直接绑它
 画 2D/3D，不必等 binUI 的 C ABI 一路扩到绘制原语。
 
 **和 binUI 发布的关系**：这三个项目都不改 `.bui` 布局、不动 `BINUI_VERSION`，所以可以随时并行

@@ -109,6 +109,61 @@ GDI 文字阴影 `AlphaBlend` 源位图未选中导致阴影整块不出现）�
   每行宽度之和 = 盒宽、横向 UV 首尾相接、首末块 UV 到 0/1、内缩钳到源图半张、
   盒比内缩小不出现负宽、退化输入返回 0。
 
+## [0.16.30] - 2026-11-15
+
+**语言分工修订**：`binGPU` 的实现从 C11 改成 **C++17**，对外的 ABI **一位未动**（仍是 C 兼容的
+扁平函数，`BINGPU_ABI_VERSION` 还是 1）。binGPU 到 **v0.2.0**；binUI 本版仍然只动文档 +
+版本号，`.bui` 布局与 `BINUI_VERSION`（29）不变。
+
+### 改 — 为什么把"语言"和"ABI"拆成两件事
+
+之前定的分工是"最底层用 C"，理由是"底下三套 API 本来就是 C + 要给别人绑"。写下来发现前两条
+理由站不住：
+
+- **绑定的理由是 ABI 的，不是语言的**：Python / Go / Rust 吃的是 C 符号，而"用 C++ 实现、导出
+  C 符号"是 Vulkan loader / HarfBuzz / bgfx / Skia 的常规做法 —— 两者根本不冲突；
+- **这一层要的全是 C++ 的主场**：句柄表、容器、生命周期、错误串拼接。用 C 写等于手写
+  `std::vector`（realloc + 容量字段）和两遍析构路径，收益为零、维护成本压在每一处；
+- **"C 更快"早测过不成立**（`docs/future.md` 里的实测：同一份混合内核 gcc/g++ 生成的汇编逐行相同，
+  差别只在能不能内联取样器）。
+
+于是现在：**四层实现全是 C++17**；唯一保留的边界是 `bingpu.h` 的 **C 兼容 ABI** —— 它必须能被
+纯 C 编译器单独编过（`make abi-check` 用 `gcc -x c` 编），因为别人要绑的就是这一圈。
+
+### 加 — binGPU 0.2.0 实际改了什么
+
+- **后端变成 C++ 类**：`class Backend` 纯虚接口 + `BackendBase`（两个后端共用的状态机/校验/计数）
+  + `NullBackend` / `CpuBackend`。共用一份状态机意味着两个后端**结构上不可能**校验不一致 ——
+  这是 0.1.0 里靠"人肉对齐"的地方。
+- **RAII 对象表**：`vector<unique_ptr<ObjectBase>>`，析构管资源，`destroy` 只负责摘槽；代数失效、
+  设备连带清理、销毁前清空别人指向它的裸指针都收到一处。
+- **错误槽换 `thread_local std::string`**；错误串的 `file:line` 现在指向真正的失败点（后端 .cpp）。
+- **异常绝不越过 ABI**：头是冻结的 C ABI（声明里不能写 `noexcept`），所以每个入口用顶层
+  try/catch 达成同一语义：`bad_alloc` → `BGPU_ERR_OUT_OF_MEMORY`，其余 → `BGPU_ERR_BACKEND_FAILED`
+  并把 `what()` 写进 `bingpu_last_error()`。
+- **代价写清楚**：静态库会带 libstdc++（构建侧 `-static-libstdc++` 静态链进去，产物自包含）。
+  用 C ABI 绑它的语言有三条路：用 C++ 驱动链接 / 自己加 `-lstdc++` / 只 include 头（头本身零
+  C++ 依赖）。`make abi-check` 新增第三条正是这个场景的冒烟：**C 目标文件 + C++ 静态库 → g++
+  链接 → 跑起来打印 `0.2.0/ABI 1`**。
+- **断言数与像素行为一条没少**：`make test` 仍是 **239 + 334** 条全绿；bin2D 的 GPU 往返用例
+  对着新库重跑仍是**最大通道差 0**。
+
+### 修 — 顺带暴露出来的 0.1.0 实现 bug（都是"重写时才发现旧写法兜不住"）
+
+1. NULL 后端 `stats.bytes_live` 只加不减（析构漏回写）；
+2. 帧中途 `destroy` 管线/纹理是 use-after-free（cmd 存裸引用）→ 现在退化成 `BGPU_ERR_STATE`；
+3. `draw_indexed` 索引越界会"画一半再报错" → 先整段校验，要么全画要么不动；
+4. `vertex_offset` 的对齐校验只在 NULL 分支里有；
+5. 交换链销毁后，借出去的帧目标纹理还持有悬空别名 → 现在一起失效；
+6. 错误串的 `file:line` 指向上层入口而不是真正的失败点。
+
+### 同步 — 文档
+
+- `docs/future.md`：「语言分工」整节重写（ABI 与实现分开、硬约束按 ABI 面/实现面分列、libstdc++
+  这条代价），binGPU 章节的语言描述、四层关系图、落地清单的语言列一起改；
+- `README.md`：生态表里 binGPU 的语言改成 "C++17 / C 兼容 ABI"；
+- `docs/README.md`：索引行同步。
+
 ## [0.16.29] - 2026-11-15
 
 生态地基：`bin2d` / `bin3d` / `binGPU` 三个项目**落地到 v0.1.0**（都在 binUI 的**同级目录**、
