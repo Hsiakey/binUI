@@ -74,6 +74,7 @@ struct Doc {
 
     std::vector<ClipRec> clips;   // v27 裁剪路径段
     std::vector<MaskRec> masks;   // v28 遮罩段
+    std::vector<BinUIBackdropEntry> backdrops;   // v29 毛玻璃段
     std::vector<std::pair<uint16_t, std::string>> names;
 };
 
@@ -658,6 +659,35 @@ bool ParseDoc(const void* data, size_t size, Doc& d) {
         }
         if (!ok) r.rewind(mark);
     }
+    // ---- 毛玻璃段（v29）：uint32 bytes + uint32 count + 每条 12 字节 ----
+    {
+        const uint8_t* mark = r.cur();
+        uint32_t bytes = 0;
+        bool ok = false;
+        if (r.u32(bytes)) {
+            if (bytes == 0) {
+                ok = true;
+            } else {
+                const uint8_t* sp = nullptr;
+                if (r.blob(bytes, sp)) {
+                    Reader s(sp, sp + bytes);
+                    uint32_t sc = 0;
+                    if (s.u32(sc)) {
+                        ok = true;
+                        for (uint32_t k = 0; k < sc && ok; k++) {
+                            const uint8_t* hp = nullptr;
+                            if (!s.blob(sizeof(BinUIBackdropEntry), hp)) { ok = false; break; }
+                            BinUIBackdropEntry be = {};
+                            memcpy(&be, hp, sizeof(be));
+                            d.backdrops.push_back(be);
+                        }
+                    }
+                }
+                if (!ok) { d.backdrops.clear(); r.rewind(mark); }
+            }
+        }
+        if (!ok) r.rewind(mark);
+    }
 
     // ---- 名称段（v8，缺失 = 无命名节点） ----
     {
@@ -871,6 +901,14 @@ std::vector<uint8_t> EmitDoc(Doc& d) {
             if (!mr.pts.empty())    put(mr.pts.data(),    mr.pts.size()    * sizeof(uint16_t));
         }
         PutSection(b, p3);
+    }
+    // 毛玻璃段（v29，恒定写出）
+    {
+        std::vector<uint8_t> p4;
+        PutU32(p4, static_cast<uint32_t>(d.backdrops.size()));
+        if (!d.backdrops.empty())
+            PutRaw(p4, d.backdrops.data(), d.backdrops.size() * sizeof(BinUIBackdropEntry));
+        PutSection(b, p4);
     }
     // 名称段（非空才写）
     if (!namePairs.empty()) {
@@ -1165,7 +1203,16 @@ bool MergeLayout(std::vector<uint8_t>& host, const void* comp, size_t compSize,
         h.masks.push_back(std::move(r3));
     }
 
-    // ---- 组件引用段（组件内再外挂组件时递归） ----
+    // ---- 毛玻璃段（v29）：按 nodeId 重映射 ----
+    for (const BinUIBackdropEntry& be : c.backdrops) {
+        auto it = compIdx.find(be.nodeId);
+        if (it == compIdx.end() || it->second == 0) continue;
+        BinUIBackdropEntry r4 = be;
+        r4.nodeId = static_cast<uint16_t>(idMap[it->second]);
+        h.backdrops.push_back(r4);
+    }
+
+    // ---- 组件引用段（组件内再内挂组件时递归） ----
     for (auto& ref : c.comps) {
         ComponentRef r2 = ref;
         r2.src = rebase(ref.src);

@@ -137,6 +137,7 @@ struct VkApi {
     BINUI_VK_FN(vkCmdPipelineBarrier)
     BINUI_VK_FN(vkCmdCopyImageToBuffer)
     BINUI_VK_FN(vkCmdCopyBufferToImage)
+    BINUI_VK_FN(vkCmdCopyImage)
     BINUI_VK_FN(vkCmdResolveImage)
     BINUI_VK_FN(vkCmdClearColorImage)
 
@@ -279,6 +280,7 @@ struct VkApi {
         BINUI_VK_LOAD(vkCmdPipelineBarrier)
         BINUI_VK_LOAD(vkCmdCopyImageToBuffer)
         BINUI_VK_LOAD(vkCmdCopyBufferToImage)
+        BINUI_VK_LOAD(vkCmdCopyImage)
         BINUI_VK_LOAD(vkCmdResolveImage)
         BINUI_VK_LOAD(vkCmdClearColorImage)
         BINUI_VK_LOAD(vkFreeDescriptorSets)
@@ -536,6 +538,10 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // v28 遮罩保留趟（dst *= srcA）：第三种混合状态，同样建两条变体
     VkPipeline pipelineKeep = VK_NULL_HANDLE;
     VkPipeline pipelineLayerKeep = VK_NULL_HANDLE;
+    // v29 毛玻璃合成（Src=ONE / Dst=ZERO，即"直接覆盖"）：第四种混合状态。
+    // 合成趟把模糊版背景**替换**掉原背景，所以不能走预乘叠加（见 binui_gfx.h）。
+    VkPipeline pipelineReplace = VK_NULL_HANDLE;
+    VkPipeline pipelineLayerReplace = VK_NULL_HANDLE;
     bool eraseOn = false;
     bool keepOn = false;
     VkPipeline activePipeline = VK_NULL_HANDLE;
@@ -654,6 +660,28 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     };
     std::vector<LayerFrame> layerStack;
     static constexpr int kMaxLayers = 4;
+
+    // ---- v29 毛玻璃：降采样链（每级 1/2，按需分配；区域尺寸不变就复用）----
+    // 与 GL 后端同一套池子语义（binui_gl-gdi.cpp 的 BlurLevel / ensureBlurLevel）：
+    // 下标 = 级别，图尺寸 = 该级的 dw×dh，尺寸变了就重建。VK 与 GL 的两处必要差异：
+    //   · 主目标是 4x MSAA，vkCmdCopyImage 不能从多重采样图取像素 → 先 resolve 再拷；
+    //   · VK 的纹理行 0 是"区域顶部"（GL 的 FBO 行 0 是底部），所以 GL 一路翻 V、
+    //     这里翻转全部抵消，UV 直接用 0..1 / 条带的 b.v0（见 blurBackdrop）。
+    struct BlurLevel {
+        Tex tex;          // image/view/ds：复用 Tex，销毁/描述符/采样器都是现成的
+        int w = 0, h = 0; // 这一级的实际尺寸（= 图尺寸）
+    };
+    std::vector<BlurLevel> blurLv;
+    // 同一帧里换尺寸会重建，而旧图仍被**已录制但还没提交**的 draw 引用
+    // （vkDeviceWaitIdle 救不了 —— 命令还没提交）。所以分两代延迟释放：
+    // 本帧淘汰的进 retiredBlurTex，present 里等过上一帧 fence 之后换成 prev，再下一帧才真放。
+    std::vector<Tex> retiredBlurTex;
+    std::vector<Tex> retiredBlurTexPrev;
+    bool ignoreLayerClip = false;   // 降采样趟画进小图时坐标是"小图局部"的，不能再用层框裁
+    bool blurReplace = false;       // 这一趟用 replace 混合（毛玻璃合成）
+    bool blurForceSingle = false;   // 目标是毛玻璃小图（单采样）→ 强制用层变体管线
+
+    static constexpr int kMaxBlurLevels = 8;
 
     // ---- 显存记账（P4：区分"我们漏了"和"驱动池化"）----
     // 只统计 vkAllocateMemory/vkFreeMemory 这一对，swapchain 图像由驱动持有，不在账上。
@@ -1072,6 +1100,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     }
 
     void destroyTargets() {
+        destroyBlurLevels();   // v29：毛玻璃降采样图也是按"目标尺寸"走的，一起放
         if (framebuffer) { g_vk.vkDestroyFramebuffer(device, framebuffer, nullptr); framebuffer = VK_NULL_HANDLE; }
         if (renderPass) { g_vk.vkDestroyRenderPass(device, renderPass, nullptr); renderPass = VK_NULL_HANDLE; }
         if (msaaView) { g_vk.vkDestroyImageView(device, msaaView, nullptr); msaaView = VK_NULL_HANDLE; }
@@ -1627,6 +1656,12 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
                 srcAccess = VK_ACCESS_SHADER_READ_BIT;
                 srcStage = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
                 break;
+            case VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL:
+                // v29：毛玻璃的降采样图/合成目标会从"附件（刚被写）"转成只读被采样，
+                // 少了这条依赖就是经典的写→读 hazard。
+                srcAccess = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+                srcStage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+                break;
             default:   // UNDEFINED：内容丢弃，无需等待
                 break;
         }
@@ -2040,6 +2075,18 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             if (pr == VK_SUCCESS && useDynamic)
                 pr = build(VK_SAMPLE_COUNT_1_BIT, pipelineLayerKeep);
         }
+        // v29 毛玻璃 replace 变体：Src=ONE / Dst=ZERO —— 模糊版背景**覆盖**原背景。
+        // 注意 Dst 因子是 ZERO 而不是 ONE_MINUS_SRC_ALPHA：alpha 也一起被替换，
+        // 否则半透明区域会残留旧背景（GL 那边就是 glBlendFunc(GL_ONE, GL_ZERO)）。
+        if (pr == VK_SUCCESS) {
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+            pr = build(samples, pipelineReplace);
+            if (pr == VK_SUCCESS && useDynamic)
+                pr = build(VK_SAMPLE_COUNT_1_BIT, pipelineLayerReplace);
+        }
         g_vk.vkDestroyShaderModule(device, vs, nullptr);
         g_vk.vkDestroyShaderModule(device, fs, nullptr);
         if (pr != VK_SUCCESS) {
@@ -2186,12 +2233,15 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         cur.count += 2;
     }
 
-    // v27：按 (是否在图层, 是否擦除) 选管线
+    // v27：按 (是否在图层, 是否擦除) 选管线；v29 多一档毛玻璃 replace
     void refreshPipeline() {
-        if (keepOn)       activePipeline = layerStack.empty() ? pipelineKeep : pipelineLayerKeep;
-        else if (eraseOn) activePipeline = layerStack.empty() ? pipelineErase : pipelineLayerErase;
-        else              activePipeline = layerStack.empty() ? pipeline : pipelineLayer;
-        if (!activePipeline) activePipeline = pipeline;   // 变体管线建失败就退回普通混合
+        // 毛玻璃的降采样目标是 1 采样的小图（不是图层），所以要能和"是否在图层里"解耦
+        const bool single = blurForceSingle || !layerStack.empty();
+        if (blurReplace)  activePipeline = single ? pipelineLayerReplace : pipelineReplace;
+        else if (keepOn)  activePipeline = single ? pipelineLayerKeep : pipelineKeep;
+        else if (eraseOn) activePipeline = single ? pipelineLayerErase : pipelineErase;
+        else              activePipeline = single ? pipelineLayer : pipeline;
+        if (!activePipeline)  activePipeline = pipeline;   // 变体管线建失败就退回普通混合
     }
 
     void flush() {
@@ -2231,7 +2281,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
                          static_cast<int32_t>(std::max(0, b.sy))};
             sc.extent = {static_cast<uint32_t>(std::max(0, std::min(b.sw, w - b.sx))),
                          static_cast<uint32_t>(std::max(0, std::min(b.sh, h - b.sy)))};
-            if (lf) {
+            if (lf && !ignoreLayerClip) {
                 const int32_t l = std::max<int32_t>(sc.offset.x, lf->l);
                 const int32_t t = std::max<int32_t>(sc.offset.y, lf->t);
                 const int32_t r = std::min<int32_t>(sc.offset.x + static_cast<int32_t>(sc.extent.width), lf->r);
@@ -2359,7 +2409,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         if (static_cast<int>(layers.size()) >= kMaxLayers) return -1;
         LayerTarget t;
         if (!createImage2D(w, h, kColorFormat,
-                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT,
+                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                               VK_IMAGE_USAGE_TRANSFER_SRC_BIT,   // v29：毛玻璃要把层里背景拷走
                            VK_SAMPLE_COUNT_1_BIT, t.tex.image, t.tex.mem,
                            VK_IMAGE_ASPECT_COLOR_BIT))
             return -1;
@@ -2384,6 +2435,348 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         for (LayerTarget& t : layers) freeTex(t.tex);
         layers.clear();
         layerStack.clear();
+    }
+
+    // ============================================================
+    // v29 毛玻璃：降采样图池 + 布局切换
+    // ============================================================
+    // 尺寸变了就重建（与 GL 的 ensureBlurLevel 同一套语义）。旧图不能立刻销毁：
+    // 本帧已经录进命令缓冲的 draw 还引用着它的 image/descriptor set，而命令缓冲
+    // 要到 present 才提交 —— vkDeviceWaitIdle 也救不了。所以只挂到 retired 队列。
+    void retireBlurTex(Tex& t) {
+        retiredBlurTex.push_back(t);
+        t = Tex{};
+    }
+
+    void destroyBlurLevels() {
+        for (BlurLevel& b : blurLv) {
+            if (b.tex.image) freeTex(b.tex);
+            b.w = b.h = 0;
+        }
+        blurLv.clear();
+        for (Tex& t : retiredBlurTex) freeTex(t);
+        retiredBlurTex.clear();
+        for (Tex& t : retiredBlurTexPrev) freeTex(t);
+        retiredBlurTexPrev.clear();
+    }
+
+    // present 里等过**上一帧**的 fence 之后调用：上一帧淘汰的图现在没人引用了。
+    // 本帧淘汰的推到"上一代"，再等一帧才真放（见 retiredBlurTex 的注释）。
+    void freeRetiredBlurTex() {
+        for (Tex& t : retiredBlurTexPrev) freeTex(t);
+        retiredBlurTexPrev.clear();
+        retiredBlurTexPrev.swap(retiredBlurTex);
+        retiredBlurTex.clear();
+    }
+
+    bool ensureBlurLevel(size_t i, int bw, int bh) {
+        if (i >= static_cast<size_t>(kMaxBlurLevels) || bw <= 0 || bh <= 0) return false;
+        if (blurLv.size() <= i) {
+            blurLv.reserve(static_cast<size_t>(kMaxBlurLevels));
+            blurLv.resize(i + 1);
+        }
+        BlurLevel& b = blurLv[i];
+        if (b.tex.image && b.w == bw && b.h == bh) return true;
+        if (b.tex.image) { retireBlurTex(b.tex); b.w = b.h = 0; }
+        // 与层目标同一套格式/采样数（单采样：图元都是解析式覆盖率的 quad，层和
+        // 降采样目标都没有 MSAA —— 与 GL 的 FBO 也一致）。多用 TRANSFER_DST：
+        // 背景要被 vkCmdCopyImage / vkCmdResolveImage 写进来；再用 SAMPLED 被采样。
+        Tex& t = b.tex;
+        if (!createImage2D(bw, bh, kColorFormat,
+                           VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
+                               VK_IMAGE_USAGE_SAMPLED_BIT,
+                           VK_SAMPLE_COUNT_1_BIT, t.image, t.mem, VK_IMAGE_ASPECT_COLOR_BIT))
+            return false;
+        t.w = bw;
+        t.h = bh;
+        t.linear = true;       // 降采样与放大都要双线性（GL 那边的纹理也是 LINEAR）
+        t.needClear = false;   // 内容由 LOAD_OP_CLEAR / 那次拷贝负责
+        t.layout = VK_IMAGE_LAYOUT_UNDEFINED;
+        t.view = makeView(t.image, kColorFormat, VK_IMAGE_ASPECT_COLOR_BIT);
+        if (!t.view || !allocTexDs(t)) {
+            std::fprintf(stderr, "[vk] 毛玻璃降采样图创建失败（%dx%d）\n", bw, bh);
+            retireBlurTex(t);
+            return false;
+        }
+        b.w = bw;
+        b.h = bh;
+        return true;
+    }
+
+    // 降采样图的三种用途之间的显式依赖（动态渲染没有 subpass 依赖表）：
+    // 附件（被写）↔ 只读（被下一级/合成采样）↔ TRANSFER_DST（被拷入背景）
+    void blurLevelToAttachment(BlurLevel& b) {
+        Tex& t = b.tex;
+        if (t.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+            barrierAttachment(t.image);
+            return;
+        }
+        VkAccessFlags srcA = 0;
+        VkPipelineStageFlags srcS = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        if (t.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            srcA = VK_ACCESS_SHADER_READ_BIT;
+            srcS = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        } else if (t.layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+            srcA = VK_ACCESS_TRANSFER_WRITE_BIT;
+            srcS = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        }
+        barrier(t.image, t.layout, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, srcA,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, srcS,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        t.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+
+    void blurLevelToSampled(BlurLevel& b) {
+        Tex& t = b.tex;
+        if (t.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) return;
+        VkAccessFlags srcA = 0;
+        VkPipelineStageFlags srcS = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        if (t.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+            srcA = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            srcS = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        } else if (t.layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) {
+            srcA = VK_ACCESS_TRANSFER_WRITE_BIT;
+            srcS = VK_PIPELINE_STAGE_TRANSFER_BIT;
+        }
+        barrier(t.image, t.layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, srcA,
+                VK_ACCESS_SHADER_READ_BIT, srcS, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        t.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    void blurLevelToTransferDst(BlurLevel& b) {
+        Tex& t = b.tex;
+        if (t.layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL) return;
+        VkAccessFlags srcA = 0;
+        VkPipelineStageFlags srcS = VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT;
+        if (t.layout == VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL) {
+            srcA = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+            srcS = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        } else if (t.layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            srcA = VK_ACCESS_SHADER_READ_BIT;
+            srcS = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
+        }
+        barrier(t.image, t.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, srcA,
+                VK_ACCESS_TRANSFER_WRITE_BIT, srcS, VK_PIPELINE_STAGE_TRANSFER_BIT);
+        t.layout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    }
+
+    void copyImageRegion(VkImage src, int sx, int sy, VkImage dst, int cw, int ch) {
+        VkImageCopy c{};
+        c.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        c.srcSubresource.layerCount = 1;
+        c.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        c.dstSubresource.layerCount = 1;
+        c.srcOffset = {sx, sy, 0};
+        c.dstOffset = {0, 0, 0};
+        c.extent = {static_cast<uint32_t>(cw), static_cast<uint32_t>(ch), 1};
+        g_vk.vkCmdCopyImage(cmd, src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, dst,
+                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &c);
+    }
+
+    // 抓背景：当前目标（layerIdx >= 0 = 层目标；否则主目标）的 (rx,ry,rw,rh) → level0。
+    // 调用前当前渲染作用域必须已经结束（附件要转成 TRANSFER_SRC）。
+    // 主目标 = 4x MSAA 时先 resolve 整帧（与 present 同一条命令）再拷这一小块：
+    // GL 的 glBlitFramebuffer(MSAA → 纹理) 在硬件上做的正是同一个"平均 4 个样本"。
+    void captureBackdrop(int layerIdx, int rx, int ry, int rw, int rh) {
+        BlurLevel& l0 = blurLv[0];
+        blurLevelToTransferDst(l0);
+        if (layerIdx >= 0) {
+            Tex& lt = layers[static_cast<size_t>(layerIdx)].tex;
+            barrier(lt.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT);
+            copyImageRegion(lt.image, rx, ry, l0.tex.image, rw, rh);
+            barrier(lt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            lt.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+            return;
+        }
+        if (samples == VK_SAMPLE_COUNT_1_BIT) {
+            barrier(msaaImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                    VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                    VK_PIPELINE_STAGE_TRANSFER_BIT);
+            copyImageRegion(msaaImage, rx, ry, l0.tex.image, rw, rh);
+            barrier(msaaImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+            return;
+        }
+        barrier(msaaImage, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT);
+        VkImageResolve rgn{};
+        rgn.srcSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        rgn.srcSubresource.layerCount = 1;
+        rgn.dstSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        rgn.dstSubresource.layerCount = 1;
+        rgn.extent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
+        g_vk.vkCmdResolveImage(cmd, msaaImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               resolveImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &rgn);
+        barrier(msaaImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+        // resolve 图的常驻布局是 TRANSFER_DST（present 每帧都往它 resolve），拷完要还原
+        barrier(resolveImage, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT);
+        copyImageRegion(resolveImage, rx, ry, l0.tex.image, rw, rh);
+        barrier(resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT);
+    }
+
+    // 降采样目标：整级清透明 + viewport/push constant 换成这一级的尺寸。
+    // 与 setPassState 的区别只有尺寸（这里是"小图局部坐标系"）。
+    void beginBlurLevelPass(BlurLevel& b) {
+        VkRenderingAttachmentInfo ca =
+            makeAttachment(b.tex.view, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                           VK_ATTACHMENT_LOAD_OP_CLEAR);
+        ca.clearValue.color.float32[0] = 0.0f;
+        ca.clearValue.color.float32[1] = 0.0f;
+        ca.clearValue.color.float32[2] = 0.0f;
+        ca.clearValue.color.float32[3] = 0.0f;
+        VkRenderingInfo ri = makeRenderingInfo(&ca, 0, 0, b.w, b.h);
+        g_vk.vkCmdBeginRendering(cmd, &ri);
+        VkViewport vp{};
+        vp.x = 0.0f;
+        vp.y = 0.0f;
+        vp.width = static_cast<float>(b.w);
+        vp.height = static_cast<float>(b.h);
+        vp.minDepth = 0.0f;
+        vp.maxDepth = 1.0f;
+        g_vk.vkCmdSetViewport(cmd, 0, 1, &vp);
+        float vs[2] = {static_cast<float>(b.w), static_cast<float>(b.h)};
+        if (pipeLayout)
+            g_vk.vkCmdPushConstants(cmd, pipeLayout, VK_SHADER_STAGE_VERTEX_BIT, 0, 8, vs);
+        refreshPipeline();   // blurReplace + blurForceSingle → 单采样 replace 变体
+    }
+
+    // 毛玻璃主流程（算法见 binui_gfx.h 与 GL 后端的同名函数，这里逐条对应：
+    //   1) 区域取整裁窗口  2) 抓背景到 level0  3) 逐级 2× 降采样  4) 圆角条带 replace 合成）
+    bool blurBackdrop(float x, float y, float fw, float fh, float radius, float blurPx) {
+        if (!ready || !useDynamic || !cmdOpen) return false;
+        if (!(blurPx > 0.0f) || fw < 2.0f || fh < 2.0f) return false;
+        int rx = static_cast<int>(std::floor(x));
+        int ry = static_cast<int>(std::floor(y));
+        int rx1 = static_cast<int>(std::ceil(x + fw));
+        int ry1 = static_cast<int>(std::ceil(y + fh));
+        rx = std::max(0, rx);
+        ry = std::max(0, ry);
+        rx1 = std::min(w, rx1);
+        ry1 = std::min(h, ry1);
+        const int rw = rx1 - rx, rh = ry1 - ry;
+        if (rw < 2 || rh < 2) return false;
+
+        int levels = 1;
+        {
+            float v = 2.0f;
+            while (levels < 6 && v < blurPx) { v *= 2.0f; levels++; }
+        }
+
+        // 手上攒的图元先落到**当前**目标：它们构成"背景"
+        flush();
+
+        const bool inLayer = !layerStack.empty();
+        const int li = inLayer ? layerStack.back().idx : -1;
+        const int sl = clipL, st = clipT, sr = clipR, sb = clipB;
+        const bool ignWas = ignoreLayerClip;
+
+        // 结束当前渲染作用域：附件既要当拷贝源，又要把画面切到小图上画降采样。
+        // 动态渲染的附件布局全由我们记账，所以这一进一出必须先手工收尾。
+        if (inLayer) endLayerPass();
+        else endMainPass();
+
+        auto resumeTarget = [&] {
+            if (inLayer) beginLayerPass(li, true, layerStack.back());
+            else beginMainPass(true);
+        };
+
+        if (!ensureBlurLevel(0, rw, rh)) {
+            resumeTarget();
+            return false;
+        }
+
+        // 1) 抓背景 → level0
+        captureBackdrop(inLayer ? li : -1, rx, ry, rw, rh);
+
+        // 2) 降采样链：每级清透明 + 一个覆盖整级的四边形采样上一级（双线性 =
+        //    目标像素中心落在上一级的 2×2 中心 → 盒式平均）。VK 纹理行 0 = 区域顶部，
+        //    所以 UV 是 (0,0)-(1,1)，不翻转（GL 那边要翻是因为它的 FBO 行 0 在底部）。
+        bool chainOk = true;
+        blurReplace = true;
+        blurForceSingle = true;
+        for (int i = 1; i <= levels && chainOk; i++) {
+            const size_t pi = static_cast<size_t>(i - 1);
+            const int dw = std::max(1, blurLv[pi].w / 2);
+            const int dh = std::max(1, blurLv[pi].h / 2);
+            if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) { chainOk = false; break; }
+            blurLevelToSampled(blurLv[pi]);          // 上一级 → 只读（在渲染作用域外转）
+            blurLevelToAttachment(blurLv[static_cast<size_t>(i)]);
+            beginBlurLevelPass(blurLv[static_cast<size_t>(i)]);
+            // 坐标是"小图局部"的：层框/窗口裁剪都不适用（GL 的 ignoreLayerClip 同理），
+            // 批次 scissor 必须换成整级 —— 否则会被节点裁剪盒整块裁掉。
+            clipL = 0;
+            clipT = 0;
+            clipR = dw;
+            clipB = dh;
+            ignoreLayerClip = true;
+            emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
+                     0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu, &blurLv[pi].tex);
+            flush();
+            g_vk.vkCmdEndRendering(cmd);
+            ignoreLayerClip = false;
+        }
+        blurForceSingle = false;
+        clipL = sl;
+        clipT = st;
+        clipR = sr;
+        clipB = sb;
+
+        // 3) 合成：BuildImageBands 的圆角条带 + 双线性放大 + replace 混合。
+        //    这里必须**换回原来的 scissor**（节点自己的裁剪），毛玻璃不能越出节点框。
+        if (chainOk) {
+            blurLevelToSampled(blurLv[static_cast<size_t>(levels)]);
+            resumeTarget();
+            refreshPipeline();   // replace 变体（按当前目标：主目标 4x / 层目标 1x）
+            binui::PaintImageBand bands[binui::kMaxImageBands];
+            const int nb = binui::BuildImageBands(x, y, fw, fh, radius, bands);
+            for (int q = 0; q < nb; q++) {
+                const binui::PaintImageBand& b = bands[q];
+                if (b.w <= 0.0f || b.h <= 0.0f) continue;
+                emitQuad(b.x, b.y, b.x + b.w, b.y + b.h, b.u0, b.v0, b.u1, b.v1,
+                         0xFFFFFFFFu, &blurLv[static_cast<size_t>(levels)].tex);
+            }
+            flush();
+        }
+
+        // 4) 恢复：混合回预乘 ONE/INV_SRC_ALPHA、裁剪与忽略开关复位、批次纹理回纯白、
+        //    当前目标与 pass 复原 —— 之后的绘制与没调用过时完全一样。
+        blurReplace = false;
+        blurForceSingle = false;
+        refreshPipeline();
+        ignoreLayerClip = ignWas;
+        clipL = sl;
+        clipT = st;
+        clipR = sr;
+        clipB = sb;
+        if (!chainOk) resumeTarget();   // 链失败时当前目标还没恢复
+        switchBatch(&white);
+
+        static const bool trace = std::getenv("BINUI_VK_TRACE") != nullptr;
+        if (trace)
+            std::fprintf(stderr,
+                         "[vk][trace] backdropBlur: 区域 %d,%d %dx%d 级数 %d 结果 %d（%s目标）\n",
+                         rx, ry, rw, rh, levels, chainOk ? 1 : 0, inLayer ? "层" : "主");
+        return chainOk;
     }
 
     // 异常路径（上一帧有层没闭合）：层图内容不重要，池子的占用标记必须复位
@@ -2680,6 +3073,7 @@ void BinUIVK::shutdown() {
     d.windowMode = false;
     d.hwnd = nullptr;
     d.destroyLayers();   // 层图先放（它们的 Tex 也占 descriptor set 和显存）
+    d.destroyBlurLevels();   // v29：毛玻璃降采样图同理（必须在描述符池之前放）
     // 图集纹理要先释放（自己 new 出来的 Tex）
     d.atlas.clear();
     d.atlas.setHost(nullptr);
@@ -2710,6 +3104,9 @@ void BinUIVK::shutdown() {
     if (d.pipelineKeep) g_vk.vkDestroyPipeline(d.device, d.pipelineKeep, nullptr);
     if (d.pipelineLayerKeep)
         g_vk.vkDestroyPipeline(d.device, d.pipelineLayerKeep, nullptr);
+    if (d.pipelineReplace) g_vk.vkDestroyPipeline(d.device, d.pipelineReplace, nullptr);
+    if (d.pipelineLayerReplace)
+        g_vk.vkDestroyPipeline(d.device, d.pipelineLayerReplace, nullptr);
     if (d.pipeLayout) g_vk.vkDestroyPipelineLayout(d.device, d.pipeLayout, nullptr);
     if (d.dsLayout) g_vk.vkDestroyDescriptorSetLayout(d.device, d.dsLayout, nullptr);
     // 双槽：每槽自己一套顶点缓冲 / fence / 信号量
@@ -3080,6 +3477,8 @@ void BinUIVK::present() {
     // 这里之间的 CPU 工作（遍历、排版、路径细分、顶点填充）都发生在上一帧还在 GPU 上跑的时候，
     // 这正是双槽换来的收益。放在提交前而不是 beginFrame，是为了把重叠窗口拉到最大。
     if (d.prevSlot >= 0 && d.prevSlot != d.slotIdx) d.waitSlot(d.slots[d.prevSlot]);
+    // v29：上一帧的 fence 已经过了，上一帧淘汰的毛玻璃降采样图现在没人引用，可以真放。
+    d.freeRetiredBlurTex();
 
     VkSubmitInfo si{};
     si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
@@ -3503,6 +3902,11 @@ bool BinUIVK::pushLayer(float x, float y, float w, float h, float alpha) {
 
 void BinUIVK::popLayer() {
     if (impl_) impl_->popLayer();
+}
+
+// v29 毛玻璃：完整流程在 Impl::blurBackdrop（与 GL 后端逐条对应）。这里只做转发。
+bool BinUIVK::backdropBlur(float x, float y, float w, float h, float radius, float blurPx) {
+    return impl_ ? impl_->blurBackdrop(x, y, w, h, radius, blurPx) : false;
 }
 
 int BinUIVK::pushClip(float x, float y, float w, float h) {

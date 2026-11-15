@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<app_window width="640" height="420" resizable="false">
+<html width="640" height="420">
+<head>
+<style>
+    body { background: #EEF2F7; color: #16202C; }
+    .cap { position: absolute; font-size: 12px; color: #5A6B80; }
+</style>
+</head>
+<body>
+    <!-- 背景：彩色色块 + 大字，用来"透过玻璃看" -->
+    <div style="position:absolute; left:0; top:0; width:640; height:420;
+                background: linear-gradient(135deg, #1E3A8A, #0B5FA5 45%, #14B8A6)">
+    </div>
+    <div style="position:absolute; left:0; top:0; width:640; height:420;
+                background: linear-gradient(0deg, rgba(196,65,12,200), rgba(196,65,12,0))">
+    </div>
+    <div style="position:absolute; left:24; top:30; width:600; height:90; font-size:64;
+                color: #FFFFFF; background: transparent">FROSTED GLASS 毛玻璃</div>
+    <div style="position:absolute; left:24; top:130; width:600; height:90; font-size:64;
+                color: #FFFFFF; background: transparent">background blur</div>
+    <div style="position:absolute; left:40; top:250; width:120; height:120; border-radius: 24;
+                background: #F59E0B"></div>
+    <div style="position:absolute; left:480; top:250; width:120; height:120; border-radius: 60;
+                background: #22C55E"></div>
+
+    <!-- 毛玻璃卡片：backdrop-filter: blur(24px) + 半透明白底 + 1px 高光边 -->
+    <div style="position:absolute; left:60; top:210; width:250; height:160; border-radius: 28;
+                backdrop-filter: blur(24px);
+                background: rgba(255,255,255,0.38);
+                border: 1; border-color: rgba(255,255,255,0.65)"></div>
+    <span class="cap" style="left:76; top:232; color:#12324F">blur(24px) 卡片</span>
+
+    <!-- 小半径 -->
+    <div style="position:absolute; left:340; top:210; width:250; height:160; border-radius: 28;
+                backdrop-filter: blur(8px);
+                background: rgba(255,255,255,0.42);
+                border: 1; border-color: rgba(255,255,255,0.7)"></div>
+    <span class="cap" style="left:356; top:232; color:#12324F">blur(8px) 卡片</span>
+
+    <!-- 圆形玻璃按钮 -->
+    <div style="position:absolute; left:346; top:262; width:56; height:56; border-radius: 28;
+                backdrop-filter: blur(16px);
+                background: rgba(255,255,255,0.28);
+                border: 1; border-color: rgba(255,255,255,0.75)"></div>
+
+    <!-- 深色玻璃：烟熏 -->
+    <div style="position:absolute; left:60; top:300; width:150; height:52; border-radius: 26;
+                backdrop-filter: blur(20px);
+                background: rgba(16,18,22,0.45);
+                border: 1; border-color: rgba(255,255,255,0.25)"></div>
+</body>
+</html>
+</app_window>

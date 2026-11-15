@@ -1066,6 +1066,75 @@ static void TestIssueRegressions() {
         TEST("16.26: 没写 mask → 无条目", masksOfName("k6").empty());
     }
 
+    // ---- 16.27：毛玻璃 backdrop-filter（v0.16.27，格式 v29 毛玻璃段） ----
+    // 钉住五件事：
+    //   1. backdrop-filter: blur(Npx) 落进毛玻璃段（renderer.backdropOf），带半径与合成圆角；
+    //   2. -webkit- 前缀同样认；
+    //   3. none / blur(0) → 没有条目（元素照常画，只是不模糊）；
+    //   4. 不支持的函数（saturate 等）→ 告警，但 blur 仍然生效；
+    //   5. 没写的元素不受影响。
+    {
+        const char* html = R"HTML(<app_window width="300" height="240" bg="#101014">
+<html width="300" height="240" bg="#101014">
+<body>
+  <div id="a1" style="position:absolute; left:20; top:20; width:120; height:80;
+       border-radius: 16; backdrop-filter: blur(24px)"></div>
+  <div id="a2" style="position:absolute; left:160; top:20; width:120; height:80;
+       -webkit-backdrop-filter: blur(8px)"></div>
+  <div id="a3" style="position:absolute; left:20; top:120; width:120; height:60;
+       backdrop-filter: none"></div>
+  <div id="a4" style="position:absolute; left:160; top:120; width:120; height:60;
+       backdrop-filter: blur(0px)"></div>
+  <div id="a5" style="position:absolute; left:20; top:190; width:120; height:60;
+       backdrop-filter: blur(12px) saturate(1.4)"></div>
+  <div id="a6" style="position:absolute; left:160; top:190; width:120; height:60"></div>
+</body></html>
+</app_window>)HTML";
+        const auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("16.27: 毛玻璃布局可解析", ParseInto(r, res.layout));
+
+        auto bdOfName = [&](const char* name) -> const BinUIBackdropEntry* {
+            const uint16_t id = r.findNodeByName(name);
+            return id ? r.backdropOf(id) : nullptr;
+        };
+        // 1) blur(24px) + 圆角
+        {
+            const BinUIBackdropEntry* b = bdOfName("a1");
+            TEST("16.27: blur(24px) 进段", b != nullptr);
+            if (b) {
+                TEST("16.27: 模糊半径 = 24", std::fabs(b->blur - 24.0f) < 0.01f);
+                TEST("16.27: 合成圆角 = 节点圆角（16）",
+                     std::fabs(b->radius - 16.0f) < 0.01f);
+            }
+        }
+        // 2) -webkit- 前缀
+        {
+            const BinUIBackdropEntry* b = bdOfName("a2");
+            TEST("16.27: -webkit-backdrop-filter 也认", b && std::fabs(b->blur - 8.0f) < 0.01f);
+        }
+        // 3) none / blur(0) 不产生条目
+        TEST("16.27: backdrop-filter: none → 无条目", bdOfName("a3") == nullptr);
+        {
+            bool warned = false;
+            for (const auto& w : res.warnings)
+                if (w.find("blur(0)") != std::string::npos) warned = true;
+            TEST("16.27: blur(0) 要告警", warned);
+            TEST("16.27: blur(0) → 无条目", bdOfName("a4") == nullptr);
+        }
+        // 4) 不支持的函数告警，blur 仍生效
+        {
+            bool warned = false;
+            for (const auto& w : res.warnings)
+                if (w.find("backdrop-filter 只支持 blur()") != std::string::npos) warned = true;
+            TEST("16.27: saturate() 要告警（只支持 blur）", warned);
+            const BinUIBackdropEntry* b = bdOfName("a5");
+            TEST("16.27: 混写时 blur 仍生效", b && std::fabs(b->blur - 12.0f) < 0.01f);
+        }
+        // 5) 没写的不受影响
+        TEST("16.27: 没写 backdrop-filter → 无条目", bdOfName("a6") == nullptr);
+    }
+
     // ---- 03：display:none 必须连整棵子树一起不生成 ----
     {
         const char* html = R"HTML(<app_window width="400" height="300" bg="#101014">

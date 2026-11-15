@@ -81,6 +81,8 @@ public:
     bool setEraseBlend(bool on) override;                       // v27：clip-path 擦除
     bool setKeepBlend(bool on) override;                        // v28：mask 保留趟
     bool supportsMask() const override { return true; }         // v28：mask 可用
+    bool backdropBlur(float x, float y, float w, float h, float radius,
+                      float blurPx) override;                  // v29：毛玻璃
     // v0.16.9：组透明度的离屏合成（见 binui_gfx.h 的 pushLayer 注释）
     bool pushLayer(float x, float y, float w, float h, float alpha);
     void popLayer();

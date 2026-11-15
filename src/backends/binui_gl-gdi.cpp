@@ -362,6 +362,34 @@ struct BinUIGLGdi::Impl {
         return true;
     }
 
+    // ---- v29 毛玻璃：降采样链（每级 1/2，按需分配；窗口尺寸不变就复用）----
+    struct BlurLevel {
+        GLuint tex = 0;
+        GLuint fbo = 0;
+        int w = 0, h = 0;
+    };
+    std::vector<BlurLevel> blurLv;
+    // 降采样趟把图元画进小 FBO 时，坐标是"小图局部"的，不能再用层框去裁
+    bool ignoreLayerClip = false;
+
+    bool ensureBlurLevel(size_t i, int w, int h) {
+        if (i >= 8 || w <= 0 || h <= 0) return false;
+        if (blurLv.size() <= i) blurLv.resize(i + 1);
+        BlurLevel& b = blurLv[i];
+        if (b.tex && b.fbo && b.w == w && b.h == h) return true;
+        if (b.fbo) { glDeleteFramebuffersP(1, &b.fbo); b.fbo = 0; }
+        if (b.tex) { glDeleteTextures(1, &b.tex); b.tex = 0; }
+        b.tex = CreateTexture2D(w, h, nullptr, true);
+        if (!b.tex) return false;
+        glGenFramebuffersP(1, &b.fbo);
+        if (!b.fbo) { glDeleteTextures(1, &b.tex); b.tex = 0; return false; }
+        glBindFramebufferP(GL_FRAMEBUFFER, b.fbo);
+        glFramebufferTexture2DP(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, b.tex, 0);
+        b.w = w;
+        b.h = h;
+        return true;
+    }
+
     void popLayer() {
         if (layerStack.empty()) return;
         flushAll();                       // 层内容落盘（flushAll 会按层框裁剪）
@@ -941,7 +969,7 @@ struct BinUIGLGdi::Impl {
         for (const auto& b : batches) {
             if (b.count == 0) continue;
             int l = b.sx, t = b.sy, r = b.sx + b.sw, bot = b.sy + b.sh;
-            if (lf) {
+            if (lf && !ignoreLayerClip) {
                 l = std::max(l, static_cast<int>(std::floor(lf->x)));
                 t = std::max(t, static_cast<int>(std::floor(lf->y)));
                 r = std::min(r, static_cast<int>(std::ceil(lf->x + lf->w)));
@@ -981,6 +1009,11 @@ struct BinUIGLGdi::Impl {
         for (auto& kv : images)
             if (kv.second) glDeleteTextures(1, &kv.second);
         images.clear();
+        for (BlurLevel& bl : blurLv) {
+            if (bl.fbo) { glDeleteFramebuffersP(1, &bl.fbo); bl.fbo = 0; }
+            if (bl.tex) { glDeleteTextures(1, &bl.tex); bl.tex = 0; }
+        }
+        blurLv.clear();
         if (whiteTex) { glDeleteTextures(1, &whiteTex); whiteTex = 0; }
         if (offTex) { glDeleteTextures(1, &offTex); offTex = 0; }
         if (offFbo) { glDeleteFramebuffersP(1, &offFbo); offFbo = 0; }
@@ -1412,6 +1445,98 @@ void BinUIGLGdi::setTextSubpixel(bool on) {
 // 节点内的每一次 drawText 都会先铺一遍阴影四边形，再画清晰字形。
 // v0.16.18 仿射状态：文字/图片/填充的四边形统一过矩阵（见 Impl::affineOn）。
 // 只在"节点有旋转/斜切/非等比缩放"时打开，关掉时 emitQuad 走原来的整数/浮点快路径。
+// v0.16.27 毛玻璃（backdrop blur）：抓当前目标的区域 → 多级 2× 降采样 → 圆角合成。
+// 算法与另两端**逐字一致**（同一套 UV 公式），这是像素一致的前提：
+//   级数 = 让 2^levels >= blurPx 的最小值（1..6）；每级 2×2 盒式模糊（双线性取
+//   目标像素中心 = 上一级 2×2 的平均），链起来逼近高斯；
+//   合成用 BuildImageBands 的圆角条带 + replace 混合（背景被糊掉，不是叠一层模糊）。
+bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
+                              float blurPx) {
+    if (!impl_ || !impl_->ready || !impl_->makeCurrent()) return false;
+    Impl& d = *impl_;
+    if (blurPx <= 0.0f || w < 2.0f || h < 2.0f) return false;
+    int rx = static_cast<int>(std::floor(x));
+    int ry = static_cast<int>(std::floor(y));
+    int rx1 = static_cast<int>(std::ceil(x + w));
+    int ry1 = static_cast<int>(std::ceil(y + h));
+    rx = std::max(0, rx); ry = std::max(0, ry);
+    rx1 = std::min(d.winW, rx1); ry1 = std::min(d.winH, ry1);
+    const int rw = rx1 - rx, rh = ry1 - ry;
+    if (rw < 2 || rh < 2) return false;
+
+    int levels = 1;
+    {
+        float v = 2.0f;
+        while (levels < 6 && v < blurPx) { v *= 2.0f; levels++; }
+    }
+
+    d.flushAll();   // 手上攒的图元先落到当前目标（它们构成"背景"）
+
+    GLint prevFbo = 0;
+    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+    GLint prevVp[4] = { 0, 0, d.winW, d.winH };
+    glGetIntegerv(GL_VIEWPORT, prevVp);
+    const bool scissorWas = glIsEnabled(GL_SCISSOR_TEST) != 0;
+
+    // 1) 抓背景：当前目标 → level0（GL 的 FBO 行从下往上，世界 y 从上往下，翻转）
+    if (!d.ensureBlurLevel(0, rw, rh)) {
+        glBindFramebufferP(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+        return false;
+    }
+    glDisable(GL_SCISSOR_TEST);   // glBlitFramebuffer 受 scissor 裁剪
+    glBindFramebufferP(GL_READ_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+    glBindFramebufferP(GL_DRAW_FRAMEBUFFER, d.blurLv[0].fbo);
+    {
+        const int by = d.winH - ry1;
+        glBlitFramebufferP(rx, by, rx1, by + rh, 0, 0, rw, rh,
+                           GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    }
+    glBindFramebufferP(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+
+    // 2) 降采样链：每级把上一级缩一半（覆盖混合；目标先清成透明）
+    glBlendFunc(GL_ONE, GL_ZERO);
+    d.ignoreLayerClip = true;
+    bool chainOk = true;
+    for (int i = 1; i <= levels && chainOk; i++) {
+        const int dw = std::max(1, d.blurLv[static_cast<size_t>(i - 1)].w / 2);
+        const int dh = std::max(1, d.blurLv[static_cast<size_t>(i - 1)].h / 2);
+        if (!d.ensureBlurLevel(static_cast<size_t>(i), dw, dh)) { chainOk = false; break; }
+        glBindFramebufferP(GL_FRAMEBUFFER, d.blurLv[static_cast<size_t>(i)].fbo);
+        glViewport(0, 0, dw, dh);
+        glUniform2fP(d.uniView, static_cast<float>(dw), static_cast<float>(dh));
+        glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+        glClear(GL_COLOR_BUFFER_BIT);
+        d.curTex = d.blurLv[static_cast<size_t>(i - 1)].tex;
+        // 目标像素中心对上一级：v 轴翻转（纹理行 0 = 目标底部）
+        d.emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
+                   0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFFFu);
+        d.flushAll();
+    }
+    d.ignoreLayerClip = false;
+    glBindFramebufferP(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+    glViewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
+    glUniform2fP(d.uniView, static_cast<float>(d.winW), static_cast<float>(d.winH));
+
+    // 3) 合成：圆角条带 + 双线性放大，replace 混合（背景被替换成模糊版）
+    if (chainOk) {
+        if (scissorWas) glEnable(GL_SCISSOR_TEST);   // 合成要遵守节点的裁剪
+        d.curTex = d.blurLv[static_cast<size_t>(levels)].tex;
+        binui::PaintImageBand bands[binui::kMaxImageBands];
+        const int nb = binui::BuildImageBands(x, y, w, h, radius, bands);
+        for (int q = 0; q < nb; q++) {
+            const binui::PaintImageBand& b = bands[q];
+            if (b.w <= 0.0f || b.h <= 0.0f) continue;
+            d.emitQuad(b.x, b.y, b.x + b.w, b.y + b.h,
+                       b.u0, 1.0f - b.v0, b.u1, 1.0f - b.v1, 0xFFFFFFFFu);
+        }
+        d.flushAll();
+    }
+    d.curTex = d.whiteTex;
+    glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // 恢复预乘混合
+    if (scissorWas) glEnable(GL_SCISSOR_TEST);
+    return chainOk;
+}
+
 bool BinUIGLGdi::setAffine(const float* xf) {
     if (!impl_) return false;
     if (!xf || !(xf[0] != 1.0f || xf[1] != 0.0f || xf[2] != 0.0f ||

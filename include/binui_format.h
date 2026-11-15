@@ -27,7 +27,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v26: 图片滤镜段（CSS filter 的颜色矩阵），见 BinUIImageFilter
 // v27: 裁剪路径段（SVG <clipPath> / clip-path），见 BinUIClipEntry
 // v28: 遮罩段（SVG <mask> / mask），见 BinUIMaskEntry
-constexpr uint32_t BINUI_VERSION    = 28;
+// v29: 毛玻璃段（backdrop-filter: blur），见 BinUIBackdropEntry
+constexpr uint32_t BINUI_VERSION    = 29;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -651,6 +652,30 @@ struct BinUIMaskEntry {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIMaskEntry) == 44, "BinUIMaskEntry must be 44 bytes");
+
+// ============================================================
+// 毛玻璃段（v29）：CSS backdrop-filter: blur(Npx)
+//
+// 布局：uint32 bBytes（0 = 无）+ uint32 bCount + 每条 BinUIBackdropEntry（12 字节）。
+// 恒定写出，位于遮罩段之后、名称段之前。
+//
+// 语义：画这个节点**自身内容之前**，把当前目标上 (x,y,w,h) 处的背景抓下来做多级
+//   2× 降采样模糊（每级就是一个 2×2 盒式模糊，链起来逼近高斯），再按 radius 圆角、
+//   以 **replace** 混合画回同一位置 —— 于是"背景被糊掉"而不是"再叠一层模糊"。
+//   调用方随后照常画元素自己的半透明底色/边框，两者合起来就是毛玻璃。
+//
+// 为什么不是着色器：着色器只做"纹理 × 顶点色"，模糊链靠**多级降采样**在固定管线里
+//   完成，VK 的预编译 SPIR-V 一行不用动；三端算法完全一致（同一套 UV 公式）。
+// ============================================================
+#pragma pack(push, 1)
+struct BinUIBackdropEntry {
+    uint16_t nodeId;
+    uint16_t flags;      // 保留（目前恒 0）
+    float    blur;       // 模糊半径（px，已乘 ui_scale）
+    float    radius;     // 合成时的圆角（= 节点圆角）
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUIBackdropEntry) == 12, "BinUIBackdropEntry must be 12 bytes");
 
 // ============================================================
 // 路径段（v15，恒定写出，位于扩展绘制段之后、名称段之前）

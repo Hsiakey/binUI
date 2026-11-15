@@ -870,7 +870,30 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         }
     }
 
-    if (const uint8_t* np = sectionAt(14)) {
+    // ---- 毛玻璃段（v29）：uint32 bBytes + uint32 bCount + 每条 12 字节 ----
+    // 段序（v29）：… / 图片滤镜 / 裁剪路径 / 遮罩 / 毛玻璃 / 名称。
+    backdrop_.clear();
+    if (const uint8_t* bp = sectionAt(14)) {
+        uint32_t bb = 0;
+        memcpy(&bb, bp, sizeof(bb));
+        if (bb >= sizeof(uint32_t) &&
+            size - static_cast<size_t>(bp - data) >= sizeof(uint32_t) + bb) {
+            const uint8_t* q = bp + sizeof(uint32_t);
+            uint32_t bc = 0;
+            memcpy(&bc, q, sizeof(bc));
+            q += sizeof(bc);
+            const uint8_t* qend = bp + sizeof(uint32_t) + bb;
+            for (uint32_t i = 0; i < bc && q + sizeof(BinUIBackdropEntry) <= qend; i++) {
+                BinUIBackdropEntry be = {};
+                memcpy(&be, q, sizeof(be));
+                q += sizeof(BinUIBackdropEntry);
+                if (!nodeIndexById_.count(be.nodeId)) continue;
+                backdrop_[be.nodeId] = be;
+            }
+        }
+    }
+
+    if (const uint8_t* np = sectionAt(15)) {
         uint32_t nbytes = 0;
         memcpy(&nbytes, np, sizeof(uint32_t));
         if (nbytes > 0 && size - static_cast<size_t>(np - data) >= sizeof(uint32_t) + nbytes) {

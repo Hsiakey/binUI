@@ -1283,6 +1283,23 @@ static void AppendMaskSection(std::vector<uint8_t>& buf, const std::vector<Pendi
     if (!data.empty()) memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
 
+// v29 毛玻璃：节点 + 模糊半径 + 合成圆角（12 字节/条）
+static void AppendBackdropSection(std::vector<uint8_t>& buf,
+                                  const std::vector<BinUIBackdropEntry>& items) {
+    std::vector<uint8_t> data;
+    if (!items.empty()) {
+        uint32_t count = (uint32_t)items.size();
+        data.resize(4 + items.size() * sizeof(BinUIBackdropEntry));
+        memcpy(data.data(), &count, sizeof(count));
+        memcpy(data.data() + 4, items.data(), items.size() * sizeof(BinUIBackdropEntry));
+    }
+    uint32_t nbytes = (uint32_t)data.size();
+    size_t start = buf.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    if (!data.empty()) memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
+
 // 点用 uint16 归一化存（0..65535 映射包围盒），比 float 省一半且精度远超显示能力。
 struct PendingPath {
     BinUIPathEntry head = {};
@@ -2007,6 +2024,7 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     AppendFilterSection(buf, {});     // v26：这条路径没有图片滤镜
     AppendClipSection(buf, {});       // v27：这条路径没有裁剪路径
     AppendMaskSection(buf, {});       // v28：XML 路径没有 mask
+    AppendBackdropSection(buf, {});   // v29：XML 路径没有毛玻璃
     AppendNameSection(buf, nodeNames, offsets);
 
     return buf;
@@ -2613,6 +2631,8 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "patternunits", "patterncontentunits", "patterntransform",
         // v0.16.26：SVG <mask>
         "mask", "maskunits", "maskcontentunits",
+        // v0.16.27：CSS backdrop-filter
+        "backdrop-filter",
         "markerwidth", "markerheight", "markerunits", "refx", "refy", "orient",
         "gradientunits", "gradienttransform", "spreadmethod", "text-anchor",
     };
@@ -4542,6 +4562,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::vector<BinUIImageFilter> filterNodes;     // v26 图片滤镜段（CSS filter 的颜色矩阵）
     std::vector<PendingClip> clipNodes;            // v27 裁剪路径段（clip-path）
     std::vector<PendingMask> maskNodes;            // v28 遮罩段（<mask>）
+    std::vector<BinUIBackdropEntry> backdropNodes; // v29 毛玻璃段（backdrop-filter）
     std::vector<PendingPath> pendingPaths;     // v15 路径段（SVG <path>/<ellipse> 的折线）
     std::vector<std::string> strings;
     strings.push_back(""); // 字符串表首位 = 空串：无文本节点的 textOffset=0 指向空串
@@ -7615,6 +7636,64 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             }
         }
 
+        // ---- v0.16.27：毛玻璃（backdrop-filter: blur(Npx)，v29 毛玻璃段） ----
+        // CSS 里写 backdrop-filter（含 -webkit- 前缀）→ 运行期把**背景**抓下来做多级
+        // 降采样模糊，再以 replace 混合按圆角画回去；元素自己的半透明底色叠在上面。
+        // 只支持 blur()：saturate()/brightness() 之类要片元级运算（着色器只做"纹理 ×
+        // 顶点色"），告警忽略。
+        {
+            std::string bfv;
+            auto bit = style.find("backdrop-filter");
+            if (bit != style.end()) bfv = TrimCopy(bit->second);
+            if (bfv.empty()) {
+                bit = style.find("-webkit-backdrop-filter");
+                if (bit != style.end()) bfv = TrimCopy(bit->second);
+            }
+            if (bfv.empty() && e.attrs.count("backdrop-filter"))
+                bfv = TrimCopy(e.attrs.at("backdrop-filter"));
+            if (!bfv.empty() && lowerStr(bfv) != "none") {
+                float blurPx = 0.0f;
+                bool anyBlur = false, otherFn = false;
+                std::string cur2;
+                for (size_t k = 0; k <= bfv.size(); k++) {
+                    const char ch = (k < bfv.size()) ? bfv[k] : ')';
+                    if (ch == '(' || ch == ')' || ch == ' ' || ch == ',') {
+                        if (!cur2.empty()) {
+                            const std::string fn = lowerStr(cur2);
+                            if (fn.rfind("blur", 0) == 0) anyBlur = true;
+                            else if (fn != "and" && fn != "px") otherFn = true;
+                            if (fn.size() > 2 && fn.back() == 'x' &&
+                                fn.find("px") != std::string::npos && fn[0] >= '0' && fn[0] <= '9') {
+                                // 形如 "12px"：数值 + 单位
+                                float v = parseLen(fn, 0.0f);
+                                blurPx = std::max(blurPx, v);
+                                anyBlur = true;
+                            }
+                            cur2.clear();
+                        }
+                    } else {
+                        cur2 += ch;
+                    }
+                }
+                if (otherFn)
+                    Warn("backdrop-filter 只支持 blur()（saturate/brightness 等需要片元运算，"
+                         "已忽略）");
+                if (anyBlur && blurPx > 0.0f) {
+                    BinUIBackdropEntry be = {};
+                    be.nodeId = n.id;
+                    be.flags = 0;
+                    // 缩放口径：SVG 子树里按 svgX 的缩放折算（同一用户单位体系），
+                    // HTML 元素按 1:1（窗口的 ui_scale 由运行期 setSize 统一缩节点，
+                    // 模糊半径跟着矩形走，不需要编译期再乘一次）
+                    be.blur = blurPx * (hasSvgPath ? PathScaleFactor(svgX) : 1.0f);
+                    be.radius = static_cast<float>(n.radius);
+                    backdropNodes.push_back(be);
+                } else if (anyBlur) {
+                    Warn("backdrop-filter: blur(0) 等于不模糊（已忽略）");
+                }
+            }
+        }
+
         nodes.push_back(n);
 
         // v15 路径段：把折线存进来（节点盒已经是几何包围盒，见上面的 <path> 分支）
@@ -8333,6 +8412,7 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
     AppendFilterSection(buf, filterNodes);
     AppendClipSection(buf, clipNodes);
     AppendMaskSection(buf, maskNodes);   // v28 遮罩段
+    AppendBackdropSection(buf, backdropNodes);   // v29 毛玻璃段
     AppendNameSection(buf, nodeNames, offsets);
 
     // ---- 6. 二进制组件：编译期离线合并 ----
@@ -8541,6 +8621,7 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     AppendFilterSection(buf, {});     // v26：这条路径没有图片滤镜
     AppendClipSection(buf, {});       // v27：这条路径没有裁剪路径
     AppendMaskSection(buf, {});       // v28：这条路径没有 mask
+    AppendBackdropSection(buf, {});   // v29：这条路径没有毛玻璃
 
     return buf;
 }

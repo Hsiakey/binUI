@@ -1019,6 +1019,15 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                         gfx.fillRect(rules[k].x, rules[k].y, rules[k].w, rules[k].h, rules[k].color);
             };
 
+            // v0.16.27 毛玻璃（v29 毛玻璃段）：在画**自己的内容之前**把背景糊一层。
+            // 后端以 replace 混合把"模糊后的背景"画回这个矩形，随后元素自己的半透明
+            // 底色/边框叠在上面 —— 这才是毛玻璃；如果反过来先画底色再模糊，糊掉的
+            // 就是元素自己。仿射节点不做（旋转矩形的背景取样没有意义）。
+            if (draw && !affine) {
+                if (const BinUIBackdropEntry* bd = renderer.backdropOf(node.id))
+                    gfx.backdropBlur(x, y, nw, nh, effRadius, bd->blur);
+            }
+
             switch (node.type) {
                 case BINUI_LABEL: {
                     // 文字色 / 字重（v13）：作者显式写了 color / font-weight 就用它，

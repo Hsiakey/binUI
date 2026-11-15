@@ -190,6 +190,12 @@ public:
     }
 
 
+    // v29 毛玻璃段：节点的背景模糊参数（无条目返回 nullptr）
+    const BinUIBackdropEntry* backdropOf(uint16_t nodeId) const {
+        auto it = backdrop_.find(nodeId);
+        return it == backdrop_.end() ? nullptr : &it->second;
+    }
+
     // v15 路径段：BINUI_PATH 节点的折线（归一化坐标 + 子路径表；无条目返回 nullptr）
     struct PathRecord {
         BinUIPathEntry head{};
@@ -737,6 +743,7 @@ private:
     // v27 裁剪路径段
     std::unordered_map<uint16_t, ClipRecord> clipPaths_;
     std::unordered_map<uint16_t, std::vector<MaskRecord>> masks_;   // v28 遮罩段
+    std::unordered_map<uint16_t, BinUIBackdropEntry> backdrop_;     // v29 毛玻璃段
     // nodeId -> (textShadows_ 起始下标, 条数)
     std::unordered_map<uint16_t, std::pair<size_t, uint32_t>> textShadowIdx_;
     // v19 路径条带的跨帧缓存（条带数量有上限，条目数也封顶）。

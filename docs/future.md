@@ -188,6 +188,10 @@ virtual void popLayer() {}
 | 10 | SVG 语义缺一半 | `mask` / `filter` 不支持（`docs/svg.md` 已列，编译告警）。**`clipPath` 已做（0.16.24 / v27）**：编译期把裁剪几何折算到设备空间写进裁剪路径段，运行期"离屏图层 + even-odd 补集擦除"（`dst *= 1-srcA`），支持 userSpaceOnUse / objectBoundingBox，三端逐像素相同（VK 是管线变体）。**`marker` 已做（0.16.23）**：编译期按"顶点 + 切线方向"展开成引用路径的**子节点**（纯填充视图），支持 marker-start/mid/end、viewBox、refX/refY、markerUnits、orient，运行期与三端零改动；带 marker 的 `<line>` 自动升级成路径。**`pattern` 也已做（0.16.25）**：`fill="url(#p)"` 命中 `<pattern>` 时 tile 在**编译期平铺展开**成普通路径（同色同笔合成一个节点，每个展开节点挂"元素轮廓"裁剪记录复用 v27 补集擦除），支持 width/height/x/y、patternUnits、patternContentUnits、viewBox、patternTransform（平移+缩放），三端逐像素相同、格式不变；超过 400 块或点数超预算退回"首色实填"。**`mask` 也已做（0.16.26 / v28）**：离屏图层里两趟混合 —— 保留趟 `dst *= srcA`（亮度折进 alpha，白保留、灰压暗）+ 补集趟 `dst *= 1-srcA`（掩码外清零），支持 maskUnits / maskContentUnits、区域默认 -10%..120%、与 clip-path 嵌套，三端逐像素相同。**剩下的**：掩码内容渐变（按中间色）、重叠形状会乘两次；`pattern` 内容不裁到 tile 框、`patternTransform` 旋转/斜切按轴对齐近似 | 部分不做（见 P2） |
 | 11 | 字形只有整像素位图 | ✅ **已做（0.16.16）**：x 的小数部分量化成 **¼ 像素相位**，每份相位是一张独立字形位图（`FT_Set_Transform` 的 delta 先把轮廓右移 `phase/4`），图集按 `(码点, 相位)` 懒加载、整表缓存 key 含相位。advance 仍是整数 ⇒ 布局/测宽不变、静态位置相位恒为 0（15 条老基准逐位不变）。实测同页 A/B：单位墨量边缘梯度能量 **+7.6%**、中间调像素 **−12%**、总墨量差 0.02%。**剩下的**：只有横向（纵向 4×4 变体不划算，DirectWrite/Chrome 同样只做横向） | binUI |
 
+### 已做的新能力（不在欠缺清单里，但值得记一笔）
+
+- **毛玻璃 `backdrop-filter: blur()`（v0.16.27 / v29 毛玻璃段）**：离屏抓背景 → 多级 2× 降采样（每个 meso 级 = 2×2 盒式模糊）→ 圆角条带 + "覆盖混合"画回原位。三端算法逐字一致（同一套 UV 公式），零着色器改动。**没做的**：`saturate()` 之类的片元级滤镜（要么改 SPIR-V，要么 CPU 读回）、噪声/颗粒（需要一张可平铺的噪声贴图）、仿射节点上的毛玻璃。
+
 ### 已知差异（尚未定位根因）
 
 - **裁剪层里的奇数宽度描边**：`clip-path` 图层内，`stroke-width` 为**奇数**时

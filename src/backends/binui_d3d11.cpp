@@ -135,6 +135,7 @@ struct BinUID3D::Impl {
     ID3D11BlendState* blend = nullptr;
     ID3D11BlendState* blendErase = nullptr;   // v27：clip-path 的 dst *= 1-srcA
     ID3D11BlendState* blendKeep = nullptr;    // v28：mask 保留趟的 dst *= srcA
+    ID3D11BlendState* blendReplace = nullptr; // v29：毛玻璃合成的"直接覆盖"（ONE/ZERO）
     ID3D11RasterizerState* ras = nullptr;
     ID3D11ShaderResourceView* whiteSrv = nullptr; // 1×1 纯白（纯色四边形）
     // 持久离屏帧缓冲：局部重绘只更新脏区，present 时整帧 blit 到交换链
@@ -428,6 +429,17 @@ struct BinUID3D::Impl {
     bd3.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
     bd3.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     device->CreateBlendState(&bd3, &blendKeep);
+    // v29 毛玻璃合成：直接覆盖（背景被替换成模糊版）
+    D3D11_BLEND_DESC bdr = {};
+    bdr.RenderTarget[0].BlendEnable = TRUE;
+    bdr.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    bdr.RenderTarget[0].DestBlend = D3D11_BLEND_ZERO;
+    bdr.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bdr.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    bdr.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ZERO;
+    bdr.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bdr.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    device->CreateBlendState(&bdr, &blendReplace);
     // v27 裁剪擦除：color/alpha 都按 dst *= (1-srcA) 混合
     D3D11_BLEND_DESC bd2 = {};
     bd2.RenderTarget[0].BlendEnable = TRUE;
@@ -903,6 +915,71 @@ struct BinUID3D::Impl {
     std::vector<LayerFrame> layerStack;
     static constexpr int kMaxLayers = 4;
 
+    // ---- v29 毛玻璃：降采样链（每级 1/2，按需分配）+ 主目标 MSAA 解析中转 ----
+    struct BlurLevel {
+        ID3D11Texture2D* tex = nullptr;
+        ID3D11RenderTargetView* rtv = nullptr;
+        ID3D11ShaderResourceView* srv = nullptr;
+        int w = 0, h = 0;
+    };
+    std::vector<BlurLevel> blurLv;
+    ID3D11Texture2D* capTex = nullptr;   // 窗口大小的单采样中转（MSAA 目标先解析到这里）
+    // 降采样趟把图元画进小纹理时，坐标是"小图局部"的，不能再按层框裁
+    bool ignoreLayerClip = false;
+
+    void releaseBlurLevel(BlurLevel& b) {
+        if (b.srv) { b.srv->Release(); b.srv = nullptr; }
+        if (b.rtv) { b.rtv->Release(); b.rtv = nullptr; }
+        if (b.tex) { b.tex->Release(); b.tex = nullptr; }
+        b.w = b.h = 0;
+    }
+
+    bool ensureBlurLevel(size_t i, int w, int h) {
+        if (i >= 8 || w <= 0 || h <= 0) return false;
+        if (blurLv.size() <= i) blurLv.resize(i + 1);
+        BlurLevel& b = blurLv[i];
+        if (b.tex && b.w == w && b.h == h) return true;
+        releaseBlurLevel(b);
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = static_cast<UINT>(w);
+        td.Height = static_cast<UINT>(h);
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        if (FAILED(device->CreateTexture2D(&td, nullptr, &b.tex))) { b.tex = nullptr; return false; }
+        if (FAILED(device->CreateRenderTargetView(b.tex, nullptr, &b.rtv)) ||
+            FAILED(device->CreateShaderResourceView(b.tex, nullptr, &b.srv))) {
+            releaseBlurLevel(b);
+            return false;
+        }
+        b.w = w;
+        b.h = h;
+        return true;
+    }
+
+    bool ensureCapTex(int w, int h) {
+        if (capTex) {
+            D3D11_TEXTURE2D_DESC od = {};
+            capTex->GetDesc(&od);
+            if (static_cast<int>(od.Width) == w && static_cast<int>(od.Height) == h) return true;
+            capTex->Release();
+            capTex = nullptr;
+        }
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = static_cast<UINT>(w);
+        td.Height = static_cast<UINT>(h);
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        return SUCCEEDED(device->CreateTexture2D(&td, nullptr, &capTex));
+    }
+
     static void warnLayerLimit() {
         static bool warned = false;
         if (warned) return;
@@ -1001,7 +1078,7 @@ struct BinUID3D::Impl {
         for (const auto& b : batches) {
             if (b.count == 0) continue;
             D3D11_RECT r = { b.sx, b.sy, b.sx + b.sw, b.sy + b.sh };
-            if (lf) {
+            if (lf && !ignoreLayerClip) {
                 const LONG ll = static_cast<LONG>(std::floor(lf->x));
                 const LONG lt = static_cast<LONG>(std::floor(lf->y));
                 const LONG lr = static_cast<LONG>(std::ceil(lf->x + lf->w));
@@ -1146,7 +1223,11 @@ struct BinUID3D::Impl {
         if (il) { il->Release(); il = nullptr; }
         if (vs) { vs->Release(); vs = nullptr; }
         if (ps) { ps->Release(); ps = nullptr; }
-        if (cb) { cb->Release(); cb = nullptr; }
+        if (blendReplace) { blendReplace->Release(); blendReplace = nullptr; }
+    for (BlurLevel& bl : blurLv) releaseBlurLevel(bl);
+    blurLv.clear();
+    if (capTex) { capTex->Release(); capTex = nullptr; }
+    if (cb) { cb->Release(); cb = nullptr; }
         if (vb) { vb->Release(); vb = nullptr; }
         if (swap) { swap->Release(); swap = nullptr; }
         if (ctx) { ctx->Release(); ctx = nullptr; }
@@ -1564,6 +1645,127 @@ bool BinUID3D::setKeepBlend(bool on) {
     float bf[4] = { 0, 0, 0, 0 };
     impl_->ctx->OMSetBlendState(want, bf, 0xFFFFFFFF);
     return true;
+}
+
+// v0.16.27 毛玻璃（backdrop blur）：抓当前目标的区域 → 多级 2× 降采样 → 圆角合成。
+// 算法与 GL 参考实现逐字一致（同一套 UV 公式），这是三端像素一致的前提。
+// D3D11 的纹理行 0 = 区域顶部（与屏幕同向），所以四边形 UV 正着来，**不做 V 翻转**。
+bool BinUID3D::backdropBlur(float x, float y, float w, float h, float radius,
+                            float blurPx) {
+    if (!impl_ || !impl_->ready) return false;
+    Impl& d = *impl_;
+    if (blurPx <= 0.0f || w < 2.0f || h < 2.0f) return false;
+    int rx = static_cast<int>(std::floor(x));
+    int ry = static_cast<int>(std::floor(y));
+    int rx1 = static_cast<int>(std::ceil(x + w));
+    int ry1 = static_cast<int>(std::ceil(y + h));
+    rx = std::max(0, rx); ry = std::max(0, ry);
+    rx1 = std::min(d.winW, rx1); ry1 = std::min(d.winH, ry1);
+    const int rw = rx1 - rx, rh = ry1 - ry;
+    if (rw < 2 || rh < 2) return false;
+
+    int levels = 1;
+    {
+        float v = 2.0f;
+        while (levels < 6 && v < blurPx) { v *= 2.0f; levels++; }
+    }
+
+    d.flushAll();   // 手上攒的图元先落到当前目标（它们构成"背景"）
+
+    // 当前目标（主目标 MSAA / 离屏层）
+    ID3D11RenderTargetView* curRtv = d.layerStack.empty()
+        ? d.msTarget : d.layers[d.layerStack.back().idx].rtv;
+    ID3D11Texture2D* curTex = d.layerStack.empty()
+        ? (d.msSamples > 1 ? d.msTex : d.offTex)
+        : d.layers[d.layerStack.back().idx].tex;
+
+    D3D11_VIEWPORT prevVp = { 0, 0, static_cast<float>(d.winW),
+                              static_cast<float>(d.winH), 0, 1 };
+    { UINT n = 1; d.ctx->RSGetViewports(&n, &prevVp); }
+
+    if (!d.ensureBlurLevel(0, rw, rh)) return false;
+
+    // 1) 抓背景：MSAA 主目标先解析到单采样中转，再按区域 Copy
+    ID3D11Texture2D* srcTex = curTex;
+    ID3D11RenderTargetView* nullRt[1] = { nullptr };
+    d.ctx->OMSetRenderTargets(1, nullRt, nullptr);          // 读之前先解绑
+    if (curTex == d.msTex && d.msSamples > 1) {
+        if (!d.ensureCapTex(d.winW, d.winH)) {
+            ID3D11RenderTargetView* back = curRtv;
+            d.ctx->OMSetRenderTargets(1, &back, nullptr);
+            return false;
+        }
+        d.ctx->ResolveSubresource(d.capTex, 0, d.msTex, 0, DXGI_FORMAT_B8G8R8A8_UNORM);
+        srcTex = d.capTex;
+    }
+    {
+        ID3D11ShaderResourceView* nullSrv[1] = { nullptr };
+        d.ctx->PSSetShaderResources(0, 1, nullSrv);         // 别让 SRV 绑着被拷
+        D3D11_BOX box = { static_cast<UINT>(rx), static_cast<UINT>(ry), 0,
+                          static_cast<UINT>(rx1), static_cast<UINT>(ry1), 1 };
+        d.ctx->CopySubresourceRegion(d.blurLv[0].tex, 0, 0, 0, 0, srcTex, 0, &box);
+    }
+    { ID3D11RenderTargetView* back = curRtv;
+      d.ctx->OMSetRenderTargets(1, &back, nullptr); }
+
+    // 2) 降采样链：每级把上一级缩一半（覆盖混合；目标先清成透明）
+    const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    d.ctx->OMSetBlendState(d.blendReplace, bf, 0xFFFFFFFF);
+    bool chainOk = true;
+    for (int i = 1; i <= levels && chainOk; i++) {
+        const int dw = std::max(1, d.blurLv[static_cast<size_t>(i - 1)].w / 2);
+        const int dh = std::max(1, d.blurLv[static_cast<size_t>(i - 1)].h / 2);
+        if (!d.ensureBlurLevel(static_cast<size_t>(i), dw, dh)) { chainOk = false; break; }
+        Impl::BlurLevel& L = d.blurLv[static_cast<size_t>(i)];
+        ID3D11RenderTargetView* rt = L.rtv;
+        d.ctx->OMSetRenderTargets(1, &rt, nullptr);
+        const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        d.ctx->ClearRenderTargetView(rt, zero);
+        D3D11_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(dw),
+                              static_cast<float>(dh), 0.0f, 1.0f };
+        d.ctx->RSSetViewports(1, &vp);
+        float vs[2] = { static_cast<float>(dw), static_cast<float>(dh) };
+        d.ctx->UpdateSubresource(d.cb, 0, nullptr, vs, 0, 0);
+        d.ignoreLayerClip = true;
+        // ★ 关键：batches 的矩形取自 scissor（节点裁剪盒），小目标上会被整块裁掉
+        const int savedSc[4] = { d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3] };
+        d.scissor[0] = 0; d.scissor[1] = 0; d.scissor[2] = dw; d.scissor[3] = dh;
+        d.curSrv = d.blurLv[static_cast<size_t>(i - 1)].srv;
+        d.curLinear = 1;
+        d.emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
+                   0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu);
+        d.flushAll();
+        d.ignoreLayerClip = false;
+        d.scissor[0] = savedSc[0]; d.scissor[1] = savedSc[1];
+        d.scissor[2] = savedSc[2]; d.scissor[3] = savedSc[3];
+    }
+
+    // 3) 合成：圆角条带 + 双线性放大，直接覆盖（背景被替换成模糊版）
+    if (chainOk) {
+        ID3D11RenderTargetView* back = curRtv;
+        d.ctx->OMSetRenderTargets(1, &back, nullptr);
+        d.ctx->RSSetViewports(1, &prevVp);
+        float vs[2] = { static_cast<float>(d.winW), static_cast<float>(d.winH) };
+        d.ctx->UpdateSubresource(d.cb, 0, nullptr, vs, 0, 0);
+        d.ctx->OMSetBlendState(d.blendReplace, bf, 0xFFFFFFFF);
+        d.curSrv = d.blurLv[static_cast<size_t>(levels)].srv;
+        d.curLinear = 1;
+        binui::PaintImageBand bands[binui::kMaxImageBands];
+        const int nb = binui::BuildImageBands(x, y, w, h, radius, bands);
+        for (int q = 0; q < nb; q++) {
+            const binui::PaintImageBand& b = bands[q];
+            if (b.w <= 0.0f || b.h <= 0.0f) continue;
+            d.emitQuad(b.x, b.y, b.x + b.w, b.y + b.h,
+                       b.u0, b.v0, b.u1, b.v1, 0xFFFFFFFFu);
+        }
+        d.flushAll();
+    }
+
+    // 恢复：混合回到预乘、纹理回到白色（fillRect 用）
+    d.ctx->OMSetBlendState(d.blend, bf, 0xFFFFFFFF);
+    d.curSrv = d.whiteSrv;
+    d.curLinear = 0;
+    return chainOk;
 }
 
 bool BinUID3D::setAffine(const float* xf) {

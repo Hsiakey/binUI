@@ -147,6 +147,18 @@ public:
     // 掩罩需要两种混合状态 + 离屏图层；GDI 遗留路径返回 false（调用方退回"不遮罩"）。
     virtual bool supportsMask() const { return false; }
 
+    // ---- 毛玻璃（v29：CSS backdrop-filter: blur）----
+    // 画节点自身内容**之前**调用：把当前目标上 (x,y,w,h) 的背景抓下来，做多级 2×
+    // 降采样（每级 = 2×2 盒式模糊，链起来逼近高斯），再按 radius 圆角、以 replace
+    // 混合画回同一位置 —— 背景被"糊掉"而不是叠一层模糊。调用方随后照常画元素自己的
+    // 半透明底色/边框，两者合起来就是毛玻璃。
+    // 返回 false = 不支持（GDI）或参数退化 → 调用方什么都不做（退回"只有半透明底色"）。
+    virtual bool backdropBlur(float x, float y, float w, float h, float radius,
+                              float blurPx) {
+        (void)x; (void)y; (void)w; (void)h; (void)radius; (void)blurPx;
+        return false;
+    }
+
     // ---- 文字阴影（v24：CSS text-shadow）----
     // 在画一个节点的文字**之前**设好，节点画完用 alpha=0 清掉（或下个节点重设）。
     // color 的 alpha 已折入元素 opacity；blur < 0.5px 由实现按"硬阴影"（偏移一份字形）处理。

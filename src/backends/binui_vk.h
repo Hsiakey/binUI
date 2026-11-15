@@ -76,6 +76,11 @@ public:
     bool setEraseBlend(bool on) override;                       // v27：clip-path 擦除
     bool setKeepBlend(bool on) override;                        // v28：mask 保留趟
     bool supportsMask() const override { return true; }         // v28：mask 可用
+    // v29 毛玻璃（CSS backdrop-filter: blur）：抓当前目标的区域 → 多级 2× 降采样 →
+    // 圆角条带 + replace 混合画回去。算法与 GL 后端逐字一致（见 binui_gfx.h 的接口注释）。
+    // 需要 Vulkan 1.3 动态渲染（要在帧内结束/重开渲染作用域）；拿不到就返回 false。
+    bool backdropBlur(float x, float y, float w, float h, float radius,
+                      float blurPx) override;
 
     bool prepareImage(uint16_t index, const uint8_t* data, size_t size,
                       uint32_t generation) override;
