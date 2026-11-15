@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<app_window width="640" height="420" resizable="false">
+<html width="640" height="420">
+<head>
+<style>
+    body { background: #EEF2F7; color: #16202C; }
+    .cell { position: absolute; width: 140; height: 120; }
+    .cap  { position: absolute; left: 0; top: 96; width: 140; height: 18;
+            font-size: 12px; color: #4A5A6E; }
+    .pic  { position: absolute; left: 0; top: 0; width: 72; height: 72; }
+</style>
+</head>
+<body>
+    <div class="cell" style="left:16;  top:10">
+        <img class="pic" src="image-round-img.png" />
+        <span class="cap">原图</span>
+    </div>
+    <div class="cell" style="left:170; top:10">
+        <img class="pic" src="image-round-img.png" style="filter: grayscale(100%)" />
+        <span class="cap">grayscale(100%)</span>
+    </div>
+    <div class="cell" style="left:324; top:10">
+        <img class="pic" src="image-round-img.png" style="filter: sepia(100%)" />
+        <span class="cap">sepia(100%)</span>
+    </div>
+    <div class="cell" style="left:478; top:10">
+        <img class="pic" src="image-round-img.png" style="filter: saturate(250%)" />
+        <span class="cap">saturate(250%)</span>
+    </div>
+
+    <div class="cell" style="left:16;  top:130">
+        <img class="pic" src="image-round-img.png" style="filter: hue-rotate(120deg)" />
+        <span class="cap">hue-rotate(120deg)</span>
+    </div>
+    <div class="cell" style="left:170; top:130">
+        <img class="pic" src="image-round-img.png" style="filter: invert(100%)" />
+        <span class="cap">invert(100%)</span>
+    </div>
+    <div class="cell" style="left:324; top:130">
+        <img class="pic" src="image-round-img.png" style="filter: contrast(180%)" />
+        <span class="cap">contrast(180%)</span>
+    </div>
+    <div class="cell" style="left:478; top:130">
+        <img class="pic" src="image-round-img.png" style="filter: brightness(60%)" />
+        <span class="cap">brightness(60%)</span>
+    </div>
+
+    <!-- 圆角 + 滤镜：走的是"横向细条"路径，条带同样要采到滤过的纹理 -->
+    <div class="cell" style="left:16; top:250">
+        <img class="pic" src="image-round-img.png" style="border-radius: 36; filter: grayscale(100%)">
+        <span class="cap">圆角 + 灰度</span>
+    </div>
+    <!-- 多函数合成：按书写顺序（grayscale → contrast → hue-rotate） -->
+    <div class="cell" style="left:170; top:250">
+        <img class="pic" src="image-round-img.png" style="filter: grayscale(60%) contrast(140%) hue-rotate(40deg)" />
+        <span class="cap">3 个函数合成</span>
+    </div>
+    <!-- 同一张图、两种滤镜：纹理缓存必须分成两份，且互不影响 -->
+    <div class="cell" style="left:324; top:250">
+        <img class="pic" src="image-round-img.png" style="filter: sepia(100%)" />
+        <span class="cap">同图 sepia（第 2 份）</span>
+    </div>
+    <!-- 滤镜 + 圆角 + 边框：纹理/几何互不干扰 -->
+    <div class="cell" style="left:478; top:250">
+        <img class="pic" src="image-round-img.png" style="border-radius: 12; filter: invert(100%)" />
+        <span class="cap">圆角 + 反相</span>
+    </div>
+
+    <span style="position:absolute; left:16; top:388; width:608; height:20; font-size:12px; color:#7A8798">v26：filter 的颜色矩阵在解码时逐像素应用，按 (imageIndex, 矩阵) 缓存纹理变体；brightness 走顶点色</span>
+</body>
+</html>
+</app_window>

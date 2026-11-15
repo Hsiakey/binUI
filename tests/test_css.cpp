@@ -11,6 +11,7 @@
 #include "binui_format.h"
 #include "binui_paint.h"     // BuildFillBands / PaintBand（渐变角度用例）
 #include "binui_mip.h"       // BuildMipChainBGRA（v0.16.20：raw 纹理的 mip 链）
+#include "binui_filter.h"    // ColorMatrix / ApplyColorMatrixBGRA（v26：CSS filter）
 #include "binui_srcmap.h"
 #include <cstdio>
 #include <cmath>
@@ -559,6 +560,158 @@ static void TestIssueRegressions() {
         binui::AffineMul(ali, rot, ali);
         TEST("16.21: 复合允许输出与输入同一数组",
              near(mapX(ali, 1, 0), 10.0f) && near(mapY(ali, 1, 0), 1.0f));
+    }
+
+    // ---- 16.22：CSS filter 的颜色矩阵（v26 图片滤镜段）----
+    // 钉住四件事：
+    //   1. 单个函数的矩阵与 CSS 规范一致（grayscale/sepia/saturate/invert/contrast）；
+    //   2. 合成顺序 = 书写顺序（先写的先作用），非交换；
+    //   3. 逐像素应用：颜色被变换、alpha 不动、越界钳制；
+    //   4. 编译器落点与缓存键（brightness 走 reserve[2]，其余进滤镜段）。
+    {
+        auto near = [](float a, float b) { return std::fabs(a - b) < 0.002f; };
+        // 定点到 0..1 的 RGB 应用矩阵，方便断言
+        auto apply = [&](const binui::ColorMatrix& c, float r, float g, float b, float out[3]) {
+            out[0] = c.m[0] * r + c.m[1] * g + c.m[2] * b + c.o[0];
+            out[1] = c.m[3] * r + c.m[4] * g + c.m[5] * b + c.o[1];
+            out[2] = c.m[6] * r + c.m[7] * g + c.m[8] * b + c.o[2];
+        };
+        float o[3];
+
+        apply(binui::FilterGrayscale(1.0f), 1.0f, 0.0f, 0.0f, o);
+        TEST("16.22: grayscale(1) 红色 → 0.2126 灰",
+             near(o[0], 0.2126f) && near(o[1], 0.2126f) && near(o[2], 0.2126f));
+        apply(binui::FilterGrayscale(0.0f), 0.3f, 0.6f, 0.9f, o);
+        TEST("16.22: grayscale(0) = 原样",
+             near(o[0], 0.3f) && near(o[1], 0.6f) && near(o[2], 0.9f));
+
+        apply(binui::FilterSepia(1.0f), 0.5f, 0.5f, 0.5f, o);
+        // 行和：0.393+0.769+0.189 = 1.351；0.349+0.686+0.168 = 1.203；0.272+0.534+0.131 = 0.937
+        TEST("16.22: sepia(1) 灰 0.5 → (0.6755, 0.6015, 0.4685)",
+             near(o[0], 0.6755f) && near(o[1], 0.6015f) && near(o[2], 0.4685f));
+
+        apply(binui::FilterSaturate(0.0f), 1.0f, 0.0f, 0.0f, o);
+        TEST("16.22: saturate(0) = grayscale(1)",
+             near(o[0], 0.2126f) && near(o[1], 0.2126f) && near(o[2], 0.2126f));
+        apply(binui::FilterSaturate(2.0f), 1.0f, 0.0f, 0.0f, o);
+        TEST("16.22: saturate(2) 纯红保持纯红（增益不改变已饱和通道）",
+             near(o[0], 0.2126f + (1.0f - 0.2126f) * 2.0f) && near(o[1], 0.2126f - 0.2126f * 2.0f));
+
+        apply(binui::FilterInvert(1.0f), 0.2f, 0.5f, 0.9f, o);
+        TEST("16.22: invert(1) 反相", near(o[0], 0.8f) && near(o[1], 0.5f) && near(o[2], 0.1f));
+        apply(binui::FilterInvert(0.5f), 0.2f, 0.5f, 0.9f, o);
+        // a = 0.5 → 系数 1-2a = 0，偏移 a = 0.5：所有颜色都被拉到中灰
+        TEST("16.22: invert(0.5) 全变成 0.5 灰",
+             near(o[0], 0.5f) && near(o[1], 0.5f) && near(o[2], 0.5f));
+
+        apply(binui::FilterContrast(0.0f), 0.1f, 0.7f, 0.9f, o);
+        TEST("16.22: contrast(0) 全变成 0.5 灰", near(o[0], 0.5f) && near(o[2], 0.5f));
+        apply(binui::FilterContrast(2.0f), 0.5f, 0.6f, 0.25f, o);
+        TEST("16.22: contrast(2) 绕 0.5 拉伸", near(o[0], 0.5f) && near(o[1], 0.7f) && near(o[2], 0.0f));
+
+        // hue-rotate(360°) ≈ 单位矩阵
+        {
+            const binui::ColorMatrix hr = binui::FilterHueRotate(360.0f);
+            apply(hr, 0.2f, 0.6f, 0.9f, o);
+            TEST("16.22: hue-rotate(360) ≈ 原样", near(o[0], 0.2f) && near(o[1], 0.6f) && near(o[2], 0.9f));
+        }
+        // 120° 把红搬到另一个通道族（R 行的权重不再让纯红留在 R）
+        {
+            const binui::ColorMatrix hr = binui::FilterHueRotate(120.0f);
+            apply(hr, 1.0f, 0.0f, 0.0f, o);
+            TEST("16.22: hue-rotate(120) 纯红 → 不再只有红通道有值",
+                 o[0] < 0.99f || o[1] > 0.01f || o[2] > 0.01f);
+        }
+
+        // 合成顺序：先 grayscale 后 invert ≠ 先 invert 后 grayscale
+        {
+            const binui::ColorMatrix g = binui::FilterGrayscale(1.0f);
+            const binui::ColorMatrix inv = binui::FilterInvert(1.0f);
+            float a[3], b[3];
+            apply(binui::ColorMatrixMul(inv, g), 1.0f, 0.0f, 0.0f, a);   // 先灰后反相
+            TEST("16.22: 灰→反相：纯红 → 亮度取反（0.7874）", near(a[0], 1.0f - 0.2126f));
+            // sepia 与 invert 不交换：这两种顺序结果必须不同（否则"按书写顺序合成"就没意义）
+            const binui::ColorMatrix sp = binui::FilterSepia(1.0f);
+            apply(binui::ColorMatrixMul(inv, sp), 0.5f, 0.2f, 0.8f, a);
+            apply(binui::ColorMatrixMul(sp, inv), 0.5f, 0.2f, 0.8f, b);
+            TEST("16.22: sepia→invert ≠ invert→sepia", std::fabs(a[0] - b[0]) > 0.05f);
+        }
+
+        // 逐像素应用：alpha 不动、越界钳制
+        {
+            std::vector<uint8_t> px = {
+                0, 0, 255, 128,     // BGRA：纯红，半透明
+                255, 255, 255, 0,   // 全透明（应原样跳过）
+                200, 100, 50, 255,  // 随机色
+            };
+            const binui::ColorMatrix inv = binui::FilterInvert(1.0f);
+            binui::ApplyColorMatrixBGRA(px.data(), 3, 1, inv);
+            TEST("16.22: 像素反相（红 → 青）", px[0] == 255 && px[1] == 255 && px[2] == 0);
+            TEST("16.22: alpha 不变", px[3] == 128);
+            TEST("16.22: 全透明像素跳过", px[4] == 255 && px[5] == 255 && px[6] == 255 && px[7] == 0);
+            TEST("16.22: 反相 (50,100,200) → (205,155,55)",
+                 px[8] == 55 && px[9] == 155 && px[10] == 205 && px[11] == 255);
+
+            // 越界钳制：contrast(4) 作用在 0.9 上会冲到 2.1 → 钳到 255
+            std::vector<uint8_t> px2 = { 230, 230, 230, 255 };
+            binui::ApplyColorMatrixBGRA(px2.data(), 1, 1, binui::FilterContrast(4.0f));
+            TEST("16.22: 越界钳制到 255", px2[0] == 255 && px2[1] == 255 && px2[2] == 255);
+        }
+
+        // 缓存键：无滤镜 = 0；不同矩阵不同键；单位矩阵（= 不写段）也返回 0
+        {
+            BinUIImageFilter f = {};
+            f.nodeId = 7; f.flags = 1;
+            const binui::ColorMatrix g = binui::FilterGrayscale(1.0f);
+            for (int i = 0; i < 9; i++) f.m[i] = g.m[i];
+            const uint64_t k1 = binui::ImageFilterKey(&f);
+            TEST("16.22: 滤镜键非 0", k1 != 0);
+            TEST("16.22: nullptr → 0", binui::ImageFilterKey(nullptr) == 0);
+            f.nodeId = 9;   // nodeId 不参与哈希（同一张图两个节点共用一份纹理）
+            TEST("16.22: nodeId 不进键", binui::ImageFilterKey(&f) == k1);
+            f.m[0] = 0.999f;
+            TEST("16.22: 矩阵变 → 键变", binui::ImageFilterKey(&f) != k1);
+        }
+
+        // 编译器落点：filter 各函数 → 滤镜段；brightness 仍走 reserve[2]
+        {
+            const char* html = R"HTML(<app_window width="420" height="320" bg="#101014">
+<html width="420" height="320" bg="#101014">
+<body>
+  <img id="gray"  src="a.png" style="position:absolute; left:10; top:10; width:100; height:60;
+                                     filter: grayscale(100%)" />
+  <img id="multi" src="a.png" style="position:absolute; left:10; top:80; width:100; height:60;
+                                     filter: sepia(50%) saturate(150%) hue-rotate(90deg)" />
+  <img id="inv"   src="a.png" style="position:absolute; left:10; top:150; width:100; height:60;
+                                     filter: invert(1)" />
+  <img id="bright" src="a.png" style="position:absolute; left:10; top:220; width:100; height:60;
+                                     filter: brightness(0.5)" />
+  <img id="none"  src="a.png" style="position:absolute; left:10; top:290; width:100; height:60" />
+  <img id="blur"  src="a.png" style="position:absolute; left:200; top:10; width:100; height:60;
+                                     filter: blur(2px)" />
+</body></html>
+</app_window>)HTML";
+            const auto bin = CompileHTML(html);
+            BinUIRenderer r;
+            TEST("16.22: filter 布局可解析", ParseInto(r, bin));
+            auto filtOf = [&](const char* name) -> const BinUIImageFilter* {
+                const uint16_t id = r.findNodeByName(name);
+                return id ? r.imageFilterOf(id) : nullptr;
+            };
+            const BinUIImageFilter* fg = filtOf("gray");
+            TEST("16.22: grayscale(100%) 进滤镜段", fg != nullptr);
+            if (fg) TEST("16.22: grayscale 矩阵首行 = 亮度权重",
+                         std::fabs(fg->m[0] - 0.2126f) < 0.002f &&
+                         std::fabs(fg->m[1] - 0.7152f) < 0.002f);
+            TEST("16.22: 多函数合成进一条", filtOf("multi") != nullptr);
+            const BinUIImageFilter* fi = filtOf("inv");
+            TEST("16.22: invert(1) 的偏移 = 1",
+                 fi && std::fabs(fi->offset[0] - 1.0f) < 0.002f &&
+                 std::fabs(fi->m[0] + 1.0f) < 0.002f);
+            TEST("16.22: brightness 不进滤镜段（走 reserve[2]）", filtOf("bright") == nullptr);
+            TEST("16.22: 没写 filter → 无条目", filtOf("none") == nullptr);
+            TEST("16.22: blur() 不进段（离屏合成暂无）", filtOf("blur") == nullptr);
+        }
     }
 
     // ---- 03：display:none 必须连整棵子树一起不生成 ----

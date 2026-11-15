@@ -24,7 +24,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v23: 阴影段（box-shadow），见 BinUIShadow
 // v24: 文字阴影段（text-shadow），见 BinUITextShadow
 // v25: 绘制附加段（九宫格图片），见 BinUIPaintEx
-constexpr uint32_t BINUI_VERSION    = 25;
+// v26: 图片滤镜段（CSS filter 的颜色矩阵），见 BinUIImageFilter
+constexpr uint32_t BINUI_VERSION    = 26;
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -562,6 +563,32 @@ struct BinUIPaintEx {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIPaintEx) == 4, "BinUIPaintEx must be 4 bytes");
+
+// ============================================================
+// 图片滤镜段（v26）：CSS filter 合成后的颜色矩阵
+//
+// 布局：uint32 ffBytes（0 = 无）+ uint32 ffCount + BinUIImageFilter[count]
+// 恒定写出，位于绘制附加段之后、名称段之前。
+//
+// 为什么单独开一段：颜色矩阵是 12 个 float（48 字节），`BinUIPaintNode` 一个字节都
+// 加不了（reserve[3] 已满），也不该为极少数带滤镜的图片给所有节点加 48 字节。
+//
+// 语义：只对 `<img>` / `<video>` 的**像素**生效（后端解码后跑一遍矩阵再上传纹理），
+// 每节点一条，按 (imageIndex, 矩阵) 缓存纹理变体。brightness 不走这里 —— 它等价于
+// "乘一个顶点色"，0.16.15 起就走 paint.reserve[2]，GDI 也能吃。
+// 矩阵的合成（多个函数按书写顺序相乘）在编译期完成，运行期只做逐像素乘法。
+// 详见 include/binui_filter.h。
+// ============================================================
+#pragma pack(push, 1)
+struct BinUIImageFilter {
+    uint16_t nodeId;
+    uint8_t  flags;       // bit0 = 有效（恒 1；留给将来的 opacity 并入等）
+    uint8_t  reserved;
+    float    m[9];        // 3×3 行主序，作用在 0..1 的 RGB（sRGB）
+    float    offset[3];   // 偏移（invert / contrast 需要）
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUIImageFilter) == 52, "BinUIImageFilter must be 52 bytes");
 
 // ============================================================
 // 路径段（v15，恒定写出，位于扩展绘制段之后、名称段之前）

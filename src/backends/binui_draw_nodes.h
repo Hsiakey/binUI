@@ -1183,6 +1183,10 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 case BINUI_IMAGE: {
                     const ImageResource* img = renderer.getImage(node.imageIndex);
                     bool drawn = false;
+                    // v26：CSS filter 的颜色矩阵（grayscale/sepia/saturate/hue-rotate/invert/
+                    // contrast）在**解码时**逐像素应用，并按 (imageIndex, 矩阵哈希) 缓存纹理。
+                    // 状态要在 prepareImage 之前设好（上传就发生在那里），本节点画完清掉。
+                    gfx.setImageFilter(renderer.imageFilterOf(node.id));
                     // v0.16.15（P1-8）：染色 = CSS `filter: brightness(N)`，编译期存进
                     // paint.reserve[2]（0 = 没声明）。三个 GPU 后端本来就是"纹理 × 顶点色"，
                     // 传个灰度顶点色就是"乘一下"，不用改着色器。
@@ -1240,11 +1244,16 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                                          24.0f, 300, node.text, textCol, true, false);
                         }
                     }
+                    gfx.setImageFilter(nullptr);   // v26：状态是后端的，不清会漏到下一张图
                     break;
                 }
                 case BINUI_VIDEO: {
                     // 底色：无解码帧时显示（深色海报底）
                     fillNodeBg(dc, static_cast<float>(effRadius));
+
+                    // v26：<video> 的解码帧同样是"图片槽 + 颜色矩阵"（每帧跑一遍，
+                    // 视频带滤镜时是真开销 —— CSS 语义如此，值为先）
+                    gfx.setImageFilter(renderer.imageFilterOf(node.id));
 
                     // 解码帧（伪图片槽，rawPixels）：contain-fit letterbox
                     const ImageResource* img = renderer.getImage(node.imageIndex);
@@ -1268,6 +1277,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                         DrawVideoControlsTmpl(gfx, renderer, node,
                                               static_cast<float>(x), static_cast<float>(y),
                                               static_cast<float>(nw), opacity);
+                    gfx.setImageFilter(nullptr);   // v26
                     break;
                 }
                 case BINUI_SVG:

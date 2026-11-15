@@ -7,6 +7,7 @@
 #include "binui_path.h"            // SVG 路径几何：d 解析 / 细分 / 包围盒（与运行期同一份数学）
 #include "binui_text_estimate.h"   // 文本尺寸粗估：与渲染器运行期 setText 重算共用同一口径
 #include "binui_flex_layout.h"     // flex 布局：与渲染器运行期重排共用同一份实现
+#include "binui_filter.h"          // CSS filter 的颜色矩阵：编译期合成，后端解码时逐像素应用
 
 #include <fstream>
 #include <sstream>
@@ -1172,6 +1173,26 @@ static void AppendPaintExSection(std::vector<uint8_t>& buf,
     memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
 
+// 追加图片滤镜段（v26）：uint32 ffBytes + uint32 ffCount + BinUIImageFilter[]
+// 恒定写出（无条目时 ffBytes=4），位于绘制附加段之后、名称段之前。
+static void AppendFilterSection(std::vector<uint8_t>& buf,
+                                const std::vector<BinUIImageFilter>& items) {
+    size_t start = buf.size();
+    std::vector<uint8_t> data;
+    auto wu = [&](uint32_t x) {
+        const uint8_t* p = reinterpret_cast<const uint8_t*>(&x);
+        data.insert(data.end(), p, p + 4);
+    };
+    wu((uint32_t)items.size());
+    if (!items.empty())
+        data.insert(data.end(), reinterpret_cast<const uint8_t*>(items.data()),
+                    reinterpret_cast<const uint8_t*>(items.data() + items.size()));
+    uint32_t nbytes = (uint32_t)data.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
+
 // 点用 uint16 归一化存（0..65535 映射包围盒），比 float 省一半且精度远超显示能力。
 struct PendingPath {
     BinUIPathEntry head = {};
@@ -1893,6 +1914,7 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     AppendShadowSection(buf, {});    // v23：XML 路径无 box-shadow，段同样恒定写出
     AppendTextShadowSection(buf, {}); // v24：XML 路径无 text-shadow，段同样恒定写出
     AppendPaintExSection(buf, {});  // v25：XML 路径无九宫格图片
+    AppendFilterSection(buf, {});     // v26：这条路径没有图片滤镜
     AppendNameSection(buf, nodeNames, offsets);
 
     return buf;
@@ -4416,6 +4438,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::vector<BinUIShadow> shadowNodes;      // v23 阴影段（box-shadow，绘制顺序 = 下标升序）
     std::vector<BinUITextShadow> textShadowNodes;  // v24 文字阴影段（text-shadow）
     std::vector<BinUIPaintEx> paintExNodes;        // v25 绘制附加段（九宫格图片等）
+    std::vector<BinUIImageFilter> filterNodes;     // v26 图片滤镜段（CSS filter 的颜色矩阵）
     std::vector<PendingPath> pendingPaths;     // v15 路径段（SVG <path>/<ellipse> 的折线）
     std::vector<std::string> strings;
     strings.push_back(""); // 字符串表首位 = 空串：无文本节点的 textOffset=0 指向空串
@@ -6188,10 +6211,13 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             }
         }
 
-        // ---- v0.16.15：CSS filter: brightness()（只对图片生效）----
-        // 三个 GPU 后端画图片时本来就是"纹理 × 顶点色"，所以"乘暗"是免费的；
-        // 系数存进扩展绘制段的 reserve[2]（1..255，0 = 没声明；255 = 1.0 不动作）。
-        // blur()/grayscale()/saturate() 这些要改着色器（VK 是预编译 SPIR-V），不做。
+        // ---- v0.16.15 / v26：CSS filter ----
+        // 两条落点，按"能不能用顶点色乘出来"分工：
+        //   · brightness() → 乘一个灰度顶点色，系数存扩展绘制段 reserve[2]（1..255，0 = 未声明）；
+        //   · grayscale/sepia/saturate/hue-rotate/invert/contrast → RGB 上的一次仿射变换，
+        //     顶点色乘不出来，编译期按书写顺序合成成 3×3+偏移写进滤镜段（v26），
+        //     后端解码图片后逐像素跑一遍（详见 include/binui_filter.h）。
+        // blur()/drop-shadow()/url(#f) 需要离屏合成，暂时不做，逐条告警。
         {
             auto fit = style.find("filter");
             if (fit != style.end()) {
@@ -6213,30 +6239,83 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                         }
                         if (!cur.empty()) fns.push_back(cur);
                     }
-                    bool sawOther = false;
+                    // 单个参数：支持百分比（50%）与纯数字（0.5）；返回 0..1 之外的也原样给
+                    auto amount = [&](const std::string& arg, float dflt) -> float {
+                        if (arg.empty()) return dflt;
+                        if (arg.back() == '%')
+                            return parseLen(arg.substr(0, arg.size() - 1), dflt * 100.0f, "filter") / 100.0f;
+                        return parseLen(arg, dflt, "filter");
+                    };
+                    // 角度：deg / turn / rad / grad（无单位按度）
+                    auto angle = [&](const std::string& arg) -> float {
+                        if (arg.empty()) return 0.0f;
+                        const std::string u = LowerCopy(arg);
+                        if (u.size() > 3 && u.compare(u.size() - 4, 4, "turn") == 0)
+                            return parseLen(arg.substr(0, arg.size() - 4), 0.0f, "filter") * 360.0f;
+                        if (u.size() > 3 && u.compare(u.size() - 4, 4, "grad") == 0)
+                            return parseLen(arg.substr(0, arg.size() - 4), 0.0f, "filter") * 0.9f;
+                        if (u.size() > 2 && u.compare(u.size() - 3, 3, "rad") == 0)
+                            return parseLen(arg.substr(0, arg.size() - 3), 0.0f, "filter") *
+                                   57.29577951308232f;
+                        if (u.size() > 2 && u.compare(u.size() - 3, 3, "deg") == 0)
+                            return parseLen(arg.substr(0, arg.size() - 3), 0.0f, "filter");
+                        return parseLen(arg, 0.0f, "filter");
+                    };
+                    binui::ColorMatrix cm = binui::ColorMatrixIdentity();
+                    bool anyMatrix = false;
+                    bool sawBlur = false;
                     for (const std::string& fn : fns) {
                         const size_t lp = fn.find('(');
-                        if (lp == std::string::npos || fn.back() != ')') { sawOther = true; continue; }
+                        if (lp == std::string::npos || fn.back() != ')') { sawBlur = true; continue; }
                         const std::string name = fn.substr(0, lp);
                         const std::string arg = fn.substr(lp + 1, fn.size() - lp - 2);
-                        if (name != "brightness") { sawOther = true; continue; }
-                        float k = 0.0f;
-                        if (!arg.empty() && arg.back() == '%')
-                            k = parseLen(arg.substr(0, arg.size() - 1), 100.0f, "filter") / 100.0f;
-                        else
-                            k = parseLen(arg, 1.0f, "filter");
-                        if (k < 0.0f) k = 0.0f;
-                        if (k >= 1.0f) continue;                    // 1.0 = 不动作（不提亮）
-                        if (k > 1.0f)
-                            Warn("CSS filter: brightness() 只支持乘暗（0~1），\"" + fn + "\" 按 1 处理");
-                        int b8 = (int)std::lround(k * 255.0f);
-                        if (b8 < 1) b8 = 1;                          // 0 留给"没声明"
-                        if (b8 > 255) b8 = 255;
-                        paint.reserve[2] = (uint8_t)b8;
+                        binui::ColorMatrix one;
+                        bool known = true;
+                        if (name == "brightness") {
+                            // 只乘暗（>1 需要提亮：顶点色只能乘、不能加），保持 0.16.15 的行为
+                            float k = amount(arg, 1.0f);
+                            if (k < 0.0f) k = 0.0f;
+                            if (k < 1.0f) {
+                                int b8 = (int)std::lround(k * 255.0f);
+                                if (b8 < 1) b8 = 1;
+                                paint.reserve[2] = (uint8_t)b8;
+                            } else if (k > 1.0f) {
+                                Warn("CSS filter: brightness() 只支持乘暗（0~1），\"" + fn + "\" 按 1 处理");
+                            }
+                            continue;
+                        } else if (name == "grayscale") {
+                            one = binui::FilterGrayscale(amount(arg, 1.0f));
+                        } else if (name == "sepia") {
+                            one = binui::FilterSepia(amount(arg, 1.0f));
+                        } else if (name == "saturate") {
+                            one = binui::FilterSaturate(amount(arg, 1.0f));
+                        } else if (name == "hue-rotate") {
+                            one = binui::FilterHueRotate(angle(arg));
+                        } else if (name == "invert") {
+                            one = binui::FilterInvert(amount(arg, 1.0f));
+                        } else if (name == "contrast") {
+                            one = binui::FilterContrast(amount(arg, 1.0f));
+                        } else {
+                            known = false;
+                        }
+                        if (!known) {
+                            sawBlur = true;
+                            continue;
+                        }
+                        cm = binui::ColorMatrixMul(one, cm);   // 先写的先作用
+                        anyMatrix = true;
                     }
-                    if (sawOther)
-                        Warn("CSS filter 只支持 brightness(0~1)，其余滤镜（blur/grayscale/"
-                             "saturate/…）已忽略");
+                    if (anyMatrix && !binui::ColorMatrixIsIdentity(cm)) {
+                        BinUIImageFilter f = {};
+                        f.nodeId = n.id;
+                        f.flags = 1;
+                        for (int k = 0; k < 9; k++) f.m[k] = cm.m[k];
+                        for (int k = 0; k < 3; k++) f.offset[k] = cm.o[k];
+                        filterNodes.push_back(f);
+                    }
+                    if (sawBlur)
+                        Warn("CSS filter: blur()/drop-shadow()/url(#id) 需要离屏合成，已忽略"
+                             "（grayscale/sepia/saturate/hue-rotate/invert/contrast/brightness 已支持）");
                 }
             }
         }
@@ -7079,6 +7158,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     AppendShadowSection(buf, shadowNodes);
     AppendTextShadowSection(buf, textShadowNodes);
     AppendPaintExSection(buf, paintExNodes);
+    AppendFilterSection(buf, filterNodes);
     AppendNameSection(buf, nodeNames, offsets);
 
     // ---- 6. 二进制组件：编译期离线合并 ----
@@ -7284,6 +7364,7 @@ std::vector<uint8_t> GenerateDefaultBinUI() {
     AppendShadowSection(buf, {});    // v23：默认布局没有 box-shadow，段同样恒定写出
     AppendTextShadowSection(buf, {}); // v24：默认布局没有 text-shadow
     AppendPaintExSection(buf, {});  // v25：默认布局没有九宫格图片
+    AppendFilterSection(buf, {});     // v26：这条路径没有图片滤镜
 
     return buf;
 }

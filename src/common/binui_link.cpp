@@ -54,6 +54,7 @@ struct Doc {
     std::vector<BinUIShadow> shadows;     // v23 阴影段
     std::vector<BinUITextShadow> textShadows;   // v24 文字阴影段
     std::vector<BinUIPaintEx> paintEx;         // v25 绘制附加段（九宫格图片）
+    std::vector<BinUIImageFilter> imgFilter;   // v26 图片滤镜段（CSS filter 颜色矩阵）
     std::vector<std::pair<uint16_t, std::string>> names;
 };
 
@@ -513,6 +514,35 @@ bool ParseDoc(const void* data, size_t size, Doc& d) {
         if (!ok) r.rewind(mark);
     }
 
+    // ---- 图片滤镜段（v26）：uint32 bytes + uint32 count + BinUIImageFilter[] ----
+    {
+        const uint8_t* mark = r.cur();
+        uint32_t bytes = 0;
+        bool ok = false;
+        if (r.u32(bytes)) {
+            if (bytes == 0) {
+                ok = true;
+            } else {
+                const uint8_t* sp = nullptr;
+                if (r.blob(bytes, sp)) {
+                    Reader s(sp, sp + bytes);
+                    uint32_t sc = 0;
+                    if (s.u32(sc) && s.left() >= (size_t)sc * sizeof(BinUIImageFilter)) {
+                        const uint8_t* ep = nullptr;
+                        if (s.blob((size_t)sc * sizeof(BinUIImageFilter), ep)) {
+                            if (sc)
+                                d.imgFilter.assign(
+                                    reinterpret_cast<const BinUIImageFilter*>(ep),
+                                    reinterpret_cast<const BinUIImageFilter*>(ep) + sc);
+                            ok = true;
+                        }
+                    }
+                }
+                if (!ok) { d.imgFilter.clear(); r.rewind(mark); }
+            }
+        }
+        if (!ok) r.rewind(mark);
+    }
     // ---- 名称段（v8，缺失 = 无命名节点） ----
     {
         uint32_t bytes = 0;
@@ -687,7 +717,14 @@ std::vector<uint8_t> EmitDoc(Doc& d) {
             PutRaw(p, d.paintEx.data(), d.paintEx.size() * sizeof(BinUIPaintEx));
         PutSection(b, p);
     }
-    // 名称段（非空才写）
+    // 图片滤镜段（v26，恒定写出）
+    {
+        std::vector<uint8_t> p;
+        PutU32(p, static_cast<uint32_t>(d.imgFilter.size()));
+        if (!d.imgFilter.empty())
+            PutRaw(p, d.imgFilter.data(), d.imgFilter.size() * sizeof(BinUIImageFilter));
+        PutSection(b, p);
+    }    // 名称段（非空才写）
     if (!namePairs.empty()) {
         std::vector<uint8_t> p;
         PutU32(p, static_cast<uint32_t>(namePairs.size()));
@@ -954,6 +991,14 @@ bool MergeLayout(std::vector<uint8_t>& host, const void* comp, size_t compSize,
         h.paintEx.push_back(p2);
     }
 
+    // ---- 图片滤镜段（v26）：颜色矩阵跟着 nodeId 重映射搬过来 ----
+    for (const BinUIImageFilter& f : c.imgFilter) {
+        auto it = compIdx.find(f.nodeId);
+        if (it == compIdx.end() || it->second == 0) continue;
+        BinUIImageFilter f2 = f;
+        f2.nodeId = idMap[it->second];
+        h.imgFilter.push_back(f2);
+    }
     // ---- 组件引用段（组件内再外挂组件时递归） ----
     for (auto& ref : c.comps) {
         ComponentRef r2 = ref;

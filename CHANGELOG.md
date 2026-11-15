@@ -109,6 +109,44 @@ GDI 文字阴影 `AlphaBlend` 源位图未选中导致阴影整块不出现）�
   每行宽度之和 = 盒宽、横向 UV 首尾相接、首末块 UV 到 0/1、内缩钳到源图半张、
   盒比内缩小不出现负宽、退化输入返回 0。
 
+## [0.16.22] - 2026-11-15 【格式 v26】
+
+`filter` 补齐（P1-8 的最后一条）：`grayscale` / `sepia` / `saturate` / `hue-rotate` /
+`invert` / `contrast` 六个函数从"告警忽略"变成真支持，三端逐像素相同。
+
+### 加 — 颜色矩阵：编译期合成，解码时逐像素应用
+
+这六个函数本质都是"RGB 上的一次仿射变换"（3×3 矩阵 + 偏移），顶点色乘不出来；而改片元
+着色器这条路对 VK 不通（SPIR-V 是仓库里预编译好的常量数组，没有构建期 glslang）。所以走
+**CPU 变体纹理**：
+
+- 编译期按**书写顺序**把函数合成成 3×3 + 偏移（数学在 `include/binui_filter.h`，与 CSS
+  Filter Effects L1 同一口径：sRGB 空间、非预乘、逐函数左乘），写进新的**图片滤镜段**
+  （`BinUIImageFilter`，52 字节/节点，`uint32 bytes + uint32 count + entries`）。
+- 后端解码图片后、建 mip 链之前跑一遍矩阵，纹理按 `(imageIndex, 矩阵哈希)` 缓存变体 ——
+  同一张图配两种滤镜是两份纹理，**之后每帧零开销**；没有滤镜时键退化为 imageIndex，
+  老路径的指针/行为一位不变。
+- `brightness()` 不动：它等价于"乘一个灰度顶点色"，0.16.15 起就走 `paint.reserve[2]`，
+  GDI 也能吃。矩阵里刻意不含它，避免双重压暗。
+- 视频帧也吃（每帧跑一遍是 CSS 语义要求的真开销，值为先）。
+
+### 改 — 三端图片缓存键：imageIndex → (imageIndex, 滤镜哈希)
+
+GL / VK / D3D11 的 `images` / `imageGen` / `imageDims` / `rawMips` 四张表统一换成
+`uint64_t` 键（`index | 哈希 << 16`）。VK 原来那张是 `unordered_map<int, Tex>`，
+**必须**一起换成 64 位，否则哈希被截断，两种滤镜可能撞同一份纹理。
+
+### 验收
+
+- `test_css` 新增 16.22（28+ 条断言）：grayscale/sepia/saturate/invert/contrast 的矩阵值、
+  hue-rotate 的 360° 恒等与 120° 换色、合成顺序非交换（sepia→invert ≠ invert→sepia）、
+  逐像素应用（alpha 不动 / 全透明跳过 / 越界钳制）、缓存键（nodeId 不进键、矩阵变则键变）、
+  编译器落点（六个函数进段、`brightness` 不进段、`blur()` 不进段）。
+- 新用例 `anim/img-filter`（12 组：单函数、圆角、3 函数合成、同图两份纹理）：
+  `pixels-vk` / `pixels-d3d11` **0 不同像素**（最大通道差 1）。
+- `make pixels` 16/16 零差异、`make test` 全绿、`check_examples` 16 示例 0 问题、
+  `vk-window` / `vk-stress` 通过。
+
 ## [0.16.21] - 2026-11-15
 
 仿射**级联**：`transform` 终于作用于**整棵子树**。0.16.18 只让"节点自己画的东西"过矩阵，

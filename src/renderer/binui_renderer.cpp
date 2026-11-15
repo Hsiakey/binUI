@@ -767,7 +767,30 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         }
     }
 
-    if (const uint8_t* np = sectionAt(11)) {
+    // ---- 图片滤镜段（v26）：uint32 ffBytes + uint32 ffCount + BinUIImageFilter[] ----
+    // 段序（v26）：… / 阴影 / 文字阴影 / 绘制附加 / 图片滤镜 / 名称。
+    imgFilter_.clear();
+    if (const uint8_t* fp = sectionAt(11)) {
+        uint32_t fb = 0;
+        memcpy(&fb, fp, sizeof(fb));
+        if (fb >= sizeof(uint32_t) &&
+            size - static_cast<size_t>(fp - data) >= sizeof(uint32_t) + fb) {
+            const uint8_t* q = fp + sizeof(uint32_t);
+            uint32_t fc = 0;
+            memcpy(&fc, q, sizeof(fc));
+            q += sizeof(fc);
+            const uint8_t* qend = fp + sizeof(uint32_t) + fb;
+            for (uint32_t i = 0; i < fc && q + sizeof(BinUIImageFilter) <= qend; i++) {
+                BinUIImageFilter f;
+                memcpy(&f, q, sizeof(f));
+                q += sizeof(f);
+                if (!nodeIndexById_.count(f.nodeId)) continue;
+                imgFilter_[f.nodeId] = f;
+            }
+        }
+    }
+
+    if (const uint8_t* np = sectionAt(12)) {
         uint32_t nbytes = 0;
         memcpy(&nbytes, np, sizeof(uint32_t));
         if (nbytes > 0 && size - static_cast<size_t>(np - data) >= sizeof(uint32_t) + nbytes) {

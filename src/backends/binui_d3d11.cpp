@@ -30,6 +30,7 @@
 // v13 扩展绘制段的共用几何（渐变色带 / 四边边框 / 文字装饰线 / 行高）：
 // 与 GDI、GL 后端共用同一份数学，三端像素表现才一致
 #include "binui_paint.h"
+#include "binui_filter.h"      // v26：CSS filter 颜色矩阵（解码后逐像素应用）
 #include "platform/binui_win32_foreground.h"
 
 using namespace binui;
@@ -179,10 +180,16 @@ struct BinUID3D::Impl {
     // 图片纹理缓存（按 imageIndex）
     std::unordered_map<uint16_t, ID3D11ShaderResourceView*> images;
     // v25 九宫格要源图像素尺寸
-    std::unordered_map<uint16_t, std::pair<int,int>> imageDims;
+    std::unordered_map<uint64_t, std::pair<int,int>> imageDims;
     // v0.16.20：原始像素纹理（视频帧/程序化纹理）的 mip 是否已补（见 uploadImageRaw）
-    std::unordered_map<uint16_t, uint8_t> rawMips;
-    std::unordered_map<uint16_t, uint32_t> imageGen; // 换图 generation：不一致时重新上传
+    std::unordered_map<uint64_t, uint8_t> rawMips;
+    std::unordered_map<uint64_t, uint32_t> imageGen; // 换图 generation：不一致时重新上传
+    // v26：当前节点的图片滤镜（setImageFilter 设、解码时应用、按哈希进缓存键）
+    binui::ColorMatrix imgFilter;
+    uint64_t imgFilterKey = 0;
+    uint64_t imgKey(uint16_t index) const {
+        return static_cast<uint64_t>(index) | (imgFilterKey << 16);
+    }
 
     // 字形图集 + 文本排版：整份逻辑在 backends/binui_glyph_atlas.h（GL / Vulkan / D3D11 共用）。
     // 句柄直接把 ID3D11ShaderResourceView* 装进 void*（SRV 与图集一一对应）。
@@ -526,16 +533,19 @@ struct BinUID3D::Impl {
     RoundTex emptyRound_;
 
     bool uploadImage(uint16_t index, const uint8_t* data, size_t size, uint32_t generation) {
-        auto it = images.find(index);
-        auto git = imageGen.find(index);
+        auto it = images.find(imgKey(index));
+        auto git = imageGen.find(imgKey(index));
         if (it != images.end() && git != imageGen.end() && git->second == generation)
             return it->second != nullptr;
 
         int w = 0, h = 0;
         std::vector<uint8_t> px = DecodeImagePixels(data, size, w, h);
+        // v26：CSS filter 的颜色矩阵在解码后、生成 mip 链之前跑一遍
+        if (!px.empty() && imgFilterKey)
+            binui::ApplyColorMatrixBGRA(px.data(), w, h, imgFilter);
         if (px.empty()) {
-            images[index] = nullptr;
-            imageGen[index] = generation;
+            images[imgKey(index)] = nullptr;
+            imageGen[imgKey(index)] = generation;
             return false;
         }
         if (it != images.end() && it->second) it->second->Release();
@@ -564,8 +574,8 @@ struct BinUID3D::Impl {
             if (FAILED(device->CreateTexture2D(&td, nullptr, &tex)) || !tex ||
                 FAILED(device->CreateShaderResourceView(tex, nullptr, &srv))) {
                 if (tex) tex->Release();
-                images[index] = nullptr;
-                imageGen[index] = generation;
+                images[imgKey(index)] = nullptr;
+                imageGen[imgKey(index)] = generation;
                 return false;
             }
             ctx->UpdateSubresource(tex, 0, nullptr, px.data(), static_cast<UINT>(w) * 4, 0);
@@ -573,30 +583,30 @@ struct BinUID3D::Impl {
         } else if (FAILED(device->CreateTexture2D(&td, &init, &tex)) ||
                    FAILED(device->CreateShaderResourceView(tex, nullptr, &srv))) {
             if (tex) tex->Release();
-            images[index] = nullptr;
-            imageGen[index] = generation;
+            images[imgKey(index)] = nullptr;
+            imageGen[imgKey(index)] = generation;
             return false;
         }
         tex->Release();
-        imageDims[index] = { w, h };    // v25：九宫格切分用
-        images[index] = srv;
-        imageGen[index] = generation;
+        imageDims[imgKey(index)] = { w, h };    // v25：九宫格切分用
+        images[imgKey(index)] = srv;
+        imageGen[imgKey(index)] = generation;
         return true;
     }
 
     // 原始 RGBA 像素直传纹理（RGBA 字节序，无解码）
     bool uploadImageRaw(uint16_t index, int w, int h, const uint8_t* rgba, uint32_t generation) {
-        auto it = images.find(index);
-        auto git = imageGen.find(index);
+        auto it = images.find(imgKey(index));
+        auto git = imageGen.find(imgKey(index));
         // v0.16.20：同一个 generation 又来了一次 = 这份原始像素不再每帧变（视频帧的
         // generation 每次都变，走不到这里）。此时**重建**成带完整 mip 链的纹理并
         // GenerateMips —— 程序化纹理（棋盘/渐变/噪声）缩小时才有 mip 可用，而视频帧
         // 不必为每帧的 GenerateMips 付钱。D3D11 的 mip 链不能在创建后追加，所以要重建。
         if (it != images.end() && git != imageGen.end() && git->second == generation &&
-            it->second && !rawMips.count(index) && w >= 2 && h >= 2 && rgba) {
+            it->second && !rawMips.count(imgKey(index)) && w >= 2 && h >= 2 && rgba) {
             std::vector<uint8_t> px(rgba, rgba + static_cast<size_t>(w) * h * 4);
             it->second->Release();
-            images[index] = nullptr;
+            images[imgKey(index)] = nullptr;
             D3D11_TEXTURE2D_DESC td = {};
             td.Width = static_cast<UINT>(w);
             td.Height = static_cast<UINT>(h);
@@ -613,11 +623,11 @@ struct BinUID3D::Impl {
                 SUCCEEDED(device->CreateShaderResourceView(tex, nullptr, &srv))) {
                 ctx->UpdateSubresource(tex, 0, nullptr, px.data(), static_cast<UINT>(w) * 4, 0);
                 ctx->GenerateMips(srv);
-                images[index] = srv;
-                rawMips[index] = 1;
+                images[imgKey(index)] = srv;
+                rawMips[imgKey(index)] = 1;
             }
             if (tex) tex->Release();
-            return images[index] != nullptr;
+            return images[imgKey(index)] != nullptr;
         }
         if (it != images.end() && git != imageGen.end() && git->second == generation)
             return it->second != nullptr;
@@ -638,15 +648,15 @@ struct BinUID3D::Impl {
         if (FAILED(device->CreateTexture2D(&td, &init, &tex)) ||
             FAILED(device->CreateShaderResourceView(tex, nullptr, &srv))) {
             if (tex) tex->Release();
-            images[index] = nullptr;
-            imageGen[index] = generation;
+            images[imgKey(index)] = nullptr;
+            imageGen[imgKey(index)] = generation;
             return false;
         }
         tex->Release();
-        imageDims[index] = { w, h };    // v25：九宫格切分用
-        images[index] = srv;
+        imageDims[imgKey(index)] = { w, h };    // v25：九宫格切分用
+        images[imgKey(index)] = srv;
         rawMips.erase(index);
-        imageGen[index] = generation;
+        imageGen[imgKey(index)] = generation;
         return true;
     }
 
@@ -1501,6 +1511,15 @@ void BinUID3D::setTextSubpixel(bool on) {
 
 // v24 文字阴影：状态交给共享图集，三端像素一致
 // v0.16.18 仿射状态：见 GL 后端同名函数（三端语义一致）
+// v26 图片滤镜：矩阵只影响"下一次上传"的像素，并按哈希进纹理缓存键。
+void BinUID3D::setImageFilter(const BinUIImageFilter* f) {
+    if (!impl_) return;
+    impl_->imgFilterKey = binui::ImageFilterKey(f);
+    if (!impl_->imgFilterKey) return;
+    for (int i = 0; i < 9; i++) impl_->imgFilter.m[i] = f->m[i];
+    for (int i = 0; i < 3; i++) impl_->imgFilter.o[i] = f->offset[i];
+}
+
 bool BinUID3D::setAffine(const float* xf) {
     if (!impl_) return false;
     if (!xf || !(xf[0] != 1.0f || xf[1] != 0.0f || xf[2] != 0.0f ||
@@ -1570,7 +1589,7 @@ bool BinUID3D::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba
 void BinUID3D::drawImageNine(uint16_t index, float x, float y, float w, float h,
                             float slice, uint32_t tint) {
     if (!impl_) return;
-    auto it = impl_->imageDims.find(index);
+    auto it = impl_->imageDims.find(impl_->imgKey(index));
     float q[9][8];
     const int n = it == impl_->imageDims.end()
         ? 0 : BuildNineSlice(x, y, w, h, it->second.first, it->second.second, slice, q);
@@ -1583,7 +1602,7 @@ void BinUID3D::drawImageNine(uint16_t index, float x, float y, float w, float h,
 void BinUID3D::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
                            float x, float y, float w, float h, uint32_t tint) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    auto it = impl_->images.find(index);
+    auto it = impl_->images.find(impl_->imgKey(index));
     if (it == impl_->images.end() || !it->second) return;
     impl_->curLinear = 1;
     impl_->curSrv = it->second;

@@ -72,6 +72,7 @@ public:
     void setTextSubpixel(bool on) override;
     void setTextShadow(float dx, float dy, float blur, uint32_t color) override;
     bool setAffine(const float xf[6]) override;
+    void setImageFilter(const BinUIImageFilter* f) override;   // v26：CSS filter 颜色矩阵
 
     bool prepareImage(uint16_t index, const uint8_t* data, size_t size,
                       uint32_t generation) override;

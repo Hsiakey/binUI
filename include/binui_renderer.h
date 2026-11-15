@@ -150,6 +150,13 @@ public:
         return it == paintEx_.end() ? 0 : static_cast<int>(it->second.imageSlice);
     }
 
+    // v26 图片滤镜段：CSS filter 合成后的颜色矩阵（grayscale/sepia/saturate/hue-rotate/
+    // invert/contrast）。没有条目返回 nullptr —— 后端据此直接用原图纹理。
+    const BinUIImageFilter* imageFilterOf(uint16_t nodeId) const {
+        auto it = imgFilter_.find(nodeId);
+        return it == imgFilter_.end() ? nullptr : &it->second;
+    }
+
     // v15 路径段：BINUI_PATH 节点的折线（归一化坐标 + 子路径表；无条目返回 nullptr）
     struct PathRecord {
         BinUIPathEntry head{};
@@ -693,6 +700,7 @@ private:
     std::unordered_map<uint16_t, std::pair<size_t, uint32_t>> shadowIdx_;
     std::vector<BinUITextShadow> textShadows_;   // v24 文字阴影段（同一节点多条连续存放）
     std::unordered_map<uint16_t, BinUIPaintEx> paintEx_;   // v25 绘制附加段（一个节点一条）
+    std::unordered_map<uint16_t, BinUIImageFilter> imgFilter_;  // v26 图片滤镜段（一个节点一条）
     // nodeId -> (textShadows_ 起始下标, 条数)
     std::unordered_map<uint16_t, std::pair<size_t, uint32_t>> textShadowIdx_;
     // v19 路径条带的跨帧缓存（条带数量有上限，条目数也封顶）。

@@ -34,6 +34,7 @@
 
 #include "binui_font_renderer.h"
 #include "binui_paint.h"
+#include "binui_filter.h"      // v26：CSS filter 颜色矩阵（解码后逐像素应用）
 #include "backends/binui_draw_nodes.h"   // v13 扩展绘制的条带几何（与 GDI/D3D11 后端共用同一份数学）
 #include "backends/binui_glyph_atlas.h"  // 字形图集 + 排版（v19：与 Vulkan 后端共用同一份）
 #include "backends/binui_win_image.h"    // GDI+ 图片解码（与 Vulkan 后端共用）
@@ -416,12 +417,19 @@ struct BinUIGLGdi::Impl {
     RoundTex emptyRound_;   // roundFor 失败时的空返回（调用方据此退回 fillRect）
     uint64_t roundClock_ = 0;   // 圆角模板缓存 LRU 时钟
 
-    std::unordered_map<uint16_t, GLuint> images;
+    // v26：图片缓存键 = (imageIndex | 滤镜哈希 << 16) —— 同一张图配不同滤镜是两份纹理
+    std::unordered_map<uint64_t, GLuint> images;
     // v25 九宫格要**源图像素尺寸**才切得开（UV 是归一化的，切分点得按像素算）
-    std::unordered_map<uint16_t, std::pair<int,int>> imageDims;
+    std::unordered_map<uint64_t, std::pair<int,int>> imageDims;
     // v0.16.20：原始像素纹理（视频帧/程序化纹理）的 mip 是否已补（见 uploadImageRaw）
-    std::unordered_map<uint16_t, uint8_t> rawMips;
-    std::unordered_map<uint16_t, uint32_t> imageGen; // 换图 generation：不匹配时重新上传
+    std::unordered_map<uint64_t, uint8_t> rawMips;
+    std::unordered_map<uint64_t, uint32_t> imageGen; // 换图 generation：不匹配时重新上传
+    // v26：当前节点的图片滤镜（setImageFilter 设、解码时应用、并按哈希进缓存键）
+    binui::ColorMatrix imgFilter;
+    uint64_t imgFilterKey = 0;
+    uint64_t imgKey(uint16_t index) const {
+        return static_cast<uint64_t>(index) | (imgFilterKey << 16);
+    }
 
     // GDI 光栅化 DC
     HDC rasterDC = nullptr;
@@ -722,57 +730,60 @@ struct BinUIGLGdi::Impl {
     }
 
     bool uploadImage(uint16_t index, const uint8_t* data, size_t size, uint32_t generation) {
-        auto it = images.find(index);
-        auto git = imageGen.find(index);
+        auto it = images.find(imgKey(index));
+        auto git = imageGen.find(imgKey(index));
         if (it != images.end() && git != imageGen.end() && git->second == generation)
             return it->second != 0;
 
         int w = 0, h = 0;
         std::vector<uint8_t> px = DecodeImagePixels(data, size, w, h);
+        // v26：CSS filter 的颜色矩阵在解码后、上传前逐像素跑一遍（一次性开销）
+        if (!px.empty() && imgFilterKey)
+            binui::ApplyColorMatrixBGRA(px.data(), w, h, imgFilter);
         if (px.empty()) {
-            images[index] = 0;
-            imageGen[index] = generation;
+            images[imgKey(index)] = 0;
+            imageGen[imgKey(index)] = generation;
             return false;
         }
         if (it != images.end() && it->second) glDeleteTextures(1, &it->second);
-        images[index] = CreateTexture2D(w, h, px.data(), true);
-    imageDims[index] = { w, h };    // v25：九宫格切分要用源图像素尺寸
+        images[imgKey(index)] = CreateTexture2D(w, h, px.data(), true);
+    imageDims[imgKey(index)] = { w, h };    // v25：九宫格切分要用源图像素尺寸
         // v0.16.15（P1-8）：给图片生成 mip 链，并把缩小采样改成三线性。
         // 只做双线性时"大图缩小"只取最近的 4 个纹素 —— 一像素的屏幕区域要代表上百个
         // 源像素，远看会闪、摩尔纹；mip 让 GPU 自动挑合适的层级再插值。
-        if (images[index] && glGenerateMipmapP) {
-            glBindTexture(GL_TEXTURE_2D, images[index]);
+        if (images[imgKey(index)] && glGenerateMipmapP) {
+            glBindTexture(GL_TEXTURE_2D, images[imgKey(index)]);
             glGenerateMipmapP(GL_TEXTURE_2D);
             glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
         }
-        imageGen[index] = generation;
-        return images[index] != 0;
+        imageGen[imgKey(index)] = generation;
+        return images[imgKey(index)] != 0;
     }
 
     // 原始 RGBA 像素直传纹理（无解码；RGBA 字节序）
     bool uploadImageRaw(uint16_t index, int w, int h, const uint8_t* rgba, uint32_t generation) {
-        auto it = images.find(index);
-        auto git = imageGen.find(index);
+        auto it = images.find(imgKey(index));
+        auto git = imageGen.find(imgKey(index));
         if (it != images.end() && git != imageGen.end() && git->second == generation) {
             // v0.16.20：**同一个 generation 又来了一次** = 这份原始像素不再每帧变
             //（视频帧的 generation 每次都变，永远走不到这里）。此时补一次 mip 链：
             // 程序化纹理（棋盘/渐变/噪声）缩小显示时才有 mip 可用，而视频帧不必为
             // 每帧的 glGenerateMipmap 付钱。只做一次（mipsBuilt 标记）。
-            if (it->second && glGenerateMipmapP && !rawMips.count(index)) {
+            if (it->second && glGenerateMipmapP && !rawMips.count(imgKey(index))) {
                 glBindTexture(GL_TEXTURE_2D, it->second);
                 glGenerateMipmapP(GL_TEXTURE_2D);
                 glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
-                rawMips[index] = 1;
+                rawMips[imgKey(index)] = 1;
             }
             return it->second != 0;
         }
         if (w <= 0 || h <= 0 || !rgba) return false;
         if (it != images.end() && it->second) glDeleteTextures(1, &it->second);
-        images[index] = CreateTexture2D(w, h, rgba, true, true);
-        imageDims[index] = { w, h };    // v25：九宫格切分要用源图像素尺寸
+        images[imgKey(index)] = CreateTexture2D(w, h, rgba, true, true);
+        imageDims[imgKey(index)] = { w, h };    // v25：九宫格切分要用源图像素尺寸
         rawMips.erase(index);
-        imageGen[index] = generation;
-        return images[index] != 0;
+        imageGen[imgKey(index)] = generation;
+        return images[imgKey(index)] != 0;
     }
 
     // 持久离屏帧缓冲（大小 = 窗口客户区）
@@ -1417,6 +1428,16 @@ void BinUIGLGdi::setTextShadow(float dx, float dy, float blur, uint32_t color) {
     if (impl_) impl_->atlas.setTextShadow(dx, dy, blur, color);
 }
 
+// v26 图片滤镜：矩阵只影响"下一次上传"的像素，并按哈希进纹理缓存键 ——
+// 同一张图配两种滤镜 = 两份纹理；没有滤镜时 imgFilterKey = 0，键退化为 imageIndex。
+void BinUIGLGdi::setImageFilter(const BinUIImageFilter* f) {
+    if (!impl_) return;
+    impl_->imgFilterKey = binui::ImageFilterKey(f);
+    if (!impl_->imgFilterKey) return;
+    for (int i = 0; i < 9; i++) impl_->imgFilter.m[i] = f->m[i];
+    for (int i = 0; i < 3; i++) impl_->imgFilter.o[i] = f->offset[i];
+}
+
 bool BinUIGLGdi::pushLayer(float x, float y, float w, float h, float alpha) {
     return impl_ ? impl_->pushLayer(x, y, w, h, alpha) : false;
 }
@@ -1479,7 +1500,7 @@ bool BinUIGLGdi::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rg
 void BinUIGLGdi::drawImageNine(uint16_t index, float x, float y, float w, float h,
                               float slice, uint32_t tint) {
     if (!impl_ || !impl_->ready) return;
-    auto it = impl_->imageDims.find(index);
+    auto it = impl_->imageDims.find(impl_->imgKey(index));
     float q[9][8];
     const int n = it == impl_->imageDims.end()
         ? 0 : BuildNineSlice(x, y, w, h, it->second.first, it->second.second, slice, q);
@@ -1492,7 +1513,7 @@ void BinUIGLGdi::drawImageNine(uint16_t index, float x, float y, float w, float 
 void BinUIGLGdi::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
                              float x, float y, float w, float h, uint32_t tint) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    auto it = impl_->images.find(index);
+    auto it = impl_->images.find(impl_->imgKey(index));
     if (it == impl_->images.end() || !it->second) return;
     impl_->curTex = it->second;
     impl_->emitQuad(x, y, x + w, y + h, u0, v0, u1, v1, tint);

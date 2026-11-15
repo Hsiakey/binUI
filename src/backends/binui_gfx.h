@@ -19,6 +19,8 @@
 #include <functional>
 #include <string>
 
+#include "binui_format.h"   // v26：setImageFilter 的 BinUIImageFilter
+
 namespace binui {
 
 class IBinUIGfx {
@@ -120,6 +122,14 @@ public:
     // v0.16.21：xf 由绘制层**沿祖先链复合**而来（M[局部] = M[父] ∘ 平移 ∘ 自身变换），
     // 所以一次 setAffine 就覆盖了整棵子树——后端不需要知道自己转的是"第几层"。
     virtual bool setAffine(const float xf[6]) { (void)xf; return false; }
+
+    // ---- 图片滤镜（v26：CSS filter 的颜色矩阵）----
+    // 设置之后**下一次** prepareImage / prepareImageRaw 解码时会把这个矩阵应用到像素上，
+    // 纹理按 (imageIndex, 矩阵哈希) 单独缓存 —— 同一张图配不同滤镜就是两份纹理。
+    // 传 nullptr 清除（键退回 imageIndex）。默认空实现：不支持的后端（GDI 遗留路径）
+    // 照常画原图，只是没有滤镜效果。
+    // 注意：brightness() 不走这里（它等价于乘一个顶点色，见 paint.reserve[2]）。
+    virtual void setImageFilter(const BinUIImageFilter* f) { (void)f; }
 
     // ---- 文字阴影（v24：CSS text-shadow）----
     // 在画一个节点的文字**之前**设好，节点画完用 alpha=0 清掉（或下个节点重设）。

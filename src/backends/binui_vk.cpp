@@ -30,7 +30,8 @@
 #include <vector>
 
 #include "backends/binui_vk_shaders.h"
-#include "binui_paint.h"   // RoundTemplateSize / BuildRoundedNineSlice / PaintQuad
+#include "binui_paint.h"
+#include "binui_filter.h"      // v26：CSS filter 颜色矩阵（解码后逐像素应用）   // RoundTemplateSize / BuildRoundedNineSlice / PaintQuad
 #include "backends/binui_glyph_atlas.h"   // 字形图集 + 排版（与 GL 后端共用）
 #include "binui_mip.h"                  // v0.16.20：mip 链的 CPU 2×2 盒式滤波（与 GL/D3D 的硬件生成等价）
 #include "backends/binui_win_image.h"     // GDI+ 图片解码（与 GL 后端共用）
@@ -557,10 +558,16 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         int t = 0;
     };
     std::unordered_map<int, RoundTex> rounds;   // key = 半径（描边用负值，与 GL 同）
-    std::unordered_map<int, Tex> images;        // 图片（按 index）
-    std::unordered_map<int, uint32_t> imageGen; // 换图 generation：不匹配时重新上传
+    std::unordered_map<uint64_t, Tex> images;   // 图片（键 = index | 滤镜哈希 << 16，v26）
+    std::unordered_map<uint64_t, uint32_t> imageGen; // 换图 generation：不匹配时重新上传
+    // v26：当前节点的图片滤镜（setImageFilter 设、解码时应用、按哈希进缓存键）
+    binui::ColorMatrix imgFilter;
+    uint64_t imgFilterKey = 0;
+    uint64_t imgKey(int index) const {
+        return static_cast<uint64_t>(static_cast<uint32_t>(index)) | (imgFilterKey << 16);
+    }
     // v0.16.20：原始像素纹理（视频帧/程序化纹理）的 mip 是否已补（见 prepareImageRaw）
-    std::unordered_map<int, uint8_t> rawMips;
+    std::unordered_map<uint64_t, uint8_t> rawMips;
 
     // 帧外产生的上传（测量文本时会光栅化字形，那时命令缓冲还没开始录制）。
     // 这些先攒着，在下一个 beginFrame 里、render pass 开始之前一次性录进去 ——
@@ -3265,6 +3272,15 @@ void BinUIVK::setTextSubpixel(bool on) {
 
 // v24 文字阴影：状态交给共享图集（GL / VK / D3D11 是同一份实现，所以三端逐像素相同）
 // v0.16.18 仿射状态：三端语义一致（见 GL 后端同名函数）
+// v26 图片滤镜：矩阵只影响"下一次上传"的像素，并按哈希进纹理缓存键。
+void BinUIVK::setImageFilter(const BinUIImageFilter* f) {
+    if (!impl_) return;
+    impl_->imgFilterKey = binui::ImageFilterKey(f);
+    if (!impl_->imgFilterKey) return;
+    for (int i = 0; i < 9; i++) impl_->imgFilter.m[i] = f->m[i];
+    for (int i = 0; i < 3; i++) impl_->imgFilter.o[i] = f->offset[i];
+}
+
 bool BinUIVK::setAffine(const float* xf) {
     if (!impl_) return false;
     if (!xf || !(xf[0] != 1.0f || xf[1] != 0.0f || xf[2] != 0.0f ||
@@ -3287,15 +3303,18 @@ bool BinUIVK::prepareImage(uint16_t index, const uint8_t* data, size_t size,
                            uint32_t generation) {
     Impl& d = *impl_;
     if (!d.ready) return false;
-    auto gi = d.imageGen.find(index);
-    auto ti = d.images.find(index);
+    auto gi = d.imageGen.find(d.imgKey(index));
+    auto ti = d.images.find(d.imgKey(index));
     if (gi != d.imageGen.end() && gi->second == generation && ti != d.images.end())
         return ti->second.view != VK_NULL_HANDLE;
 
     int iw = 0, ih = 0;
     std::vector<uint8_t> px = DecodeImagePixels(data, size, iw, ih);
+    // v26：CSS filter 的颜色矩阵在解码后、建 mip 链之前跑一遍（链也是滤过的）
+    if (!px.empty() && d.imgFilterKey)
+        binui::ApplyColorMatrixBGRA(px.data(), iw, ih, d.imgFilter);
     if (px.empty()) {
-        d.imageGen[index] = generation;
+        d.imageGen[d.imgKey(index)] = generation;
         return false;
     }
     if (ti != d.images.end()) d.freeTex(ti->second);   // 换图：旧图像必须放掉
@@ -3309,9 +3328,9 @@ bool BinUIVK::prepareImage(uint16_t index, const uint8_t* data, size_t size,
     std::vector<std::vector<uint8_t>> chain = BuildMipChainBGRA(px.data(), iw, ih);
     if (chain.empty()) return false;
     const uint32_t levels = static_cast<uint32_t>(chain.size());
-    Impl::Tex& t = d.images[index];
+    Impl::Tex& t = d.images[d.imgKey(index)];
     if (!d.createTexImage(t, iw, ih, true, levels)) {
-        d.images.erase(index);
+        d.images.erase(d.imgKey(index));
         return false;
     }
     t.needClear = false;   // 整张覆盖，不用先清零
@@ -3322,7 +3341,7 @@ bool BinUIVK::prepareImage(uint16_t index, const uint8_t* data, size_t size,
         cw = std::max(1, cw / 2);
         ch = std::max(1, ch / 2);
     }
-    d.imageGen[index] = generation;
+    d.imageGen[d.imgKey(index)] = generation;
     return ok;
 }
 
@@ -3331,14 +3350,14 @@ bool BinUIVK::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
                               uint32_t generation) {
     Impl& d = *impl_;
     if (!d.ready || w <= 0 || h <= 0 || !rgba) return false;
-    auto gi = d.imageGen.find(index);
-    auto ti = d.images.find(index);
+    auto gi = d.imageGen.find(d.imgKey(index));
+    auto ti = d.images.find(d.imgKey(index));
     // v0.16.20：同一个 generation 又来了一次 = 这份原始像素不再每帧变（视频帧的
     // generation 每次都变，走不到这里）。此时补一条 mip 链：与 prepareImage 同一套
     // **CPU 2×2 盒式滤波**逐级上传 —— 程序化纹理缩小时才有 mip 可用，视频帧不必为
     // 每帧的链付钱。只做一次（rawMips 标记），之后 generation 不变就一直复用。
     if (gi != d.imageGen.end() && gi->second == generation && ti != d.images.end() &&
-        ti->second.view && !d.rawMips.count(index) && w >= 2 && h >= 2) {
+        ti->second.view && !d.rawMips.count(d.imgKey(index)) && w >= 2 && h >= 2) {
         std::vector<uint8_t> bgra(static_cast<size_t>(w) * h * 4);
         for (size_t i = 0; i < static_cast<size_t>(w) * h; i++) {
             bgra[i * 4 + 0] = rgba[i * 4 + 2];
@@ -3350,10 +3369,10 @@ bool BinUIVK::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
         std::vector<std::vector<uint8_t>> chain = BuildMipChainBGRA(bgra.data(), w, h);
         if (chain.empty()) return false;
         d.freeTex(ti->second);
-        Impl::Tex& t = d.images[index];
+        Impl::Tex& t = d.images[d.imgKey(index)];
         if (!d.createTexImage(t, w, h, true, static_cast<uint32_t>(chain.size()))) {
-            d.images.erase(index);
-            d.imageGen.erase(index);
+            d.images.erase(d.imgKey(index));
+            d.imageGen.erase(d.imgKey(index));
             return false;
         }
         t.needClear = false;
@@ -3364,7 +3383,7 @@ bool BinUIVK::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
             cw = std::max(1, cw / 2);
             ch = std::max(1, ch / 2);
         }
-        if (ok) d.rawMips[index] = 1;
+        if (ok) d.rawMips[d.imgKey(index)] = 1;
         return ok;
     }
     if (gi != d.imageGen.end() && gi->second == generation && ti != d.images.end())
@@ -3378,15 +3397,15 @@ bool BinUIVK::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
         bgra[i * 4 + 3] = rgba[i * 4 + 3];
     }
     if (ti != d.images.end()) d.freeTex(ti->second);
-    Impl::Tex& t = d.images[index];
+    Impl::Tex& t = d.images[d.imgKey(index)];
     if (!d.createTexImage(t, w, h, true)) {
-        d.images.erase(index);
+        d.images.erase(d.imgKey(index));
         return false;
     }
     t.needClear = false;
     const bool ok = d.uploadRegion(t, 0, 0, w, h, bgra.data(), w * 4);
-    d.rawMips.erase(index);
-    d.imageGen[index] = generation;
+    d.rawMips.erase(d.imgKey(index));
+    d.imageGen[d.imgKey(index)] = generation;
     return ok;
 }
 
@@ -3394,7 +3413,7 @@ bool BinUIVK::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
 void BinUIVK::drawImageNine(uint16_t index, float x, float y, float w, float h,
                            float slice, uint32_t tint) {
     if (!impl_ || !impl_->ready) return;
-    auto it = impl_->images.find(index);
+    auto it = impl_->images.find(impl_->imgKey(index));
     float q[9][8];
     const int n = it == impl_->images.end() || !it->second.view
         ? 0 : BuildNineSlice(x, y, w, h, it->second.w, it->second.h, slice, q);
@@ -3408,7 +3427,7 @@ void BinUIVK::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1
                           float x, float y, float w, float h, uint32_t tint) {
     Impl& d = *impl_;
     if (!d.ready || w <= 0 || h <= 0) return;
-    auto it = d.images.find(index);
+    auto it = d.images.find(d.imgKey(index));
     if (it == d.images.end() || !it->second.view) return;
     d.emitQuad(x, y, x + w, y + h, u0, v0, u1, v1, tint, &it->second);
 }
