@@ -1027,19 +1027,38 @@ constexpr int kNineMaxTiles = 32;
 // 调用方按这个值准备缓冲（256 × 8 × 4B = 8 KB，栈上够用），超了按比例压缩块数。
 constexpr int kMaxNineSliceQuads = 256;
 
-// 把目标轴区间 [a, b) 按 mode 切块（0=stretch 1=repeat 2=round），写进 out，返回块数。
+// 把目标轴区间 [a, b) 按 mode 切块（0=stretch 1=repeat 2=round 3=space），写进 out，返回块数。
 inline int SplitNineAxis(int mode, float a, float b, float natural,
                          PaintNineTile* out, int maxTiles) {
     const float len = b - a;
     if (len <= 0.0f || out == nullptr || maxTiles <= 0) return 0;
     if (mode != 0 && natural > 0.5f) {
-        if (mode == 2) {                                        // round：块数取整后等分
-            int cnt = static_cast<int>(std::lround(len / natural));
+        if (mode == 2 || mode == 3) {                           // round / space：块数取整
+            int cnt = static_cast<int>(mode == 2 ? std::lround(len / natural)
+                                                 : std::floor(len / natural + 1e-4f));
             if (cnt < 1) cnt = 1;
             if (cnt > maxTiles) cnt = maxTiles;
-            const float tw = len / static_cast<float>(cnt);
+            if (mode == 2) {                                    // round：块数取整后等分
+                const float tw = len / static_cast<float>(cnt);
+                for (int i = 0; i < cnt; i++) {
+                    out[i].t0 = a + static_cast<float>(i) * tw;
+                    out[i].t1 = out[i].t0 + tw;
+                    out[i].f0 = 0.0f;
+                    out[i].f1 = 1.0f;
+                }
+                return cnt;
+            }
+            // space：块尺寸 = 自然尺寸（**不缩放、不裁切**），余数均分成 cnt+1 个间隙 ——
+            // 两端各一个、块间一个，全部等宽（CSS 的原话是 "the extra space is distributed
+            // around the tiles"，所以端头也有间隙，而不是首末块贴边）。
+            // 只有一种例外：中段比一块还窄（cnt = 1 且 natural > len）—— 这时候没有"余数"
+            // 可均分，只能把这一块缩到区间长（等价 stretch 一块）。CSS 对 space 的要求是
+            // "不被裁切"，缩到刚好放得下正是这个意思。
+            float tw = natural;
+            if (cnt == 1 && natural > len) tw = len;
+            const float gap = (len - static_cast<float>(cnt) * tw) / static_cast<float>(cnt + 1);
             for (int i = 0; i < cnt; i++) {
-                out[i].t0 = a + static_cast<float>(i) * tw;
+                out[i].t0 = a + gap + static_cast<float>(i) * (tw + gap);
                 out[i].t1 = out[i].t0 + tw;
                 out[i].f0 = 0.0f;
                 out[i].f1 = 1.0f;

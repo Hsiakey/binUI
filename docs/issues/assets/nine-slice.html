@@ -1,14 +1,15 @@
 <!DOCTYPE html>
-<app_window width="640" height="600" resizable="false">
-<html width="640" height="600">
+<app_window width="640" height="860" resizable="false">
+<html width="640" height="860">
 <head>
 <style>
     body { background: #F2F5FA; color: #16202C; }
     /* v25 九宫格（image-slice）：同一个 48×48 贴图，左列整图拉伸（边框被拉粗、
        圆角被压扁），右列按 12px 内缩九宫格（四角与边框粗细不变）。
-       v0.16.49 起中段可以平铺（CSS border-image-repeat: repeat / round）：
-       贴图每条边中间有一个色点（上红 / 左紫 / 右绿 / 下黄），平铺时这些点会重复出现，
-       一眼就能看出到底铺没铺、铺了几个。 */
+       v0.16.49 起中段可以平铺（CSS border-image-repeat: repeat / round），
+       v0.16.51 起 space 也真铺了。贴图每条边中间有一个色点（上红 / 左紫 / 右绿 / 下黄），
+       平铺/留缝时这些点会重复出现 —— 一眼就能看出到底铺没铺、铺了几个、缝有多大。
+       space 的一行垫了深色底：间隙露出来的就是深色，"两端也留缝"这件事才看得见。 */
 </style>
 </head>
 <body>
@@ -30,7 +31,7 @@
     <img src="nine-slice-img.png" style="position:absolute; left:24; top:312; width:580; height:36; image-slice:16" />
 
     <!-- ===== v0.16.49：中段平铺 ===== -->
-    <span style="position:absolute; left:24; top:364; width:592; height:18; font-size:12px; color:#5A6B80">中段平铺（CSS border-image-repeat）：横 repeat / 竖 repeat / 双 repeat / round / space→repeat</span>
+    <span style="position:absolute; left:24; top:364; width:592; height:18; font-size:12px; color:#5A6B80">中段平铺（CSS border-image-repeat）：横 repeat / 竖 repeat / 双 repeat / round / space</span>
 
     <!-- ① 只横向平铺：上下边的红点应该重复，左右边（紫/绿点）仍拉伸 -->
     <img src="nine-slice-img.png" style="position:absolute; left:24; top:388; width:380; height:70; image-slice:12; border-image-repeat:repeat" />
@@ -45,8 +46,39 @@
     <!-- ④ round：块数取整、块长按比例缩放（不留裁切边） -->
     <img src="nine-slice-img.png" style="position:absolute; left:264; top:486; width:200; height:100; image-slice:12; border-image-repeat:round" />
 
-    <!-- ⑤ space：本版未实现，编译期按 repeat 处理并告警 -->
+    <!-- ⑤ space：v0.16.49 时按 repeat 处理；v0.16.51 起真铺（块不缩放、余数均分成间隙） -->
     <img src="nine-slice-img.png" style="position:absolute; left:504; top:486; width:112; height:100; image-slice:12; border-image-repeat:space" />
+
+    <!-- ===== v0.16.51：space ===== -->
+    <span style="position:absolute; left:24; top:600; width:592; height:18; font-size:12px; color:#5A6B80">space：块尺寸不缩放、余数均分成 cnt+1 个间隙（两端也有缝）/ 双轴 space / 中段比一块还窄</span>
+
+    <!-- ⑥ 横向 space（垫深色底看缝）：380 宽、内缩 12 → 中段 356 放 29 块 12px，
+         余 8px 均分成 30 个缝（每个 0.27px，所以看起来几乎连成一条） -->
+    <div style="position:absolute; left:20; top:620; width:388; height:68; background:#101A26"></div>
+    <img src="nine-slice-img.png" style="position:absolute; left:24; top:624; width:380; height:60; image-slice:12; border-image-repeat:space" />
+    <span style="position:absolute; left:424; top:628; width:120; height:16; font-size:11px; color:#5A6B80">横 space</span>
+
+    <!-- ⑦ 双轴 space：中心块也摊成网格，两轴的间隙各自均分 -->
+    <div style="position:absolute; left:420; top:620; width:200; height:68; background:#101A26"></div>
+    <img src="nine-slice-img.png" style="position:absolute; left:424; top:624; width:192; height:60; image-slice:12; border-image-repeat:space space" />
+    <span style="position:absolute; left:424; top:690; width:192; height:16; font-size:11px; color:#5A6B80">space space</span>
+
+    <!-- ⑧ 中段 6px < 一块 12px：没有余数可均分，唯一一块缩到 6px（"不被裁切"）；
+         右边同一个盒子用 stretch 作对照 -->
+    <img src="nine-slice-img.png" style="position:absolute; left:24; top:712; width:30; height:56; image-slice:12; border-image-repeat:space" />
+    <img src="nine-slice-img.png" style="position:absolute; left:72; top:712; width:30; height:56; image-slice:12" />
+    <span style="position:absolute; left:120; top:716; width:340; height:16; font-size:11px; color:#5A6B80">左 space（唯一一块缩到 6px）　右 stretch 对照</span>
+
+    <!-- ⑨ 单块居中：82 宽、内缩 24 → 中段 34px，一块 24px 放得下、两块放不下，
+         余 10px 均分成 2 个缝 → 整条边就是"5px 缝 + 24px 块 + 5px 缝"，两端都留缝 -->
+    <div style="position:absolute; left:20; top:786; width:90; height:64; background:#101A26"></div>
+    <img src="nine-slice-img.png" style="position:absolute; left:24; top:790; width:82; height:56; image-slice:24; border-image-repeat:space" />
+    <span style="position:absolute; left:120; top:796; width:190; height:16; font-size:11px; color:#5A6B80">space 单块居中（两端各留缝）</span>
+
+    <!-- ⑩ 同样的盒子换 repeat 作对照：最后一块被裁切、两端不留缝 -->
+    <div style="position:absolute; left:300; top:786; width:90; height:64; background:#101A26"></div>
+    <img src="nine-slice-img.png" style="position:absolute; left:304; top:790; width:82; height:56; image-slice:24; border-image-repeat:repeat" />
+    <span style="position:absolute; left:400; top:796; width:220; height:16; font-size:11px; color:#5A6B80">同尺寸 repeat 对照（末块裁切、贴边）</span>
 </body>
 </html>
 </app_window>

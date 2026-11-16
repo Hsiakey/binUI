@@ -648,6 +648,98 @@ static void TestIssueRegressions() {
         TEST("16.49: 双轴 repeat 不超过预算", n > 0 && n <= binui::kMaxNineSliceQuads);
     }
 
+    // ---- 0.16.51：九宫格 space（border-image-repeat 的最后一个模式）----
+    // 钉住五件事：
+    //   1. `space` 落成模式 3（两轴、单值/双值都认）；
+    //   2. 块数 = floor(中段 / 自然尺寸)，块**不缩放、不裁切**（块长恒等于内缩）；
+    //   3. 余数均分成 **块数 + 1** 个间隙（两端各一个 —— 规范原话 "distributed around
+    //      the tiles"），所以首块不吃着角、末块也不贴着角；
+    //   4. 中段比一块还窄时没有余数可均分 → 唯一一块缩到中段长（"不被裁切"）；
+    //   5. 与 round 的区别：round 改块长（等分、无缝隙），space 改缝隙（块长不动）。
+    {
+        const char* html = R"HTML(<app_window width="420" height="240" bg="#101014">
+<html width="420" height="240" bg="#101014">
+<body>
+  <img id="sp" src="a.png" style="position:absolute; left:10; top:10; width:180; height:70; image-slice:12;
+                                      border-image-repeat:space" />
+  <img id="sp2" src="a.png" style="position:absolute; left:10; top:90; width:180; height:70; image-slice:12;
+                                       border-image-repeat:space round" />
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("16.51: space 布局可解析", ParseInto(r, bin));
+        auto repOf = [&](const char* name) -> int {
+            const uint16_t id = r.findNodeByName(name);
+            return id ? r.imageSliceRepeatOf(id) : -1;
+        };
+        TEST("16.51: space 两轴都生效（模式 3）", repOf("sp") == (3 | (3 << 2)));
+        TEST("16.51: space / round 混写",
+             repOf("sp2") == (3 | (2 << 2)));
+
+        // ---- 单轴数学：中段 [0,356)、自然 12 → 29 块 + 30 个缝（每个 8/30）----
+        binui::PaintNineTile tiles[binui::kNineMaxTiles];
+        const float mid0 = 0.0f, mid1 = 356.0f, nat = 12.0f;
+        const int cnt = binui::SplitNineAxis(3, mid0, mid1, nat, tiles, binui::kNineMaxTiles);
+        TEST("16.51: space 的块数 = floor(中段/自然)", cnt == 29);
+        if (cnt == 29) {
+            const float gap = (mid1 - mid0 - static_cast<float>(cnt) * nat) / static_cast<float>(cnt + 1);
+            bool ok = true;
+            for (int i = 0; i < cnt; i++) {
+                if (std::fabs((tiles[i].t1 - tiles[i].t0) - nat) > 1e-4f) ok = false;   // 块长不动
+                if (std::fabs(tiles[i].f0) > 1e-6f || std::fabs(tiles[i].f1 - 1.0f) > 1e-6f) ok = false;
+            }
+            TEST("16.51: 每块都是自然尺寸、UV 取整段", ok);
+            TEST("16.51: 两端各留一个缝（首块不贴着起点）",
+                 std::fabs(tiles[0].t0 - gap) < 1e-4f &&
+                 std::fabs((mid1 - tiles[cnt - 1].t1) - gap) < 1e-4f);
+            TEST("16.51: 块间缝隙等宽",
+                 std::fabs((tiles[1].t0 - tiles[0].t1) - gap) < 1e-4f &&
+                 std::fabs((tiles[cnt - 1].t0 - tiles[cnt - 2].t1) - gap) < 1e-4f);
+        }
+        // ---- 中段比一块还窄：[0,6) / 自然 12 → 1 块缩到 6（不裁切、不越界）----
+        const int cnt2 = binui::SplitNineAxis(3, 0.0f, 6.0f, nat, tiles, binui::kNineMaxTiles);
+        TEST("16.51: 中段比一块窄时只放一块",
+             cnt2 == 1 && std::fabs(tiles[0].t0) < 1e-5f && std::fabs(tiles[0].t1 - 6.0f) < 1e-5f);
+        // ---- 与 round 的对照：同样 [0,146) / 12，round 是 12 块各 12.17，space 是 12 块各 12 + 13 个缝 ----
+        const int nr = binui::SplitNineAxis(2, 0.0f, 146.0f, nat, tiles, binui::kNineMaxTiles);
+        float rLast = nr > 0 ? tiles[nr - 1].t1 : -1.0f;
+        TEST("16.51: round 用等分块长填满（末块正好到边界）",
+             nr == 12 && std::fabs(rLast - 146.0f) < 1e-4f);
+        const int ns = binui::SplitNineAxis(3, 0.0f, 146.0f, nat, tiles, binui::kNineMaxTiles);
+        TEST("16.51: space 块长仍是自然尺寸、靠缝填满（末块不到边界）",
+             ns == 12 && std::fabs((tiles[ns - 1].t1 - tiles[ns - 1].t0) - nat) < 1e-4f &&
+             (146.0f - tiles[ns - 1].t1) > 1e-4f &&
+             std::fabs((146.0f - tiles[ns - 1].t1) - tiles[0].t0) < 1e-4f);
+
+        // ---- 整盒几何：180×70 / 内缩 12 / 双轴 space ----
+        // 中段 156 → x 轴 13 块（156 = 13×12，缝隙 0）；中段 46 → y 轴 3 块 + 余 10 均分 4 缝
+        // 四边形数 = (13+2) × (3+2) = 75
+        static float q[binui::kMaxNineSliceQuads * 8];
+        const int n = binui::BuildNineSlice(0, 0, 180, 70, 48, 48, 12, 3, 3, q,
+                                           binui::kMaxNineSliceQuads);
+        TEST("16.51: 双轴 space 的四边形数", n == 75);
+        bool inside = true;
+        for (int i = 0; i < n; i++) {
+            const float* o = q + i * 8;
+            if (o[4] < -1e-4f || o[5] < -1e-4f || o[4] + o[6] > 180.0f + 1e-3f ||
+                o[5] + o[7] > 70.0f + 1e-3f) inside = false;                 // 不越界
+            if (o[6] > 12.0f + 1e-3f || o[7] > 12.0f + 1e-3f) {
+                // 只有四角与两端是 12×12；中段块也不该超过自然尺寸
+                if (o[6] > 12.0f + 1e-3f) inside = false;
+            }
+        }
+        TEST("16.51: space 的所有块都在盒内且不超过自然尺寸", inside);
+        // y 轴的缝隙 = (46 - 36) / 4 = 2.5：顶行 y=0、中心行第一块 y = 12 + 2.5
+        bool rowOk = false;
+        for (int i = 0; i < n; i++) {
+            const float* o = q + i * 8;
+            if (std::fabs(o[4] - 12.0f) < 1e-3f && std::fabs(o[5] - 14.5f) < 1e-3f &&
+                std::fabs(o[7] - 12.0f) < 1e-3f) rowOk = true;
+        }
+        TEST("16.51: y 轴余数均分成缝（中心行下移 2.5px）", rowOk);
+    }
+
     // ---- 0.16.20：程序化纹理/视频帧的 mip 链（binui_mip.h）----
     // 钉住三件事：
     //   1. 层数：一直减半到 1×1，最多 16 级；

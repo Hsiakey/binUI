@@ -8084,14 +8084,14 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                     if (hasRadius)
                         Warn("图片同时写了 image-slice 与 border-radius：九宫格优先，圆角忽略");
                     // v0.16.49：中段怎么填 —— CSS `border-image-repeat: <x> [<y>]`
-                    // （stretch | repeat | round；space 未实现，按 repeat 处理并告警）。
+                    // （stretch | repeat | round；v0.16.51 起 space）。
                     // 两个值分别管"上/下边"和"左/右边"，缺省时两者相同。
                     uint8_t repFlags = 0;
                     {
                         std::string rv = pick(e.attrs, style, "border-image-repeat",
                                               "border-image-repeat", "");
                         if (!rv.empty()) {
-                            int modes[2] = { 0, 0 };   // 0=stretch 1=repeat 2=round
+                            int modes[2] = { 0, 0 };   // 0=stretch 1=repeat 2=round 3=space
                             int nm = 0;
                             for (const std::string& tk : splitCssTokens(rv)) {
                                 const std::string lt = LowerCopy(tk);
@@ -8099,13 +8099,10 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                                 if (lt == "stretch") m = 0;
                                 else if (lt == "repeat") m = 1;
                                 else if (lt == "round") m = 2;
-                                else if (lt == "space") {
-                                    m = 1;
-                                    Warn("CSS border-image-repeat 的 space 未实现"
-                                         "（按 repeat 处理）：\"" + tk + "\"");
-                                } else {
+                                else if (lt == "space") m = 3;
+                                else {
                                     Warn("CSS border-image-repeat 认不出的值（stretch/repeat/"
-                                         "round）：\"" + tk + "\"，已按 stretch 处理");
+                                         "round/space）：\"" + tk + "\"，已按 stretch 处理");
                                 }
                                 if (nm < 2) modes[nm] = m;
                                 nm++;

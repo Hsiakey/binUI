@@ -660,11 +660,12 @@ struct BinUIPaintEx {
 static_assert(sizeof(BinUIPaintEx) == 4, "BinUIPaintEx must be 4 bytes");
 
 // 九宫格中段的填充模式（BinUIPaintEx::flags 里两轴各两位）。对应 CSS
-// `border-image-repeat: stretch | repeat | round`；space 未实现（编译期降级成 repeat 并告警）。
+// `border-image-repeat: stretch | repeat | round | space`。
 enum BinUISliceRepeat : uint8_t {
     BINUI_SLICE_STRETCH = 0,   // 拉伸（默认，旧行为）
     BINUI_SLICE_REPEAT  = 1,   // 按自然尺寸平铺，末块裁切
     BINUI_SLICE_ROUND   = 2,   // 块数取整后按比例缩放
+    BINUI_SLICE_SPACE   = 3,   // 按自然尺寸铺，余数均分成 cnt+1 个间隙（含两端），不裁切
 };
 
 // ============================================================
