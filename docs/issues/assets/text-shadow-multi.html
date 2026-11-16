@@ -1,0 +1,49 @@
+<app_window width="640" height="470" resizable="false">
+<html width="640" height="470" bg="#F2F5FA">
+  <!-- v0.16.50 多层 text-shadow：霓虹 3 层 / 描边 4 层 / 双色偏移 / 继承 / currentColor /
+       贴边大模糊（裁剪外扩）/ 三个不同模糊半径同时活跃（= 三张阴影图集） -->
+  <span style="position:absolute;left:24px;top:10px;width:592px;height:36px;font-size:26px;color:#16202C;text-shadow:0 2px 6px rgba(0,0,0,0.45)">多层文字阴影 multi-layer text-shadow</span>
+
+  <!-- 1. 霓虹：三层同偏移、半径递增（写在前面的在最上面 = 白色芯） -->
+  <div style="position:absolute;left:24px;top:56px;width:288px;height:118px;border-radius:14px;background:#0A1220">
+    <span style="position:absolute;left:18px;top:14px;width:252px;height:30px;font-size:22px;color:#EAF6FF;text-shadow:0 0 2px #FFFFFF, 0 0 9px #00E5FF, 0 0 20px #0066FF">霓虹 3 层</span>
+    <span style="position:absolute;left:18px;top:52px;width:252px;height:22px;font-size:15px;color:#7FC7FF;text-shadow:0 0 8px #0088FF, 0 0 18px #0044AA">两层光晕（半径不同）</span>
+    <span style="position:absolute;left:18px;top:80px;width:252px;height:20px;font-size:13px;color:#9FB0C4;text-shadow:0 0 4px rgba(0,0,0,0.9)">单层对照</span>
+  </div>
+
+  <!-- 2. 描边：四层硬阴影各差 1px（text-shadow 版 stroke），无模糊 -->
+  <div style="position:absolute;left:328px;top:56px;width:288px;height:118px;border-radius:14px;background:#FFF7E8">
+    <span style="position:absolute;left:18px;top:14px;width:252px;height:30px;font-size:22px;color:#FF8A00;text-shadow:-1px 0 0 #3A2200, 1px 0 0 #3A2200, 0 -1px 0 #3A2200, 0 1px 0 #3A2200">描边 4 层</span>
+    <span style="position:absolute;left:18px;top:52px;width:252px;height:22px;font-size:15px;color:#B45309;text-shadow:-1px -1px 0 #FFFFFF, 1px 1px 2px rgba(0,0,0,0.45)">对角描边 + 投影</span>
+    <span style="position:absolute;left:18px;top:80px;width:252px;height:20px;font-size:13px;color:#7A5A2E">单层对照</span>
+  </div>
+
+  <!-- 3. 双色偏移：红蓝各一侧，两层都是硬阴影 -->
+  <span style="position:absolute;left:24px;top:188px;width:288px;height:32px;font-size:24px;color:#101418;text-shadow:2px 2px 0 #FF3B30, -2px -2px 0 #0A84FF">双色偏移 红 / 蓝</span>
+
+  <!-- 4. currentColor 两层：颜色跟随文字色 -->
+  <span style="position:absolute;left:328px;top:188px;width:288px;height:32px;font-size:22px;color:#C2185B;text-shadow:0 0 4px currentColor, 0 0 14px currentColor">currentColor 两层</span>
+
+  <!-- 5. 继承：两层写在卡片上，里面每个文字节点都带（含小字） -->
+  <div style="position:absolute;left:24px;top:228px;width:288px;height:150px;border-radius:14px;background:#FFFFFF;text-shadow:0 1px 2px rgba(0,0,0,0.55), 0 6px 14px rgba(20,80,200,0.35)">
+    <span style="position:absolute;left:16px;top:12px;width:256px;height:24px;font-size:18px;color:#16202C">父级写两层，子元素继承</span>
+    <span style="position:absolute;left:16px;top:42px;width:256px;height:20px;font-size:14px;color:#44546A">第二行（同样两层）</span>
+    <span style="position:absolute;left:16px;top:70px;width:256px;height:20px;font-size:14px;color:#44546A;text-shadow:none">这一行 none 清掉</span>
+    <span style="position:absolute;left:16px;top:98px;width:256px;height:26px;font-size:20px;color:#0B5FA5;font-weight:700">粗体 + 两层</span>
+  </div>
+
+  <!-- 6. 三个不同模糊半径同时活跃（各自一张阴影图集）+ 贴边不裁 -->
+  <div style="position:absolute;left:328px;top:228px;width:288px;height:150px;border-radius:14px;background:#101A26">
+    <span style="position:absolute;left:16px;top:12px;width:256px;height:28px;font-size:20px;color:#FFD166;text-shadow:0 0 3px #FF8A00, 0 0 10px #FF3B30, 0 0 22px #7A0033">3/10/22 三个半径</span>
+    <span style="position:absolute;left:16px;top:52px;width:256px;height:20px;font-size:14px;color:#8FA6BC;text-shadow:0 0 6px #22CC88, 0 3px 8px rgba(0,0,0,0.85)">绿光 + 底部投影</span>
+    <!-- 贴边：阴影会溢出到卡片右外侧，没算外扩就会被自身盒子切出一道直边 -->
+    <span style="position:absolute;left:96px;top:96px;width:180px;height:26px;font-size:18px;color:#EAF6FF;text-shadow:0 0 16px #00E5FF">贴边 16 光晕</span>
+  </div>
+
+  <span style="position:absolute;left:24px;top:392px;width:592px;height:18px;font-size:13px;color:#5A6B80;text-shadow:0 1px 0 #FFFFFF, 0 2px 4px rgba(0,0,0,0.25)">浅底两层：1px 白字描边 + 4px 投影</span>
+
+  <span style="position:absolute;left:24px;top:418px;width:592px;height:20px;font-size:15px;color:#3B4A5C;text-shadow:0 1px 0 #FFFFFF, 0 4px 10px rgba(11,95,165,0.55)">第 5 层起会被编译期点名忽略（上限 4 层）</span>
+
+  <span style="position:absolute;left:24px;top:444px;width:592px;height:20px;font-size:13px;color:#7A8798;text-shadow:0 0 2px #FFFFFF, 0 0 6px rgba(0,0,0,0.35)">两层都很淡：检查叠加顺序与 alpha 合成</span>
+</html>
+</app_window>

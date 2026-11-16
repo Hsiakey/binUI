@@ -4111,8 +4111,8 @@ bool BinUIVK::setAffine(const float* xf) {
     return true;
 }
 
-void BinUIVK::setTextShadow(float dx, float dy, float blur, uint32_t color) {
-    if (impl_) impl_->atlas.setTextShadow(dx, dy, blur, color);
+void BinUIVK::setTextShadows(const BinUITextShadow* layers, int count) {
+    if (impl_) impl_->atlas.setTextShadows(layers, count);
 }
 
 // ---------- 图片 ----------

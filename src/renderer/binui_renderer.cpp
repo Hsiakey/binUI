@@ -4372,7 +4372,7 @@ bool BinUIRenderer::invalidRect(uint16_t nodeId, float& x, float& y, float& w, f
         for (int k = 0; k < shN; k++) PaintShadowPad(shs[k], sPad, padX, padY);
         int tsN = 0;
         const BinUITextShadow* ts = textShadowsOf(nodeId, tsN);
-        if (ts && tsN > 0) PaintTextShadowPad(ts[0], padX, padY);
+        for (int k = 0; k < tsN; k++) PaintTextShadowPad(ts[k], padX, padY);
         // 有阴影时再多给 1px：调用方（外壳）最后会把矩形截断成整数像素，
         // 外扩量若正好落在阴影最外一圈上，边界那几个像素会被切掉半个覆盖率
         // （实测 6 个像素差 1）。多 1px 换来"局部重绘 = 整帧"的逐位一致。

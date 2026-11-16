@@ -72,7 +72,7 @@ public:
                      bool italic = false) override;
     void setTextSubpixel(bool on) override;
     void setLetterSpacing(float px) override;   // v0.16.40
-    void setTextShadow(float dx, float dy, float blur, uint32_t color) override;
+    void setTextShadows(const BinUITextShadow* layers, int count) override;
     bool setAffine(const float xf[6]) override;
     void setImageFilter(const BinUIImageFilter* f) override;   // v26：CSS filter 颜色矩阵
     bool setEraseBlend(bool on) override;                       // v27：clip-path 擦除

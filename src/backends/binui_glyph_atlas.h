@@ -30,6 +30,7 @@
 #include <vector>
 
 #include "binui_font_renderer.h"
+#include "binui_format.h"      // BINUI_MAX_TEXT_SHADOWS（v0.16.50 多层文字阴影）
 
 namespace binui {
 
@@ -193,13 +194,18 @@ struct GlyphRunQuad {
     float x = 0, y = 0, w = 0, h = 0;
     float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
     bool white = false;   // 彩色字形用白顶点（不染色）
-    // v24 文字阴影：同一字形的阴影格。
-    //   blur = 0 → 直接复用字形格（sTex == tex、同 UV、sPad = 0），"阴影 = 偏移一份字形"；
-    //   blur > 0 → 模糊图集里的一格，每边比字形格多 sPad 像素，画的时候按 sPad 外扩。
-    // 彩色字形（emoji）不挂阴影（见 FillShadowQuad 注释），sTex 保持 nullptr。
-    void* sTex = nullptr;
-    float su0 = 0, sv0 = 0, su1 = 0, sv1 = 0;
-    float sPad = 0;
+    // v24 文字阴影：同一字形的每一层阴影格（v0.16.50 起支持多层，按下标与
+    //   GlyphAtlas::setTextShadows 给进来的层一一对应）。
+    //   blur = 0 → 直接复用字形格（tex == 本四边形的 tex、同 UV、pad = 0），
+    //     "阴影 = 偏移一份字形"；
+    //   blur > 0 → 模糊图集里的一格，每边比字形格多 pad 像素，画的时候按 pad 外扩。
+    // 彩色字形（emoji）不挂阴影（见 FillShadowQuad 注释），tex 保持 nullptr。
+    struct ShadowRef {
+        void* tex = nullptr;
+        float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
+        float pad = 0;
+    };
+    ShadowRef s[BINUI_MAX_TEXT_SHADOWS];
 };
 struct GlyphRun {
     uint64_t gen = 0;                 // 建立时的图集代数
@@ -235,24 +241,43 @@ public:
     bool snapText = true;
 
     // ---- v24：文字阴影（后端在画一个节点的文字之前设好，节点画完清掉）----
-    // 语义与 CSS text-shadow 一致：先把整段文字的**模糊覆盖率**按 (dx,dy) 偏移铺一遍，
-    // 再把清晰文字盖上去。模糊在 CPU 上做（字形位图 → 高斯），按 (字形, 模糊半径)
-    // 缓存在独立的图集里，所以同一段文字每帧只是多发射一批四边形。
+    // 语义与 CSS text-shadow 一致：先把整段文字的**模糊覆盖率**按 (dx,dy) 偏移铺一遍
+    // （多层时按"绘制顺序"逐层铺），再把清晰文字盖上去。模糊在 CPU 上做
+    // （字形位图 → 高斯），按 (字形, 模糊半径) 缓存在独立的图集里，所以同一段文字
+    // 每帧只是多发射一批四边形。
     //
     // blur < 0.5px 视为 0：这时候"阴影"就是偏移一份字形位图，不需要模糊图集。
-    void setTextShadow(float dx, float dy, float blur, uint32_t color) {
-        shadow_.on = ((color >> 24) & 0xFFu) != 0;
-        shadow_.dx = dx;
-        shadow_.dy = dy;
-        shadow_.blur = blur > 0.0f ? blur : 0.0f;
-        shadow_.color = color;
-        int q = static_cast<int>(std::lround(shadow_.blur * 4.0f));
-        if (q < 2) q = 0;                 // < 0.5px 的模糊等于没模糊（硬阴影）
-        if (q > kMaxShadowBlurQ) q = kMaxShadowBlurQ;
-        shadow_.blurQ = q;
+    //
+    // v0.16.50：**多层**（最多 BINUI_MAX_TEXT_SHADOWS）。层数组顺序 = 绘制顺序
+    // （下标 0 先画 = 在下面），与布局段 BinUITextShadow[] 的顺序一致，这里不再反转。
+    void setTextShadows(const BinUITextShadow* layers, int count) {
+        shadow_.count = 0;
+        if (!layers || count <= 0) return;
+        if (count > BINUI_MAX_TEXT_SHADOWS) count = BINUI_MAX_TEXT_SHADOWS;
+        for (int i = 0; i < count; i++) {
+            const BinUITextShadow& src = layers[i];
+            if (((src.color >> 24) & 0xFFu) == 0) continue;   // 全透明的层不占状态
+            ShadowLayer& d = shadow_.layer[shadow_.count++];
+            d.dx = src.offsetX;
+            d.dy = src.offsetY;
+            d.blur = src.blur > 0.0f ? src.blur : 0.0f;
+            d.color = src.color;
+            int q = static_cast<int>(std::lround(d.blur * 4.0f));
+            if (q < 2) q = 0;                 // < 0.5px 的模糊等于没模糊（硬阴影）
+            if (q > kMaxShadowBlurQ) q = kMaxShadowBlurQ;
+            d.blurQ = q;
+        }
     }
-    void clearTextShadow() { shadow_.on = false; }
-    bool textShadowActive() const { return shadow_.on; }
+    // 单层便利入口（老调用点语义不变）
+    void setTextShadow(float dx, float dy, float blur, uint32_t color) {
+        BinUITextShadow s = {};
+        s.offsetX = dx; s.offsetY = dy; s.blur = blur; s.color = color;
+        setTextShadows(&s, 1);
+    }
+    void clearTextShadow() { shadow_.count = 0; }
+    bool textShadowActive() const { return shadow_.count > 0; }
+    // 当前层数（0 = 没有阴影）
+    int textShadowCount() const { return shadow_.count; }
 
     // 纹理/字体变动即让整形缓存失效（见 GlyphRun 注释）
     void bumpAtlasGen() {
@@ -288,6 +313,16 @@ public:
         // v0.16.40：letter-spacing 参与 key（¼ 像素量化）—— 间距不同就是另一份 run
         mix(static_cast<uint64_t>(static_cast<uint32_t>(
             static_cast<int32_t>(std::lround(letterSpacing_ * 4.0f)))));
+        // v0.16.50：**阴影签名**参与 key（层数 + 每层的量化模糊半径）。
+        // 不混进来会串味，两个方向都踩得到：
+        //   1) 同一句话在两个节点上模糊半径不同 → 烘进去的阴影 UV 不通用，
+        //      第二个节点会默默画成第一个节点的模糊半径（旧实现就有这个 bug）；
+        //   2) 同一句话先被**无阴影**节点排版、再被有阴影的节点复用 → 命中缓存
+        //      直接重放，遮影整条丢失。
+        // 只混模糊半径：dx/dy/颜色是发射期叠加的，不进位图。
+        mix(static_cast<uint64_t>(shadow_.count));
+        for (int li = 0; li < shadow_.count; li++)
+            mix(static_cast<uint64_t>(shadow_.layer[li].blurQ));
         for (unsigned char c : asciiFont_) {
             h ^= c;
             h *= 1099511628211ull;
@@ -296,23 +331,26 @@ public:
     }
 
     // 重放整形结果：颜色按调用方给的（灰字形染色，彩色字形白顶点）。
-    // 有文字阴影时**先整条阴影、再整条字形** —— 逐字交错会让后面那个字的阴影
-    // 压到前面那个字上（半透明文字会看出脏边）。
+    // 有文字阴影时**先逐层整条阴影、再整条字形** —— 逐字交错会让后面那个字的阴影
+    // 压到前面那个字上（半透明文字会看出脏边）。多层时"层"在外、"字"在内：
+    // 层序 = 绘制顺序（下标 0 在最下面），作者写的第一个要盖在其它阴影上，
+    // 所以布局段里已经把它放在数组末尾（见 binui_format.h 的段注释）。
     void EmitRun(const GlyphRun& run, float x, float baseline, uint32_t color,
                  const EmitFn& emit) {
-        const bool sh = textShadowActive();
-        uint32_t shColor = 0;
-        if (sh) { shColor = shadow_.color; PremultColor(shColor); }
-        if (sh) {
+        for (int li = 0; li < shadow_.count; li++) {
+            const ShadowLayer& L = shadow_.layer[li];
+            uint32_t shColor = L.color;
+            PremultColor(shColor);
             for (const GlyphRunQuad& q : run.quads) {
-                if (!q.sTex) continue;
+                const GlyphRunQuad::ShadowRef& r = q.s[li];
+                if (!r.tex) continue;
                 GlyphQuad g;
-                g.tex = q.sTex;
-                g.x = x + q.x - q.sPad + shadow_.dx;
-                g.y = baseline + q.y - q.sPad + shadow_.dy;
-                g.w = q.w + 2.0f * q.sPad;
-                g.h = q.h + 2.0f * q.sPad;
-                g.u0 = q.su0; g.v0 = q.sv0; g.u1 = q.su1; g.v1 = q.sv1;
+                g.tex = r.tex;
+                g.x = x + q.x - r.pad + L.dx;
+                g.y = baseline + q.y - r.pad + L.dy;
+                g.w = q.w + 2.0f * r.pad;
+                g.h = q.h + 2.0f * r.pad;
+                g.u0 = r.u0; g.v0 = r.v0; g.u1 = r.u1; g.v1 = r.v1;
                 g.color = shColor;
                 emit(g);
             }
@@ -586,7 +624,7 @@ public:
             delete sa;
         }
         shadowAtlases_.clear();
-        shadow_.on = false;
+        shadow_.count = 0;
         scratch_.clear();
         scratch_.shrink_to_fit();
     }
@@ -662,12 +700,15 @@ private:
         float u0 = 0, v0 = 0, u1 = 0, v1 = 0;
         float pad = 0;
     };
-    // 当前生效的文字阴影（由 setTextShadow 写入）
-    struct ShadowState {
-        bool on = false;
+    // 当前生效的文字阴影（由 setTextShadows 写入）：一层一个条目，数组顺序 = 绘制顺序
+    struct ShadowLayer {
         float dx = 0, dy = 0, blur = 0;
         int blurQ = 0;
         uint32_t color = 0;
+    };
+    struct ShadowState {
+        int count = 0;
+        ShadowLayer layer[BINUI_MAX_TEXT_SHADOWS];
     };
     ShadowState shadow_;
     std::vector<ShadowAtlas*> shadowAtlases_;
@@ -1004,11 +1045,11 @@ private:
         sa->glyphs[cp] = sg;
     }
 
-    // 取一个字形的阴影格。没有阴影 / 造不出来都返回空（调用方跳过这个字的阴影）。
-    ShadowRef shadowRef(Atlas* base, uint32_t cp) {
+    // 取一个字形的某一层阴影格。没有阴影 / 造不出来都返回空（调用方跳过这个字的这层）。
+    ShadowRef shadowRef(Atlas* base, uint32_t cp, int blurQ) {
         ShadowRef r;
-        if (!shadow_.on || !base || shadow_.blurQ <= 0) return r;
-        ShadowAtlas* sa = getShadowAtlas(base, shadow_.blurQ);
+        if (!base || blurQ <= 0) return r;
+        ShadowAtlas* sa = getShadowAtlas(base, blurQ);
         if (!sa) return r;
         auto it = sa->glyphs.find(cp);
         if (it == sa->glyphs.end()) {
@@ -1027,24 +1068,28 @@ private:
         return r;
     }
 
-    // 给一个字形四边形挂上阴影格：
+    // 给一个字形四边形挂上每层阴影格：
     //   blur = 0 → 复用字形自己那一格（阴影就是偏移一份字形，最精确、零额外纹理）；
     //   blur > 0 → 模糊图集里的一格（每边多 pad 像素）。
+    // v0.16.50：逐层都挂（同一个字形可能同时出现在好几个模糊半径的图集里）。
     void FillShadowQuad(GlyphRunQuad& q, Atlas* a, uint32_t cp,
                         float gx, float gy, float cell, float t) {
-        if (!shadow_.on) return;
-        if (shadow_.blurQ <= 0) {
-            q.sTex = a->tex;
-            q.su0 = gx / t; q.sv0 = gy / t;
-            q.su1 = (gx + cell) / t; q.sv1 = (gy + cell) / t;
-            q.sPad = 0.0f;
-            return;
+        for (int li = 0; li < shadow_.count; li++) {
+            const int blurQ = shadow_.layer[li].blurQ;
+            GlyphRunQuad::ShadowRef& r = q.s[li];
+            if (blurQ <= 0) {
+                r.tex = a->tex;
+                r.u0 = gx / t; r.v0 = gy / t;
+                r.u1 = (gx + cell) / t; r.v1 = (gy + cell) / t;
+                r.pad = 0.0f;
+                continue;
+            }
+            const ShadowRef sg = shadowRef(a, cp, blurQ);
+            if (!sg.tex) continue;
+            r.tex = sg.tex;
+            r.u0 = sg.u0; r.v0 = sg.v0; r.u1 = sg.u1; r.v1 = sg.v1;
+            r.pad = sg.pad;
         }
-        const ShadowRef r = shadowRef(a, cp);
-        if (!r.tex) return;
-        q.sTex = r.tex;
-        q.su0 = r.u0; q.sv0 = r.v0; q.su1 = r.u1; q.sv1 = r.v1;
-        q.sPad = r.pad;
     }
 
     // ---------- 彩色字形（FreeType COLR 合成） ----------

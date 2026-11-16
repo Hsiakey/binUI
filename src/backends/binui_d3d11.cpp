@@ -2169,8 +2169,8 @@ bool BinUID3D::setAffine(const float* xf) {
     return true;
 }
 
-void BinUID3D::setTextShadow(float dx, float dy, float blur, uint32_t color) {
-    if (impl_) impl_->atlas.setTextShadow(dx, dy, blur, color);
+void BinUID3D::setTextShadows(const BinUITextShadow* layers, int count) {
+    if (impl_) impl_->atlas.setTextShadows(layers, count);
 }
 
 bool BinUID3D::pushLayer(float x, float y, float w, float h, float alpha) {

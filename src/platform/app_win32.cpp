@@ -839,8 +839,10 @@ struct TextShadowBmp {
 
 static std::vector<TextShadowBmp> g_textShadowCache;
 static uint64_t g_textShadowUse = 0;
-// 当前节点的文字阴影（alpha = 0 = 不画）。由 drawNodesGDI 的节点循环设置。
-static binui::BinUITextShadow g_gdiTextShadow;
+// 当前节点的文字阴影（数组顺序 = 绘制顺序；count = 0 = 不画）。
+// 由 drawNodesGDI 的节点循环设置。v0.16.50：多层。
+static binui::BinUITextShadow g_gdiTextShadow[binui::BINUI_MAX_TEXT_SHADOWS];
+static int g_gdiTextShadowN = 0;
 static bool g_gdiTextShadowOn = false;
 
 static void TextShadowBmpFree(TextShadowBmp& e) {
@@ -896,7 +898,9 @@ static void TextShadowBlur(std::vector<float>& buf, int w, int h, float sigma) {
 }
 
 // 取该文字阴影的预乘位图（缓存命中直接复用）。pad 写回"位图比文字矩形每边多出的像素"。
-static TextShadowBmp* TextShadowBmpGet(HDC ref, LPCWSTR text, int len, const RECT& box, UINT fmt) {
+// L = 要烘的那一层（v0.16.50 多层：一层一张位图，缓存键里带该层的参数）。
+static TextShadowBmp* TextShadowBmpGet(HDC ref, LPCWSTR text, int len, const RECT& box, UINT fmt,
+                                       const binui::BinUITextShadow& L) {
     const int boxW = box.right - box.left;
     const int boxH = box.bottom - box.top;
     if (boxW <= 0 || boxH <= 0 || !text) return nullptr;
@@ -906,7 +910,7 @@ static TextShadowBmp* TextShadowBmpGet(HDC ref, LPCWSTR text, int len, const REC
     HFONT cur = (HFONT)GetCurrentObject(ref, OBJ_FONT);
     if (cur) GetObjectW(cur, sizeof(lf), &lf);
 
-    const float blur = g_gdiTextShadow.blur > 0.0f ? g_gdiTextShadow.blur : 0.0f;
+    const float blur = L.blur > 0.0f ? L.blur : 0.0f;
     const float sigma = blur * 0.5f;
     int pad = sigma > 0.01f ? (int)std::ceil(sigma * 3.0f) + 1 : 1;
     if (pad > 48) pad = 48;                        // 再大就只是浪费内存
@@ -923,10 +927,10 @@ static TextShadowBmp* TextShadowBmpGet(HDC ref, LPCWSTR text, int len, const REC
     key = TextShadowKeyMix(key, &boxW, sizeof(boxW));
     key = TextShadowKeyMix(key, &boxH, sizeof(boxH));
     key = TextShadowKeyMix(key, &fmt, sizeof(fmt));
-    key = TextShadowKeyMix(key, &g_gdiTextShadow.offsetX, sizeof(float));
-    key = TextShadowKeyMix(key, &g_gdiTextShadow.offsetY, sizeof(float));
-    key = TextShadowKeyMix(key, &g_gdiTextShadow.blur, sizeof(float));
-    key = TextShadowKeyMix(key, &g_gdiTextShadow.color, sizeof(uint32_t));
+    key = TextShadowKeyMix(key, &L.offsetX, sizeof(float));
+    key = TextShadowKeyMix(key, &L.offsetY, sizeof(float));
+    key = TextShadowKeyMix(key, &L.blur, sizeof(float));
+    key = TextShadowKeyMix(key, &L.color, sizeof(uint32_t));
 
     ++g_textShadowUse;
     for (TextShadowBmp& e : g_textShadowCache) {
@@ -980,9 +984,9 @@ static TextShadowBmp* TextShadowBmpGet(HDC ref, LPCWSTR text, int len, const REC
         }
     }
 
-    const uint32_t rgb = g_gdiTextShadow.color & 0x00FFFFFFu;
+    const uint32_t rgb = L.color & 0x00FFFFFFu;
     const uint32_t sr = (rgb >> 16) & 0xFFu, sg = (rgb >> 8) & 0xFFu, sb = rgb & 0xFFu;
-    const uint32_t baseA = (g_gdiTextShadow.color >> 24) & 0xFFu;
+    const uint32_t baseA = (L.color >> 24) & 0xFFu;
     uint8_t* px = static_cast<uint8_t*>(bits);
     for (size_t p = 0, n = (size_t)iw * ih; p < n; p++, px += 4) {
         int c = (int)(cov[p] + 0.5f);
@@ -1017,21 +1021,25 @@ static TextShadowBmp* TextShadowBmpGet(HDC ref, LPCWSTR text, int len, const REC
     return &g_textShadowCache.back();
 }
 
-// 画文字（有阴影先铺一层模糊覆盖率）。所有**真正落像素**的 DrawTextW 都走这里；
+// 画文字（有阴影先铺模糊覆盖率）。所有**真正落像素**的 DrawTextW 都走这里；
 // 测量用的 DT_CALCRECT 直接透传（不铺阴影、不进缓存）。
+// v0.16.50：多层时按数组顺序（= 绘制顺序）逐层铺，最后画清晰文字 ——
+// 与 GPU 端"层在外、字在内"的发射顺序一致。
 static void GdiDrawTextShadowed(HDC hdc, LPCWSTR text, int len, LPRECT rc, UINT fmt) {
     // A/B 开关：BINUI_TEXTSHADOW_OFF=1 关掉文字阴影（排查"阴影还是排版弄的"用）
     static const bool tsOff = std::getenv("BINUI_TEXTSHADOW_OFF") != nullptr;
     if (tsOff) { DrawTextW(hdc, text, len, rc, fmt); return; }
-    if (!g_gdiTextShadowOn || !text || !rc || (fmt & DT_CALCRECT)) {
+    if (!g_gdiTextShadowOn || g_gdiTextShadowN <= 0 || !text || !rc || (fmt & DT_CALCRECT)) {
         DrawTextW(hdc, text, len, rc, fmt);
         return;
     }
-    TextShadowBmp* bmp = TextShadowBmpGet(hdc, text, len, *rc, fmt);
-    if (bmp) {
-        const int dx = rc->left - bmp->pad + (int)std::lround(g_gdiTextShadow.offsetX);
-        const int dy = rc->top - bmp->pad + (int)std::lround(g_gdiTextShadow.offsetY);
-        BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+    for (int li = 0; li < g_gdiTextShadowN; li++) {
+        const binui::BinUITextShadow& L = g_gdiTextShadow[li];
+        TextShadowBmp* bmp = TextShadowBmpGet(hdc, text, len, *rc, fmt, L);
+        if (!bmp) continue;
+        const int dx = rc->left - bmp->pad + (int)std::lround(L.offsetX);
+        const int dy = rc->top - bmp->pad + (int)std::lround(L.offsetY);
         AlphaBlend(hdc, dx, dy, bmp->w, bmp->h, bmp->dc, 0, 0, bmp->w, bmp->h, bf);
     }
     DrawTextW(hdc, text, len, rc, fmt);
@@ -1212,17 +1220,30 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
 
         // v24 文字阴影：本节点的状态（GDI 侧自己烘覆盖率位图，见 TextShadowBmpGet）。
         // 颜色 alpha 折入元素 opacity —— GDI 没有分层合成，阴影也得跟着一起淡。
+        // v0.16.50：多层一起设；全透明的层直接跳过（省一张位图）。
+        float tsPadX = 0.0f, tsPadY = 0.0f;
         {
             int tsN = 0;
             const binui::BinUITextShadow* tss = renderer.textShadowsOf(node.id, tsN);
-            g_gdiTextShadowOn = (tss != nullptr && tsN > 0 && nodeOp > 0.002f);
-            { static const bool d = std::getenv("BINUI_TEXTSHADOW_DBG") != nullptr; if (d) std::fprintf(stderr, "[ts] node=%u type=%u text=%d tsN=%d\\n", (unsigned)node.id, (unsigned)node.type, (int)node.text.size(), tsN); }
-            if (g_gdiTextShadowOn) {
-                g_gdiTextShadow = tss[0];
-                const uint32_t a0 = (g_gdiTextShadow.color >> 24) & 0xFFu;
-                const uint32_t a = (uint32_t)(a0 * nodeOp + 0.5f);
-                g_gdiTextShadow.color = (g_gdiTextShadow.color & 0x00FFFFFFu) | (a << 24);
+            g_gdiTextShadowN = 0;
+            if (tss && tsN > 0 && nodeOp > 0.002f) {
+                if (tsN > (int)binui::BINUI_MAX_TEXT_SHADOWS) tsN = binui::BINUI_MAX_TEXT_SHADOWS;
+                for (int li = 0; li < tsN; li++) {
+                    binui::BinUITextShadow s = tss[li];
+                    const uint32_t a0 = (s.color >> 24) & 0xFFu;
+                    if (a0 == 0) continue;                 // 这一层本来就不画
+                    const uint32_t a = (uint32_t)(a0 * nodeOp + 0.5f);
+                    if (a == 0) continue;
+                    s.color = (s.color & 0x00FFFFFFu) | (a << 24);
+                    g_gdiTextShadow[g_gdiTextShadowN++] = s;
+                    // 自身裁剪 / 剔除的外扩：按最大的一层算（与 GPU 路径同一个公式）
+                    const float sig = s.blur > 0.0f ? s.blur * 0.5f : 0.0f;
+                    tsPadX = std::max(tsPadX, sig * 3.0f + 1.0f + std::fabs(s.offsetX));
+                    tsPadY = std::max(tsPadY, sig * 3.0f + 1.0f + std::fabs(s.offsetY));
+                }
             }
+            g_gdiTextShadowOn = g_gdiTextShadowN > 0;
+            { static const bool d = std::getenv("BINUI_TEXTSHADOW_DBG") != nullptr; if (d) std::fprintf(stderr, "[ts] node=%u type=%u text=%d tsN=%d\\n", (unsigned)node.id, (unsigned)node.type, (int)node.text.size(), tsN); }
         }
         // 全透明：GDI 没有 alpha 合成，画出来是一块黑，所以整块跳过。
         // 但有文字的节点必须画（<pre>/<div>文字</div> 这种没底色的容器否则整个消失）。
@@ -1240,12 +1261,14 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         // "完全在外才剔除"。以前右/下两侧写成 `x + pad >= clip.right`（节点边进入
         // clip 边 pad 以内就剔），局部重绘时紧贴脏矩形边缘的那排节点会整块消失 ——
         // 见 docs/issues/10-partial-redraw-cull.md。
-        if (!binui::PaintNodeInClip(x, y, nw, nh, shPadX, shPadY,
+        if (!binui::PaintNodeInClip(x, y, nw, nh, std::max(shPadX, tsPadX),
+                                    std::max(shPadY, tsPadY),
                                     static_cast<float>(clip.left), static_cast<float>(clip.top),
                                     static_cast<float>(clip.right), static_cast<float>(clip.bottom)))
             continue;
         // 滚动容器内：视口外的节点（内容溢出/未滚动到）纯整数裁剪，避免 GDI 链
-        if (hasVp[i] && !binui::PaintNodeInClip(x, y, nw, nh, shPadX, shPadY,
+        if (hasVp[i] && !binui::PaintNodeInClip(x, y, nw, nh, std::max(shPadX, tsPadX),
+                                                std::max(shPadY, tsPadY),
                                                 static_cast<float>(vpL[i]), static_cast<float>(vpT[i]),
                                                 static_cast<float>(vpR[i]), static_cast<float>(vpB[i])))
             continue;
@@ -1432,11 +1455,10 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         bool draw = true;
         RECT nr = rc;
         if (g_gdiTextShadowOn) {   // 文字阴影露在盒外：自身裁剪跟着外扩（与 GPU 路径一致）
-            const int tpad = (int)std::ceil(g_gdiTextShadow.blur * 1.5f) + 1;
-            const int tox = (int)std::fabs((float)g_gdiTextShadow.offsetX);
-            const int toy = (int)std::fabs((float)g_gdiTextShadow.offsetY);
-            nr.left -= tpad + tox; nr.top -= tpad + toy;
-            nr.right += tpad + tox; nr.bottom += tpad + toy;
+            // 外扩量在上面的节点循环里按**所有层**的最大值算好了（tsPadX/tsPadY）
+            const int tpx = (int)std::ceil(tsPadX), tpy = (int)std::ceil(tsPadY);
+            nr.left -= tpx; nr.top -= tpy;
+            nr.right += tpx; nr.bottom += tpy;
         }
         if (IntersectClipRect(hdc, nr.left, nr.top, nr.right, nr.bottom) == NULLREGION)
             draw = false;

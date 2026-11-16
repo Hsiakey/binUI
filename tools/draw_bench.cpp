@@ -166,8 +166,17 @@ struct CountGfx : IBinUIGfx {
         Mix(10); MixF(x); MixF(y); MixF(w); MixF(h); MixF(r); MixF(blur); MixF(grain);
         return true;
     }
-    void setTextShadow(float dx, float dy, float blur, uint32_t c) override {
-        Mix(11); MixF(dx); MixF(dy); MixF(blur); Mix(c);
+    // v0.16.50：多层文字阴影。计数按"层数"记 —— 每层对每个字形多一个四边形，
+    // 所以层数是这里唯一有意义的量；参数也混进哈希，免得改层参数时计数不变。
+    void setTextShadows(const BinUITextShadow* layers, int n) override {
+        Mix(11);
+        Mix(static_cast<uint32_t>(n));
+        if (layers) {
+            for (int i = 0; i < n; i++) {
+                MixF(layers[i].offsetX); MixF(layers[i].offsetY);
+                MixF(layers[i].blur); Mix(layers[i].color);
+            }
+        }
     }
     bool pushLayer(float x, float y, float w, float h, float a) override {
         Mix(12); MixF(x); MixF(y); MixF(w); MixF(h); MixF(a);

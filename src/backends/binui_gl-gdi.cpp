@@ -1919,8 +1919,8 @@ bool BinUIGLGdi::setKeepBlend(bool on) {
 
 
 
-void BinUIGLGdi::setTextShadow(float dx, float dy, float blur, uint32_t color) {
-    if (impl_) impl_->atlas.setTextShadow(dx, dy, blur, color);
+void BinUIGLGdi::setTextShadows(const BinUITextShadow* layers, int count) {
+    if (impl_) impl_->atlas.setTextShadows(layers, count);
 }
 
 // v26 图片滤镜：矩阵只影响"下一次上传"的像素，并按哈希进纹理缓存键 ——

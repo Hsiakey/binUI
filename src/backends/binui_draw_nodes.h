@@ -797,10 +797,11 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
 
         // v24 文字阴影：字形模糊会溢出节点盒（CSS 的 text-shadow 不受盒子边界约束），
         // 所以自身裁剪矩形要按阴影外扩量放大，否则贴边文字的阴影会被切出一道直边。
+        // v0.16.50：多层时按**最大**的一层算（每层偏移/模糊都不同的情况很常见）。
         int tsCount = 0;
         const BinUITextShadow* ts = renderer.textShadowsOf(node.id, tsCount);
         float tsPadX = 0.0f, tsPadY = 0.0f;
-        if (ts && tsCount > 0) binui::PaintTextShadowPad(ts[0], tsPadX, tsPadY);
+        for (int k = 0; k < tsCount; k++) binui::PaintTextShadowPad(ts[k], tsPadX, tsPadY);
 
         // 脏矩形 / 视口剔除：四边一律"**完全在外**才剔除"（见 binui_paint.h 的
         // PaintNodeInClip）。这里曾经把右/下两侧写成 `x + pad >= clipR`、
@@ -977,11 +978,19 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             }
             // v24 文字阴影：状态设一次，本节点内所有 drawText / drawTextWrapped 都带上它；
             // 没有阴影（或元素透明）就显式清零 —— 状态是后端的，不清会漏到下一个节点。
-            if (ts && tsCount > 0 && opacity > 0.002f)
-                gfx.setTextShadow(ts[0].offsetX, ts[0].offsetY, ts[0].blur,
-                                  GfxScaleAlpha(ts[0].color, opacity));
-            else
-                gfx.setTextShadow(0.0f, 0.0f, 0.0f, 0u);
+            // v0.16.50：多层整批交给后端（层序 = 绘制顺序，后端不再反转）。color 的
+            // alpha 在这里折入元素 opacity；元素全透明时直接当作没有阴影（否则会多烘位图）。
+            if (ts && tsCount > 0 && opacity > 0.002f) {
+                BinUITextShadow scaled[BINUI_MAX_TEXT_SHADOWS];
+                const int tn = tsCount > BINUI_MAX_TEXT_SHADOWS ? BINUI_MAX_TEXT_SHADOWS : tsCount;
+                for (int k = 0; k < tn; k++) {
+                    scaled[k] = ts[k];
+                    scaled[k].color = GfxScaleAlpha(ts[k].color, opacity);
+                }
+                gfx.setTextShadows(scaled, tn);
+            } else {
+                gfx.setTextShadows(nullptr, 0);
+            }
             // v0.16.40 字间距（CSS letter-spacing）：与文字阴影同一个位置设状态 ——
             // 本节点内所有 textWidth / drawText / drawTextWrapped 都用它，不必逐个调用点传参。
             gfx.setLetterSpacing(pt ? pt->letterSpacing : 0.0f);
@@ -1776,7 +1785,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     }
     // 收尾：图层必须成对弹出（正常不会剩下，防御性兜底）
     // v24 文字阴影是后端状态：整趟遍历结束显式清掉，别让画布回调/浮层继承到上一节点的阴影
-    gfx.setTextShadow(0.0f, 0.0f, 0.0f, 0u);
+    gfx.setTextShadows(nullptr, 0);
     while (!layerStack.empty()) {
         gfx.popLayer();
         layerStack.pop_back();

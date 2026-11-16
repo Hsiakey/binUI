@@ -4690,10 +4690,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // 两者在 SVG 里含义不同 —— 没写 = 默认黑填充，写了 none = 不填。
         bool fillMentioned = false;
         // v24：生效的文字阴影（CSS text-shadow 是**继承属性**：卡片上写一次，卡片里
-        // 所有文字都带）。present=false = 本子树没有阴影；写了 none / 全透明就从这里清掉。
-        bool     tsPresent = false;
-        float    tsDx = 0.0f, tsDy = 0.0f, tsBlur = 0.0f;
-        uint32_t tsColor = 0xFF000000u;
+        // 所有文字都带）。空 = 本子树没有阴影；写了 none / 全透明就从这里清掉。
+        // v0.16.50：**多层**（数组顺序 = 绘制顺序，见 binui_format.h 的段注释）。
+        std::vector<BinUITextShadow> tsLayers;
     };
 
     // 根节点固定 id 0，位于坐标原点。画布默认白色；<app_window bg>/<html bg> 覆盖
@@ -7858,11 +7857,11 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         //   颜色不写 = 当前文字色（CSS 的 currentColor）。
         // 可继承：本元素没写就沿用祖先的生效值（CSS 规定 text-shadow 是继承属性）；
         //   写了 none / 全透明 = 从本元素起清掉整棵子树。
-        // 只能取一条：多层文字阴影要多次"模糊字形位图"，图集里每种模糊半径都要多一份
-        //   变体，代价跟收益不成比例（真实用到多层的页面极少），所以第二层起明确告警。
-        bool tsPresent = pc.tsPresent;
-        float tsDx = pc.tsDx, tsDy = pc.tsDy, tsBlur = pc.tsBlur;
-        uint32_t tsColor = pc.tsColor;
+        // v0.16.50：**多层**。CSS 的绘制顺序是"写在前面的在最上面"，而段的数组顺序
+        //   = 绘制顺序（下标小的先画），所以下面按"书写顺序的逆序"写出（与 box-shadow
+        //   同一套约定）。每层在 GPU 端多一份模糊覆盖率图集、在 GDI 端多一张位图，
+        //   所以层数封在 BINUI_MAX_TEXT_SHADOWS，超出的点名忽略。
+        std::vector<BinUITextShadow> tsLayers = pc.tsLayers;
         {
             std::string tsv = pick(e.attrs, style, "text-shadow", "text-shadow", "");
             if (!tsv.empty()) {
@@ -7878,11 +7877,11 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                     }
                     if (!cur.empty()) items.push_back(cur);
                 }
-                bool stated = false;      // 本次是否给出了"生效值"（false = none/全透明）
+                std::vector<BinUITextShadow> authored;   // 书写顺序（第一个在最上面）
                 for (const std::string& raw : items) {
                     const std::string piece = TrimCopy(raw);
                     if (piece.empty()) continue;
-                    if (LowerCopy(piece) == "none") { stated = false; tsPresent = false; continue; }
+                    if (LowerCopy(piece) == "none") continue;   // 由 authored 是否为空决定清不清
                     BinUITextShadow s = {};
                     float lens[3] = { 0, 0, 0 };
                     int nlen = 0;
@@ -7914,35 +7913,41 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                              piece + "\"，多出来的按 0 处理（text-shadow 没有 spread）");
                     if (lens[2] < 0.0f) lens[2] = 0.0f;      // 负的 blur 半径无意义
                     if (!hasColor) s.color = textCol;        // currentColor
-                    if (((s.color >> 24) & 0xFFu) == 0) continue;   // 全透明 = 不画
-                    if (stated) {
-                        Warn("CSS text-shadow 目前只支持**一层**：\"" + piece +
-                             "\" 已忽略（第一层先生效）");
-                        continue;
-                    }
+                    if (((s.color >> 24) & 0xFFu) == 0) continue;   // 全透明 = 这一层不画
                     s.offsetX = lens[0];
                     s.offsetY = lens[1];
                     s.blur    = lens[2];
-                    s.nodeId  = n.id;
                     s.flags   = 0;
-                    tsPresent = true;
-                    stated = true;
-                    tsDx = s.offsetX; tsDy = s.offsetY; tsBlur = s.blur; tsColor = s.color;
+                    authored.push_back(s);
                 }
-                if (!stated) tsPresent = false;     // 只写了 none / 全透明
+                if (authored.empty()) {
+                    tsLayers.clear();                    // 只写了 none / 全透明
+                } else {
+                    if (static_cast<int>(authored.size()) > BINUI_MAX_TEXT_SHADOWS) {
+                        Warn("CSS text-shadow 最多支持 " +
+                             std::to_string(BINUI_MAX_TEXT_SHADOWS) + " 层：\"" + tsv +
+                             "\" 里多出来的 " +
+                             std::to_string(static_cast<int>(authored.size()) -
+                                            BINUI_MAX_TEXT_SHADOWS) +
+                             " 层被忽略（每层都要多烘一份字形模糊覆盖率，"
+                             "再多对观感没有增量）");
+                        authored.resize(static_cast<size_t>(BINUI_MAX_TEXT_SHADOWS));
+                    }
+                    tsLayers.clear();
+                    // 反序：数组顺序 = 绘制顺序（作者写的第一个在最上面 = 最后画）
+                    for (size_t k = authored.size(); k > 0; k--) tsLayers.push_back(authored[k - 1]);
+                }
             }
         }
         // 只有真正会画字的节点才写条目：阴影是"按字形位图模糊"，没字就没得画。
         // （INPUT 的文字来自运行期的输入值，编译期可能是空的 —— 它是单行输入框，
         //   占位符/内容一定非空时才画，所以用 srcText 判断已足够。）
-        if (tsPresent && !srcText.empty()) {
-            BinUITextShadow ts = {};
-            ts.nodeId = n.id;
-            ts.offsetX = tsDx;
-            ts.offsetY = tsDy;
-            ts.blur = tsBlur;
-            ts.color = tsColor;
-            textShadowNodes.push_back(ts);
+        if (!tsLayers.empty() && !srcText.empty()) {
+            for (BinUITextShadow ts : tsLayers) {   // 数组顺序 = 绘制顺序
+                ts.nodeId = n.id;
+                ts.flags = 0;
+                textShadowNodes.push_back(ts);
+            }
         }
 
         // 字号已在元素开头算好（供 em 换算用），这里直接落库
@@ -8983,12 +8988,8 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             child.fillMentioned = eFillMentioned;   // fill（含 none）的"提到过"也沿树继承
             child.fillGradId = fillGradId;   // 渐变填充是继承属性（<svg>/<g> 写一次全子树生效）
             child.strokeGradId = strokeGradId;   // 渐变描边同理（v17）
-            // v24：文字阴影同样是继承属性，往整棵子树传（写了 none 的元素上面已置 false）
-            child.tsPresent = tsPresent;
-            child.tsDx = tsDx;
-            child.tsDy = tsDy;
-            child.tsBlur = tsBlur;
-            child.tsColor = tsColor;
+            // v24：文字阴影同样是继承属性，往整棵子树传（写的 none 已在上面清成空）
+            child.tsLayers = tsLayers;
             if (e.tag == "svg") {
                 // 子元素坐标 = viewBox 用户单位 → 本容器内容盒局部坐标。
                 // 注意**不乘位移**：Ctx.ox 已经是内容盒原点，再加一次就是双重偏移

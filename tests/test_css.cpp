@@ -375,7 +375,109 @@ static void TestIssueRegressions() {
         TEST("16.16: 负 blur 收敛到 0", sg && ng == 1 && std::fabs(sg->blur) < 0.01f);
         int nm = 0;
         const BinUITextShadow* sm = tsOfName("multi", nm);
-        TEST("16.16: 多层只取第一层", sm && nm == 1 && std::fabs(sm->blur - 2.0f) < 0.01f);
+        // v0.16.50：多层不再截断。段的数组顺序 = 绘制顺序，所以作者写的第二层
+        // （红、blur 10）在下标 0，第一层（黑、blur 2）在后 —— 详细断言见下面的 16.50 段。
+        TEST("16.50: 两层都进段（段序 = 绘制顺序）",
+             sm && nm == 2 && std::fabs(sm[0].blur - 10.0f) < 0.01f &&
+             std::fabs(sm[1].blur - 2.0f) < 0.01f);
+    }
+
+    // ---- 0.16.50：多层 text-shadow（P1 表里最后一条功能尾巴）----
+    // 钉住六件事：
+    //   1. 三层按"书写顺序的逆序"进段（段序 = 绘制顺序，第一个写的最后画 = 在最上面）；
+    //   2. **可继承**：容器写两层，子树里的文字节点各拿到同样两层（顺序也一致）；
+    //   3. `none` 从该元素起清空整棵子树；
+    //   4. 层数上限 BINUI_MAX_TEXT_SHADOWS：第 5 层起点名告警并忽略；
+    //   5. 全透明的层根本不占条目（省一份模糊图集 / 一张 GDI 位图）；
+    //   6. 外扩量按**最大**的一层算（裁剪与脏矩形都用它，少算了会留残影）。
+    {
+        const char* html = R"HTML(<app_window width="420" height="320" bg="#101014">
+<html width="420" height="320" bg="#101014">
+<body>
+  <span id="three" style="position:absolute; left:10; top:10; font-size:16px; color:#FFFFFF;
+        text-shadow: 0 0 2px #FF0000, 0 0 6px #00FF00, 0 0 12px #0000FF">three</span>
+  <div id="card2" style="position:absolute; left:10; top:40; width:400; height:120;
+        text-shadow: 0 1px 2px rgba(0,0,0,0.60), 0 4px 9px rgba(255,0,0,0.50)">
+    <span id="kid2" style="position:absolute; left:8; top:8; font-size:16px">inherit</span>
+    <span id="kid2none" style="position:absolute; left:8; top:40; font-size:16px;
+          text-shadow:none">none</span>
+  </div>
+  <span id="five" style="position:absolute; left:10; top:170; font-size:16px;
+        text-shadow: 0 1px 1px #010101, 0 2px 2px #020202, 0 3px 3px #030303, 0 4px 4px #040404, 0 5px 5px #050505">five</span>
+  <span id="ghost" style="position:absolute; left:220; top:170; font-size:16px; color:#FFFFFF;
+        text-shadow: 0 0 4px rgba(0,0,0,0), 0 2px 3px #22CC88, 0 1px 0 currentColor">ghost</span>
+</body></html>
+</app_window>)HTML";
+        const auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("16.50: 多层文字阴影布局可解析", ParseInto(r, res.layout));
+        auto tsOfName = [&](const char* name, int& n) -> const BinUITextShadow* {
+            const uint16_t id = r.findNodeByName(name);
+            n = 0;
+            return id ? r.textShadowsOf(id, n) : nullptr;
+        };
+        // 1) 三层：逆序进段
+        int n3 = 0;
+        const BinUITextShadow* s3 = tsOfName("three", n3);
+        TEST("16.50: 三层都进段", s3 && n3 == 3);
+        if (s3 && n3 == 3) {
+            TEST("16.50: 段序 = 书写顺序的逆序（blur 12 / 6 / 2）",
+                 std::fabs(s3[0].blur - 12.0f) < 0.01f &&
+                 std::fabs(s3[1].blur - 6.0f) < 0.01f &&
+                 std::fabs(s3[2].blur - 2.0f) < 0.01f);
+            TEST("16.50: 每层颜色各自独立（蓝 / 绿 / 红）",
+                 (s3[0].color & 0x00FFFFFFu) == 0x0000FFu &&
+                 (s3[1].color & 0x00FFFFFFu) == 0x00FF00u &&
+                 (s3[2].color & 0x00FFFFFFu) == 0xFF0000u);
+            // 6) 外扩按最大层：blur 12 → σ=6 → 6*3+1 = 19
+            float px = 0.0f, py = 0.0f;
+            for (int k = 0; k < n3; k++) binui::PaintTextShadowPad(s3[k], px, py);
+            TEST("16.50: 外扩量取最大层（19px）",
+                 std::fabs(px - 19.0f) < 0.01f && std::fabs(py - 19.0f) < 0.01f);
+        }
+        // 2) 继承两层
+        int nc2 = 0, nk2 = 0;
+        const BinUITextShadow* sc2 = tsOfName("card2", nc2);
+        const BinUITextShadow* sk2 = tsOfName("kid2", nk2);
+        TEST("16.50: 容器没文字 → 不写条目", sc2 == nullptr && nc2 == 0);
+        TEST("16.50: 子元素继承两层", sk2 && nk2 == 2);
+        if (sk2 && nk2 == 2) {
+            TEST("16.50: 继承的两层顺序与值都一致",
+                 std::fabs(sk2[0].blur - 9.0f) < 0.01f &&
+                 std::fabs(sk2[0].offsetY - 4.0f) < 0.01f &&
+                 ((sk2[0].color >> 24) & 0xFFu) == 128 &&
+                 std::fabs(sk2[1].blur - 2.0f) < 0.01f &&
+                 std::fabs(sk2[1].offsetY - 1.0f) < 0.01f &&
+                 ((sk2[1].color >> 24) & 0xFFu) == 153);
+        }
+        // 3) none 清空
+        int nkn = 0;
+        TEST("16.50: none 清掉继承的多层", tsOfName("kid2none", nkn) == nullptr && nkn == 0);
+        // 4) 层数上限
+        int n5 = 0;
+        const BinUITextShadow* s5 = tsOfName("five", n5);
+        TEST("16.50: 超过上限截到 4 层", s5 && n5 == BINUI_MAX_TEXT_SHADOWS);
+        if (s5 && n5 >= 4) {
+            // authored 前四层 = blur 1..4，逆序进段 → 段首是 blur 4
+            TEST("16.50: 保留的是**前**四层（blur 4 / 3 / 2 / 1）",
+                 std::fabs(s5[0].blur - 4.0f) < 0.01f && std::fabs(s5[1].blur - 3.0f) < 0.01f &&
+                 std::fabs(s5[2].blur - 2.0f) < 0.01f && std::fabs(s5[3].blur - 1.0f) < 0.01f);
+        }
+        bool warnedCap = false;
+        for (const auto& w : res.warnings)
+            if (w.find("最多支持 4 层") != std::string::npos) warnedCap = true;
+        TEST("16.50: 第 5 层点名告警", warnedCap);
+        // 5) 全透明的层不占条目；currentColor 逐层解析
+        int ng = 0;
+        const BinUITextShadow* sg = tsOfName("ghost", ng);
+        TEST("16.50: 全透明的层被丢掉（3 层写法 → 2 层条目）", sg && ng == 2);
+        if (sg && ng == 2) {
+            TEST("16.50: 剩下的两层顺序正确（硬阴影 currentColor 在前）",
+                 std::fabs(sg[0].blur) < 0.01f &&
+                 (sg[0].color & 0x00FFFFFFu) == 0xFFFFFFu &&
+                 std::fabs(sg[1].blur - 3.0f) < 0.01f &&
+                 (sg[1].color & 0x00FFFFFFu) == 0x22CC88u);
+        }
     }
 
     // ---- 0.16.19：九宫格图片（v25 绘制附加段，P1-8 的尾巴）----

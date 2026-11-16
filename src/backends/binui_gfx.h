@@ -225,12 +225,16 @@ public:
         return false;
     }
 
-    // ---- 文字阴影（v24：CSS text-shadow）----
-    // 在画一个节点的文字**之前**设好，节点画完用 alpha=0 清掉（或下个节点重设）。
-    // color 的 alpha 已折入元素 opacity；blur < 0.5px 由实现按"硬阴影"（偏移一份字形）处理。
+    // ---- 文字阴影（v24：CSS text-shadow；v0.16.50 起多层）----
+    // 在画一个节点的文字**之前**设好，节点画完设 count=0 清掉（或下个节点重设）。
+    // layers[0..count-1] 的**数组顺序 = 绘制顺序**（下标 0 先画 = 在最下面），与布局段
+    // BinUITextShadow[] 的顺序一致；实现内部不得再反转。count 上限
+    // BINUI_MAX_TEXT_SHADOWS（超过的部分编译器已经截断，实现再夹一次即可）。
+    // 每层 color 的 alpha 已折入元素 opacity；blur < 0.5px 由实现按"硬阴影"
+    // （偏移一份字形）处理。
     // 默认空实现：不支持的后端（如 GDI 的老路径）文字照常画，只是没有阴影。
-    virtual void setTextShadow(float dx, float dy, float blur, uint32_t color) {
-        (void)dx; (void)dy; (void)blur; (void)color;
+    virtual void setTextShadows(const BinUITextShadow* layers, int count) {
+        (void)layers; (void)count;
     }
 
     // ---- 图层 / 组透明度（v0.16.9）----
