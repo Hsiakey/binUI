@@ -104,9 +104,12 @@ public:
     // 为什么放在后端而不是 drawNodes 里切：切分要**源图像素尺寸**，只有解码过图片的
     // 后端知道。默认实现退回普通整图拉伸（GDI 这类遗留后端不必为此改）——
     // 这样"不支持九宫格"退化成"框被拉粗"，而不是什么都不画。
+    // repX / repY：中段的填充模式（BinUISliceRepeat：0=stretch 1=repeat 2=round）。
     virtual void drawImageNine(uint16_t index, float x, float y, float w, float h,
-                               float slice, uint32_t tint) {
+                               float slice, int repX, int repY, uint32_t tint) {
         (void)slice;
+        (void)repX;
+        (void)repY;
         drawImageEx(index, 0.0f, 0.0f, 1.0f, 1.0f, x, y, w, h, tint);
     }
 

@@ -1,11 +1,14 @@
 <!DOCTYPE html>
-<app_window width="640" height="360" resizable="false">
-<html width="640" height="360">
+<app_window width="640" height="600" resizable="false">
+<html width="640" height="600">
 <head>
 <style>
     body { background: #F2F5FA; color: #16202C; }
     /* v25 九宫格（image-slice）：同一个 48×48 贴图，左列整图拉伸（边框被拉粗、
-       圆角被压扁），右列按 12px 内缩九宫格（四角与边框粗细不变）。 */
+       圆角被压扁），右列按 12px 内缩九宫格（四角与边框粗细不变）。
+       v0.16.49 起中段可以平铺（CSS border-image-repeat: repeat / round）：
+       贴图每条边中间有一个色点（上红 / 左紫 / 右绿 / 下黄），平铺时这些点会重复出现，
+       一眼就能看出到底铺没铺、铺了几个。 */
 </style>
 </head>
 <body>
@@ -23,8 +26,27 @@
     <img src="nine-slice-img.png" style="position:absolute; left:24; top:224; width:380; height:60" />
     <img src="nine-slice-img.png" style="position:absolute; left:424; top:224; width:180; height:60; image-slice:12" />
 
-    <span style="position:absolute; left:24; top:292; width:360; height:18; font-size:12px; color:#5A6B80">贴边通栏（560×36，slice:16）</span>
+    <span style="position:absolute; left:24; top:292; width:360; height:18; font-size:12px; color:#5A6B80">贴边通栏（580×36，slice:16）</span>
     <img src="nine-slice-img.png" style="position:absolute; left:24; top:312; width:580; height:36; image-slice:16" />
+
+    <!-- ===== v0.16.49：中段平铺 ===== -->
+    <span style="position:absolute; left:24; top:364; width:592; height:18; font-size:12px; color:#5A6B80">中段平铺（CSS border-image-repeat）：横 repeat / 竖 repeat / 双 repeat / round / space→repeat</span>
+
+    <!-- ① 只横向平铺：上下边的红点应该重复，左右边（紫/绿点）仍拉伸 -->
+    <img src="nine-slice-img.png" style="position:absolute; left:24; top:388; width:380; height:70; image-slice:12; border-image-repeat:repeat" />
+    <span style="position:absolute; left:24; top:462; width:380; height:16; font-size:11px; color:#5A6B80">repeat（上红点重复）/ 高 70</span>
+
+    <!-- ② 只纵向平铺 -->
+    <img src="nine-slice-img.png" style="position:absolute; left:424; top:388; width:120; height:120; image-slice:12; border-image-repeat:stretch repeat" />
+
+    <!-- ③ 双轴平铺：中心块也摊成网格 -->
+    <img src="nine-slice-img.png" style="position:absolute; left:24; top:486; width:200; height:100; image-slice:12; border-image-repeat:repeat repeat" />
+
+    <!-- ④ round：块数取整、块长按比例缩放（不留裁切边） -->
+    <img src="nine-slice-img.png" style="position:absolute; left:264; top:486; width:200; height:100; image-slice:12; border-image-repeat:round" />
+
+    <!-- ⑤ space：本版未实现，编译期按 repeat 处理并告警 -->
+    <img src="nine-slice-img.png" style="position:absolute; left:504; top:486; width:112; height:100; image-slice:12; border-image-repeat:space" />
 </body>
 </html>
 </app_window>

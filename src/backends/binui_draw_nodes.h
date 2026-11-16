@@ -1368,10 +1368,12 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                     // 直角时一条整图，像素与旧版完全相同。
                     // v25 九宫格（image-slice）：交给后端切（它才知道源图像素尺寸）。
                     const int slicePx = renderer.imageSliceOf(node.id);
+                    const int sliceRep = renderer.imageSliceRepeatOf(node.id);
                     auto drawImg = [&](float ix, float iy, float iw, float ih) {
                         if (slicePx > 0) {
                             gfx.drawImageNine(node.imageIndex, ix, iy, iw, ih,
-                                              static_cast<float>(slicePx), tint);
+                                              static_cast<float>(slicePx),
+                                              sliceRep & 3, (sliceRep >> 2) & 3, tint);
                             return;
                         }
                         if (effRadius <= 0.5f) {

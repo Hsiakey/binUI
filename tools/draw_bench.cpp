@@ -111,9 +111,10 @@ struct CountGfx : IBinUIGfx {
         MixF(x); MixF(y); MixF(w); MixF(h); Mix(tint);
     }
     void drawImageNine(uint16_t index, float x, float y, float w, float h, float slice,
-                       uint32_t tint) override {
+                       int repX, int repY, uint32_t tint) override {
         Count(6, 9);
         Mix(7); Mix(index); MixF(x); MixF(y); MixF(w); MixF(h); MixF(slice); Mix(tint);
+        Mix((uint32_t)repX); Mix((uint32_t)repY);
     }
     void drawText(float x, float y, float size, int weight, const std::string& s,
                   uint32_t c, bool ch, bool cv, bool it) override {

@@ -633,15 +633,28 @@ static_assert(sizeof(BinUITextShadow) == 20, "BinUITextShadow must be 20 bytes")
 // 语义：`imageSlice > 0` 表示这个 `<img>` 按九宫格画（四边内缩 = 源图像素）。
 // 详见 src/backends/binui_draw_nodes.h 的 BINUI_IMAGE 分支与
 // IBinUIGfx::drawImageNine。
+//
+// flags（v0.16.49 起有值）：两轴各 2 位的"中段怎么填" —— 0=stretch（拉伸，旧行为）、
+// 1=repeat（按自然尺寸平铺，末块裁切）、2=round（块数取整后按比例缩放）。
+// 走 flags 而不是新开字段：这一字节本来就写着"保留（恒 0）"，旧产物的 0 正好等于
+// stretch，所以**不升 BINUI_VERSION**（与 v0.16.38 复用 flags 空闲位同一个先例）。
 // ============================================================
 #pragma pack(push, 1)
 struct BinUIPaintEx {
     uint16_t nodeId;
     uint8_t  imageSlice;  // 九宫格内缩（源图像素，四边同宽；0 = 普通拉伸）
-    uint8_t  flags;       // 保留（目前恒 0）
+    uint8_t  flags;       // bit0-1 = x 轴模式，bit2-3 = y 轴模式（BinUISliceRepeat）
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIPaintEx) == 4, "BinUIPaintEx must be 4 bytes");
+
+// 九宫格中段的填充模式（BinUIPaintEx::flags 里两轴各两位）。对应 CSS
+// `border-image-repeat: stretch | repeat | round`；space 未实现（编译期降级成 repeat 并告警）。
+enum BinUISliceRepeat : uint8_t {
+    BINUI_SLICE_STRETCH = 0,   // 拉伸（默认，旧行为）
+    BINUI_SLICE_REPEAT  = 1,   // 按自然尺寸平铺，末块裁切
+    BINUI_SLICE_ROUND   = 2,   // 块数取整后按比例缩放
+};
 
 // ============================================================
 // 图片滤镜段（v26）：CSS filter 合成后的颜色矩阵

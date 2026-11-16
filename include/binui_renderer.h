@@ -145,6 +145,11 @@ public:
     }
 
     // v25 绘制附加段：九宫格内缩（源图像素，四边同宽）。0 = 普通拉伸，没有条目也返回 0。
+    // 九宫格中段的填充模式（打包：bit0-1 = x 轴，bit2-3 = y 轴；见 BinUISliceRepeat）
+    int imageSliceRepeatOf(uint16_t nodeId) const {
+        auto it = paintEx_.find(nodeId);
+        return it == paintEx_.end() ? 0 : static_cast<int>(it->second.flags & 0x0Fu);
+    }
     int imageSliceOf(uint16_t nodeId) const {
         auto it = paintEx_.find(nodeId);
         return it == paintEx_.end() ? 0 : static_cast<int>(it->second.imageSlice);

@@ -1999,12 +1999,13 @@ bool BinUIGLGdi::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rg
 // v25 九宫格：切分数学在 binui_gfx.h 的 BuildNineSlice（三端共用），这里只负责
 // 按算出的小块发九个四边形。源图尺寸缺失就退回整图拉伸（不至于什么都不画）。
 void BinUIGLGdi::drawImageNine(uint16_t index, float x, float y, float w, float h,
-                              float slice, uint32_t tint) {
+                              float slice, int repX, int repY, uint32_t tint) {
     if (!impl_ || !impl_->ready) return;
     auto it = impl_->imageDims.find(impl_->imgKey(index));
-    float q[9][8];
+    float q[kMaxNineSliceQuads][8];
     const int n = it == impl_->imageDims.end()
-        ? 0 : BuildNineSlice(x, y, w, h, it->second.first, it->second.second, slice, q);
+        ? 0 : BuildNineSlice(x, y, w, h, it->second.first, it->second.second, slice,
+                             repX, repY, &q[0][0], kMaxNineSliceQuads);
     if (n <= 0) { drawImageEx(index, 0.0f, 0.0f, 1.0f, 1.0f, x, y, w, h, tint); return; }
     for (int i = 0; i < n; i++)
         drawImageEx(index, q[i][0], q[i][1], q[i][2], q[i][3],

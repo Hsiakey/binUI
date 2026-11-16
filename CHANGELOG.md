@@ -5,6 +5,37 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.16.49] - 2026-11-16 【格式 v33】
+
+**九宫格图片的中段也能平铺了：`border-image-repeat: stretch | repeat | round`。**
+P1-8 那条「九宫格只有 stretch」的尾巴收掉。零新管线：切分数学还是三端共用的
+`BuildNineSlice`，只是"中段一块拉伸"变成"中段按模式切若干块"。
+
+### 做法
+
+- **模式存哪**：`BinUIPaintEx` 本来就有一个写着"保留（目前恒 0）"的 `flags` 字节 —— 拿它存
+  "两轴各 2 位"（0=stretch 1=repeat 2=round）。旧产物的 0 正好等于 stretch，所以
+  **`BINUI_VERSION` 不必升**（与 v0.16.38 复用 flags 空闲位同一个先例）。
+- **`repeat`**：按"自然尺寸 = 内缩像素"铺；末块不是丢弃而是**裁切** —— 目标宽度缩到剩余部分，
+  **源 UV 也按同一比例裁**（`f1 = rest / natural`），否则末块会被整段压扁。
+- **`round`**：块数 = `lround(中段长 / 自然尺寸)`，块长 = 中段长 / 块数，不留裁切边。
+- **预算护栏**：两轴都平铺时块数是乘积（中心也会摊成网格），超了就把块数按比例压小
+  （退成等分，看起来接近 round），单次最多 256 个四边形（栈上 8 KB）。
+- 三个 GPU 后端只是把 `repX/repY` 透给共享切分函数；GDI 遗留后端仍然退回整图拉伸
+  （`drawImageNine` 默认实现）。
+
+### 验证
+
+- `pixels-vk` / `pixels-d3d11` 全绿：`anim/nine-slice` 这个用例已经扩成 5 组
+  （横 repeat / 竖 repeat / 双轴 repeat / round / space→repeat），VK 与 D3D11 对 GL
+  **0 个超过通道容差的像素**；
+- `pixels` 17/17 零差异（GDI 不参与九宫格，这一例钉的是"没碰别的路径"）；
+- `test_css` 新增 16.49 段：两轴模式落段、stretch **与老实现逐字节相同**、
+  repeat 的块数与自然尺寸、末块裁切（目标与源 UV 一起裁）、round 的取整分配、预算护栏；
+- `make test` 全 PASS、`partial` OK、`check_examples` 0 问题、`make check-guard` 0 报告。
+- 证据图：`docs/issues/assets/nine-slice-repeat.png`（同一张 48×48 贴图，每条边中间有色点，
+  平铺后这些点会重复出现 —— 一眼能看出到底铺没铺）。
+
 ## [0.16.48] - 2026-11-16 【格式 v33】
 
 **P0-3 收口：扫描线填充改用活动边表（AET）—— 50 个 120px 图标 3.29 ms → 1.35 ms（AA）。**

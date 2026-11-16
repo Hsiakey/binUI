@@ -467,6 +467,85 @@ static void TestIssueRegressions() {
                                       binui::BuildNineSlice(0, 0, 180, 70, 48, 48, 0, q) == 0);
     }
 
+    // ---- 0.16.49：九宫格中段平铺（CSS border-image-repeat）----
+    // 钉住四件事：
+    //   1. 两轴各两位落进 BinUIPaintEx::flags（renderer.imageSliceRepeatOf）；
+    //   2. stretch 与老行为**逐字节相同**（块数/顺序/数值都不变）；
+    //   3. repeat：按"自然尺寸 = 内缩"平铺，末块裁切且**源 UV 同比例裁**；
+    //   4. round：块数取整、块长等分（不留裁切边）。
+    {
+        const char* html = R"HTML(<app_window width="420" height="240" bg="#101014">
+<html width="420" height="240" bg="#101014">
+<body>
+  <img id="st" src="a.png" style="position:absolute; left:10; top:10; width:180; height:70; image-slice:12" />
+  <img id="rx" src="a.png" style="position:absolute; left:10; top:90; width:180; height:70; image-slice:12;
+                                      border-image-repeat:repeat" />
+  <img id="ry" src="a.png" style="position:absolute; left:10; top:170; width:180; height:70; image-slice:12;
+                                      border-image-repeat:stretch round" />
+  <img id="rb" src="a.png" style="position:absolute; left:210; top:10; width:180; height:70; image-slice:12;
+                                      border-image-repeat:repeat round" />
+</body></html>
+</app_window>)HTML";
+        const auto bin = CompileHTML(html);
+        BinUIRenderer r;
+        TEST("16.49: 九宫格布局可解析", ParseInto(r, bin));
+        auto repOf = [&](const char* name) -> int {
+            const uint16_t id = r.findNodeByName(name);
+            return id ? r.imageSliceRepeatOf(id) : -1;
+        };
+        TEST("16.49: 没写 = stretch/stretch(0)", repOf("st") == 0);
+        TEST("16.49: 一个值两轴都生效", repOf("rx") == (1 | (1 << 2)));
+        TEST("16.49: 两个值分别管 x/y", repOf("ry") == (0 | (2 << 2)));
+        TEST("16.49: repeat/round 混写", repOf("rb") == (1 | (2 << 2)));
+
+        // ---- 几何：stretch 与老的三段调用逐字节相同 ----
+        float a9[9][8], b9[9][8];
+        const int na = binui::BuildNineSlice(0, 0, 180, 70, 48, 48, 12, a9);
+        const int nb = binui::BuildNineSlice(0, 0, 180, 70, 48, 48, 12, 0, 0, &b9[0][0], 9);
+        bool same = (na == nb && na == 9);
+        for (int i = 0; same && i < na; i++)
+            for (int k = 0; k < 8; k++)
+                if (a9[i][k] != b9[i][k]) same = false;
+        TEST("16.49: stretch 与老行为逐字节相同", same);
+
+        // ---- repeat：180 宽、内缩 12 → 中段 156 = 13×12（无末块）
+        // 4 角 + 上下各 13 + 左右各 1 + 中心 13 = 45
+        static float q[binui::kMaxNineSliceQuads * 8];
+        int n = binui::BuildNineSlice(0, 0, 180, 70, 48, 48, 12, 1, 0, q, binui::kMaxNineSliceQuads);
+        TEST("16.49: 横向 repeat 的块数", n == 45);
+        bool topOk = false;
+        for (int i = 0; i < n; i++) {
+            const float* o = q + i * 8;
+            // 上边第一条：x=12、12×12、UV 中间段的开头 0.25..0.5
+            if (std::fabs(o[4] - 12.0f) < 1e-4f && std::fabs(o[5]) < 1e-4f &&
+                std::fabs(o[6] - 12.0f) < 1e-4f && std::fabs(o[7] - 12.0f) < 1e-4f &&
+                std::fabs(o[0] - 0.25f) < 1e-5f && std::fabs(o[2] - 0.75f) < 1e-5f) topOk = true;
+        }
+        TEST("16.49: repeat 的块是自然尺寸，UV 对应同一段", topOk);
+
+        // 盒宽 175 → 中段 151 = 12×12 + 末块 7（UV 只取 7/12）
+        n = binui::BuildNineSlice(0, 0, 175, 70, 48, 48, 12, 1, 0, q, binui::kMaxNineSliceQuads);
+        bool tailOk = false;
+        for (int i = 0; i < n; i++) {
+            const float* o = q + i * 8;
+            if (std::fabs(o[6] - 7.0f) < 1e-3f && std::fabs(o[7] - 12.0f) < 1e-3f &&
+                std::fabs((o[2] - o[0]) - (0.5f * 7.0f / 12.0f)) < 1e-5f) tailOk = true;
+        }
+        TEST("16.49: repeat 末块按比例裁切（目标与源 UV 一起裁）", tailOk);
+
+        // ---- round：盒宽 170 → 中段 146 → 12 块（146/12=12.17 取整），块长等分
+        n = binui::BuildNineSlice(0, 0, 170, 70, 48, 48, 12, 2, 0, q, binui::kMaxNineSliceQuads);
+        int topRow = 0;
+        for (int i = 0; i < n; i++) {
+            const float* o = q + i * 8;
+            if (std::fabs(o[5]) < 1e-4f && std::fabs(o[7] - 12.0f) < 1e-4f) topRow++;
+        }
+        TEST("16.49: round 的块数按取整分配（顶行 1+12+1）", topRow == 14);
+        // 预算护栏：极窄的自然宽度不该炸出成百上千块
+        n = binui::BuildNineSlice(0, 0, 400, 400, 48, 48, 4, 1, 1, q, binui::kMaxNineSliceQuads);
+        TEST("16.49: 双轴 repeat 不超过预算", n > 0 && n <= binui::kMaxNineSliceQuads);
+    }
+
     // ---- 0.16.20：程序化纹理/视频帧的 mip 链（binui_mip.h）----
     // 钉住三件事：
     //   1. 层数：一直减半到 1×1，最多 16 级；

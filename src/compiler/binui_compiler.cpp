@@ -2652,6 +2652,8 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "patternunits", "patterncontentunits", "patterntransform",
         // v0.16.26：SVG <mask>
         "mask", "maskunits", "maskcontentunits",
+        // v0.16.49：九宫格中段填充模式
+        "image-slice", "nine-slice", "border-image-repeat",
         // v0.16.27：CSS backdrop-filter
         "backdrop-filter", "material",
         "markerwidth", "markerheight", "markerunits", "refx", "refy", "orient",
@@ -8076,12 +8078,50 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                     const bool hasRadius = style.count("border-radius") != 0 || e.attrs.count("radius") != 0;
                     if (hasRadius)
                         Warn("图片同时写了 image-slice 与 border-radius：九宫格优先，圆角忽略");
+                    // v0.16.49：中段怎么填 —— CSS `border-image-repeat: <x> [<y>]`
+                    // （stretch | repeat | round；space 未实现，按 repeat 处理并告警）。
+                    // 两个值分别管"上/下边"和"左/右边"，缺省时两者相同。
+                    uint8_t repFlags = 0;
+                    {
+                        std::string rv = pick(e.attrs, style, "border-image-repeat",
+                                              "border-image-repeat", "");
+                        if (!rv.empty()) {
+                            int modes[2] = { 0, 0 };   // 0=stretch 1=repeat 2=round
+                            int nm = 0;
+                            for (const std::string& tk : splitCssTokens(rv)) {
+                                const std::string lt = LowerCopy(tk);
+                                int m = 0;
+                                if (lt == "stretch") m = 0;
+                                else if (lt == "repeat") m = 1;
+                                else if (lt == "round") m = 2;
+                                else if (lt == "space") {
+                                    m = 1;
+                                    Warn("CSS border-image-repeat 的 space 未实现"
+                                         "（按 repeat 处理）：\"" + tk + "\"");
+                                } else {
+                                    Warn("CSS border-image-repeat 认不出的值（stretch/repeat/"
+                                         "round）：\"" + tk + "\"，已按 stretch 处理");
+                                }
+                                if (nm < 2) modes[nm] = m;
+                                nm++;
+                            }
+                            if (nm >= 1) {
+                                if (nm == 1) modes[1] = modes[0];
+                                repFlags = (uint8_t)((modes[0] & 3) | ((modes[1] & 3) << 2));
+                            }
+                        }
+                    }
                     BinUIPaintEx pe = {};
                     pe.nodeId = n.id;
                     pe.imageSlice = (uint8_t)ipx;
+                    pe.flags = repFlags;
                     paintExNodes.push_back(pe);
                     n.radius = 0;   // 九宫格自己带角，别再裁一层
                 }
+            } else if (style.count("border-image-repeat") ||
+                       e.attrs.count("border-image-repeat")) {
+                Warn("border-image-repeat 只对九宫格图片（image-slice）生效："
+                     "当前图片没写 image-slice，已忽略");
             }
         }
 

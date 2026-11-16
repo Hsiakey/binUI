@@ -1013,9 +1013,99 @@ inline int BuildImageBands(float x, float y, float w, float h, float radius,
 // 内缩会被**两端同时**钳制：源图方向上不超过半张图（两块角不能重叠），
 // 目标盒方向上不超过半个盒（否则中间那块会被拉成负宽）。
 // ============================================================
+// 九宫格中段的一个"块"：目标轴上的起止 + 源 UV 上的分数起止
+// （repeat 的末块要裁切，所以源区间不能总是 0..1）。
+struct PaintNineTile {
+    float t0 = 0.0f, t1 = 0.0f;   // 目标轴（屏幕像素）
+    float f0 = 0.0f, f1 = 1.0f;   // 源 UV 的分数（相对这一条切片）
+};
+
+// 单轴最多切几块。超过就退成"等分"（等价 round）—— 一个 300px 的框里塞几百块既
+// 没意义又会把顶点预算打满（这条是预算护栏，不是审美取舍）。
+constexpr int kNineMaxTiles = 32;
+// 一次九宫格最多输出几个四边形（两端都平铺时是"四角 + 两向边 + 中心"的乘积）：
+// 调用方按这个值准备缓冲（256 × 8 × 4B = 8 KB，栈上够用），超了按比例压缩块数。
+constexpr int kMaxNineSliceQuads = 256;
+
+// 把目标轴区间 [a, b) 按 mode 切块（0=stretch 1=repeat 2=round），写进 out，返回块数。
+inline int SplitNineAxis(int mode, float a, float b, float natural,
+                         PaintNineTile* out, int maxTiles) {
+    const float len = b - a;
+    if (len <= 0.0f || out == nullptr || maxTiles <= 0) return 0;
+    if (mode != 0 && natural > 0.5f) {
+        if (mode == 2) {                                        // round：块数取整后等分
+            int cnt = static_cast<int>(std::lround(len / natural));
+            if (cnt < 1) cnt = 1;
+            if (cnt > maxTiles) cnt = maxTiles;
+            const float tw = len / static_cast<float>(cnt);
+            for (int i = 0; i < cnt; i++) {
+                out[i].t0 = a + static_cast<float>(i) * tw;
+                out[i].t1 = out[i].t0 + tw;
+                out[i].f0 = 0.0f;
+                out[i].f1 = 1.0f;
+            }
+            return cnt;
+        }
+        // repeat：按自然尺寸铺，末块裁到区间边界（源 UV 也按同一比例裁）
+        const int full = static_cast<int>(std::floor(len / natural + 1e-4f));
+        const float rest = len - static_cast<float>(full) * natural;
+        const int need = full + (rest > 0.01f ? 1 : 0);
+        if (need <= maxTiles) {
+            int n = 0;
+            for (int i = 0; i < full; i++) {
+                out[n].t0 = a + static_cast<float>(i) * natural;
+                out[n].t1 = out[n].t0 + natural;
+                out[n].f0 = 0.0f;
+                out[n].f1 = 1.0f;
+                n++;
+            }
+            if (rest > 0.01f) {
+                out[n].t0 = a + static_cast<float>(full) * natural;
+                out[n].t1 = b;
+                out[n].f0 = 0.0f;
+                out[n].f1 = rest / natural;
+                n++;
+            }
+            return n;
+        }
+        // 预算不够：退成等分（块被拉宽，看起来接近 round）
+        const float tw = len / static_cast<float>(maxTiles);
+        for (int i = 0; i < maxTiles; i++) {
+            out[i].t0 = a + static_cast<float>(i) * tw;
+            out[i].t1 = out[i].t0 + tw;
+            out[i].f0 = 0.0f;
+            out[i].f1 = 1.0f;
+        }
+        return maxTiles;
+    }
+    out[0].t0 = a;
+    out[0].t1 = b;
+    out[0].f0 = 0.0f;
+    out[0].f1 = 1.0f;
+    return 1;
+}
+
+// 把区间均分成 cnt 块（预算压缩时用：块被拉宽，看起来接近 round）
+inline int SplitNineAxisCount(float a, float b, int cnt, PaintNineTile* out) {
+    const float len = b - a;
+    if (len <= 0.0f || cnt <= 0 || out == nullptr) return 0;
+    const float tw = len / static_cast<float>(cnt);
+    for (int i = 0; i < cnt; i++) {
+        out[i].t0 = a + static_cast<float>(i) * tw;
+        out[i].t1 = out[i].t0 + tw;
+        out[i].f0 = 0.0f;
+        out[i].f1 = 1.0f;
+    }
+    return cnt;
+}
+
+// 九宫格切分：out 每 8 个 float 一个四边形（u0,v0,u1,v1,x,y,w,h），返回块数。
+// repX / repY 是两轴的填充模式（见 BinUISliceRepeat）；都为 0 时与老行为**逐字节相同**
+// （块的顺序也照旧：行优先 r×c）。
 inline int BuildNineSlice(float x, float y, float w, float h, int srcW, int srcH,
-                          float slice, float out[9][8]) {
-    if (out == nullptr || w <= 0.0f || h <= 0.0f || srcW <= 0 || srcH <= 0) return 0;
+                          float slice, int repX, int repY, float* out, int cap) {
+    if (out == nullptr || cap <= 0) return 0;
+    if (w <= 0.0f || h <= 0.0f || srcW <= 0 || srcH <= 0) return 0;
     float sx = slice;
     if (sx > static_cast<float>(srcW) * 0.5f) sx = static_cast<float>(srcW) * 0.5f;
     if (sx > static_cast<float>(srcH) * 0.5f) sx = static_cast<float>(srcH) * 0.5f;
@@ -1029,18 +1119,66 @@ inline int BuildNineSlice(float x, float y, float w, float h, int srcW, int srcH
     const float sv[4] = { 0.0f, sx / static_cast<float>(srcH), 1.0f - sx / static_cast<float>(srcH), 1.0f };
     const float tx[4] = { x, x + dx, x + w - dx, x + w };
     const float ty[4] = { y, y + dx, y + h - dx, y + h };
+
+    // 两条轴各自的"带"：0 = 角/边（永远一块），1 = 中段（按模式切）
+    PaintNineTile bx[3][kNineMaxTiles];
+    PaintNineTile by[3][kNineMaxTiles];
+    int nbx[3] = { 1, 1, 1 }, nby[3] = { 1, 1, 1 };
+    bx[0][0] = { tx[0], tx[1], 0.0f, 1.0f };
+    bx[2][0] = { tx[2], tx[3], 0.0f, 1.0f };
+    by[0][0] = { ty[0], ty[1], 0.0f, 1.0f };
+    by[2][0] = { ty[2], ty[3], 0.0f, 1.0f };
+    nbx[1] = SplitNineAxis(repX, tx[1], tx[2], dx, bx[1], kNineMaxTiles);
+    nby[1] = SplitNineAxis(repY, ty[1], ty[2], dx, by[1], kNineMaxTiles);
+    // 预算：两端都平铺时块数是乘积 —— 超了就按比例压缩块数（退成等分，别把上限撑爆）
+    {
+        const int budget = cap;
+        int nx = nbx[1] > 0 ? nbx[1] : 1;
+        int ny = nby[1] > 0 ? nby[1] : 1;
+        bool shrunk = false;
+        while ((nx + 2) * (ny + 2) > budget && (nx > 1 || ny > 1)) {
+            if (nx >= ny && nx > 1) nx--;
+            else if (ny > 1) ny--;
+            else nx--;
+            shrunk = true;
+        }
+        if (shrunk) {
+            nbx[1] = SplitNineAxisCount(tx[1], tx[2], nx, bx[1]);
+            nby[1] = SplitNineAxisCount(ty[1], ty[2], ny, by[1]);
+        }
+    }
+
     int n = 0;
     for (int r = 0; r < 3; r++) {
         for (int c = 0; c < 3; c++) {
-            const float qw = tx[c + 1] - tx[c];
-            const float qh = ty[r + 1] - ty[r];
-            if (qw <= 0.0f || qh <= 0.0f) continue;
-            float* o = out[n++];
-            o[0] = su[c]; o[1] = sv[r]; o[2] = su[c + 1]; o[3] = sv[r + 1];
-            o[4] = tx[c]; o[5] = ty[r]; o[6] = qw;       o[7] = qh;
+            if (nby[r] <= 0 || nbx[c] <= 0) continue;
+            for (int yi = 0; yi < nby[r]; yi++) {
+                for (int xi = 0; xi < nbx[c]; xi++) {
+                    const PaintNineTile& ht = bx[c][xi];
+                    const PaintNineTile& vt = by[r][yi];
+                    if (ht.t1 - ht.t0 <= 0.0f || vt.t1 - vt.t0 <= 0.0f) continue;
+                    if (n >= cap) return n;
+                    float* o = out + n * 8;
+                    o[0] = su[c] + (su[c + 1] - su[c]) * ht.f0;
+                    o[1] = sv[r] + (sv[r + 1] - sv[r]) * vt.f0;
+                    o[2] = su[c] + (su[c + 1] - su[c]) * ht.f1;
+                    o[3] = sv[r] + (sv[r + 1] - sv[r]) * vt.f1;
+                    o[4] = ht.t0;
+                    o[5] = vt.t0;
+                    o[6] = ht.t1 - ht.t0;
+                    o[7] = vt.t1 - vt.t0;
+                    n++;
+                }
+            }
         }
     }
     return n;
+}
+
+// 老调用点（单测、内部工具）：三段拉伸，够放九块
+inline int BuildNineSlice(float x, float y, float w, float h, int srcW, int srcH,
+                          float slice, float out[9][8]) {
+    return BuildNineSlice(x, y, w, h, srcW, srcH, slice, 0, 0, &out[0][0], 9);
 }
 
 
