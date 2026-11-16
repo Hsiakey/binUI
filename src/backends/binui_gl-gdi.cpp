@@ -332,10 +332,22 @@ struct BinUIGLGdi::Impl {
         t.tex = CreateTexture2D(winW, winH, nullptr, true);
         if (!t.tex) return -1;
         glGenFramebuffersP(1, &t.fbo);
-        glBindFramebufferP(GL_FRAMEBUFFER, t.fbo);
+        bindFbo(t.fbo);
         glFramebufferTexture2DP(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, t.tex, 0);
         layers.push_back(t);
         return static_cast<int>(layers.size() - 1);
+    }
+
+    // ---- v0.16.35：自己维护"当前绑定的 FBO"，不再用 glGetIntegerv 查询 ----
+    // glGetIntegerv(GL_FRAMEBUFFER_BINDING) 是一次**同步查询**：驱动必须把之前排队的
+    // 命令处理到"当前状态确定"才能回答，等于把 GPU 流水线 drain 一次。它原来出现在
+    // pushLayer / popLayer / 毛玻璃三处，每帧每个图层一次 —— 实测 4 个 opacity 组的
+    // 页面：绘制 0.097 ms/帧，其中一大半是这两个查询（改成跟踪后 0.018 ms）。
+    // 规矩：所有改绑定的地方都走 bindFbo()，不要直接调 glBindFramebufferP。
+    GLuint curFbo = 0;
+    void bindFbo(GLuint f) {
+        glBindFramebufferP(GL_FRAMEBUFFER, f);
+        curFbo = f;
     }
 
     bool pushLayer(float x, float y, float w, float h, float alpha) {
@@ -343,8 +355,7 @@ struct BinUIGLGdi::Impl {
         if (static_cast<int>(layerStack.size()) >= kMaxLayers) { warnLayerLimit(); return false; }
         // 顺序很重要：先把"当前目标"和手头的图元收拾干净，再去碰层缓冲 ——
         // acquireLayer 会顺手把新 FBO 绑上，先 flush 的话那些图元会画进空层里再被清掉。
-        GLint prevFbo = 0;
-        glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
+        const GLuint prevFbo = curFbo;
         flushAll();
         const int idx = acquireLayer();
         if (idx < 0) { warnLayerLimit(); return false; }
@@ -353,7 +364,7 @@ struct BinUIGLGdi::Impl {
         LayerFrame f;
         f.idx = idx; f.x = x; f.y = y; f.w = w; f.h = h; f.alpha = alpha;
         f.prevFbo = prevFbo;
-        glBindFramebufferP(GL_FRAMEBUFFER, t.fbo);
+        bindFbo(t.fbo);
         glDisable(GL_SCISSOR_TEST);
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
@@ -424,7 +435,7 @@ struct BinUIGLGdi::Impl {
         const LayerFrame f = layerStack.back();
         layerStack.pop_back();
         LayerTarget& t = layers[f.idx];
-        glBindFramebufferP(GL_FRAMEBUFFER, static_cast<GLuint>(f.prevFbo));
+        bindFbo(f.prevFbo);
         // 合成：把层纹理按 alpha 画回父目标。层里存的是**预乘**颜色（混合是 ONE/ONE_MINUS_SRC_ALPHA），
         // 着色器输出 t.rgb*vcol.rgb / t.a*vcol.a，所以 vcol 全给 alpha 就是"整组乘一次"。
         const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
@@ -1147,7 +1158,7 @@ void BinUIGLGdi::beginFrame(const void* clipRect) {
     impl_->scissor[3] = impl_->winH;
 
     // 绘制目标 = 4x MSAA 离屏帧缓冲（present 时解析到 offTex）
-    glBindFramebufferP(GL_FRAMEBUFFER, impl_->msFbo);
+    impl_->bindFbo(impl_->msFbo);
     glViewport(0, 0, impl_->winW, impl_->winH);
 
     // 清空本次绘制区到画布底色（透明窗口 = 全透明；否则白色）：局部重绘的基准底色，
@@ -1553,26 +1564,27 @@ bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
 
     d.flushAll();   // 手上攒的图元先落到当前目标（它们构成"背景"）
 
-    GLint prevFbo = 0;
-    glGetIntegerv(GL_FRAMEBUFFER_BINDING, &prevFbo);
-    GLint prevVp[4] = { 0, 0, d.winW, d.winH };
-    glGetIntegerv(GL_VIEWPORT, prevVp);
+    // v0.16.35：这两个查询都是同步点（驱动要 drain 流水线才能回答），改成用自己维护的值。
+    // 视口在这一刻恒为 (0,0,winW,winH)：beginFrame 设一次，层/降采样链结束后都会恢复。
+    const GLuint prevFbo = d.curFbo;
+    const GLint prevVp[4] = { 0, 0, d.winW, d.winH };
     const bool scissorWas = glIsEnabled(GL_SCISSOR_TEST) != 0;
 
     // 1) 抓背景：当前目标 → level0（GL 的 FBO 行从下往上，世界 y 从上往下，翻转）
     if (!d.ensureBlurLevel(0, rw, rh)) {
-        glBindFramebufferP(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+        d.bindFbo(prevFbo);
         return false;
     }
     glDisable(GL_SCISSOR_TEST);   // glBlitFramebuffer 受 scissor 裁剪
-    glBindFramebufferP(GL_READ_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+    glBindFramebufferP(GL_READ_FRAMEBUFFER, prevFbo);
     glBindFramebufferP(GL_DRAW_FRAMEBUFFER, d.blurLv[0].fbo);
+    d.curFbo = d.blurLv[0].fbo;
     {
         const int by = d.winH - ry1;
         glBlitFramebufferP(rx, by, rx1, by + rh, 0, 0, rw, rh,
                            GL_COLOR_BUFFER_BIT, GL_NEAREST);
     }
-    glBindFramebufferP(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+    d.bindFbo(prevFbo);
 
     // 2) 降采样链：每级把上一级缩一半（覆盖混合；目标先清成透明）
     glBlendFunc(GL_ONE, GL_ZERO);
@@ -1582,7 +1594,7 @@ bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
         const int dw = std::max(1, d.blurLv[static_cast<size_t>(i - 1)].w / 2);
         const int dh = std::max(1, d.blurLv[static_cast<size_t>(i - 1)].h / 2);
         if (!d.ensureBlurLevel(static_cast<size_t>(i), dw, dh)) { chainOk = false; break; }
-        glBindFramebufferP(GL_FRAMEBUFFER, d.blurLv[static_cast<size_t>(i)].fbo);
+        d.bindFbo(d.blurLv[static_cast<size_t>(i)].fbo);
         glViewport(0, 0, dw, dh);
         glUniform2fP(d.uniView, static_cast<float>(dw), static_cast<float>(dh));
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -1594,7 +1606,7 @@ bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
         d.flushAll();
     }
     d.ignoreLayerClip = false;
-    glBindFramebufferP(GL_FRAMEBUFFER, static_cast<GLuint>(prevFbo));
+    d.bindFbo(prevFbo);
     glViewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
     glUniform2fP(d.uniView, static_cast<float>(d.winW), static_cast<float>(d.winH));
 
