@@ -139,6 +139,7 @@ struct BinUID3D::Impl {
     ID3D11BlendState* blendErase = nullptr;   // v27：clip-path 的 dst *= 1-srcA
     ID3D11BlendState* blendKeep = nullptr;    // v28：mask 保留趟的 dst *= srcA
     ID3D11BlendState* blendReplace = nullptr; // v29：毛玻璃合成的"直接覆盖"（ONE/ZERO）
+    ID3D11BlendState* blendAdd = nullptr;     // v0.16.44：分离高斯的抽头累加（ONE/ONE）
     ID3D11RasterizerState* ras = nullptr;
     ID3D11ShaderResourceView* whiteSrv = nullptr; // 1×1 纯白（纯色四边形）
     // 持久离屏帧缓冲：局部重绘只更新脏区，present 时整帧 blit 到交换链
@@ -456,6 +457,17 @@ struct BinUID3D::Impl {
     bdr.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
     bdr.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
     device->CreateBlendState(&bdr, &blendReplace);
+    // v0.16.44 分离高斯的抽头累加：Src=ONE / Dst=ONE（GL 是 glBlendFunc(GL_ONE, GL_ONE)）
+    D3D11_BLEND_DESC bda = {};
+    bda.RenderTarget[0].BlendEnable = TRUE;
+    bda.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+    bda.RenderTarget[0].DestBlend = D3D11_BLEND_ONE;
+    bda.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bda.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ONE;
+    bda.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    bda.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bda.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_ALL;
+    device->CreateBlendState(&bda, &blendAdd);
     // v27 裁剪擦除：color/alpha 都按 dst *= (1-srcA) 混合
     D3D11_BLEND_DESC bd2 = {};
     bd2.RenderTarget[0].BlendEnable = TRUE;
@@ -1089,15 +1101,71 @@ struct BinUID3D::Impl {
         return true;
     }
 
-    // ---- v0.16.42/43：离屏图层效果（filter: blur / filter: drop-shadow）----
-    // 与 backdropBlur 共用同一条降采样链；三者都以"整像素矩形 + 正常 alpha 混合"为准
-    // （这是三端逐像素一致的前提）。D3D 的纹理行 0 = 区域顶部，UV 正着来、不翻转。
-    static int blurLevelsFor(float blurPx) {
-        if (!(blurPx > 0.0f)) return 0;
-        int levels = 1;
-        float v = 2.0f;
-        while (levels < 6 && v < blurPx) { v *= 2.0f; levels++; }
-        return levels;
+    // 级数与抽头算法在 include/binui_paint.h（PaintFilterBlurLevel / PaintFilterGaussTaps）——
+    // 三端与单元测试共用一份实现，这里只留别名，别再各写一遍（以前三份拷贝，改一处漏两处）。
+    static int blurLevelsFor(float blurPx) { return binui::PaintFilterBlurLevel(blurPx); }
+    static int gaussTaps(float sigmaTexels, uint32_t* w, int maxN) {
+        return binui::PaintFilterGaussTaps(sigmaTexels, w, maxN);
+    }
+
+    bool gaussBlurLevel(int level, float blurPx) {
+        if (level < 0 || level >= 7) return false;   // 末号留给暂存
+        const size_t li = static_cast<size_t>(level);
+        if (li >= blurLv.size()) return false;
+        const int lw = blurLv[li].w, lh = blurLv[li].h;
+        const float sigmaPx = blurPx / static_cast<float>(1 << level);
+        if (!blurLv[li].tex || lw < 1 || lh < 1 || !(sigmaPx > 0.0f)) return false;
+        if (!ensureBlurLevel(7, lw, lh)) return false;
+        uint32_t w[33];
+        const int n = gaussTaps(sigmaPx, w, 33);
+        const int r = (n - 1) / 2;
+        static const bool trace = std::getenv("BINUI_BLUR_TRACE") != nullptr;
+        if (trace)
+            std::fprintf(stderr, "[d3d11][gauss] 级 %d %dx%d σ=%.2f 纹素 抽头 %d 个\n",
+                         level, lw, lh, sigmaPx, n);
+        // 小图局部的批次矩形（退出时务必还原，不然之后画的图元全被裁在末尾那块里）
+        const int savedSc[4] = { scissor[0], scissor[1], scissor[2], scissor[3] };
+        const bool ignWas = ignoreLayerClip;
+        const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        for (int pass = 0; pass < 2; pass++) {
+            BlurLevel& dst = blurLv[pass == 0 ? 7 : li];
+            BlurLevel& from = blurLv[pass == 0 ? li : 7];
+            ID3D11RenderTargetView* drt = dst.rtv;
+            ctx->OMSetRenderTargets(1, &drt, nullptr);
+            const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            ctx->ClearRenderTargetView(drt, zero);
+            D3D11_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(lw),
+                                  static_cast<float>(lh), 0.0f, 1.0f };
+            ctx->RSSetViewports(1, &vp);
+            float vs[2] = { static_cast<float>(lw), static_cast<float>(lh) };
+            ctx->UpdateSubresource(cb, 0, nullptr, vs, 0, 0);
+            ctx->OMSetBlendState(blendAdd, bf, 0xFFFFFFFF);
+            ignoreLayerClip = true;
+            scissor[0] = 0; scissor[1] = 0; scissor[2] = lw; scissor[3] = lh;
+            curSrv = from.srv;
+            curLinear = 1;
+            for (int k = -r; k <= r; k++) {
+                const float o = static_cast<float>(k);
+                uint32_t c = (w[k + r] << 24) | 0x00FFFFFFu;
+                Premult(c);
+                if (pass == 0)
+                    emitQuad(0.0f, 0.0f, static_cast<float>(lw), static_cast<float>(lh),
+                             o / static_cast<float>(lw), 0.0f,
+                             1.0f + o / static_cast<float>(lw), 1.0f, c);
+                else
+                    emitQuad(0.0f, 0.0f, static_cast<float>(lw), static_cast<float>(lh),
+                             0.0f, o / static_cast<float>(lh),
+                             1.0f, 1.0f + o / static_cast<float>(lh), c);
+            }
+            flushAll();
+        }
+        ignoreLayerClip = ignWas;
+        scissor[0] = savedSc[0]; scissor[1] = savedSc[1];
+        scissor[2] = savedSc[2]; scissor[3] = savedSc[3];
+        curSrv = whiteSrv;
+        curLinear = 0;
+        ctx->OMSetBlendState(blend, bf, 0xFFFFFFFF);   // 还原正常预乘混合
+        return true;
     }
 
     bool layerRegion(const LayerFrame& f, int& rx, int& ry, int& rw, int& rh) const {
@@ -1128,8 +1196,9 @@ struct BinUID3D::Impl {
         curLinear = 0;
     }
 
-    // 从 level0 往下建 1..levels 级；返回最终可用级号（中途失败就是失败前那一级）
-    int buildChain(int levels) {
+    // 从 level0 往下建 1..levels 级，再在末级上跑分离高斯；返回最终可用级号
+    int buildChain(float blurPx) {
+        const int levels = blurLevelsFor(blurPx);
         int finalLevel = 0;
         if (levels <= 0) return 0;
         // 降采样趟的批次矩形必须换成"小图局部"（见下），退出时**务必还原** ——
@@ -1164,6 +1233,8 @@ struct BinUID3D::Impl {
         }
         scissor[0] = savedSc[0]; scissor[1] = savedSc[1];
         scissor[2] = savedSc[2]; scissor[3] = savedSc[3];
+        // v0.16.44：末级上跑横/纵分离高斯（失败就保持"只降采样"的老观感）
+        gaussBlurLevel(finalLevel, blurPx);
         return finalLevel;
     }
 
@@ -1203,7 +1274,7 @@ struct BinUID3D::Impl {
                                        layers[static_cast<size_t>(f.idx)].tex, 0, &box);
         }
         // 2) 降采样链 + 3) 回父目标合成
-        const int finalLevel = buildChain(blurLevelsFor(f.blur));
+        const int finalLevel = buildChain(f.blur);
         resumeParent(f);
         const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
         uint32_t col = (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
@@ -1256,7 +1327,7 @@ struct BinUID3D::Impl {
         scissor[0] = savedSc[0]; scissor[1] = savedSc[1];
         scissor[2] = savedSc[2]; scissor[3] = savedSc[3];
         // 3) 建链 + 按偏移（取整）合成
-        const int finalLevel = buildChain(blurLevelsFor(sh.blur));
+        const int finalLevel = buildChain(sh.blur);
         resumeParent(f);
         const int sdx = static_cast<int>(std::llround(sh.dx));
         const int sdy = static_cast<int>(std::llround(sh.dy));
@@ -1465,6 +1536,7 @@ struct BinUID3D::Impl {
         if (vs) { vs->Release(); vs = nullptr; }
         if (ps) { ps->Release(); ps = nullptr; }
         if (blendReplace) { blendReplace->Release(); blendReplace = nullptr; }
+        if (blendAdd) { blendAdd->Release(); blendAdd = nullptr; }
     if (samPointWrap) { samPointWrap->Release(); samPointWrap = nullptr; }
     if (noiseSrv) { noiseSrv->Release(); noiseSrv = nullptr; }
     for (BlurLevel& bl : blurLv) releaseBlurLevel(bl);
@@ -1955,10 +2027,10 @@ bool BinUID3D::backdropBlur(float x, float y, float w, float h, float radius,
     const int rw = rx1 - rx, rh = ry1 - ry;
     if (rw < 2 || rh < 2) return false;
 
-    int levels = 1;
+    int levels = 0;
     {
-        float v = 2.0f;
-        while (levels < 6 && v < blurPx) { v *= 2.0f; levels++; }
+        // v0.16.44：与 filter: blur 同一个取法（降到 σ 还剩 ≥2 纹素那一级，剩下的交给分离高斯）
+        while (levels < 5 && blurPx / static_cast<float>(1 << (levels + 1)) >= 2.0f) levels++;
     }
 
     d.flushAll();   // 手上攒的图元先落到当前目标（它们构成"背景"）
@@ -2033,6 +2105,8 @@ bool BinUID3D::backdropBlur(float x, float y, float w, float h, float radius,
 
     // 3) 合成：圆角条带 + 双线性放大，直接覆盖（背景被替换成模糊版）
     if (chainOk) {
+        // v0.16.44：末级上跑分离高斯（横/纵各一趟密采样加权卷积）
+        d.gaussBlurLevel(levels, blurPx);
         ID3D11RenderTargetView* back = curRtv;
         d.ctx->OMSetRenderTargets(1, &back, nullptr);
         d.ctx->RSSetViewports(1, &prevVp);

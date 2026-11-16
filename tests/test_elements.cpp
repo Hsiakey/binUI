@@ -3048,6 +3048,54 @@ int run() {
               "v43: 阴影外扩 = 3σ(4)+8 = 20，比自身的 18 大 → 取 20");
     }
 
+    // ---------- v0.16.44：分离高斯（模糊质量） ----------
+    // 级数：降到"σ 还剩 ≥2 纹素"的那一级就停（以前是"让 2^levels ≥ 半径"，最粗级只剩
+    // 几个纹素 → 放大回来是梯形/平台）。抽头：每纹素一个、覆盖 ±3σ、权重和正好 255。
+    {
+        CHECK(binui::PaintFilterBlurLevel(0.0f) == 0, "v44: blur(0) 不降采样（硬阴影）");
+        CHECK(binui::PaintFilterBlurLevel(0.5f) == 1, "v44: 极小半径也至少降一级（1:1 合成会暴露圆角模板相位差）");
+        CHECK(binui::PaintFilterBlurLevel(1.0f) == 1, "v44: σ=1 走 1 级（σ_level 0.5 纹素）");
+        CHECK(binui::PaintFilterBlurLevel(4.0f) == 1, "v44: σ=4 → 降 1 级（σ 2 纹素）");
+        CHECK(binui::PaintFilterBlurLevel(18.0f) == 3, "v44: σ=18 → 降 3 级（σ 2.25 纹素）");
+        CHECK(binui::PaintFilterBlurLevel(64.0f) == 5, "v44: 上限 64px → 降 5 级（σ 2 纹素）");
+        CHECK(binui::PaintFilterBlurLevel(200.0f) == 5, "v44: 超过上限也钳在 5 级");
+        // σ_level 落在 [1,4) 是这条规则的判据（再小就白扫像素，再大就丢形状）
+        for (int lv = 1; lv <= 5; lv++) {
+            const float b = 2.0f * static_cast<float>(1 << lv);
+            CHECK(binui::PaintFilterBlurLevel(b) == lv, "v44: 2×2^lv 的档位正好落在本级");
+            CHECK(binui::PaintFilterBlurLevel(b * 1.9f) == lv, "v44: 档位之内仍然留在本级");
+            if (lv < 5)
+                CHECK(binui::PaintFilterBlurLevel(b * 2.1f) == lv + 1, "v44: 越过档位就再降一级");
+        }
+
+        unsigned w[64];
+        // σ=2 纹素：抽头 = 2*ceil(3*2)+1 = 13，权重和 255，中心最大、左右对称
+        const int n = binui::PaintFilterGaussTaps(2.0f, w, 64);
+        CHECK(n == 13, "v44: σ=2 → 13 个抽头（每纹素一个，覆盖 ±3σ）");
+        unsigned sum = 0;
+        for (int i = 0; i < n; i++) sum += w[i];
+        CHECK(sum == 255, "v44: 权重和正好 255（否则总亮度随半径漂移）");
+        bool sym = true, peak = true, tail = true;
+        for (int i = 0; i < n; i++) if (w[i] != w[n - 1 - i]) sym = false;
+        // 从边缘往中心**单调不降**、越过中心后单调不增（量化到 8 位后相邻抽头可能相等）
+        for (int i = 1; i <= n / 2; i++)
+            if (w[i] < w[i - 1]) peak = false;                    // 左半边向中心递增
+        for (int i = n / 2 + 1; i < n; i++)
+            if (w[i] > w[i - 1]) peak = false;                    // 右半边离开中心递减
+        CHECK(sym, "v44: 权重左右对称");
+        CHECK(peak, "v44: 单峰（中心最大，往外单调不增）");
+        CHECK(w[n / 2] > 20 * w[0], "v44: 3σ 处的抽头权重几乎为 0（尾巴截断）");
+        (void)tail;
+        // σ=4：25 个抽头；σ=0.5 这种极小值也必须至少 3 个抽头（r 钳到 1）
+        CHECK(binui::PaintFilterGaussTaps(4.0f, w, 64) == 25, "v44: σ=4 → 25 个抽头");
+        CHECK(binui::PaintFilterGaussTaps(0.2f, w, 64) == 3, "v44: 极小 σ 至少 3 个抽头");
+        // 缓冲不够时按 maxN 收窄，且仍然满足"和为 255"
+        const int nm = binui::PaintFilterGaussTaps(4.0f, w, 9);
+        unsigned sum2 = 0;
+        for (int i = 0; i < nm; i++) sum2 += w[i];
+        CHECK(nm == 9 && sum2 == 255, "v44: 抽头数受 maxN 限制，权重仍然加满 255");
+    }
+
     if (g_fail == 0) std::printf("test_paint: 全部通过\n");
     return g_fail;
 }

@@ -542,8 +542,13 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // 合成趟把模糊版背景**替换**掉原背景，所以不能走预乘叠加（见 binui_gfx.h）。
     VkPipeline pipelineReplace = VK_NULL_HANDLE;
     VkPipeline pipelineLayerReplace = VK_NULL_HANDLE;
+    // v0.16.44 分离高斯的抽头累加（Src=ONE / Dst=ONE）：没有片元着色器可写，这是唯一能"求和"
+    // 的混合方式（GL 那边就是 glBlendFunc(GL_ONE, GL_ONE)）。第五种混合状态。
+    VkPipeline pipelineAdd = VK_NULL_HANDLE;
+    VkPipeline pipelineLayerAdd = VK_NULL_HANDLE;
     bool eraseOn = false;
     bool keepOn = false;
+    bool addOn = false;
     VkPipeline activePipeline = VK_NULL_HANDLE;
     VkDescriptorPool dsPool = VK_NULL_HANDLE;
 
@@ -2129,6 +2134,16 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             if (pr == VK_SUCCESS && useDynamic)
                 pr = build(VK_SAMPLE_COUNT_1_BIT, pipelineLayerReplace);
         }
+        // v0.16.44 加法变体：Src=ONE / Dst=ONE —— 分离高斯的抽头累加（见 gaussBlurLevel）
+        if (pr == VK_SUCCESS) {
+            cba.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstColorBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            cba.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+            pr = build(samples, pipelineAdd);
+            if (pr == VK_SUCCESS && useDynamic)
+                pr = build(VK_SAMPLE_COUNT_1_BIT, pipelineLayerAdd);
+        }
         g_vk.vkDestroyShaderModule(device, vs, nullptr);
         g_vk.vkDestroyShaderModule(device, fs, nullptr);
         if (pr != VK_SUCCESS) {
@@ -2279,7 +2294,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     void refreshPipeline() {
         // 毛玻璃的降采样目标是 1 采样的小图（不是图层），所以要能和"是否在图层里"解耦
         const bool single = blurForceSingle || !layerStack.empty();
-        if (blurReplace)  activePipeline = single ? pipelineLayerReplace : pipelineReplace;
+        if (addOn)        activePipeline = single ? pipelineLayerAdd : pipelineAdd;
+        else if (blurReplace)  activePipeline = single ? pipelineLayerReplace : pipelineReplace;
         else if (keepOn)  activePipeline = single ? pipelineLayerKeep : pipelineKeep;
         else if (eraseOn) activePipeline = single ? pipelineLayerErase : pipelineErase;
         else              activePipeline = single ? pipelineLayer : pipeline;
@@ -2719,10 +2735,11 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         const int rw = rx1 - rx, rh = ry1 - ry;
         if (rw < 2 || rh < 2) return false;
 
-        int levels = 1;
+        int levels = 0;
         {
-            float v = 2.0f;
-            while (levels < 6 && v < blurPx) { v *= 2.0f; levels++; }
+            // v0.16.44：与 filter: blur 同一个取法（降到 σ 还剩 ≥2 纹素那一级，剩下的交给
+            // 分离高斯），三端逐字一致
+            while (levels < 5 && blurPx / static_cast<float>(1 << (levels + 1)) >= 2.0f) levels++;
         }
 
         // 手上攒的图元先落到**当前**目标：它们构成"背景"
@@ -2784,10 +2801,14 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         clipR = sr;
         clipB = sb;
 
+        // v0.16.44：末级上跑横/纵分离高斯（三端同一条算法；失败就保持"只降采样"的老观感）
+        if (chainOk) gaussBlurLevel(levels, blurPx);
+
         // 3) 合成：BuildImageBands 的圆角条带 + 双线性放大 + replace 混合。
         //    这里必须**换回原来的 scissor**（节点自己的裁剪），毛玻璃不能越出节点框。
         if (chainOk) {
             blurLevelToSampled(blurLv[static_cast<size_t>(levels)]);
+            blurReplace = true;   // gaussBlurLevel 退场时把混合还原了，合成趟要重新置上
             resumeTarget();
             refreshPipeline();   // replace 变体（按当前目标：主目标 4x / 层目标 1x）
             binui::PaintImageBand bands[binui::kMaxImageBands];
@@ -2939,17 +2960,67 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         return true;
     }
 
-    // ---- v0.16.42/43：离屏图层效果（filter: blur / filter: drop-shadow）----
-    // 与 blurBackdrop（毛玻璃）共用同一条降采样链。三者都以"整像素矩形 + 正常 alpha 混合"
-    // 为准，这是三端逐像素一致的前提。进入这些函数时层渲染作用域必须已经结束。
+    // 级数与抽头算法在 include/binui_paint.h（PaintFilterBlurLevel / PaintFilterGaussTaps）——
+    // 三端与单元测试共用一份实现，这里只留别名，别再各写一遍（以前三份拷贝，改一处漏两处）。
+    static int blurLevelsFor(float blurPx) { return binui::PaintFilterBlurLevel(blurPx); }
+    static int gaussTaps(float sigmaTexels, uint32_t* w, int maxN) {
+        return binui::PaintFilterGaussTaps(sigmaTexels, w, maxN);
+    }
 
-    // 级数：让 2^levels >= 半径 的最小值（1..6）；0 = 不降采样（硬阴影）
-    static int blurLevelsFor(float blurPx) {
-        if (!(blurPx > 0.0f)) return 0;
-        int levels = 1;
-        float v = 2.0f;
-        while (levels < 6 && v < blurPx) { v *= 2.0f; levels++; }
-        return levels;
+    bool gaussBlurLevel(int level, float blurPx) {
+        if (level < 0 || level >= kMaxBlurLevels - 1) return false;   // 末号留给暂存
+        const size_t li = static_cast<size_t>(level);
+        if (li >= blurLv.size()) return false;
+        const int lw = blurLv[li].w, lh = blurLv[li].h;
+        const float sigmaPx = blurPx / static_cast<float>(1 << level);
+        if (!blurLv[li].tex.image || lw < 1 || lh < 1 || !(sigmaPx > 0.0f)) return false;
+        const size_t ti = static_cast<size_t>(kMaxBlurLevels - 1);
+        if (!ensureBlurLevel(ti, lw, lh)) return false;
+        uint32_t w[33];
+        const int n = gaussTaps(sigmaPx, w, 33);
+        const int r = (n - 1) / 2;
+        static const bool trace = std::getenv("BINUI_BLUR_TRACE") != nullptr;
+        if (trace)
+            std::fprintf(stderr, "[vk][gauss] 级 %d %dx%d σ=%.2f 纹素 抽头 %d 个\n",
+                         level, lw, lh, sigmaPx, n);
+        blurForceSingle = true;   // 小图局部坐标系：强制用单采样变体
+        blurReplace = false;
+        addOn = true;
+        const int sl = clipL, st = clipT, sr = clipR, sb = clipB;
+        const bool ignWas = ignoreLayerClip;
+        for (int pass = 0; pass < 2; pass++) {
+            const size_t di = pass == 0 ? ti : li;
+            const size_t fi = pass == 0 ? li : ti;
+            // 布局切换必须在渲染作用域外：源 → 只读，目标 → 附件
+            blurLevelToSampled(blurLv[fi]);
+            blurLevelToAttachment(blurLv[di]);
+            beginBlurLevelPass(blurLv[di]);   // 清透明 + 小图视口 + 加法变体
+            clipL = 0; clipT = 0; clipR = lw; clipB = lh;
+            ignoreLayerClip = true;
+            for (int k = -r; k <= r; k++) {
+                const float o = static_cast<float>(k);
+                uint32_t c = (w[k + r] << 24) | 0x00FFFFFFu;
+                Premult(c);
+                // VK 的纹理行 0 = 区域顶部，UV 正着来（GL 那边要翻 v）
+                if (pass == 0)
+                    emitQuad(0.0f, 0.0f, static_cast<float>(lw), static_cast<float>(lh),
+                             o / static_cast<float>(lw), 0.0f,
+                             1.0f + o / static_cast<float>(lw), 1.0f, c, &blurLv[fi].tex);
+                else
+                    emitQuad(0.0f, 0.0f, static_cast<float>(lw), static_cast<float>(lh),
+                             0.0f, o / static_cast<float>(lh),
+                             1.0f, 1.0f + o / static_cast<float>(lh), c, &blurLv[fi].tex);
+            }
+            flush();
+            g_vk.vkCmdEndRendering(cmd);
+            ignoreLayerClip = false;
+        }
+        addOn = false;
+        blurForceSingle = false;
+        ignoreLayerClip = ignWas;   // 裁剪区还给调用方（合成/颗粒趟还要用）
+        clipL = sl; clipT = st; clipR = sr; clipB = sb;
+        blurLevelToSampled(blurLv[li]);
+        return true;
     }
 
     // 区域 = **层框 ∩ 进入时的裁剪**，也就是 VK 真正清过的那块（beginLayerPass 的
@@ -2967,8 +3038,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     }
 
     // 从 level0 往下建 1..levels 级（与 blurBackdrop 逐字一致：VK 的行 0 = 区域顶部，
-    // UV 不翻转）。返回最终可用的级号（中途失败就是失败前那一级）。
-    int buildChain(int levels) {
+    // UV 不翻转），再在末级上跑分离高斯。返回最终可用的级号。
+    int buildChain(float blurPx) {
+        const int levels = blurLevelsFor(blurPx);
         int finalLevel = 0;
         if (levels <= 0) return 0;
         blurReplace = true;
@@ -2993,6 +3065,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         blurReplace = false;
         blurForceSingle = false;
         blurLevelToSampled(blurLv[static_cast<size_t>(finalLevel)]);
+        // v0.16.44：末级上跑横/纵分离高斯（失败就保持"只降采样"的老观感）
+        gaussBlurLevel(finalLevel, blurPx);
         return finalLevel;
     }
 
@@ -3031,7 +3105,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             copyImageRegion(lt.image, rx, ry, blurLv[0].tex.image, rw, rh);
             setTexLayout(lt, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
-        const int finalLevel = buildChain(blurLevelsFor(f.blur));
+        const int finalLevel = buildChain(f.blur);
         resumeParent(f);
         const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
         uint32_t col = (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
@@ -3080,7 +3154,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         // 3) 偏移取整（合成四边形恒落在像素边界上，三端一致）
         const int sdx = static_cast<int>(std::llround(sh.dx));
         const int sdy = static_cast<int>(std::llround(sh.dy));
-        const int finalLevel = buildChain(blurLevelsFor(sh.blur));
+        const int finalLevel = buildChain(sh.blur);
         if (std::getenv("BINUI_LV_DUMP")) {
             static int dn = 0;
             if (dn < 2) {
@@ -3348,6 +3422,8 @@ void BinUIVK::shutdown() {
     if (d.pipelineReplace) g_vk.vkDestroyPipeline(d.device, d.pipelineReplace, nullptr);
     if (d.pipelineLayerReplace)
         g_vk.vkDestroyPipeline(d.device, d.pipelineLayerReplace, nullptr);
+    if (d.pipelineAdd) g_vk.vkDestroyPipeline(d.device, d.pipelineAdd, nullptr);
+    if (d.pipelineLayerAdd) g_vk.vkDestroyPipeline(d.device, d.pipelineLayerAdd, nullptr);
     if (d.pipeLayout) g_vk.vkDestroyPipelineLayout(d.device, d.pipeLayout, nullptr);
     if (d.dsLayout) g_vk.vkDestroyDescriptorSetLayout(d.device, d.dsLayout, nullptr);
     // 双槽：每槽自己一套顶点缓冲 / fence / 信号量

@@ -1,0 +1,36 @@
+<html width="660" height="470" bg="#EEF2F7">
+  <!-- v0.16.44：模糊质量 —— 把"降采样链 ≈ 高斯"换成"降采样 + 真正的分离高斯"两趟。
+       旧实现：每级 2× 盒平均，最后把**最粗那一级**双线性放大回原位。半径大、元素小时的
+       最粗级只剩 5~7 个纹素，放大后边缘是"斜坡 + 折点"（像梯形/平台）。
+       新实现：降采样只降到 σ 还剩 ≥2 纹素的那一级，再在那一级上跑横/纵两趟
+       **密采样**加权卷积（每个纹素一个抽头、覆盖 ±3σ、加法混合累加、权重和 = 255），
+       所以边缘是一条真正的高斯斜坡（S 形、无折点）。
+       本页只进跨后端比对（GDI 遗留路径不模糊）。 -->
+
+  <!-- ① 小元素 + 大半径：旧实现最难看的一组（低级纹理不足以描述形状） -->
+  <div style="position:absolute;left:16px;top:16px;width:100px;height:100px;background:#16202C;border-radius:14px;filter:blur(18px)"></div>
+  <div style="position:absolute;left:150px;top:16px;width:40px;height:40px;background:#2F6BF0;border-radius:20px;filter:blur(16px)"></div>
+  <div style="position:absolute;left:236px;top:40px;width:14px;height:14px;background:#E11D48;border-radius:7px;filter:blur(12px)"></div>
+  <div style="position:absolute;left:290px;top:14px;width:6px;height:104px;background:#0F766E;filter:blur(10px)"></div>
+  <div style="position:absolute;left:320px;top:14px;width:6px;height:104px;background:#0F766E;filter:blur(10px)"></div>
+  <div style="position:absolute;left:346px;top:14px;width:104px;height:104px;background:linear-gradient(135deg,#2F6BF0,#14B8A6);border-radius:52px;filter:blur(14px)"></div>
+  <span style="position:absolute;left:16px;top:126px;width:628px;height:16px;font-size:11px;color:#4A5A6E">100px / 40px / 14px / 两根 6px 细条（间距 24px，旧实现会糊成一块）/ 渐变圆 blur 14</span>
+
+  <!-- ② 边缘剖面：黑色方块 → 沿水平线量 alpha 斜坡（平台/梯形 vs 高斯 S 形） -->
+  <div style="position:absolute;left:210px;top:158px;width:240px;height:56px;background:#16202C;filter:blur(16px)"></div>
+  <span style="position:absolute;left:16px;top:176px;width:186px;height:16px;font-size:11px;color:#4A5A6E">边缘剖面（y=186 量）</span>
+  <span style="position:absolute;left:456px;top:176px;width:190px;height:16px;font-size:11px;color:#4A5A6E">16px 半径的过渡带</span>
+
+  <!-- ③ 文字 + 毛玻璃：三条模糊路径（filter: blur / drop-shadow / backdrop-filter）同一套算法 -->
+  <span style="position:absolute;left:16px;top:216px;width:300px;height:34px;font-size:26px;color:#16202C;filter:blur(3px)">模糊正文 3px</span>
+  <span style="position:absolute;left:330px;top:216px;width:320px;height:34px;font-size:26px;color:#16202C;filter:drop-shadow(0 4px 10px rgba(47,107,240,0.8))">阴影 10px</span>
+
+  <!-- ④ 毛玻璃卡片（backdrop-filter：同一套降采样 + 分离高斯） -->
+  <div style="position:absolute;left:16px;top:268px;width:628px;height:120px;background:linear-gradient(90deg,#2F6BF0,#E11D48,#F0B429,#14B8A6)"></div>
+  <div style="position:absolute;left:30px;top:284px;width:180px;height:88px;background:rgba(255,255,255,0.28);border-radius:16px;backdrop-filter:blur(10px)"></div>
+  <div style="position:absolute;left:240px;top:284px;width:180px;height:88px;background:rgba(255,255,255,0.28);border-radius:16px;backdrop-filter:blur(20px)"></div>
+  <div style="position:absolute;left:450px;top:284px;width:180px;height:88px;background:rgba(255,255,255,0.28);border-radius:16px;backdrop-filter:blur(32px)"></div>
+  <span style="position:absolute;left:16px;top:398px;width:628px;height:16px;font-size:11px;color:#4A5A6E">毛玻璃 10px / 20px / 32px（背板是四色硬边渐变，斜坡形状直接看得见）</span>
+
+  <span style="position:absolute;left:16px;top:434px;width:630px;height:20px;font-size:12px;color:#16202C">v0.16.44 分离高斯：降到 σ≥2 纹素那一级，再横/纵两趟密采样加权卷积（不写着色器）</span>
+</html>

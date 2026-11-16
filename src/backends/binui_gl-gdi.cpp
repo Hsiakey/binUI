@@ -440,17 +440,60 @@ struct BinUIGLGdi::Impl {
         return true;
     }
 
-    // ---- v0.16.42/43：离屏图层效果的公共件（filter: blur / filter: drop-shadow）----
-    // 三件事都以"整像素矩形 + 正常 alpha 混合"为准，这是三端逐像素一致的前提：
-    //   · 级数：让 2^levels >= 半径 的最小值（1..6）；0 = 不降采样（硬阴影）
-    //   · 区域：层框 ∩ 窗口（整像素）—— 抓取/回写都落在整像素上
-    //   · 降采样链：level0 就绪后往下建 1..levels 级（与 backdropBlur 逐字一致）
-    static int blurLevelsFor(float blurPx) {
-        if (!(blurPx > 0.0f)) return 0;
-        int levels = 1;
-        float v = 2.0f;
-        while (levels < 6 && v < blurPx) { v *= 2.0f; levels++; }
-        return levels;
+    // 级数与抽头算法在 include/binui_paint.h（PaintFilterBlurLevel / PaintFilterGaussTaps）——
+    // 三端与单元测试共用一份实现，这里只留别名，别再各写一遍（以前三份拷贝，改一处漏两处）。
+    static int blurLevelsFor(float blurPx) { return binui::PaintFilterBlurLevel(blurPx); }
+    static int gaussTaps(float sigmaTexels, uint32_t* w, int maxN) {
+        return binui::PaintFilterGaussTaps(sigmaTexels, w, maxN);
+    }
+
+    bool gaussBlurLevel(int level, float blurPx) {
+        if (level < 0 || level >= 7) return false;          // 7 号留给暂存
+        if (static_cast<size_t>(level) >= blurLv.size()) return false;
+        // ★ 不要在这里抓 BlurLevel& 引用：下面的 ensureBlurLevel(7, ...) 会 resize blurLv，
+        // vector 扩容后引用就悬空了 —— 读到的 w/h 是已释放内存。下面一律先取标量。
+        const int lw = blurLv[static_cast<size_t>(level)].w;
+        const int lh = blurLv[static_cast<size_t>(level)].h;
+        const bool hasTex = blurLv[static_cast<size_t>(level)].tex != 0;
+        const float sigmaPx = blurPx / static_cast<float>(1 << level);
+        if (!hasTex || lw < 1 || lh < 1 || !(sigmaPx > 0.0f)) return false;
+        if (!ensureBlurLevel(7, lw, lh)) return false;
+        uint32_t w[33];
+        const int n = gaussTaps(sigmaPx, w, 33);
+        const int r = (n - 1) / 2;
+        static const bool trace = std::getenv("BINUI_BLUR_TRACE") != nullptr;
+        if (trace)
+            std::fprintf(stderr, "[gl][gauss] 级 %d %dx%d σ=%.2f 纹素 抽头 %d 个\n",
+                         level, lw, lh, sigmaPx, n);
+        glBlendFunc(GL_ONE, GL_ONE);
+        ignoreLayerClip = true;
+        for (int pass = 0; pass < 2; pass++) {
+            BlurLevel& dst = blurLv[pass == 0 ? 7 : static_cast<size_t>(level)];
+            BlurLevel& from = blurLv[pass == 0 ? static_cast<size_t>(level) : 7];
+            bindFbo(dst.fbo);
+            glViewport(0, 0, lw, lh);
+            glUniform2fP(uniView, static_cast<float>(lw), static_cast<float>(lh));
+            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            curTex = from.tex;
+            for (int k = -r; k <= r; k++) {
+                const float o = static_cast<float>(k);
+                uint32_t c = (w[k + r] << 24) | 0x00FFFFFFu;
+                Premult(c);
+                if (pass == 0)   // 横向
+                    emitQuad(0.0f, 0.0f, static_cast<float>(lw), static_cast<float>(lh),
+                             o / static_cast<float>(lw), 1.0f,
+                             1.0f + o / static_cast<float>(lw), 0.0f, c);
+                else             // 纵向（v 轴翻转是 GL 的 FBO 行序，抽头对称所以不影响结果）
+                    emitQuad(0.0f, 0.0f, static_cast<float>(lw), static_cast<float>(lh),
+                             0.0f, 1.0f + o / static_cast<float>(lh),
+                             1.0f, 0.0f + o / static_cast<float>(lh), c);
+            }
+            flushAll();
+        }
+        ignoreLayerClip = false;
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+        return true;
     }
 
     bool layerRegion(const LayerFrame& f, int& rx, int& ry, int& rw, int& rh) const {
@@ -466,10 +509,12 @@ struct BinUIGLGdi::Impl {
         return rw >= 2 && rh >= 2;
     }
 
-    // 把 level0（已就绪）按 levels 建链，再以正常 alpha 把 (rx,ry,rw,rh) 合成回 target。
+    // 把 level0（已就绪）降到 blurLevelsFor(blurPx) 那一级、在那一级上跑分离高斯，
+    // 再以正常 alpha 把 (rx,ry,rw,rh) 合成回 target。
     // 入口约定：scissor 已关、当前目标是 level0/层目标（这里会自己切回来）。
-    void compositeThroughLevels(int levels, GLuint target, int rx, int ry, int rw, int rh,
+    void compositeThroughLevels(float blurPx, GLuint target, int rx, int ry, int rw, int rh,
                                 uint32_t col) {
+        const int levels = blurLevelsFor(blurPx);
         int finalLevel = 0;
         if (levels > 0) {
             glBlendFunc(GL_ONE, GL_ZERO);
@@ -491,6 +536,9 @@ struct BinUIGLGdi::Impl {
             }
             ignoreLayerClip = false;
             glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
+            // v0.16.44：末级上跑分离高斯。失败（暂存图建不出来）就保持"只降采样"的老观感 ——
+            // 宁可糊得糙，也不要整块不画。
+            if (!gaussBlurLevel(finalLevel, blurPx)) finalLevel = levels;
         }
         bindFbo(target);
         glViewport(0, 0, winW, winH);
@@ -527,7 +575,7 @@ struct BinUIGLGdi::Impl {
         const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
         uint32_t col = (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
         Premult(col);
-        compositeThroughLevels(blurLevelsFor(f.blur), prevFbo, rx, ry, rw, rh, col);
+        compositeThroughLevels(f.blur, prevFbo, rx, ry, rw, rh, col);
         return true;
     }
 
@@ -582,7 +630,7 @@ struct BinUIGLGdi::Impl {
             std::fprintf(stderr, "[gl][shadow] region %d,%d %dx%d 级数 %d 偏移 %d,%d 层框 %.1f,%.1f %.1fx%.1f scissor %d,%d-%d,%d\n",
                          rx, ry, rw, rh, blurLevelsFor(sh.blur), sdx, sdy, f.x, f.y, f.w, f.h,
                          scissor[0], scissor[1], scissor[2], scissor[3]);
-        compositeThroughLevels(blurLevelsFor(sh.blur), prevFbo, rx + sdx, ry + sdy, rw, rh,
+        compositeThroughLevels(sh.blur, prevFbo, rx + sdx, ry + sdy, rw, rh,
                                0xFFFFFFFFu);
     }
 
@@ -1726,10 +1774,12 @@ bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
     const int rw = rx1 - rx, rh = ry1 - ry;
     if (rw < 2 || rh < 2) return false;
 
-    int levels = 1;
+    int levels = 0;
     {
-        float v = 2.0f;
-        while (levels < 6 && v < blurPx) { v *= 2.0f; levels++; }
+        // v0.16.44：与 filter: blur 用同一个取法（降到 σ 还剩 ≥2 纹素那一级，剩下的交给
+        // 分离高斯）。以前是"让 2^levels ≥ 半径"，大半径时最粗级只剩几个纹素 ——
+        // 毛玻璃的背板多半是平滑渐变所以不明显，但硬边背板一眼就能看出梯形边缘。
+        while (levels < 5 && blurPx / static_cast<float>(1 << (levels + 1)) >= 2.0f) levels++;
     }
 
     d.flushAll();   // 手上攒的图元先落到当前目标（它们构成"背景"）
@@ -1776,12 +1826,22 @@ bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
         d.flushAll();
     }
     d.ignoreLayerClip = false;
+    // v0.16.44：末级上跑分离高斯（横 7 抽头 + 纵 7 抽头）。失败就只是"糊得糙一点"，
+    // 不影响后面照常合成。scissor 必须先关：它既裁 glClear（只清到节点框，框外留着上一帧的
+    // 残影）又裁累加趟 —— 毛玻璃的合成在下面自己会重新打开。
+    if (chainOk) {
+        glDisable(GL_SCISSOR_TEST);
+        d.gaussBlurLevel(levels, blurPx);
+    }
     d.bindFbo(prevFbo);
     glViewport(prevVp[0], prevVp[1], prevVp[2], prevVp[3]);
     glUniform2fP(d.uniView, static_cast<float>(d.winW), static_cast<float>(d.winH));
 
     // 3) 合成：圆角条带 + 双线性放大，replace 混合（背景被替换成模糊版）
     if (chainOk) {
+        // gaussBlurLevel 退出时把混合恢复成了正常 alpha（它自己的累加趟用 ADD），
+        // 毛玻璃的合成必须是 replace —— 这里显式再设一次，别依赖"上一段代码留的状态"。
+        glBlendFunc(GL_ONE, GL_ZERO);
         if (scissorWas) glEnable(GL_SCISSOR_TEST);   // 合成要遵守节点的裁剪
         d.curTex = d.blurLv[static_cast<size_t>(levels)].tex;
         binui::PaintImageBand bands[binui::kMaxImageBands];

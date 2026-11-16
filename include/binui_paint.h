@@ -179,8 +179,54 @@ inline int PaintFilterBlurPad(float blurPx) {
     return static_cast<int>(pad > kMaxFilterBlurPx * 3.0f ? kMaxFilterBlurPx * 3.0f : pad);
 }
 
-// 一个节点的离屏图层要外扩多少（v0.16.43）—— 把**所有**会画到盒子外面的效果叠起来：
-//   · filter: blur(N)      → 3σ（上面的 PaintFilterBlurPad）
+// ---- 分离高斯（v0.16.44）----
+// 模糊的执行方式（三个后端共用这一份规则）：
+//   1) 先按 2× 逐级降采样，降到"σ 还剩 >= 2 纹素"的那一级就停；
+//   2) 在那一级上跑横/纵两趟加权卷积（每个纹素一个抽头，加法混合累加）。
+// 为什么不再"一路降到底"：最粗那一级在"大半径 + 小元素"时只剩 5~7 个纹素，形状信息在那一步
+// 就丢了，双线性放大回来是一条斜坡 + 折点（肉眼就是梯形/平台；14px 的圆点糊出来是个十字）。
+// 口径：σ = 半径（CSS `blur(N)` / `drop-shadow(0 0 N)` 的定义），所以外扩恰好是 3σ = 3N，
+// 与上面的 PaintFilterBlurPad 一致。
+//
+// **为什么最小是 1 级（不许 0 级）**：0 级意味着"合成时把抓下来的区域 1:1 拷回去"。那么层里
+// 任何 1 像素级的差异都会原样上屏 —— 而 1× 离屏层里的**圆角图片**正好有一处既有的三端差异
+// （GL 与 VK 的圆角模板相位差 1px，17 个像素、单通道差 200+；只写 `opacity:0.98` 包一个圆角
+// `<img>` 就能复现，与模糊无关，见 docs/future.md）。降一级顺带做了 2×2 平均，把这个相位差
+// 摊平成"网格量化"级别（实测最大通道差回到 59 以下，与 v0.16.42/43 持平）。
+// 等圆角模板那边对齐了，这里可以放开到 0。
+inline int PaintFilterBlurLevel(float blurPx) {
+    if (!(blurPx > 0.0f)) return 0;
+    int levels = 1;   // ★ 至少降一级，理由见下
+    while (levels < 5 && blurPx / static_cast<float>(1 << (levels + 1)) >= 2.0f) levels++;
+    return levels;
+}
+
+// 抽头权重：k = -3σ..+3σ，**每个纹素一个**（按 ±kσ 布会留 σ 宽的空档，卷积核变梳状、
+// 输出带栅栏）。返回抽头个数（奇数），权重写入 w[0..n-1] 且**和正好 255** —— 量化误差补在
+// 中心抽头上，否则总亮度会随半径漂移、三端还各漂各的。
+inline int PaintFilterGaussTaps(float sigmaTexels, unsigned* w, int maxN) {
+    if (!(sigmaTexels > 0.0f) || !w || maxN < 3) return 0;
+    int r = static_cast<int>(std::ceil(3.0f * sigmaTexels));
+    if (r < 1) r = 1;
+    if (2 * r + 1 > maxN) r = (maxN - 1) / 2;
+    const int n = 2 * r + 1;
+    float f[64];
+    float sum = 0.0f;
+    for (int k = -r; k <= r; k++) {
+        const float t = static_cast<float>(k) / sigmaTexels;
+        f[k + r] = std::exp(-0.5f * t * t);
+        sum += f[k + r];
+    }
+    int acc = 0;
+    for (int i = 0; i < n; i++) {
+        w[i] = static_cast<unsigned>(f[i] / sum * 255.0f + 0.5f);
+        acc += static_cast<int>(w[i]);
+    }
+    w[r] = static_cast<unsigned>(static_cast<int>(w[r]) + (255 - acc));
+    return n;
+}
+
+// 一个节点的离屏图层要外扩多少（v0.16.43）—— 把**所有**会画到盒子外面的效果叠起来：//   · filter: blur(N)      → 3σ（上面的 PaintFilterBlurPad）
 //   · filter: drop-shadow  → 它自己的 3σ + 偏移的绝对值（阴影整体挪出去了）
 //     （box-shadow 不走图层，它的外扩在 PaintShadowPad / invalidRect 里单独算）
 // 参数传的是"这个节点自身"的值；后代的图层不需要祖先的外扩，因为祖先的层本来就更大。

@@ -599,7 +599,10 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # drop-shadow（v0.16.43）：外阴影取元素 alpha 上色；本用例覆盖星形轮廓/文字/子树/多阴影/硬阴影/
 # 负偏移/颜色前置/opacity 同用/贴窗口边缘/blur+shadow 同写/方角图片。三端 0 不同像素。
 # 那 59 来自"层里画圆角图片"的既有单采样差异（见 docs/future.md 的工具链已知问题）。
-ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow
+# blur-quality（v0.16.44）：分离高斯。小元素 + 大半径（旧实现最难看的一组：14px 圆点糊成十字、
+# 6px 细条糊成方块）+ 边缘剖面（16px 半径的水平线）+ 文字 blur(3) / drop-shadow(10) + 毛玻璃
+# 10~32px。只进跨后端比对；观感差异看 docs/issues/assets/blur-quality.png。
+ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow blur-quality
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 
