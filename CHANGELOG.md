@@ -32,14 +32,15 @@ P2 表里"掩码内容渐变按中间色"这条收掉，顺手修了一个 v28 �
 
 ### 验证
 
-- `test_css` 新增 16.53 段（14 条断言）：渐变记录生成、flags 置位、渐变本体可读、
+- `test_css` 新增 16.53 段（13 条断言）：渐变记录生成、flags 置位、渐变本体可读、
   线性 + 两个色标、**白端 alpha 255 / 黑端 alpha 0**、归一化到本组几何盒（x 0 → 1）、
   纯色 + 渐变 → 两条记录且不合并、色标 alpha = 亮度 × fill-opacity（灰 #808080 × 0.5 ≈ 64、
   白 × 0.5 ≈ 128）、纯色记录的 flags 不置位、以及区域宽高 200×120 的回归断言；
 - `pixels` 18/18 零差异（GDI 基准图不含 mask，这一例钉的是"格式改动没波及别的段"）；
-- `pixels-vk` 48 例 0 个超容差像素；`anim/svg-mask` 扩到 660×700（新增横向线性、
-  竖向三色标、径向聚光三例），**GL/VK 0 像素差、最大通道差 0**；
-  `pixels-d3d11` 只有既有的 `anim/affine-text` 那 6 像素；
+- `pixels-vk` 全部用例（实测 **45 例** = 18 像素 + 4 示例 UI + 23 动画帧）0 个超容差像素；
+  `anim/svg-mask` 扩到 660×700（新增横向线性、竖向三色标、径向聚光三例），
+  **GL/VK 0 像素差、最大通道差 0**；`pixels-d3d11` 全部用例（实测 **47 例**）里
+  只有既有的 `anim/affine-text` 那 6 像素；
 - `make test` 全 PASS、`partial` OK、`check_examples` 16 例 0 问题、`make check-guard` 0 报告。
 - 证据图：`docs/issues/assets/svg-mask-gradient.png`（下半部分是三个渐变蒙版）。
 
@@ -75,7 +76,7 @@ P2 表里"pattern 只支持平移+缩放"那条收掉。零格式改动、零运
   `PathIsSimilarity` 对旋转/斜切的正反判定；
 - **逐位不变**的 A/B：`offscreen_render` 分别用 v0.16.51 与新编译器渲染同一张旧 pattern 页
   → `不同像素 0，最大通道差 0`（GDI 基准不受影响，`pixels` 18/18 零差异）；
-- `pixels-vk` 48 例 0 个超容差像素；`anim/svg-pattern` 扩到 660×820（新增 `rotate(30)` 的
+- `pixels-vk` 全部用例 0 个超容差像素；`anim/svg-pattern` 扩到 660×820（新增 `rotate(30)` 的
   斜条、`rotate(45)` 的菱形格、`skewX(20)` 的斜砖、`rotate(-20) scale(1.4)` 的圆点阵），
   GL/VK **0 像素差、最大通道差 0**；`pixels-d3d11` 只有既有的 `anim/affine-text` 那 6 像素；
 - `make test` 全 PASS、`partial` OK、`check_examples` 16 例 0 问题、`make check-guard` 0 报告。
@@ -108,7 +109,7 @@ P1-8 的尾巴（v0.16.49 时 `space` 是"按 repeat 处理并告警"的降级�
   块数 = `floor(中段/自然)`、每块都是自然尺寸且 UV 取整段、**两端各留一个缝**、块间缝等宽、
   中段比一块窄时缩成一块、与 round 的对照、整盒双轴 space 的四边形数（75）与
   "所有块都在盒内、不超过自然尺寸"、y 轴余数均分（中心行下移 2.5px）；
-- `pixels-vk` 48 例 0 个超容差像素（`anim/nine-slice` 已扩成 640×860 的十个用例：
+- `pixels-vk` 全部用例 0 个超容差像素（`anim/nine-slice` 已扩成 640×860 的十个用例：
   横/竖/双轴 repeat、round、space、单块居中、末块裁切对照、中段过窄…），
   `pixels-d3d11` 只有既有的 `anim/affine-text` 那 6 像素；
 - `pixels` 18/18 零差异（九宫格不参与 GDI 基准图，这一例钉的是"没碰别的路径"）；
@@ -158,11 +159,11 @@ P1 表里最后一条"只支持一层"的尾巴收掉。零格式改动、零新
 
 - `pixels` 18/18 零差异（新增的 `text-shadow-multi` 基准图由 GDI 生成，其余 17 张
   **逐字节未变** —— 说明单层的 GDI 输出没被这次改动碰到）；
-- `pixels-vk` 48 例：VK 与 GL **0 个超过通道容差的像素**，新用例 `text-shadow-multi`
+- `pixels-vk` 全部用例：VK 与 GL **0 个超过通道容差的像素**，新用例 `text-shadow-multi`
   的最大通道差是 **0**（三端共用同一份图集代码，多层也不该有差）；
-- `pixels-d3d11` 49 例：只有既有的 `anim/affine-text` 6 像素（D3D11 自己的文本光栅化），
+- `pixels-d3d11` 全部用例：只有既有的 `anim/affine-text` 6 像素（D3D11 自己的文本光栅化），
   两个 text-shadow 用例都是 0 像素 0 通道差；
-- `test_css` 新增 16.50 段（12 条断言）：三层逆序进段、每层颜色独立、
+- `test_css` 新增 16.50 段（15 条断言）：三层逆序进段、每层颜色独立、
   **继承两层**（顺序与值都一致）、`none` 清空、第 5 层截断 + 点名告警、
   全透明层被丢掉、外扩取最大层（blur 12 → 19px）；
 - `make test` 全 PASS、`partial` OK、`check_examples` 16 例 0 问题、`make check-guard` 0 报告。
