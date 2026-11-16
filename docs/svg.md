@@ -620,8 +620,10 @@ v16 把单条路径的条带上限从 2048 提到 4096，就是为了让 400px �
 
 ### 11.8 到此为止的部分（以及为什么）
 
-`filter`（`blur()` / `drop-shadow()` / `url(#f)`）、SMIL 动画、`<tspan>` 富文本、
-字形描边 —— 这些要么需要第二套绘制管线、要么需要字体轮廓（`<text stroke>`）。
+SMIL 动画、`<tspan>` 富文本、
+字形描边 —— 这些要么需要字体轮廓（`<text stroke>`）、要么需要动画时间轴。
+`filter`（`blur()` / `drop-shadow()` / `url(#f)`）后来都做了：前两者是节点级离屏层（v0.16.42/43），
+`url(#f)` 在**编译期归约**成同样的原子效果（v0.16.47，见 14.6），剩下只有"归约不了"的原语。
 全部保持"明确告警 + 说清楚换什么"，不静默。
 注意这里说的是 **SVG 的 `<filter>` 元素 / `filter="url(#f)"` 引用**；CSS 侧的
 `style="filter: blur(4px)"` 自 v0.16.42 起已支持（元素 + 整棵子树进离屏层做
@@ -811,3 +813,45 @@ blend state / VK 建两条管线变体）。几何在编译期折算进**裁剪�
 没有差异。pattern 里若用奇数宽度画线条，会被放大成"每条线整行差"（`anim/svg-pattern` 第一版
 0.16%，改成偶数宽度后 0）。根因尚未定位（怀疑是层内单采样光栅化与 GL 的层内坐标取整），
 先按"图案线条用偶数宽度"规避，记在 `docs/future.md`。
+
+### 14.6 `<filter>` / `filter="url(#f)"`（v0.16.47，格式不变）
+
+上一个还没做的 SVG 大件。关键判断：**运行期不需要新管线** —— 后端的离屏图层已经能表达
+两种"原子效果"，`<filter>` 的原语链在**编译期归约**成它们的组合即可：
+
+| 原子效果 | 怎么表达 | 谁来画 |
+|---|---|---|
+| 整组模糊 | `paint.blurPx = σ`（与 CSS `filter: blur()` 同一落点，格式 v32） | 图层 `pop` 时抓层内容 → 降采样链 → 高斯 |
+| 身后的彩色影子 | `BinUIFilterDropShadowEntry{dx,dy,blur,color}`（与 CSS `drop-shadow()` 同一落点，格式 v33） | 图层 `pop` 时取层 alpha 上色 → 同一降采样链 → 按偏移合成 |
+
+归约规则（`feMerge` 决定"影子在下、本体在上"，正是运行期的固定叠法）：
+
+- `feGaussianBlur(SourceGraphic)` → 整组模糊；
+- `feDropShadow` → 一条影子（SVG2 一步到位）；
+- `feGaussianBlur(SourceAlpha) → feOffset → feFlood → feComposite(operator="in") → feMerge[影子, 源]`
+  → 一条带模糊的影子（最常见的"手写版本"）；
+- 去掉 `feGaussianBlur` 就是**硬边阴影**（σ=0）；
+- `feMerge` 里可以有多条影子（先写的在下面）；**颜色写在第一层、`in2`/`in` 两个方向都认**
+  （`feComposite in="flood" in2="alpha"` 与反过来等价）。
+
+不支持原语的告警（逐条、点名）：`feColorMatrix` / `feBlend` / `feBoxBlur` / `feMorphology` /
+`feTurbulence` / `feImage` / `feTile` / `feDisplacementMap` / 各种光照 —— 它们要么需要真正的
+逐像素运算（只能改着色器或每帧同步读回，两条都是本项目明确不做的事），要么需要第二张输入位图。
+另外这几条也会告警：连续两层 `feGaussianBlur`（运行期只做一趟）、各向异性 `stdDeviation`
+（按 σx）、`feOffset` 直接作用在源图形上（= 整体平移，请用元素自己的 `transform`）、
+`feMerge` 里出现多层源图形、影子写在源图形之后（运行期只把影子放在下方）、滤镜区域
+（`x/y/width/height`）比默认 `-10%..110%` **窄**（我们不按它裁剪，按元素框外扩 3σ 画）。
+
+**套滤镜的容器盒子**：`<g>` / `<svg>` 自己的盒子常常是 **0×0**（子形状是绝对定位的独立
+节点），而离屏图层框 = 节点框外扩 3σ —— 框是空的就把层里的内容**整个裁掉**（第一版实测：
+套了 `filter="url(#f)"` 的 `<g>` 整块消失）。修法是编译期给"带滤镜且盒子为空"的节点算一个
+**子树包围盒**并撑大盒子（**不动 x/y**，免得把流式光标和兄弟带偏），同时把结果写进重排规格
+（`relW/relH`，清掉 `SPEC_AUTO_W`）—— 否则运行期 `setSize` 会按"自动宽度"把它算回 0×0。
+
+已知边界（都会告警）：`filter` 区域参数；连续模糊；各向异性 σ；`feMerge` 的多源图形；
+不支持的原语。GDI 遗留后端不参与（`pushLayerEx` 返回 false → 退回不画效果，元素照常显示）。
+
+验收：`pixels` 新增 `svg-filter`（660×470，GDI 基准 0 差异）；`anim/svg-filter` 进跨后端
+比对（VK/D3D11 vs GL 均 **0 不同像素**，最大通道差 2 —— 与既有的 `drop-shadow`/`blur` 用例同级）；
+单测 `test_elements` 的 v47 段钉住：五原语链归约、硬阴影、`feDropShadow`、单模糊、两条影子的
+**叠放顺序**、不支持原语的告警、引用不存在 id 的告警、`<g>` 盒子被撑到覆盖子树且不铺满父容器。

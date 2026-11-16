@@ -1,0 +1,136 @@
+<html width="660" height="470" bg="#EEF2F7">
+  <!-- v0.16.47：SVG <filter> / filter="url(#f)"。
+       运行期只有两种离屏原子效果（整组模糊 = CSS blur()、身后的彩色影子 = CSS drop-shadow()），
+       所以 <filter> 的原语链在**编译期**归约成这两样的组合，运行期与二进制格式零改动。
+       本页覆盖：经典五原语阴影链 / 无模糊硬阴影 / SVG2 feDropShadow / 单 feGaussianBlur /
+       两条影子（叠放顺序）/ 文字与 <g> 子树 / 模糊本体 + 影子同用 / 隐性 SourceGraphic。
+       只进跨后端比对。 -->
+
+  <svg width="0" height="0" style="position:absolute;left:0px;top:0px">
+    <defs>
+      <!-- ① 经典五原语阴影链（feGaussianBlur → feOffset → feFlood → feComposite(in) → feMerge） -->
+      <filter id="ds-classic" x="-20%" y="-20%" width="140%" height="140%">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="2.5" result="blur"/>
+        <feOffset in="blur" dx="4" dy="6" result="off"/>
+        <feFlood flood-color="#0B1F3A" flood-opacity="0.45" result="flood"/>
+        <feComposite in="off" in2="flood" operator="in" result="shadow"/>
+        <feMerge>
+          <feMergeNode in="shadow"/>
+          <feMergeNode in="SourceGraphic"/>
+        </feMerge>
+      </filter>
+
+      <!-- ② 没有模糊的硬阴影：feOffset + feFlood + feComposite(in) + feMerge -->
+      <filter id="ds-hard" x="-20%" y="-20%" width="140%" height="140%">
+        <feOffset in="SourceAlpha" dx="7" dy="7" result="off"/>
+        <feFlood flood-color="#22398F" flood-opacity="1" result="flood"/>
+        <feComposite in="flood" in2="off" operator="in" result="shadow"/>
+        <feMerge>
+          <feMergeNode in="shadow"/>
+          <feMergeNode in="SourceGraphic"/>
+        </feMerge>
+      </filter>
+
+      <!-- ③ SVG2 的 feDropShadow 一步到位 -->
+      <filter id="ds-drop" x="-20%" y="-20%" width="140%" height="140%">
+        <feDropShadow dx="0" dy="5" stdDeviation="4" flood-color="#7C2D12" flood-opacity="0.55"/>
+      </filter>
+
+      <!-- ④ 只做整组模糊（等价于 CSS filter: blur()） -->
+      <filter id="fx-blur" x="-20%" y="-20%" width="140%" height="140%">
+        <feGaussianBlur in="SourceGraphic" stdDeviation="3"/>
+      </filter>
+
+      <!-- ⑤ 两条影子：先写的在下面（SVG 叠放顺序），shadowA 靠下、shadowB 紧贴本体 -->
+      <filter id="ds-two" x="-20%" y="-20%" width="140%" height="140%">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="5" result="b1"/>
+        <feOffset in="b1" dx="10" dy="12" result="o1"/>
+        <feFlood flood-color="#1D4ED8" flood-opacity="0.5" result="f1"/>
+        <feComposite in="o1" in2="f1" operator="in" result="s1"/>
+        <feGaussianBlur in="SourceAlpha" stdDeviation="1.5" result="b2"/>
+        <feOffset in="b2" dx="2" dy="3" result="o2"/>
+        <feFlood flood-color="#B91C1C" flood-opacity="0.75" result="f2"/>
+        <feComposite in="o2" in2="f2" operator="in" result="s2"/>
+        <feMerge>
+          <feMergeNode in="s1"/>
+          <feMergeNode in="s2"/>
+          <feMergeNode in="SourceGraphic"/>
+        </feMerge>
+      </filter>
+
+      <!-- ⑥ 模糊本体 + 影子同用：merge 里的 SourceGraphic 先过一趟模糊 -->
+      <filter id="ds-blurred" x="-20%" y="-20%" width="140%" height="140%">
+        <feGaussianBlur in="SourceAlpha" stdDeviation="2" result="sa"/>
+        <feOffset in="sa" dx="5" dy="5" result="off"/>
+        <feFlood flood-color="#065F46" flood-opacity="0.6" result="flood"/>
+        <feComposite in="off" in2="flood" operator="in" result="shadow"/>
+        <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="gblur"/>
+        <feMerge>
+          <feMergeNode in="shadow"/>
+          <feMergeNode in="gblur"/>
+        </feMerge>
+      </filter>
+    </defs>
+  </svg>
+
+  <!-- ① 经典五原语阴影链（星形：影子是星形轮廓，不是盒子） -->
+  <svg width="112" height="112" style="position:absolute;left:14px;top:10px">
+    <polygon points="56,6 70,42 108,42 78,64 89,102 56,80 23,102 34,64 4,42 42,42"
+             fill="#F0B429" filter="url(#ds-classic)" />
+  </svg>
+
+  <!-- ② 硬阴影（无模糊） -->
+  <div style="position:absolute;left:136px;top:14px;width:96px;height:96px;background:#FF5A5A;border-radius:14px;filter:url(#ds-hard)"></div>
+
+  <!-- ③ SVG2 feDropShadow -->
+  <div style="position:absolute;left:252px;top:14px;width:96px;height:96px;background:#FFFFFF;border-radius:16px;filter:url(#ds-drop)"></div>
+
+  <!-- ④ 只模糊 -->
+  <div style="position:absolute;left:368px;top:14px;width:96px;height:96px;background:linear-gradient(135deg,#2F6BF0,#14B8A6);border-radius:20px;filter:url(#fx-blur)"></div>
+
+  <!-- ⑤ 两条影子（蓝在下、红在上，本体最上） -->
+  <div style="position:absolute;left:484px;top:14px;width:96px;height:96px;background:#F8FAFC;border-radius:50px;filter:url(#ds-two)"></div>
+
+  <span style="position:absolute;left:14px;top:126px;width:632px;height:16px;font-size:11px;color:#4A5A6E">经典五原语链 / 无模糊硬阴影 / feDropShadow / 仅 feGaussianBlur / 两条影子（先写的在下面）</span>
+
+  <!-- ⑥ 文字：轮廓来自字形（feDropShadow 走 SVG 属性写法） -->
+  <span style="position:absolute;left:14px;top:150px;width:420px;height:44px;font-size:34px;color:#16202C;filter:url(#ds-classic)">SVG FILTER</span>
+  <span style="position:absolute;left:452px;top:164px;width:200px;height:16px;font-size:11px;color:#4A5A6E">文字轮廓（字形 alpha）</span>
+
+  <!-- ⑦ <g> 子树：整棵子树合成一个轮廓，子元素之间没有缝 -->
+  <svg width="200" height="110" style="position:absolute;left:14px;top:206px">
+    <g filter="url(#ds-classic)">
+      <rect x="6" y="6" width="180" height="80" rx="12" fill="#FFFFFF"/>
+      <rect x="20" y="22" width="52" height="44" rx="8" fill="#22C55E"/>
+      <circle cx="120" cy="44" r="24" fill="#0B5FA5"/>
+      <rect x="152" y="22" width="24" height="44" rx="12" fill="#F0B429"/>
+    </g>
+  </svg>
+
+  <!-- ⑧ 模糊本体 + 影子（merge 里 SourceGraphic 先模糊） -->
+  <div style="position:absolute;left:232px;top:210px;width:90px;height:90px;background:#E11D48;border-radius:18px;filter:url(#ds-blurred)"></div>
+
+  <!-- ⑨ 同一份滤镜定义被两个元素共用 + 与 opacity 图层叠用 -->
+  <div style="position:absolute;left:340px;top:210px;width:90px;height:90px;background:#A855F7;border-radius:12px;filter:url(#ds-classic)"></div>
+  <div style="position:absolute;left:448px;top:210px;width:90px;height:90px;background:#14B8A6;border-radius:12px;opacity:0.72;filter:url(#ds-drop)"></div>
+
+  <span style="position:absolute;left:14px;top:312px;width:632px;height:16px;font-size:11px;color:#4A5A6E">文字 / &lt;g&gt; 子树一个轮廓 / 模糊本体 + 影子同用 / 定义共用 + opacity 图层</span>
+
+  <!-- ⑩ 嵌套 <g transform>：滤镜作用在变换后的设备空间内容上 -->
+  <svg width="220" height="120" style="position:absolute;left:14px;top:336px">
+    <g transform="translate(10,10) rotate(12 100 50)" filter="url(#ds-two)">
+      <rect x="10" y="10" width="170" height="60" rx="10" fill="#F59E0B"/>
+    </g>
+  </svg>
+
+  <!-- ⑪ 贴窗口边缘（外扩被窗口裁掉一部分） -->
+  <div style="position:absolute;left:-18px;top:352px;width:70px;height:70px;background:#0B5FA5;border-radius:10px;filter:url(#ds-classic)"></div>
+
+  <!-- ⑫ filter 与 border-radius / 圆角图片共存 -->
+  <div style="position:absolute;left:252px;top:340px;width:120px;height:110px">
+    <img style="position:absolute;left:0px;top:0px;width:110px;height:110px;filter:url(#ds-classic)" src="image-round-img.png" />
+  </div>
+  <div style="position:absolute;left:400px;top:352px;width:96px;height:96px;background:#FFFFFF;border-radius:24px;filter:url(#ds-hard)"></div>
+
+  <span style="position:absolute;left:14px;top:452px;width:632px;height:16px;font-size:11px;color:#4A5A6E">嵌套变换 / 贴边外扩 / 圆角图片 / 圆角卡片</span>
+</html>

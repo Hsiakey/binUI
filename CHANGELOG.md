@@ -5,6 +5,57 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.16.47] - 2026-11-16 【格式 v33】
+
+**`filter: url(#f)`（SVG `<filter>`）支持了 —— 编译期归约，运行期与二进制格式零改动。**
+这是 `docs/future.md` 里"图 8 / 图 10"剩下的最后一条 SVG 缺口；上一版把它记成"需要第二套
+绘制管线"，实际动手发现**不需要**：后端离屏图层已经能表达两种原子效果，把原语链在编译期
+折成它们的组合就够了。
+
+### 做法：两种原子效果 + 一条归约规则
+
+运行期只有"整组模糊"（`paint.blurPx`，v32）与"身后的彩色影子"
+（`BinUIFilterDropShadowEntry`，v33）—— 这正是 CSS 侧 `blur()` / `drop-shadow()` 的落点。
+于是 `<filter>` 的归约规则就是"把链折成这两样"：
+
+| SVG 原语链 | 归约成 |
+|---|---|
+| `feGaussianBlur(SourceGraphic)` | 整组模糊（σ = `stdDeviation`） |
+| `feDropShadow` | 一条影子 |
+| `feGaussianBlur(SourceAlpha) → feOffset → feFlood → feComposite(operator="in") → feMerge[影子, 源]` | 一条带模糊的影子（最常见的手写版本） |
+| 同上去掉 `feGaussianBlur` | 一条硬边影子（σ=0） |
+| `feMerge` 里多条影子 | 多条影子（SVG 先写的在下面；阴影段口径是"下标 0 在最上面"→ 倒着落段） |
+
+`filter` 现在既认 CSS 写法（`style="filter:url(#f)"`）也认 **SVG 表现属性**
+（`<g filter="url(#f)">`）。归约不了的原语逐条点名告警：`feColorMatrix` / `feBlend` /
+`feBoxBlur` / `feMorphology` / `feTurbulence` / `feImage` / `feTile` / `feDisplacementMap` /
+光照（逐像素运算要么改着色器、要么每帧同步读回，两条都是本项目明确不做的）。
+另外这些也告警：连续两层模糊（运行期只做一趟）、各向异性 `stdDeviation`（按 σx）、
+`feOffset` 直接作用在源图形上（= 整体平移）、`feMerge` 多源图形、影子写在源图形之后、
+滤镜区域比默认 `-10%..110%` 更窄（我们不按它裁剪）。
+
+### 顺手修的一个坑：套滤镜的 `<g>` 内容整个消失
+
+`<g>` / `<svg>` 这类容器自己的盒子常常是 **0×0**（子形状是绝对定位的独立节点），而离屏图层
+框 = 节点框外扩 3σ —— 框是空的就把层里的内容**全裁掉**。第一版实测：套了
+`filter="url(#f)"` 的 `<g>` 整块消失，而 `<div>` 套同样的滤镜正常。
+修法：编译期给"带滤镜且盒子为空"的节点算一个**子树包围盒**撑大盒子（**不动 x/y**，免得把
+流式光标和兄弟带偏），并把结果写进重排规格（`relW/relH` + 清 `SPEC_AUTO_W`）——否则运行期
+`setSize` 会按"自动宽度"把它算回 0×0（这一条是实测出来的：编译期补好了盒子，`gl_shot`
+里还是 0×0）。
+
+### 验证
+
+- `pixels` 新增 `svg-filter`（660×470，16 → 17 例）：GDI 基准 **0 差异**（GDI 是遗留后端，
+  本来就不画阴影，这一例钉的是"内容不会被盒子裁没 + 几何/颜色不变"）。
+- `anim/svg-filter` 进跨后端比对：VK vs GL **0 不同像素**（最大通道差 2）、D3D11 vs GL
+  **0 不同像素**（最大 2）—— 与既有的 `drop-shadow` / `blur` 用例同级。
+- `test_elements` 新增 v47 段（`tests/test_elements.cpp`）：五原语链归约、硬阴影、`feDropShadow`、
+  单 `feGaussianBlur`、两条影子的叠放顺序、`feColorMatrix` 告警且不产生效果、引用不存在 id 的
+  告警、带滤镜的 `<g>` 盒子被撑到覆盖子树但**不**铺满父容器。`make test` 全 PASS。
+- 其余门禁：`partial` OK、`check_examples` 16 个 UI 0 问题、`make check-guard`（电篱笆）0 报告。
+- 证据图：`docs/issues/assets/svg-filter.png`（GL）、`docs/pixels/svg-filter.png`（GDI 基准）。
+
 ## [0.16.46] - 2026-11-16 【格式 v33】
 
 **定位并修掉 `check_examples` 那条"约 30% 概率 `0xC0000005`、一个字都不输出"的旧问题**

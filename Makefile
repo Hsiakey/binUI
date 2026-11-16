@@ -561,7 +561,7 @@ bench-gl: $(BIN_DIR)/gl_shot$(EXT)
 #   mingw32-make SHELL=sh pixels           # 渲染 + 与 docs/pixels 基准图比对
 #   mingw32-make SHELL=sh pixels-update    # 改完绘制/布局后重新生成基准图
 # =============================================
-PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad svgjoin svgstroke svgfinish svgaa opacity grad-angle shadow image-round image-mip text-shadow
+PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad svgjoin svgstroke svgfinish svgaa opacity grad-angle shadow image-round image-mip text-shadow svg-filter
 PIXEL_OUT   := $(BUILD_DIR)/pixels
 PIXEL_GOLD  := docs/pixels
 PIXEL_TOL   ?= 0.5
@@ -619,7 +619,7 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # 这条用例就是"VK 图层用了 4× MSAA 主管线"的判据：修之前弧线每行差一个像素（17 px / 通道差
 # 200+），修之后 GL/VK/D3D11 三端 0 不同像素、最大通道差 0。覆盖 opacity 层、模糊层、
 # 小数坐标、嵌套两层，以及层里的圆/渐变/细线（确认修法没波及别的图元）。
-ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow blur-quality round-in-layer
+ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow blur-quality round-in-layer svg-filter
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 

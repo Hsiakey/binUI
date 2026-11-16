@@ -3048,6 +3048,130 @@ int run() {
               "v43: 阴影外扩 = 3σ(4)+8 = 20，比自身的 18 大 → 取 20");
     }
 
+    // ---------- v0.16.47：SVG <filter> / filter="url(#f)" ----------
+    // 运行期只有"整组模糊"和"身后的彩色影子"两种原子效果，所以 <filter> 的原语链在
+    // 编译期归约成这两样：经典五原语阴影链 / 无模糊硬阴影 / feDropShadow / 单模糊 /
+    // 两条影子（叠放顺序）。归约不了的原语必须告警，不能静默近似。
+    {
+        const char* ui =
+            "<app_window width=\"460\" height=\"320\" bg=\"#FFFFFF\"><html><body>\n"
+            " <svg width=\"0\" height=\"0\"><defs>\n"
+            "  <filter id=\"f-classic\">\n"
+            "   <feGaussianBlur in=\"SourceAlpha\" stdDeviation=\"2.5\" result=\"b\"/>\n"
+            "   <feOffset in=\"b\" dx=\"4\" dy=\"6\" result=\"o\"/>\n"
+            "   <feFlood flood-color=\"#0B1F3A\" flood-opacity=\"0.4\" result=\"c\"/>\n"
+            "   <feComposite in=\"o\" in2=\"c\" operator=\"in\" result=\"s\"/>\n"
+            "   <feMerge><feMergeNode in=\"s\"/><feMergeNode in=\"SourceGraphic\"/></feMerge>\n"
+            "  </filter>\n"
+            "  <filter id=\"f-hard\">\n"
+            "   <feOffset in=\"SourceAlpha\" dx=\"7\" dy=\"9\" result=\"o\"/>\n"
+            "   <feFlood flood-color=\"#22398F\" result=\"c\"/>\n"
+            "   <feComposite in=\"c\" in2=\"o\" operator=\"in\" result=\"s\"/>\n"
+            "   <feMerge><feMergeNode in=\"s\"/><feMergeNode in=\"SourceGraphic\"/></feMerge>\n"
+            "  </filter>\n"
+            "  <filter id=\"f-drop\">\n"
+            "   <feDropShadow dx=\"1\" dy=\"5\" stdDeviation=\"4\" flood-color=\"#7C2D12\"/>\n"
+            "  </filter>\n"
+            "  <filter id=\"f-blur\"><feGaussianBlur in=\"SourceGraphic\" stdDeviation=\"3\"/></filter>\n"
+            "  <filter id=\"f-two\">\n"
+            "   <feGaussianBlur in=\"SourceAlpha\" stdDeviation=\"5\" result=\"b1\"/>\n"
+            "   <feOffset in=\"b1\" dx=\"10\" dy=\"12\" result=\"o1\"/>\n"
+            "   <feFlood flood-color=\"#1D4ED8\" flood-opacity=\"0.5\" result=\"f1\"/>\n"
+            "   <feComposite in=\"o1\" in2=\"f1\" operator=\"in\" result=\"s1\"/>\n"
+            "   <feOffset in=\"SourceAlpha\" dx=\"2\" dy=\"3\" result=\"o2\"/>\n"
+            "   <feFlood flood-color=\"#B91C1C\" result=\"f2\"/>\n"
+            "   <feComposite in=\"o2\" in2=\"f2\" operator=\"in\" result=\"s2\"/>\n"
+            "   <feMerge><feMergeNode in=\"s1\"/><feMergeNode in=\"s2\"/>"
+            "<feMergeNode in=\"SourceGraphic\"/></feMerge>\n"
+            "  </filter>\n"
+            "  <filter id=\"f-bad\"><feColorMatrix type=\"saturate\" values=\"2\"/></filter>\n"
+            " </defs></svg>\n"
+            " <div id=\"a\" style=\"width:60px;height:60px;filter:url(#f-classic)\"></div>\n"
+            " <div id=\"h\" style=\"width:60px;height:60px;filter:url(#f-hard)\"></div>\n"
+            " <div id=\"d\" style=\"width:60px;height:60px;filter:url(#f-drop)\"></div>\n"
+            " <div id=\"b\" style=\"width:60px;height:60px;filter:url(#f-blur)\"></div>\n"
+            " <div id=\"t\" style=\"width:60px;height:60px;filter:url(#f-two)\"></div>\n"
+            " <div id=\"bad\" style=\"width:60px;height:60px;filter:url(#f-bad)\"></div>\n"
+            " <div id=\"miss\" style=\"width:60px;height:60px;filter:url(#f-nope)\"></div>\n"
+            " <svg width=\"200\" height=\"120\">"
+            "<g id=\"gg\" filter=\"url(#f-classic)\">"
+            "<rect x=\"20\" y=\"20\" width=\"120\" height=\"60\" fill=\"#F59E0B\"/></g></svg>\n"
+            "</body></html></app_window>\n";
+        auto res = CompileBinUIEx(ui);
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "v47: 布局可解析");
+
+        // ① 经典五原语链 → 一条影子：偏移/σ/flood 颜色都原样落段
+        int n1 = 0;
+        const BinUIFilterDropShadowEntry* s1 = r.dropShadowsOf(r.findNodeByName("a"), n1);
+        CHECK(s1 && n1 == 1, "v47: 五原语链归约成一条影子");
+        CHECK(s1 && std::fabs(s1[0].dx - 4.0f) < 1e-3f &&
+                  std::fabs(s1[0].dy - 6.0f) < 1e-3f &&
+                  std::fabs(s1[0].blur - 2.5f) < 1e-3f, "v47: 阴影的偏移与 σ 落段");
+        CHECK(s1 && ((s1[0].color >> 24) & 0xFF) == 102, "v47: flood-opacity 落进颜色 alpha");
+        CHECK(s1 && ((s1[0].color >> 16) & 0xFF) == 0x0B && (s1[0].color & 0xFF) == 0x3A,
+              "v47: flood-color 的 RGB 落段");
+
+        // ② 无模糊硬阴影：σ=0（feOffset + feFlood + feComposite(in) + feMerge）
+        int nh = 0;
+        const BinUIFilterDropShadowEntry* sh = r.dropShadowsOf(r.findNodeByName("h"), nh);
+        CHECK(sh && nh == 1 && sh[0].blur == 0.0f, "v47: 硬阴影 σ=0");
+        CHECK(sh && std::fabs(sh[0].dx - 7.0f) < 1e-3f && std::fabs(sh[0].dy - 9.0f) < 1e-3f,
+              "v47: 硬阴影偏移落段");
+
+        // ③ feDropShadow 一步到位
+        int nd = 0;
+        const BinUIFilterDropShadowEntry* sd = r.dropShadowsOf(r.findNodeByName("d"), nd);
+        CHECK(sd && nd == 1 && std::fabs(sd[0].dy - 5.0f) < 1e-3f &&
+                  std::fabs(sd[0].blur - 4.0f) < 1e-3f, "v47: feDropShadow 直接落成一条影子");
+
+        // ④ 只写 feGaussianBlur(SourceGraphic) = 整组模糊，不是影子
+        int nb2 = 0;
+        r.dropShadowsOf(r.findNodeByName("b"), nb2);
+        CHECK(nb2 == 0, "v47: 单 feGaussianBlur 不生成影子");
+        CHECK(std::fabs(r.blurOf(r.findNodeByName("b")) - 3.0f) < 1e-3f,
+              "v47: 单 feGaussianBlur 落成整组模糊");
+
+        // ⑤ 两条影子：SVG 叠放顺序是"先写的在下面"，而阴影段下标 0 在最上面 → 要倒过来
+        int nt = 0;
+        const BinUIFilterDropShadowEntry* st = r.dropShadowsOf(r.findNodeByName("t"), nt);
+        CHECK(st && nt == 2, "v47: 两条影子都落段");
+        CHECK(st && ((st[0].color >> 16) & 0xFF) == 0xB9 && ((st[0].color >> 8) & 0xFF) == 0x1C,
+              "v47: 段里下标 0 = 后写的（红色，在上面）");
+        CHECK(st && ((st[1].color >> 16) & 0xFF) == 0x1D && (st[1].color & 0xFF) == 0xD8,
+              "v47: 段里下标 1 = 先写的（蓝色，在下面）");
+        CHECK(st && std::fabs(st[1].blur - 5.0f) < 1e-3f && st[0].blur == 0.0f,
+              "v47: 两条影子的 σ 各归各的");
+
+        // ⑥ 归约不了的原语必须告警，且不能凭空画出效果
+        bool warnedBad = false;
+        for (const auto& w : res.warnings)
+            if (w.find("fecolormatrix") != std::string::npos) warnedBad = true;
+        CHECK(warnedBad, "v47: 不支持的 feColorMatrix 有告警");
+        int nbad = 0;
+        r.dropShadowsOf(r.findNodeByName("bad"), nbad);
+        CHECK(nbad == 0 && r.blurOf(r.findNodeByName("bad")) == 0.0f,
+              "v47: 不支持的滤镜不产生效果");
+
+        // ⑦ 引用不存在的 <filter>
+        bool warnedMiss = false;
+        for (const auto& w : res.warnings)
+            if (w.find("f-nope") != std::string::npos) warnedMiss = true;
+        CHECK(warnedMiss, "v47: url(#不存在的 id) 有告警");
+
+        // ⑧ 套了滤镜的 <g> 原本是 0×0 盒子（子形状是绝对定位的独立节点），图层框会把它
+        //    的内容全裁掉 → 编译期要用子树包围盒把盒子撑起来（不动 x/y，免得带偏兄弟）
+        const uint16_t gg = r.findNodeByName("gg");
+        int ng = 0;
+        const BinUIFilterDropShadowEntry* sg = r.dropShadowsOf(gg, ng);
+        CHECK(sg && ng == 1, "v47: <g> 上的 filter 属性也认（SVG 表现属性）");
+        const auto& gnode = r.getNodes()[gg];
+        CHECK(gnode.width >= 120.0f && gnode.height >= 60.0f,
+              "v47: 带滤镜的 <g> 盒子被撑到覆盖子树");
+        CHECK(gnode.width * gnode.height < 200.0f * 120.0f,
+              "v47: 只撑到子树范围，不铺满父 <svg>");
+    }
+
     // ---------- v0.16.44：分离高斯（模糊质量） ----------
     // 级数：降到"σ 还剩 ≥2 纹素"的那一级就停（以前是"让 2^levels ≥ 半径"，最粗级只剩
     // 几个纹素 → 放大回来是梯形/平台）。抽头：每纹素一个、覆盖 ±3σ、权重和正好 255。

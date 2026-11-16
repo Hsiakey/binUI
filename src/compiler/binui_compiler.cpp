@@ -2656,6 +2656,13 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "backdrop-filter", "material",
         "markerwidth", "markerheight", "markerunits", "refx", "refy", "orient",
         "gradientunits", "gradienttransform", "spreadmethod", "text-anchor",
+        // v0.16.47：SVG <filter>（含不支持的原语的属性 —— 那些原语本身会单独告警一次，
+        // 不再逐属性刷屏）
+        "filter", "stddeviation", "flood-color", "flood-opacity", "in", "in2", "result",
+        "operator", "dx", "dy", "mode", "values", "tablevalues", "slope", "intercept",
+        "amplitude", "exponent", "scale", "radius", "azimuth", "elevation", "surfacescale",
+        "specularconstant", "specularexponent", "k1", "k2", "k3", "k4", "preservealpha",
+        "basefrequency", "numoctaves", "stitchtiles", "seed", "targetx", "targety",
     };
     return kSet;
 }
@@ -3325,7 +3332,7 @@ static void MarkSvgDefinitions(std::vector<HNode>& elems) {
             // 渐变定义（含 <stop>）也是模板：即使写在 <defs> 外面，也不该画出一个空盒子
             if (t == "defs" || t == "symbol" || t == "lineargradient" ||
                 t == "radialgradient" || t == "stop" || t == "marker" || t == "clippath" ||
-                t == "pattern" || t == "mask") {
+                t == "pattern" || t == "mask" || t == "filter") {
                 elems[i].attrs["_def"] = "1";
                 break;
             }
@@ -5587,6 +5594,328 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         svgMasks[mid2] = std::move(md2);
     }
 
+    // ============ v0.16.47：SVG <filter>（编译期归约，运行期/格式零改动）============
+    // 运行期能做的"离屏原子效果"只有两种（见后端 popLayer）：整组模糊（= CSS blur()）
+    // 和身后的彩色影子（= CSS drop-shadow()）。所以 <filter> 的原语链在**编译期**就归约
+    // 成这两样的组合：
+    //   · feGaussianBlur(SourceGraphic)                        → 整组模糊
+    //   · feDropShadow                                         → 一条影子
+    //   · feGaussianBlur(SourceAlpha) → feOffset → feFlood
+    //     → feComposite(operator="in") → feMerge[影子, 源]       → 一条影子（带模糊）
+    //   · feOffset → feFlood → feComposite(in) → feMerge        → 一条硬边影子（σ=0）
+    // 归约不了的原语（feColorMatrix / feBlend / feTurbulence / 光照…）逐条告警，
+    // 绝不静默近似 —— 这条仓库的规矩：写了没效果必须说出来。
+    struct SvgFilterShadow {
+        float dx = 0.0f, dy = 0.0f, blur = 0.0f;
+        uint32_t color = 0xFF000000u;
+    };
+    struct SvgFilterDef {
+        bool found = false;
+        float blur = 0.0f;                       // 对元素整组施加的模糊（σ）
+        std::vector<SvgFilterShadow> shadows;    // SVG 叠放顺序：[0] 在最下面
+        std::string ignored;                     // 认不出的原语（去重，逗号分隔）
+    };
+    std::unordered_map<std::string, SvgFilterDef> svgFilters;
+    {
+        // 归约过程中传递的"值"：只关心这几件事 —— 是源图形还是源 alpha、积累的偏移/模糊、
+        // 有没有被纯色上色（上了色就是"影子"，否则还是本体的一个视图）。
+        struct FxVal {
+            int kind = 0;        // 0 = 源图形  1 = 带色影子  2 = 纯色(flood)  3 = 源 alpha
+            float dx = 0.0f, dy = 0.0f, blur = 0.0f;
+            uint32_t color = 0;
+            bool valid = false;
+        };
+        for (size_t fi = 0; fi < elems.size(); fi++) {
+            if (lowerStr(elems[fi].tag) != "filter") continue;
+            const HNode& fel = elems[fi];
+            const std::string fid = fel.attrs.count("id") ? TrimCopy(fel.attrs.at("id")) : "";
+            if (fid.empty()) {
+                Warn("<filter> 没有 id，无法被 filter=\"url(#…)\" 引用（已忽略）");
+                continue;
+            }
+            SvgFilterDef def;
+            def.found = true;
+            // 区域参数（x/y/width/height）我们不按它裁：运行期的图层框是"元素框外扩 3σ"。
+            // 只在**比 SVG 默认区域（-10%..110%）更窄**时告警 —— 那时作者以为自己限制了
+            // 绘制范围，实际我们会画到框外（多半是好事，但必须说出来）。四个值都是百分比
+            // 才比较得动；有些值写了 px 就没法判断，按"不告警"处理（别给正常素材刷屏）。
+            {
+                bool allPct = true;
+                float rx = -0.10f, ry = -0.10f, rw = 1.20f, rh = 1.20f;
+                const char* keys[4] = { "x", "y", "width", "height" };
+                float* outs[4] = { &rx, &ry, &rw, &rh };
+                for (int ki = 0; ki < 4; ki++) {
+                    auto it = fel.attrs.find(keys[ki]);
+                    if (it == fel.attrs.end()) continue;
+                    const std::string v = TrimCopy(it->second);
+                    if (v.empty() || v.back() != '%') { allPct = false; continue; }
+                    *outs[ki] = parseLen(v.substr(0, v.size() - 1), 0.0f) / 100.0f;
+                }
+                if (allPct && (rx > -0.0999f || ry > -0.0999f ||
+                               rx + rw < 1.0999f || ry + rh < 1.0999f)) {
+                    Warn("<filter id=\"" + fid + "\"> 的滤镜区域（x/y/width/height）比默认的 "
+                         "-10%..110% 窄：未按它裁剪，按元素框外扩 3σ 绘制");
+                }
+            }
+
+            std::unordered_map<std::string, FxVal> vals;   // result 名 → 值
+            FxVal prevOut;
+            bool hasPrev = false;
+            auto getIn = [&](const std::string& inName) -> FxVal {
+                const std::string n = lowerStr(TrimCopy(inName));
+                if (n.empty()) {
+                    if (hasPrev) return prevOut;
+                    FxVal s;
+                    s.kind = 0;
+                    s.valid = true;
+                    return s;
+                }
+                if (n == "sourcegraphic") { FxVal s; s.kind = 0; s.valid = true; return s; }
+                if (n == "sourcealpha") { FxVal s; s.kind = 3; s.valid = true; return s; }
+                auto it = vals.find(n);
+                return it == vals.end() ? FxVal{} : it->second;
+            };
+            // flood-color / flood-opacity（SVG 缺省：黑色、全不透明）
+            auto floodColOf = [&](const HNode& h) -> uint32_t {
+                uint32_t c = 0xFF000000u;
+                auto it = h.attrs.find("flood-color");
+                if (it != h.attrs.end()) {
+                    const std::string v = TrimCopy(it->second);
+                    // 定义里的 currentColor 没有宿主可以继承 → 按黑（SVG 缺省色）处理
+                    if (lowerStr(v) != "currentcolor")
+                        c = parseColorWith(v, 0xFF000000u, "SVG filter flood-color");
+                }
+                float op = 1.0f;
+                auto io = h.attrs.find("flood-opacity");
+                if (io != h.attrs.end()) {
+                    op = parseLen(TrimCopy(io->second), 1.0f);
+                    if (op < 0.0f) op = 0.0f;
+                    if (op > 1.0f) op = 1.0f;
+                }
+                const float a = (float)((c >> 24) & 0xFFu) * op;
+                return ((uint32_t)(a + 0.5f) << 24) | (c & 0x00FFFFFFu);
+            };
+            // stdDeviation="σx [σy]"（逗号或空白分隔；只写一个 = 各向同性）
+            auto stdDevOf = [&](const HNode& h, float& sx, float& sy) -> bool {
+                sx = sy = 0.0f;
+                auto it = h.attrs.find("stddeviation");
+                if (it == h.attrs.end()) return false;
+                std::vector<std::string> t;
+                {
+                    std::string cur;
+                    for (char ch : TrimCopy(it->second)) {
+                        if (ch == ' ' || ch == '\t' || ch == ',') {
+                            if (!cur.empty()) { t.push_back(cur); cur.clear(); }
+                            continue;
+                        }
+                        cur += ch;
+                    }
+                    if (!cur.empty()) t.push_back(cur);
+                }
+                if (t.empty()) return false;
+                sx = parseLen(t[0], 0.0f);
+                sy = t.size() > 1 ? parseLen(t[1], 0.0f) : sx;
+                if (sx < 0.0f) sx = 0.0f;
+                if (sy < 0.0f) sy = 0.0f;
+                return true;
+            };
+            auto clampBlur = [&](float& sig, const std::string& who) {
+                if (sig > kMaxFilterBlurPx) {
+                    sig = kMaxFilterBlurPx;
+                    Warn("SVG <filter id=\"" + fid + "\"> 的 " + who + " 上限 64px，按 64px 处理");
+                }
+            };
+
+            for (size_t fj = 0; fj < elems.size(); fj++) {
+                if (elems[fj].parentIdx != fi) continue;
+                const HNode& pe = elems[fj];
+                const std::string pt = lowerStr(pe.tag);
+                if (pt == "femergenode") continue;   // 由父 feMerge 统一处理
+                auto attrOf = [&](const char* k) -> std::string {
+                    auto it = pe.attrs.find(k);
+                    return it == pe.attrs.end() ? std::string() : TrimCopy(it->second);
+                };
+                const std::string in1 = attrOf("in");
+                const std::string resName = lowerStr(attrOf("result"));
+                FxVal out;
+                bool handled = true;
+
+                if (pt == "fegaussianblur") {
+                    float sx = 0.0f, sy = 0.0f;
+                    if (!stdDevOf(pe, sx, sy) || sx <= 0.0f) {
+                        // 没有 stdDeviation = 不变的恒等原语，直接透传
+                        out = getIn(in1);
+                        if (!out.valid) handled = false;
+                    } else {
+                        FxVal v = getIn(in1);
+                        if (!v.valid) {
+                            handled = false;
+                        } else if (v.kind == 2) {
+                            handled = false;   // 给纯色再模糊没有意义（也没法画）
+                        } else if (v.blur > 0.0f) {
+                            // 连续两次模糊：运行期只有一趟。σ 合并成 sqrt(σ1²+σ2²) 是数学上
+                            // 正确的做法，但我们的降采样链只按单一 σ 走 → 明确告警。
+                            Warn("SVG <filter id=\"" + fid + "\"> 里连续两层 feGaussianBlur "
+                                 "无法合成（运行期只做一趟模糊），按第一层的 σ 处理");
+                            out = v;
+                        } else {
+                            if (std::fabs(sx - sy) > 0.01f) {
+                                Warn("SVG <filter id=\"" + fid + "\"> 的 stdDeviation 各向异性"
+                                     "（σx=" + std::to_string(sx) + ", σy=" + std::to_string(sy) +
+                                     "）不支持，按 σx 处理");
+                            }
+                            v.blur = sx;
+                            clampBlur(v.blur, "feGaussianBlur stdDeviation");
+                            out = v;
+                        }
+                    }
+                } else if (pt == "feoffset") {
+                    FxVal v = getIn(in1);
+                    if (!v.valid || v.kind == 2) {
+                        handled = false;
+                    } else {
+                        v.dx += parseLen(attrOf("dx"), 0.0f);
+                        v.dy += parseLen(attrOf("dy"), 0.0f);
+                        out = v;
+                    }
+                } else if (pt == "feflood") {
+                    FxVal v;
+                    v.kind = 2;
+                    v.color = floodColOf(pe);
+                    v.valid = true;
+                    out = v;
+                } else if (pt == "fecomposite") {
+                    const std::string op = lowerStr(attrOf("operator"));
+                    FxVal a = getIn(in1);
+                    FxVal b = getIn(attrOf("in2"));
+                    // 只支持 operator="in"：一个输入是纯色、另一个是"形状的 alpha 视图"
+                    // → 得到"上色的轮廓"，也就是影子。其它算子（out/atop/xor/arithmetic）
+                    // 需要真正的双输入像素运算，运行期没有。
+                    if (op.empty() || op == "in") {
+                        if (a.valid && a.kind != 2 && b.valid && b.kind == 2) {
+                            out = a;
+                            out.kind = 1;
+                            out.color = b.color;
+                        } else if (a.valid && a.kind == 2 && b.valid && b.kind != 2) {
+                            out = b;
+                            out.kind = 1;
+                            out.color = a.color;
+                        } else {
+                            handled = false;
+                        }
+                    } else {
+                        handled = false;
+                    }
+                } else if (pt == "fedropshadow") {
+                    // SVG2：feDropShadow = 偏移+模糊+上色+叠回本体。我们的管线本来就
+                    // "本体最后画在最上面"，所以直接记一条影子即可。
+                    float sx = 0.0f, sy = 0.0f;
+                    stdDevOf(pe, sx, sy);
+                    SvgFilterShadow sh;
+                    sh.dx = parseLen(attrOf("dx"), 0.0f);
+                    sh.dy = parseLen(attrOf("dy"), 0.0f);
+                    sh.blur = sx;
+                    clampBlur(sh.blur, "feDropShadow stdDeviation");
+                    sh.color = floodColOf(pe);
+                    def.shadows.push_back(sh);
+                    FxVal v;
+                    v.kind = 0;
+                    v.valid = true;
+                    out = v;
+                } else if (pt == "femerge") {
+                    std::vector<FxVal> layers;
+                    for (size_t fk = 0; fk < elems.size(); fk++) {
+                        if (elems[fk].parentIdx != fj) continue;
+                        if (lowerStr(elems[fk].tag) != "femergenode") continue;
+                        std::string inName;
+                        auto ii = elems[fk].attrs.find("in");
+                        if (ii != elems[fk].attrs.end()) inName = ii->second;
+                        layers.push_back(getIn(inName));
+                    }
+                    if (layers.empty()) {
+                        handled = false;
+                    } else {
+                        int nSrc = 0, nShadow = 0, lastSrc = -1;
+                        for (size_t lk = 0; lk < layers.size() && handled; lk++) {
+                            const FxVal& lv = layers[lk];
+                            if (!lv.valid || lv.kind == 2) { handled = false; break; }
+                            if (lv.kind == 0) {
+                                nSrc++;
+                                lastSrc = (int)lk;
+                                if (lv.blur > def.blur) def.blur = lv.blur;
+                            } else if (lv.kind == 1) {
+                                nShadow++;
+                            } else {
+                                handled = false;   // 源 alpha 直接进 merge 画不出来
+                            }
+                        }
+                        if (handled) {
+                            if (nSrc == 0)
+                                Warn("SVG <filter id=\"" + fid + "\"> 的 feMerge 里没有源图形层："
+                                     "运行期总是把元素本体画在影子上方，已按此处理");
+                            else if (nSrc > 1)
+                                Warn("SVG <filter id=\"" + fid + "\"> 的 feMerge 里有多层源图形"
+                                     "（含模糊版本），运行期只画一次，按第一层处理");
+                            if (nShadow > 0 && lastSrc >= 0) {
+                                for (size_t lk = (size_t)lastSrc + 1; lk < layers.size(); lk++)
+                                    if (layers[lk].kind == 1) {
+                                        Warn("SVG <filter id=\"" + fid + "\"> 有影子写在源图形"
+                                             "之后（= 盖在元素上方）：运行期只把影子放在元素下方，"
+                                             "已按下方处理");
+                                        break;
+                                    }
+                            }
+                            for (size_t lk = 0; lk < layers.size(); lk++) {
+                                const FxVal& lv = layers[lk];
+                                if (lv.kind != 1) continue;
+                                SvgFilterShadow sh;
+                                sh.dx = lv.dx;
+                                sh.dy = lv.dy;
+                                sh.blur = lv.blur;
+                                clampBlur(sh.blur, "影子模糊");
+                                sh.color = lv.color;
+                                def.shadows.push_back(sh);
+                            }
+                            out.kind = 0;
+                            out.valid = true;
+                        }
+                    }
+                } else {
+                    handled = false;
+                }
+
+                if (!handled) {
+                    if (def.ignored.empty()) def.ignored = pt;
+                    else if (def.ignored.find(pt) == std::string::npos) def.ignored += "," + pt;
+                    continue;
+                }
+                if (!resName.empty()) vals[resName] = out;
+                prevOut = out;
+                hasPrev = true;
+            }
+
+            // 链尾仍是"被平移/被模糊的源图形" → 分别是"整体平移"（不支持）与整组模糊（支持）
+            if (hasPrev && prevOut.valid) {
+                if (prevOut.kind == 0 && prevOut.blur > 0.0f && def.blur <= 0.0f)
+                    def.blur = prevOut.blur;
+                if (prevOut.kind == 0 && (std::fabs(prevOut.dx) > 0.01f ||
+                                          std::fabs(prevOut.dy) > 0.01f)) {
+                    Warn("SVG <filter id=\"" + fid + "\"> 的 feOffset 直接作用在源图形上"
+                         "（= 整体平移元素）不支持：请改用元素自己的 transform/x/y");
+                }
+            }
+            if (!def.ignored.empty()) {
+                Warn("SVG <filter id=\"" + fid + "\"> 的原语 " + def.ignored +
+                     " 不支持（本运行期只有 feGaussianBlur / feOffset / feFlood / "
+                     "feComposite(operator=in) / feMerge / feDropShadow），已忽略");
+            }
+            if (def.blur <= 0.0f && def.shadows.empty() && def.ignored.empty()) {
+                Warn("SVG <filter id=\"" + fid + "\"> 没有可用的原语，引用它的元素看起来和没写一样");
+            }
+            svgFilters[fid] = std::move(def);
+        }
+    }
+
     {
         static const std::unordered_set<std::string> kKnownTags = {
             // 结构/包裹
@@ -5606,6 +5935,13 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             "path", "ellipse", "g", "defs", "symbol", "text", "image",
             "lineargradient", "radialgradient", "stop",
             "marker", "clippath", "pattern", "mask",
+            // v0.16.47：SVG <filter> 与它的原语（原语由滤镜注册表消费；不支持的原语
+            // 在注册表那一趟逐条告警，这里只负责"别报未知标签"）
+            "filter", "fegaussianblur", "feoffset", "feflood", "fecomposite", "femerge",
+            "femergenode", "fedropshadow", "fecolormatrix", "feblend", "feboxblur",
+            "femorphology", "feturbulence", "feimage", "fetile", "fecomponenttransfer",
+            "fedisplacementmap", "fediffuselighting", "fespecularlighting", "fedistantlight",
+            "fepointlight", "fespotlight",
         };
         // 认得但只能糊弄过去的标签：明确说清楚会变成什么，别让人以为生效了
         static const std::unordered_map<std::string, const char*> kShimTags = {
@@ -7199,13 +7535,19 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         //     后端解码图片后逐像素跑一遍（详见 include/binui_filter.h）。
         //   · blur() → 组语义（节点 + 整棵子树），只能离屏：半径写进绘制段 blurPx（v32），
         //     绘制期把子树包进图层、按半径降采样模糊后再合成（与 backdrop-filter 同一条链）。
-        // drop-shadow()/url(#f) 仍需另一套离屏语义（阴影要偏移+着色+再叠回本体），
-        // 本轮未做，逐条告警。
+        //   · url(#f) → 引用 SVG <filter>：那一趟已经在前面把原语链**归约**成
+        //     "整组模糊 + 身后的彩色影子"（v0.16.47），这里只把结果抄进同样的落点。
+        //     归约不了的原语在 <filter> 定义处逐条告警，不在这里重复。
         {
-            auto fit = style.find("filter");
-            if (fit == style.end()) fit = style.find("-webkit-filter");
-            if (fit != style.end()) {
-                const std::string fv = LowerCopy(TrimCopy(fit->second));
+            // filter 既是 CSS 属性也是 SVG 表现属性（<g filter="url(#f)">）：属性优先，
+            // 与仓库其它属性口径一致（pick）。
+            std::string filtRaw = TrimCopy(pick(e.attrs, style, "filter", "filter", ""));
+            if (filtRaw.empty()) {
+                auto wf = style.find("-webkit-filter");
+                if (wf != style.end()) filtRaw = TrimCopy(wf->second);
+            }
+            if (!filtRaw.empty()) {
+                const std::string fv = LowerCopy(filtRaw);
                 if (!fv.empty() && fv != "none") {
                     // 按空白拆函数（括号内的空格不拆）
                     std::vector<std::string> fns;
@@ -7249,6 +7591,7 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                     bool anyMatrix = false;
                     bool sawUnsupported = false;
                     bool sawDropShadow = false;
+                    bool sawBlurFromUrl = false;   // 模糊来自 url(#f)：那是 SVG 本来的语义，不告警
                     for (const std::string& fn : fns) {
                         const size_t lp = fn.find('(');
                         if (lp == std::string::npos || fn.back() != ')') { sawUnsupported = true; continue; }
@@ -7287,6 +7630,38 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                                 }
                             }
                             if (bp > 0.0f) paint.blurPx = bp;
+                            continue;
+                        } else if (name == "url") {
+                            // v0.16.47：filter: url(#f) → 取前面归约好的 SVG <filter>
+                            std::string fid2;
+                            if (!ParseUrlId(fn, fid2)) {
+                                Warn("CSS filter: " + fn + " 不是 url(#id) 写法，已忽略");
+                            } else {
+                                auto sf = svgFilters.find(fid2);
+                                if (sf == svgFilters.end() || !sf->second.found) {
+                                    Warn("CSS filter: url(#" + fid2 + ") 找不到对应的 <filter> "
+                                         "定义（请检查 id 拼写，或 <filter> 是不是写在别的文件里）");
+                                } else {
+                                    const SvgFilterDef& sd = sf->second;
+                                    if (sd.blur > 0.0f) {
+                                        paint.blurPx = sd.blur;
+                                        sawBlurFromUrl = true;
+                                    }
+                                    // SVG 叠放顺序是"先写的在下面"，而阴影段的口径是
+                                    // "下标 0 在最上面"（后端逆序画）→ 这里倒着放。
+                                    for (int si = (int)sd.shadows.size() - 1; si >= 0; si--) {
+                                        const SvgFilterShadow& sh = sd.shadows[(size_t)si];
+                                        BinUIFilterDropShadowEntry e = {};
+                                        e.nodeId = n.id;
+                                        e.dx = sh.dx;
+                                        e.dy = sh.dy;
+                                        e.blur = sh.blur;
+                                        e.color = sh.color;
+                                        dropShadowNodes.push_back(e);
+                                        sawDropShadow = true;
+                                    }
+                                }
+                            }
                             continue;
                         } else if (name == "drop-shadow") {
                             // v33：语法 <color>? && <length>{2,3} —— 两个偏移必填、
@@ -7374,13 +7749,13 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                         filterNodes.push_back(f);
                     }
                     if (sawUnsupported)
-                        Warn("CSS filter: url(#id)（引用 SVG <filter>）需要第二套绘制管线，已忽略"
-                             "（blur/drop-shadow/grayscale/sepia/saturate/hue-rotate/invert/"
-                             "contrast/brightness 已支持）");
+                        Warn("CSS filter: 有认不出的函数，已忽略"
+                             "（blur/drop-shadow/url(#id)/grayscale/sepia/saturate/hue-rotate/"
+                             "invert/contrast/brightness 已支持）");
                     // 语义顺序提醒：CSS 里滤镜是**从左到右**复合的，`blur() drop-shadow()`
                     // 的阴影本该取自"已经糊过"的轮廓。我们的离屏层只做一趟，阴影与本体
                     // 都取自同一张（未糊的）层内容 —— 两者同写时明确告警，不静默近似。
-                    if (sawDropShadow && paint.blurPx > 0.0f)
+                    if (sawDropShadow && paint.blurPx > 0.0f && !sawBlurFromUrl)
                         Warn("CSS filter: 同时写 blur() 与 drop-shadow() 时，阴影按**未模糊**的"
                              "轮廓生成（两者共用同一张离屏图）");
                 }
@@ -8651,6 +9026,73 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
     while (stack.size() > 1)
         popAndPropagate();
     growToContent(stack[0]);
+
+    // ---- v0.16.47：给"带滤镜的空盒子容器"补一个包围盒 ----
+    // <g>/<svg> 这类容器自己的盒子常常是 0×0（子形状是绝对定位的独立节点），而滤镜的
+    // 离屏图层框 = 节点框外扩 3σ —— 框是空的就把层里的内容**全裁掉**（实测：套了
+    // filter="url(#f)" 的 <g> 整块消失）。所以只给"带滤镜且盒子为空"的节点算一个
+    // 子树并集当盒子；别的容器不动，免得悄悄改变命中与布局。
+    {
+        auto hasFx = [&](uint16_t nid) {
+            for (const auto& pn2 : paintNodes) {
+                if (pn2.nodeId == nid && pn2.blurPx > 0.0f) return true;
+            }
+            for (const auto& ds2 : dropShadowNodes) {
+                if (ds2.nodeId == nid) return true;
+            }
+            return false;
+        };
+        std::vector<char> needBox(nodes.size(), 0);
+        bool anyNeed = false;
+        for (size_t ni = 1; ni < nodes.size(); ni++) {
+            if (nodes[ni].width >= 1.0f && nodes[ni].height >= 1.0f) continue;
+            if (!hasFx(nodes[ni].id)) continue;
+            needBox[ni] = 1;
+            anyNeed = true;
+        }
+        if (anyNeed) {
+            // 绝对坐标已经算好：把每个**非空**节点的框并进它所有祖先的累加器（一遍就够了，
+            // 与元素顺序无关）。id 与 nodes 下标同序（下面根节点自动撑大那段也这么假设）。
+            const float kBig = 1e30f;
+            std::vector<float> ux0(nodes.size(), kBig), uy0(nodes.size(), kBig);
+            std::vector<float> ux1(nodes.size(), -kBig), uy1(nodes.size(), -kBig);
+            for (size_t ni = 1; ni < nodes.size(); ni++) {
+                const BinUINode& nd = nodes[ni];
+                if (nd.width <= 0.0f && nd.height <= 0.0f) continue;
+                const float ax0 = nd.x, ay0 = nd.y;
+                const float ax1 = nd.x + nd.width, ay1 = nd.y + nd.height;
+                uint16_t pid = nd.parentId;
+                int guard = 0;
+                while (pid != 0xFFFF && pid != 0 && pid < nodes.size() && guard++ < 256) {
+                    if (ax0 < ux0[pid]) ux0[pid] = ax0;
+                    if (ay0 < uy0[pid]) uy0[pid] = ay0;
+                    if (ax1 > ux1[pid]) ux1[pid] = ax1;
+                    if (ay1 > uy1[pid]) uy1[pid] = ay1;
+                    pid = nodes[pid].parentId;
+                }
+            }
+            for (size_t ni = 1; ni < nodes.size(); ni++) {
+                if (!needBox[ni]) continue;
+                if (ux1[ni] <= ux0[ni] || uy1[ni] <= uy0[ni]) continue;   // 子树也是空的
+                // 只**放大盒子**去盖住子树，不动自己的 x/y：动位置会把流式光标和兄弟
+                // 一起带偏（<g> 的盒子本来就没有布局意义，只有渲染层框用它）。
+                const float growW = ux1[ni] - nodes[ni].x;
+                const float growH = uy1[ni] - nodes[ni].y;
+                if (growW > nodes[ni].width) nodes[ni].width = growW;
+                if (growH > nodes[ni].height) nodes[ni].height = growH;
+                // 同步重排规格：否则运行期 setSize 会按"自动宽度 = 父内容盒宽/0"把它
+                // 重算回空盒子（实测：编译期补的盒子在 setSize 之后又变回 0×0）。
+                for (auto& sp2 : specNodes) {
+                    if (sp2.nodeId != nodes[ni].id) continue;
+                    sp2.flags &= static_cast<uint16_t>(
+                        ~(SPEC_AUTO_W | SPEC_PCT_W | SPEC_PCT_H | SPEC_FLOW_Y));
+                    sp2.relW = nodes[ni].width;
+                    sp2.relH = nodes[ni].height;
+                    break;
+                }
+            }
+        }
+    }
 
     // 视口 = 窗口：给了尺寸就别让内容把根撑大。
     // 不钳的话，内容比窗口高时根会"长"出窗口（脏矩形、命中、绘制全落到窗口外，
