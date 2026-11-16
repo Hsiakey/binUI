@@ -1181,12 +1181,19 @@ std::vector<uint32_t> BinUIRenderer::drawOrder() const {
         else
             kids[it->second].push_back(i);
     }
-    auto byLayer = [this](uint32_t a, uint32_t b) {
+    // "定位元素"标记：absolute/fixed 之外，**sticky 也算**（CSS：sticky 是 positioned，
+    // 在同一个层叠上下文里按"定位阶段"画在流式内容之后 —— 不这么标的话，钉住的表头
+    // 会被紧随其后的流式内容盖住，表现就是"钉住了但看不见"）。
+    std::vector<uint8_t> positioned(n, 0);
+    for (uint32_t i = 0; i < n; i++)
+        positioned[i] = ((nodes_[i].flags & BINUI_ABSOLUTE) != 0 ||
+                         isStickyPositioned(nodes_[i].id)) ? 1 : 0;
+    auto byLayer = [this, &positioned](uint32_t a, uint32_t b) {
         const int za = nodes_[a].zIndex, zb = nodes_[b].zIndex;
         if (za != zb) return za < zb;
-        const bool aa = (nodes_[a].flags & BINUI_ABSOLUTE) != 0;
-        const bool ab = (nodes_[b].flags & BINUI_ABSOLUTE) != 0;
-        if (aa != ab) return !aa;  // 同层：流式先于 absolute
+        const bool aa = positioned[a] != 0;
+        const bool ab = positioned[b] != 0;
+        if (aa != ab) return !aa;  // 同层：流式先于定位元素
         return a < b;              // 同层同型：DOM 顺序
     };
     for (auto& k : kids) if (k.size() > 1) std::stable_sort(k.begin(), k.end(), byLayer);
@@ -1490,9 +1497,13 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
                 x = cb.ox + cb.cw - r - w;
             }
             if (spec->anchorFlags & ANCHOR_B) {
-                const float b = (spec->anchorFlags & ANCHOR_B_PCT) ? spec->anchorB * cb.ch
-                                                                  : spec->anchorB;
-                y = cb.oy + cb.ch - b - h;
+                // sticky 节点借同一个字段存 top 偏移（见 ANCHOR_STICKY），它**不能**在这里落位 ——
+                // 它是流式节点，位置由上面的流光标给，粘滞是绘制期的事。
+                if (!(spec->anchorFlags & ANCHOR_STICKY)) {
+                    const float b = (spec->anchorFlags & ANCHOR_B_PCT) ? spec->anchorB * cb.ch
+                                                                      : spec->anchorB;
+                    y = cb.oy + cb.ch - b - h;
+                }
             }
         } else {
             x = c.ox + (node.x - c.ox); // 无规格：保持原位
@@ -1757,8 +1768,21 @@ int BinUIRenderer::hitTestEx(float x, float y, bool allowStyled, uint8_t state) 
             }
         }
         float ox = 0, oy = 0;
+        // v0.16.39：sticky 的钳制要在命中里同样生效，否则"看得见但点不到"。
+        // 这里的累加方向是"外 → 内"（k 从最外层祖先往内走），所以每遇到一个 sticky
+        // 祖先时，它上面的滚动视口已经算出来了（portT/portB），位移折进 oy 就是绘制那套。
+        float portT = 0.0f, portB = 0.0f;
+        bool hasPort = false;
         for (int k = cn - 1; k >= 0; k--) {
             const auto& par = nodes_[chain[k]];
+            if (isStickyPositioned(par.id) && hasPort) {
+                const size_t above = (k + 1 < cn) ? chain[k + 1] : static_cast<size_t>(-1);
+                const float blkBottom = (above != static_cast<size_t>(-1))
+                                            ? nodes_[above].y - oy + nodes_[above].height
+                                            : portB;
+                const float inset = stickyTopInset(par.id, portB - portT);
+                oy -= PaintStickyShiftY(par.y - oy, par.height, portT, portB, blkBottom, inset);
+            }
             if (!(par.flags & BINUI_SCROLLABLE)) continue;
             // 视口外内容不可命中（视口 = 容器屏幕矩形）
             if (x < par.x - ox || x > par.x - ox + par.width ||
@@ -1767,9 +1791,22 @@ int BinUIRenderer::hitTestEx(float x, float y, bool allowStyled, uint8_t state) 
                 break;
             }
             auto sit = scroll_.find(par.id);
+            // 视口矩形必须在**加自己的滚动之前**算：滚动不会移动容器本身
+            portT = par.y - oy;
+            portB = portT + par.height;
+            hasPort = true;
             if (sit != scroll_.end()) { ox += sit->second.x; oy += sit->second.y; }
         }
         if (hidden) continue;
+        // 候选节点自己就是 sticky：同样钳一下（它没有"上面的父盒"，用滚动视口底当包含块底）
+        if (isStickyPositioned(node.id) && hasPort) {
+            auto pit2 = nodeIndexById_.find(node.parentId);
+            const float blkBottom = (pit2 != nodeIndexById_.end())
+                                        ? nodes_[pit2->second].y - oy + nodes_[pit2->second].height
+                                        : portB;
+            const float inset = stickyTopInset(node.id, portB - portT);
+            oy -= PaintStickyShiftY(node.y - oy, node.height, portT, portB, blkBottom, inset);
+        }
 
         if (x >= node.x - ox && x <= node.x - ox + node.width &&
             y >= node.y - oy && y <= node.y - oy + node.height) {
@@ -1872,6 +1909,22 @@ bool BinUIRenderer::isFixedPositioned(uint16_t nodeId) const {
     if (i == static_cast<size_t>(-1) || i >= specOf_.size()) return false;
     const BinUISpecNode* s = specOf_[i];
     return s && (s->anchorFlags & ANCHOR_FIXED);
+}
+
+// position: sticky（v0.16.39）：留在文档流，绘制时按滚动视口钳上沿。
+bool BinUIRenderer::isStickyPositioned(uint16_t nodeId) const {
+    const size_t i = nodeIndexOf(nodeId);
+    if (i == static_cast<size_t>(-1) || i >= specOf_.size()) return false;
+    const BinUISpecNode* s = specOf_[i];
+    return s && (s->anchorFlags & ANCHOR_STICKY);
+}
+
+float BinUIRenderer::stickyTopInset(uint16_t nodeId, float portH) const {
+    const size_t i = nodeIndexOf(nodeId);
+    if (i == static_cast<size_t>(-1) || i >= specOf_.size()) return 0.0f;
+    const BinUISpecNode* s = specOf_[i];
+    if (!s || !(s->anchorFlags & ANCHOR_STICKY) || !(s->anchorFlags & ANCHOR_B)) return 0.0f;
+    return (s->anchorFlags & ANCHOR_B_PCT) ? s->anchorB * portH : s->anchorB;
 }
 
 // 禁用（v14）：不进焦点链、不响应悬停/点击/编辑，绘制时后端压到 55% 淡

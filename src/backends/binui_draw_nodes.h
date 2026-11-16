@@ -348,8 +348,11 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     // v30：position:fixed —— 含定位盒是视口，所以不吃祖先滚动偏移、也不吃祖先裁剪视口。
     // 一次算齐（避免在下面那条热循环里反复问渲染器）。
     std::vector<uint8_t> isFixed(nodes.size(), 0);
-    for (size_t i = 0; i < nodes.size(); i++)
+    std::vector<uint8_t> stickyFlag(nodes.size(), 0);
+    for (size_t i = 0; i < nodes.size(); i++) {
         isFixed[i] = renderer.isFixedPositioned(nodes[i].id) ? 1 : 0;
+        stickyFlag[i] = renderer.isStickyPositioned(nodes[i].id) ? 1 : 0;
+    }
     for (size_t i = 0; i < nodes.size(); i++) {
         const auto& node = nodes[i];
         if (node.parentId == 0xFFFF) continue;
@@ -381,6 +384,21 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             hasVp[i] = hasVp[pi];
             vpL[i] = vpL[pi]; vpT[i] = vpT[pi];
             vpR[i] = vpR[pi]; vpB[i] = vpB[pi];
+        }
+        // v0.16.39：position:sticky —— 滚到"滚动视口上沿 + top"就钉住，父容器滚走时被带走。
+        // 位移直接折进 offY（后代继承 ⇒ 整棵子树一起动），布局坐标一个都不改，所以
+        // resize / 局部重排 / 命中都不用为它另算一套。
+        if (stickyFlag[i] && hasVp[i]) {
+            const auto& par = nodes[pi];
+            const float portH = static_cast<float>(vpB[i] - vpT[i]);
+            const float inset = renderer.stickyTopInset(node.id, portH);
+            const float natY = node.y - offY[i];
+            const float blkBottom = par.y - offY[pi] + par.height;
+            const float shift = binui::PaintStickyShiftY(natY, node.height,
+                                                         static_cast<float>(vpT[i]),
+                                                         static_cast<float>(vpB[i]),
+                                                         blkBottom, inset);
+            offY[i] -= shift;
         }
     }
 

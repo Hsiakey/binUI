@@ -2691,16 +2691,72 @@ int run() {
         }
         CHECK(!fixedWarned, "v30f: position:fixed 不再告警（已经是真 fixed）");
 
-        // sticky 仍未实现：必须告警（静默当成 static 会让作者以为写上了）
+        // ---------- v0.16.39：position: sticky ----------
+        // 观测点在**绘制期**（布局坐标刻意不动），所以这里用 hitTest 验证"钉住后的位置"——
+        // 命中和绘制走的是同一份钳制数学（PaintStickyShiftY）。
         {
-            auto sres = CompileBinUIEx(
-                "<app_window width=\"100\" height=\"100\"><html><body>"
-                "<div style=\"position:sticky;top:0;width:50px;height:20px\"></div>"
-                "</body></html></app_window>\n");
+            const char* sui =
+                "<app_window width=\"300\" height=\"200\" bg=\"#101010\"><html><body>\n"
+                "  <div id=\"sc\" style=\"position:absolute;left:0;top:0;width:300px;height:200px;"
+                "overflow:auto\">\n"
+                "    <div id=\"wrap\" style=\"width:300px;height:1200px\">\n"
+                "      <button id=\"hdr\" style=\"width:300px;height:30px;position:sticky;top:0\">H</button>\n"
+                "      <button id=\"pcor\" style=\"width:300px;height:30px;position:sticky;top:10%\">P</button>\n"
+                "      <div id=\"body\" style=\"width:300px;height:1100px\"></div>\n"
+                "    </div>\n"
+                "  </div>\n"
+                "</body></html></app_window>\n";
+            auto sres = CompileBinUIEx(sui);
             bool stickyWarned = false;
             for (const auto& m : sres.warnings)
                 if (m.find("sticky") != std::string::npos) stickyWarned = true;
-            CHECK(stickyWarned, "v30f: position:sticky 明确告警（按 static 处理）");
+            CHECK(!stickyWarned, "v39: 带 top 的 position:sticky 不再告警");
+            BinUIRenderer s;
+            CHECK(s.loadLayout(sres.layout.data(), sres.layout.size()), "v39: sticky 页面可解析");
+            const uint16_t scId = s.findNodeByName("sc");
+            const uint16_t hdrId = s.findNodeByName("hdr");
+            const uint16_t pcorId = s.findNodeByName("pcor");
+            CHECK(s.isStickyPositioned(hdrId), "v39: sticky 标记正确");
+            CHECK(!s.isStickyPositioned(scId), "v39: 普通容器不是 sticky");
+            auto nodeY = [&](uint16_t id) {
+                for (const auto& n : s.getNodes()) if (n.id == id) return n.y;
+                return -1.0f;
+            };
+            const float hdrY0 = nodeY(hdrId);
+            // 滚动 300：布局坐标不动（粘滞是绘制期的事），但命中点仍在视口顶部
+            s.scrollTo(scId, 0.0f, 300.0f);
+            CHECK(s.hitTest(150.0f, 15.0f) == hdrId, "v39: 滚动 300 后表头仍钉在视口顶部（仍能命中）");
+            CHECK(nodeY(hdrId) == hdrY0, "v39: 粘滞不改布局坐标（只改绘制偏移）");
+            // 百分比 inset：30 高的表头按 top:10%（视口 200 → 20px）钉住
+            CHECK(s.hitTest(150.0f, 25.0f) == pcorId, "v39: top:10% 按滚动视口高解析（20px）");
+            // 滚到接近底部：wrap（1200 高）的下沿到屏幕 y=10，表头被父容器带走
+            // （CSS：sticky 元素永不离开包含块 → 表头被压到 -20..10，而不是继续钉在 0）
+            s.scrollTo(scId, 0.0f, 1190.0f);
+            CHECK(s.hitTest(150.0f, 5.0f) == hdrId, "v39: 父容器滚走时表头被带在父盒下沿（仍能命中）");
+            CHECK(s.hitTest(150.0f, 85.0f) != hdrId, "v39: 表头不会被带到远离父盒的位置");
+            // resize 不改 sticky 节点的流式位置（ANCHOR_B 的落位公式必须跳过 sticky）
+            s.scrollTo(scId, 0.0f, 0.0f);
+            s.setSize(300, 260);
+            CHECK(std::fabs(nodeY(hdrId) - hdrY0) < 0.51f, "v39: resize 后 sticky 位置仍由流式布局决定");
+        }
+        // sticky 的两种误用都要告警：没有 top、写了 left
+        {
+            auto r1 = CompileBinUIEx(
+                "<app_window width=\"100\" height=\"100\"><html><body>"
+                "<div style=\"position:sticky;width:50px;height:20px\"></div>"
+                "</body></html></app_window>\n");
+            bool noTop = false;
+            for (const auto& m : r1.warnings)
+                if (m.find("sticky") != std::string::npos && m.find("top") != std::string::npos) noTop = true;
+            CHECK(noTop, "v39: sticky 没写 top 时告警（等价于 static）");
+            auto r2 = CompileBinUIEx(
+                "<app_window width=\"100\" height=\"100\"><html><body>"
+                "<div style=\"position:sticky;top:0;left:8px;width:50px;height:20px\"></div>"
+                "</body></html></app_window>\n");
+            bool lateral = false;
+            for (const auto& m : r2.warnings)
+                if (m.find("sticky") != std::string::npos && m.find("left") != std::string::npos) lateral = true;
+            CHECK(lateral, "v39: sticky 的 left 明确告警（只支持纵向 top）");
         }
 
         BinUIRenderer r;

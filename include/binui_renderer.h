@@ -261,6 +261,10 @@ public:
     // position: fixed（v30）：含定位盒是视口、绘制不吃祖先滚动偏移、不被祖先裁剪、
     // 按根层级的 positioned 阶段绘制。绘制/命中/裁剪三处都要问它，所以单独暴露出来。
     bool isFixedPositioned(uint16_t nodeId) const;
+    // position: sticky（v30）：留在文档流里，绘制时按滚动视口钳制上沿。
+    bool isStickyPositioned(uint16_t nodeId) const;
+    // sticky 的 top 偏移（px；portH = 滚动视口高，用来解析百分比）。非 sticky 返回 0。
+    float stickyTopInset(uint16_t nodeId, float portH) const;
 
     // v14 表单/文字附加标记（BinUITextFlag；无扩展绘制条目返回 0）
     uint32_t textFlagsOf(uint16_t nodeId) const {

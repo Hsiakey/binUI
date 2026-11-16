@@ -6650,8 +6650,35 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             if (sh.empty()) sh = "18";
         }
 
-        if (!sx.empty()) { auto p = ParseLenPct(sx, 0, curCtx, "left"); lx = p.value; if (p.pct) pctX = p.value / 100.0f; hasX = true; }
-        if (!sy.empty()) { auto p = ParseLenPct(sy, 0, curCtx, "top"); ly = p.value; if (p.pct) pctY = p.value / 100.0f; hasY = true; }
+        // ---- position（必须在解析 left/top 之前读出来）----
+        // 为什么前移：sticky 的 `top` 是"粘滞偏移"，不是定位坐标 —— 若先按 left/top 解析，
+        // 这个节点会被当成"显式定位"（hasY = true）脱离文档流，sticky 就变成了 absolute。
+        std::string pos = lowerStr(style.count("position") ? style.at("position") : "");
+        bool isAbs = (pos == "absolute" || pos == "fixed");
+        // v30：`position: fixed` 是**真的钉在窗口上**，不是"贴父容器"：
+        // 含定位盒换成视口（根节点内容盒），left/top/right/bottom/百分比全按视口解析，
+        // 绘制不吃祖先滚动偏移、不被祖先 overflow 裁剪、层级提到根层级（见 ANCHOR_FIXED）。
+        // 下面所有位置换算统一走 cb（= fixed 时的视口上下文），口径与渲染器重排一致。
+        const bool isFixed = (pos == "fixed");
+        const Ctx& cb = isFixed ? stack.front() : pc;
+        // v0.16.39：`position: sticky` —— 留在文档流里，绘制时按滚动视口钳制（见 ANCHOR_STICKY）。
+        // top 偏移单独接住（不写进 ly/hasY），left 只支持横向的粘滞，其余边明确告警。
+        const bool isSticky = (pos == "sticky");
+        float stickyTopPx = 0.0f, stickyTopPct = -1.0f;
+        bool  hasStickyTop = false;
+        if (isSticky) {
+            if (!sy.empty()) {
+                auto p = ParseLenPct(sy, 0, curCtx, "top");
+                stickyTopPx = p.value;
+                if (p.pct) stickyTopPct = p.value / 100.0f;
+                hasStickyTop = true;
+            }
+            if (!hasStickyTop)
+                Warn("position:sticky 没有写 top：没有钉住的阈值，等价于 static（请写 top:0 之类）");
+        }
+
+        if (!sx.empty() && !isSticky) { auto p = ParseLenPct(sx, 0, curCtx, "left"); lx = p.value; if (p.pct) pctX = p.value / 100.0f; hasX = true; }
+        if (!sy.empty() && !isSticky) { auto p = ParseLenPct(sy, 0, curCtx, "top"); ly = p.value; if (p.pct) pctY = p.value / 100.0f; hasY = true; }
         // v30：贴右 / 贴下（CSS right / bottom / inset）。位置 = 父内容盒宽高 − 偏移 − 自身尺寸，
         // 而自身尺寸要到下面才算得出来，所以这里只解析偏移，落位在 w/lh 定下来之后。
         const std::string sr = pick(e.attrs, style, "right", "right", "");
@@ -6659,14 +6686,17 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         float rightPx = -1.0f, bottomPx = -1.0f, pctR = -1.0f, pctB = -1.0f;
         if (!sr.empty()) { auto p = ParseLenPct(sr, 0, curCtx, "right"); rightPx = p.value; if (p.pct) pctR = p.value / 100.0f; }
         if (!sb.empty()) { auto p = ParseLenPct(sb, 0, curCtx, "bottom"); bottomPx = p.value; if (p.pct) pctB = p.value / 100.0f; }
+        // sticky 只做纵向：其它三边明确告警（静默忽略会让作者以为钉住了）
+        if (isSticky && (!sx.empty() || !sr.empty() || !sb.empty()))
+            Warn("position:sticky 目前只支持纵向的 top（left/right/bottom 已忽略）");
         // inset：四值简写（1/2/4 个值都按 CSS 的简写规则展开），等价于 top/right/bottom/left。
         // 只展开作者**没单独写**的边（长属性优先，与 CSS 层叠一致）。
         if (style.count("inset") || style.count("inset-top")) {
             const auto ins = parseBox(style, "inset", "inset-top", "inset-right",
                                       "inset-bottom", "inset-left", -1.0f);
-            if (ins[0] >= 0 && !hasY) { ly = ins[0]; hasY = true; }
+            if (ins[0] >= 0 && !hasY && !isSticky) { ly = ins[0]; hasY = true; }
             if (ins[2] >= 0 && sb.empty()) { bottomPx = ins[2]; pctB = -1.0f; }
-            if (ins[3] >= 0 && !hasX) { lx = ins[3]; hasX = true; }
+            if (ins[3] >= 0 && !hasX && !isSticky) { lx = ins[3]; hasX = true; }
             if (ins[1] >= 0 && sr.empty()) { rightPx = ins[1]; pctR = -1.0f; }
         }
         if (!sw.empty()) { auto p = ParseLenPct(sw, 0, curCtx, "width"); if (p.pct) pctW = p.value / 100.0f; hasW = true; }
@@ -6689,19 +6719,6 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         parseCon("max-height", mxH, mxHp);
 
         // position:absolute/fixed 且未显式 left/top：视为 (0,0)（脱离文档流 + 绘制在最上层）
-        std::string pos = lowerStr(style.count("position") ? style.at("position") : "");
-        bool isAbs = (pos == "absolute" || pos == "fixed");
-        // v30：`position: fixed` 是**真的钉在窗口上**，不是"贴父容器"：
-        // 含定位盒换成视口（根节点内容盒），left/top/right/bottom/百分比全按视口解析，
-        // 绘制不吃祖先滚动偏移、不被祖先 overflow 裁剪、层级提到根层级（见 ANCHOR_FIXED）。
-        // 下面所有位置换算统一走 cb（= fixed 时的视口上下文），口径与渲染器重排一致。
-        const bool isFixed = (pos == "fixed");
-        const Ctx& cb = isFixed ? stack.front() : pc;
-        // sticky 是"半固定"（在父容器范围内跟随流式、滚到阈值后钉住），需要滚动时重算
-        // 布局坐标，现在没有那条钩子。静默当成 static 是错的（作者以为写上了），明确告警。
-        if (pos == "sticky")
-            Warn("CSS position:sticky 暂不支持（按 static 处理，不钉在视口边上）；"
-                 "需要整块固定不动的 chrome 请用 position:fixed");
         // 作者到底写没写 left/top —— 必须在这两行"绝对定位补 0"之前记下来，
         // 否则 right/bottom 会被误判成"同时写了 left/right"。
         const bool declaredX = hasX, declaredY = hasY;
@@ -8264,6 +8281,13 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         // v30：贴右/贴下 —— 静态布局已经在上面算好落位，这两位是给运行期 resize 重排用的
         // （没有它们，窗口变宽后"贴右"的元素会留在左边）。口径与编译期完全一致。
         if (isFixed) sp.anchorFlags |= ANCHOR_FIXED;   // 重排的含定位盒 = 视口
+        // v0.16.39：sticky 的 top 偏移借 anchorB 存（它本来是 absolute 的 bottom，
+        // 同一个节点不可能两者兼有）。运行期钳制见 binui_paint.h 的 PaintStickyShiftY。
+        if (isSticky && hasStickyTop) {
+            sp.anchorB = (stickyTopPct >= 0) ? stickyTopPct : stickyTopPx;
+            sp.anchorFlags |= ANCHOR_STICKY | ANCHOR_B;
+            if (stickyTopPct >= 0) sp.anchorFlags |= ANCHOR_B_PCT;
+        }
         if (useRight) {
             sp.anchorR = (pctR >= 0) ? pctR : rightPx;
             sp.flags |= SPEC_ANCHOR_R;

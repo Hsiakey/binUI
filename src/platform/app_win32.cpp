@@ -1125,6 +1125,17 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
             vpL[i] = vpL[pi]; vpT[i] = vpT[pi];
             vpR[i] = vpR[pi]; vpB[i] = vpB[pi];
         }
+        // v0.16.39：position:sticky（与 GPU 后端那份同一个函数、同一套口径）
+        if (renderer.isStickyPositioned(node.id) && hasVp[i]) {
+            const auto& par = nodes[pi];
+            const float portH = static_cast<float>(vpB[i] - vpT[i]);
+            const float inset = renderer.stickyTopInset(node.id, portH);
+            const float blkBottom = par.y - offY[pi] + par.height;
+            offY[i] -= binui::PaintStickyShiftY(node.y - offY[i], node.height,
+                                                static_cast<float>(vpT[i]),
+                                                static_cast<float>(vpB[i]),
+                                                blkBottom, inset);
+        }
     }
 
     // 根节点背景（外层已把 hdc 裁剪到脏矩形，只填充脏区）

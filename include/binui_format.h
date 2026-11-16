@@ -140,6 +140,15 @@ enum BinUIAnchorFlag : uint8_t {
     //     等价于 CSS "fixed 建立层叠上下文，按最近的层叠上下文（这里是根）参与排序"。
     // 占用 v30 新增的 anchorFlags 空闲位，旧产物恒 0，不升 BINUI_VERSION。
     ANCHOR_FIXED  = 1 << 2,
+    // ---- v30：position: sticky（在滚动容器里"滚到边就钉住"）----
+    // 与 fixed 不同，sticky **留在文档流里**：布局位置照常按流式算，只有**绘制时**按
+    // "滚动视口上沿 + top 偏移"钳制，越界部分平移回来（见 binui_paint.h 的
+    // PaintStickyShiftY）。钳制的上下界：上 = 滚动视口上沿 + top，下 = 父容器（包含块）
+    // 下沿 − 自身高（滚过父容器时被带走，与 CSS 一致）。
+    // 偏移存在 `anchorB`（它与 absolute 的 bottom 互斥：同一个节点不可能既是 sticky
+    // 又是脱离流的定位），百分比用 ANCHOR_B_PCT 标记。渲染器重排时**不要**把
+    // ANCHOR_B 的落位公式套在 sticky 节点上（它是流式节点，位置由流光标给）。
+    ANCHOR_STICKY = 1 << 3,
 };
 
 #pragma pack(push, 1)

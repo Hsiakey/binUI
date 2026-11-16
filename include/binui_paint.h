@@ -142,6 +142,29 @@ inline uint32_t PaintLerpArgbGradDither(uint32_t a, uint32_t b, float t,
     return PaintLerpArgbDither(a, b, t, errR, errG, errB);
 }
 
+// position: sticky 的纵向钳制（v0.16.39）。参数全是**屏幕坐标**，返回"额外位移"：
+//   0 = 不动；正 = 向下平移（元素被滚出视口上沿 → 钉在边上）；负 = 向上平移（父容器滚走时被带走）。
+//
+//   naturalTop        元素本该在的屏幕 y（已含祖先滚动偏移）
+//   h                 元素高
+//   portTop/Bottom    最近的可滚动祖先的视口上下沿（屏幕）
+//   blockBottom       包含块（父节点盒）的下沿（屏幕）—— 越过它就被父容器带走
+//   insetTop          `top` 偏移（px；百分比由调用方先折算）
+//
+// 为什么只钳纵向：桌面 UI 里 99% 的 sticky 是"表头/分组标题钉在列表顶部"，横向 sticky
+// （左列钉住）需求极少，留到真有人要时再补 —— 少一个维度就少一半边角情形（见编译器告警）。
+inline float PaintStickyShiftY(float naturalTop, float h,
+                               float portTop, float portBottom,
+                               float blockBottom, float insetTop) {
+    (void)portBottom;                             // 只用来算 insetTop 的百分比（调用方折算）
+    const float pinTop = portTop + insetTop;      // 钉住后的上沿
+    const float lowest = blockBottom - h;         // 不能越过包含块下沿（被父容器带走）
+    float t = naturalTop;
+    if (t < pinTop) t = pinTop;                   // 滚过上沿 → 钉住
+    if (t > lowest) t = lowest;                   // 父容器滚走 → 被带走（CSS：永不离开包含块）
+    return t - naturalTop;
+}
+
 // 圆角矩形在"距边 dy"处的水平内缩（dy 从边的中心算起，超过 radius 就没内缩）
 //   dy = 0   → 内缩 = radius（圆角矩形最高处只剩中间那段）
 //   dy >= r  → 0（进入直边）
