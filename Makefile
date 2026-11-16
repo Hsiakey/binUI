@@ -395,6 +395,19 @@ $(BIN_DIR)/check_examples$(EXT): tools/check_examples.cpp $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A) $(GL_LIBS)
 
+# "电篱笆"版的零警告检查：每个 C++ 堆块末尾挂一个不可访问页，越界写/读已释放内存
+# 立刻崩并打印分配栈。本机 mingw 没有 libasan、也没权限开 page heap，这是替代品 ——
+# v0.16.46 就是靠它定位到编译器里一处悬空引用（栈引用被 push_back 扩容搞失效）。
+# 慢两个数量级，所以单独成目标，不进 all。
+$(BIN_DIR)/check_examples_guard$(EXT): tools/check_examples.cpp tools/guard_alloc.cpp $(LIB_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ tools/check_examples.cpp \
+	    tools/guard_alloc.cpp $(LIB_A) $(GL_LIBS)
+
+.PHONY: check-guard
+check-guard: $(BIN_DIR)/check_examples_guard$(EXT)
+	$(BIN_DIR)/check_examples_guard$(EXT) examples
+
 # ★ 这条规则（以及下面 gl_shot/d3d11_shot 直接编译 .cpp 的几条）**没有头依赖**：
 #   改了 include/binui_paint.h、src/backends/binui_draw_nodes.h 这类共享头之后，
 #   这些 exe 不会重编，验出来的还是旧行为（本仓库在 §7.6.4 踩过一次，0.16.13 又踩了一次：

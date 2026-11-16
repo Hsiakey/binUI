@@ -4712,6 +4712,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     }
 
     std::vector<Ctx> stack;
+    // 栈深最多 = 元素数 + 1（每个元素最多压一层）：一次性预留，push_back 就不会扩容。
+    // 扩容会把下面 `Ctx& pc = stack.back()` 弄成悬空引用（踩过：读到已释放的视口宽高，
+    // 走到 0xC0000005）。
+    stack.reserve(elems.size() + 1);
     stack.push_back({ 0, 0, 0, 0, rootW, 0, 0xFFFFFFFFu, false, false });
 
     // viewBox="minX minY w h"：四个数（SVG 允许逗号/空白分隔）
@@ -8543,6 +8547,10 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             specFlex.push_back(fs);
         }
 
+        // push_back 之后还要用父上下文这几个字段 → 先拷出来。栈已经 reserve 过，
+        // 但别让正确性依赖"不会扩容"：pc 是 stack.back() 的引用，扩容即悬空。
+        const float pcOx = pc.ox, pcOy = pc.oy, pcContentW = pc.contentW;
+        const float pcVpW = pc.vpW, pcVpH = pc.vpH;
         stack.push_back({ n.id, x + pad, y + pad, 0, w - 2 * pad, nodes.size() - 1,
                           textCol, hasOwnText || pc.hasText, !hasY && !flexPlaced,
                           nodeLetterSpacing });
@@ -8625,16 +8633,16 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                 child.svgXform = base;
             } else if (e.tag == "g") {
                 // <g> 不建立坐标系：子元素与 g 共用父容器原点与内容宽度
-                child.ox = pc.ox;
-                child.oy = pc.oy;
-                child.contentW = pc.contentW;
+                child.ox = pcOx;
+                child.oy = pcOy;
+                child.contentW = pcContentW;
                 child.svgXform = svgX;
-                child.vpW = pc.vpW;      // 视口尺寸跟着祖先走（userSpaceOnUse 的百分比要用）
-                child.vpH = pc.vpH;
+                child.vpW = pcVpW;      // 视口尺寸跟着祖先走（userSpaceOnUse 的百分比要用）
+                child.vpH = pcVpH;
             } else {
                 child.svgXform = svgX;
-                child.vpW = pc.vpW;
-                child.vpH = pc.vpH;
+                child.vpW = pcVpW;
+                child.vpH = pcVpH;
             }
         }
     }
