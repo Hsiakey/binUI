@@ -1101,6 +1101,9 @@ void drawNodesGDI(void* hdcCtx, const BinUIRenderer& renderer, const void* clipR
         const size_t pi = pit->second;
         parentIdx[i] = static_cast<int32_t>(pi);
         if (hidden[pi] || !(nodes[pi].flags & BINUI_VISIBLE)) { hidden[i] = 1; continue; }
+        // v30：position:fixed 的含定位盒是视口 —— 不吃祖先滚动偏移、不继承祖先裁剪视口。
+        // 遗留后端只跟这一条（层级/裁剪链是渲染器给的，自动一致）；不做别的 fixed 例外。
+        if (renderer.isFixedPositioned(node.id)) continue;
         offX[i] = offX[pi];
         offY[i] = offY[pi];
         const auto& par = nodes[pi];

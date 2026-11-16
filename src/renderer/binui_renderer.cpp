@@ -1159,10 +1159,24 @@ std::vector<uint32_t> BinUIRenderer::drawOrder() const {
     std::vector<std::vector<uint32_t>> kids(n);
     std::vector<uint32_t> roots;
     roots.reserve(8);
+    // v30：position:fixed 的绘制层级按"根层级"排（CSS：fixed 建立层叠上下文，
+    // 按最近的层叠上下文 = 根，参与 positioned 阶段）。挂在父节点下面画的话，
+    // 声明在后面的卡片会盖住右下角的悬浮按钮/标题栏 —— 那正是 fixed 最常见的用法。
+    // 命中顺序也一起跟着对（后画 = 先命中），视觉与点击不会打架。
+    uint32_t rootIdx = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (nodes_[i].parentId == 0xFFFF) { rootIdx = i; break; }
+    }
+    // 规格段与节点同下标（见 loadLayout），所以这里直接按 i 读，不走 id → 下标映射：
+    // drawOrder 每帧都跑，一次哈希探测就是几百纳秒。
     for (uint32_t i = 0; i < n; i++) {
         const uint16_t pid = nodes_[i].parentId;
         auto it = (pid == 0xFFFF) ? nodeIndexById_.end() : nodeIndexById_.find(pid);
-        if (it == nodeIndexById_.end() || it->second >= n || it->second == i)
+        const bool fixedHere = i < specOf_.size() && specOf_[i] &&
+                               (specOf_[i]->anchorFlags & ANCHOR_FIXED);
+        if (fixedHere && i != rootIdx)
+            kids[rootIdx].push_back(i);    // 提到根层级（子树仍挂在它自己下面）
+        else if (it == nodeIndexById_.end() || it->second >= n || it->second == i)
             roots.push_back(i);            // 无父 / 悬空父 / 自指：当根处理
         else
             kids[it->second].push_back(i);
@@ -1379,6 +1393,13 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
                       rootNode.width - 2 * rootNode.padding,
                       rootNode.height - 2 * rootNode.padding, 0 });
 
+    // v30：position:fixed 的含定位盒 = **视口**（根节点内容盒）。局部重排（relayoutSubtree）
+    // 时 stack[0] 只是子树根，不能当视口用，所以视口上下文单独算一份。
+    RCtx vpCtx{ nodes_[0].id, 0,
+                nodes_[0].x + nodes_[0].padding, nodes_[0].y + nodes_[0].padding,
+                nodes_[0].width - 2 * nodes_[0].padding,
+                nodes_[0].height - 2 * nodes_[0].padding, 0 };
+
     // 容器高度不足时扩展到容纳流式内容（滚动容器保持固定视口）
     auto growContainer = [&](RCtx& c) {
         NodeInfo& cn = nodes_[c.nodeIdx];
@@ -1401,6 +1422,10 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
         // 局部重排：父链已经弹回起点（说明这个节点不在本子树里）——跳过
         if (stack.back().nodeId != node.parentId) continue;
         RCtx& c = stack.back();
+        // v30：position:fixed 的百分比 / 锚定位 / 落位全部按**视口**算，不按父容器。
+        // 与编译期同一份口径（那里是 cb = stack.front()）。
+        const bool isFixed = spec && (spec->anchorFlags & ANCHOR_FIXED);
+        const RCtx& cb = isFixed ? vpCtx : c;
 
         // ---- 尺寸 ----
         float w, h;
@@ -1409,16 +1434,16 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
             w = fp->second[2];
             h = fp->second[3];
         } else {
-            if (spec && (spec->flags & SPEC_PCT_W)) w = spec->pctW * c.cw;
-            else if (spec && (spec->flags & SPEC_AUTO_W)) w = c.cw - spec->ml - spec->mr;
+            if (spec && (spec->flags & SPEC_PCT_W)) w = spec->pctW * cb.cw;
+            else if (spec && (spec->flags & SPEC_AUTO_W)) w = cb.cw - spec->ml - spec->mr;
             else if (spec && spec->relW >= 0) w = spec->relW;
             else w = node.width;
-            if (spec && (spec->flags & SPEC_PCT_H)) h = spec->pctH * c.ch;
+            if (spec && (spec->flags & SPEC_PCT_H)) h = spec->pctH * cb.ch;
             else if (spec && spec->relH >= 0) h = spec->relH;
             else h = node.height;
             if (spec) {
-                w = ClampSize(w, spec, c.cw, SPEC_MINW_PCT, SPEC_MAXW_PCT, spec->minW, spec->maxW);
-                h = ClampSize(h, spec, c.ch, SPEC_MINH_PCT, SPEC_MAXH_PCT, spec->minH, spec->maxH);
+                w = ClampSize(w, spec, cb.cw, SPEC_MINW_PCT, SPEC_MAXW_PCT, spec->minW, spec->maxW);
+                h = ClampSize(h, spec, cb.ch, SPEC_MINH_PCT, SPEC_MAXH_PCT, spec->minH, spec->maxH);
             }
         }
         // 尺寸覆盖（缩放拖拽钉住的节点）：规格段算出来的宽高让位给宿主拖出来的值，
@@ -1437,7 +1462,7 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
             if (natural > 0.0f) {
                 h = natural;
                 if (spec)
-                    h = ClampSize(h, spec, c.ch, SPEC_MINH_PCT, SPEC_MAXH_PCT,
+                    h = ClampSize(h, spec, cb.ch, SPEC_MINH_PCT, SPEC_MAXH_PCT,
                                   spec->minH, spec->maxH);
             }
         }
@@ -1453,21 +1478,21 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
             x = c.ox + spec->relX;
             c.cursorY += spec->mt + h + spec->mb;
         } else if (spec) {
-            // 显式定位（absolute/explicit）：百分比或编译期锚点
-            x = (spec->flags & SPEC_PCT_X) ? c.ox + spec->pctX * c.cw : c.ox + spec->relX;
-            y = (spec->flags & SPEC_PCT_Y) ? c.oy + spec->pctY * c.ch : c.oy + spec->relY;
+            // 显式定位（absolute/explicit）：百分比或编译期锚点（fixed 用视口上下文 cb）
+            x = (spec->flags & SPEC_PCT_X) ? cb.ox + spec->pctX * cb.cw : cb.ox + spec->relX;
+            y = (spec->flags & SPEC_PCT_Y) ? cb.oy + spec->pctY * cb.ch : cb.oy + spec->relY;
             // v30：贴右 / 贴下（CSS right / bottom）。与编译期同一个式子：
-            //   位置 = 父内容盒边 − 偏移 − 自身尺寸
+            //   位置 = 含定位盒边 − 偏移 − 自身尺寸
             // 不这么写的话，窗口变宽后"贴右"的元素会留在左边（静态布局是对的，一 resize 就错）。
             if (spec->flags & SPEC_ANCHOR_R) {
-                const float r = (spec->flags & SPEC_ANCHOR_R_PCT) ? spec->anchorR * c.cw
+                const float r = (spec->flags & SPEC_ANCHOR_R_PCT) ? spec->anchorR * cb.cw
                                                                  : spec->anchorR;
-                x = c.ox + c.cw - r - w;
+                x = cb.ox + cb.cw - r - w;
             }
             if (spec->anchorFlags & ANCHOR_B) {
-                const float b = (spec->anchorFlags & ANCHOR_B_PCT) ? spec->anchorB * c.ch
+                const float b = (spec->anchorFlags & ANCHOR_B_PCT) ? spec->anchorB * cb.ch
                                                                   : spec->anchorB;
-                y = c.oy + c.ch - b - h;
+                y = cb.oy + cb.ch - b - h;
             }
         } else {
             x = c.ox + (node.x - c.ox); // 无规格：保持原位
@@ -1614,7 +1639,7 @@ void BinUIRenderer::clampScrollOffsets() {
         if (maxY < 0) maxY = 0;
         float maxX = 0;
         for (const auto& ch : nodes_) {
-            if (ch.parentId == id)
+            if (ch.parentId == id && !isFixedPositioned(ch.id))
                 maxX = std::max(maxX, ch.x + ch.width - n.x);
         }
         maxX -= n.width;
@@ -1706,14 +1731,30 @@ int BinUIRenderer::hitTestEx(float x, float y, bool allowStyled, uint8_t state) 
         int cn = 0;
         size_t idx = i;
         bool hidden = false;
-        while (cn < 64) {
-            const auto& anc = nodes_[idx];
-            if (anc.parentId == 0xFFFF) break;
-            auto pit = nodeIndexById_.find(anc.parentId);
-            if (pit == nodeIndexById_.end()) break;
-            idx = pit->second;
-            chain[cn++] = idx;
-            if (!(nodes_[idx].flags & BINUI_VISIBLE)) { hidden = true; break; }
+        if (isFixedPositioned(node.id)) {
+            // v30：fixed 命中不累计任何滚动偏移、也不受祖先 overflow 视口限制
+            // （含定位盒是视口）。但祖先链的**可见性**仍然要看：display:none 里面的
+            // fixed 元素不该能点。所以只走可见性，不往 chain 里放裁剪/滚动祖先。
+            while (true) {
+                const auto& anc = nodes_[idx];
+                if (anc.parentId == 0xFFFF) break;
+                auto pit = nodeIndexById_.find(anc.parentId);
+                if (pit == nodeIndexById_.end()) break;
+                idx = pit->second;
+                if (!(nodes_[idx].flags & BINUI_VISIBLE)) { hidden = true; break; }
+            }
+        } else {
+            while (cn < 64) {
+                const auto& anc = nodes_[idx];
+                if (anc.parentId == 0xFFFF) break;
+                auto pit = nodeIndexById_.find(anc.parentId);
+                if (pit == nodeIndexById_.end()) break;
+                idx = pit->second;
+                chain[cn++] = idx;
+                if (!(nodes_[idx].flags & BINUI_VISIBLE)) { hidden = true; break; }
+                // 遇到 fixed 祖先就停：再往上的祖先不裁它、也不跟着它滚
+                if (isFixedPositioned(nodes_[idx].id)) break;
+            }
         }
         float ox = 0, oy = 0;
         for (int k = cn - 1; k >= 0; k--) {
@@ -1825,6 +1866,14 @@ bool BinUIRenderer::isUserScrollable(uint16_t nodeId) const {
     return isScrollable(nodeId) && clipOnly_.count(nodeId) == 0;
 }
 
+// position: fixed（v30）：含定位盒 = 视口。绘制/命中/裁剪/滚动内容高四处都要问它。
+bool BinUIRenderer::isFixedPositioned(uint16_t nodeId) const {
+    const size_t i = nodeIndexOf(nodeId);
+    if (i == static_cast<size_t>(-1) || i >= specOf_.size()) return false;
+    const BinUISpecNode* s = specOf_[i];
+    return s && (s->anchorFlags & ANCHOR_FIXED);
+}
+
 // 禁用（v14）：不进焦点链、不响应悬停/点击/编辑，绘制时后端压到 55% 淡
 bool BinUIRenderer::isDisabled(uint16_t nodeId) const {
     auto it = nodeIndexById_.find(nodeId);
@@ -1853,7 +1902,9 @@ float BinUIRenderer::contentHeight(uint16_t nodeId) const {
     const auto& c = nodes_[it->second];
     float bottom = 0;
     for (const auto& n : nodes_) {
-        if (n.parentId == nodeId)
+        // fixed 子节点挂在视口上，不该把容器的可滚动内容撑高
+        // （右下角的悬浮按钮会让滚动条凭空多出一截）
+        if (n.parentId == nodeId && !isFixedPositioned(n.id))
             bottom = std::max(bottom, n.y + n.height - c.y);
     }
     return bottom;
@@ -1866,7 +1917,7 @@ float BinUIRenderer::contentWidth(uint16_t nodeId) const {
     const auto& c = nodes_[it->second];
     float right = 0;
     for (const auto& n : nodes_) {
-        if (n.parentId == nodeId)
+        if (n.parentId == nodeId && !isFixedPositioned(n.id))
             right = std::max(right, n.x + n.width - c.x);
     }
     return right;
@@ -1917,7 +1968,7 @@ void BinUIRenderer::scrollTo(uint16_t nodeId, float x, float y) {
     float maxY = contentHeight(nodeId) - c.height;
     float maxX = 0;
     for (const auto& n : nodes_) {
-        if (n.parentId == nodeId)
+        if (n.parentId == nodeId && !isFixedPositioned(n.id))
             maxX = std::max(maxX, n.x + n.width - c.x);
     }
     maxX -= c.width;
@@ -3840,6 +3891,9 @@ std::vector<uint16_t> BinUIRenderer::stepAnimations() {
 }
 
 void BinUIRenderer::clippingAncestors(uint16_t nodeId, std::vector<uint16_t>& out) const {    out.clear();
+    // v30：position:fixed 的含定位盒是视口 —— 祖先的 overflow / <svg> 一律不裁它
+    // （CSS 同理：fixed 元素只受根视口约束）。它自己的子树照旧被它裁。
+    if (isFixedPositioned(nodeId)) return;
     // 每个节点都要走一次这条链：用 nodeIndexOf（稠密 id 走数组直读）而不是哈希表，
     // 否则每一步都是一次 unordered_map 探测。
     size_t cur = nodeIndexOf(nodeId);
@@ -3854,6 +3908,8 @@ void BinUIRenderer::clippingAncestors(uint16_t nodeId, std::vector<uint16_t>& ou
         // <svg> 的默认 overflow 就是 hidden（浏览器语义），而 v14 及以前三端都没实现，
         // 子图形会画到容器外面 —— 这里补上，路径溢出才能被容器边界收住。
         if ((par.flags & BINUI_SCROLLABLE) || par.type == BINUI_SVG) out.push_back(par.id);
+        // fixed 祖先之上不再裁：它的含定位盒也是视口，祖先的 overflow 对它无效。
+        if (isFixedPositioned(par.id)) break;
     }
 }
 

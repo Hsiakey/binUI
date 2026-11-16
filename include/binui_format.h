@@ -132,6 +132,14 @@ enum BinUISpecFlag : uint16_t {
 enum BinUIAnchorFlag : uint8_t {
     ANCHOR_B      = 1 << 0,   // anchorB 有效（像素）
     ANCHOR_B_PCT  = 1 << 1,   // anchorB 是父内容盒高的百分比（0..1）
+    // ---- v30：position: fixed（真正的"钉在窗口上"）----
+    // 含定位盒从**父内容盒**换成**视口（根节点内容盒）**，并连带三条运行期语义：
+    //   · 百分比 / right / bottom 全部按视口解析（不是父容器）；
+    //   · 绘制不吃祖先的滚动偏移，也不被祖先的 overflow / <svg> 裁剪；
+    //   · 绘制层级提到根层级的 positioned 阶段（挂在后面的兄弟卡片盖不住它）——
+    //     等价于 CSS "fixed 建立层叠上下文，按最近的层叠上下文（这里是根）参与排序"。
+    // 占用 v30 新增的 anchorFlags 空闲位，旧产物恒 0，不升 BINUI_VERSION。
+    ANCHOR_FIXED  = 1 << 2,
 };
 
 #pragma pack(push, 1)
@@ -164,7 +172,7 @@ struct BinUISpecNode {
     // ---- v30：贴右/贴下定位（见 BinUISpecFlag 的 SPEC_ANCHOR_R 与 BinUIAnchorFlag）----
     float    anchorR;      // right 偏移（SPEC_ANCHOR_R：像素；SPEC_ANCHOR_R_PCT：0..1）
     float    anchorB;      // bottom 偏移（ANCHOR_B：像素；ANCHOR_B_PCT：0..1）
-    uint8_t  anchorFlags;  // BinUIAnchorFlag（bottom 那两个标记；flags 的 16 位已用满）
+    uint8_t  anchorFlags;  // BinUIAnchorFlag（bottom 的两个标记 + ANCHOR_FIXED；flags 的 16 位已用满）
     uint8_t  reserve2[3];  // 对齐填充
 };
 #pragma pack(pop)

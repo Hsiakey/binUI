@@ -345,6 +345,11 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     std::vector<int32_t> vpL(nodes.size(), 0), vpT(nodes.size(), 0),
                          vpR(nodes.size(), 0), vpB(nodes.size(), 0);
     std::vector<uint8_t> hasVp(nodes.size(), 0);
+    // v30：position:fixed —— 含定位盒是视口，所以不吃祖先滚动偏移、也不吃祖先裁剪视口。
+    // 一次算齐（避免在下面那条热循环里反复问渲染器）。
+    std::vector<uint8_t> isFixed(nodes.size(), 0);
+    for (size_t i = 0; i < nodes.size(); i++)
+        isFixed[i] = renderer.isFixedPositioned(nodes[i].id) ? 1 : 0;
     for (size_t i = 0; i < nodes.size(); i++) {
         const auto& node = nodes[i];
         if (node.parentId == 0xFFFF) continue;
@@ -352,6 +357,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         if (pi == static_cast<size_t>(-1)) continue;
         parentIdx[i] = static_cast<int32_t>(pi);
         if (hidden[pi] || !(nodes[pi].flags & BINUI_VISIBLE)) { hidden[i] = 1; continue; }
+        if (isFixed[i]) continue;   // 偏移/视口都从 0 开始（祖先的滚动与裁剪到此为止）
         offX[i] = offX[pi];
         offY[i] = offY[pi];
         const auto& par = nodes[pi];

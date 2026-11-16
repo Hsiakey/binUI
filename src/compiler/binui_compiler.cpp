@@ -4794,6 +4794,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             if (kdisp == "none") continue;
             if (ke.tag=="head" || ke.tag=="title" || ke.tag=="meta" || ke.tag=="link" ||
                 ke.tag=="script" || ke.tag=="style" || ke.tag=="app_window") continue;
+            // position:fixed 脱离流（含定位盒是视口），不该占 flex 的一个槽位：
+            // 不滤掉的话，一个右下角的悬浮按钮会在按钮行里凭空挤出 120px 的空位。
+            const std::string kpos = lowerStr(kst.count("position") ? kst.at("position") : "");
+            if (kpos == "fixed") continue;
             active.push_back(k);
         }
         size_t n = active.size();
@@ -6687,12 +6691,17 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         // position:absolute/fixed 且未显式 left/top：视为 (0,0)（脱离文档流 + 绘制在最上层）
         std::string pos = lowerStr(style.count("position") ? style.at("position") : "");
         bool isAbs = (pos == "absolute" || pos == "fixed");
-        // v30：`position: fixed` 现在按 absolute 处理（贴父容器、会跟着滚动）—— 这是**静默**的
-        // 语义偏差，必须告警。真要"固定不动"得让 fixed 节点不吃祖先滚动偏移、以窗口为包含块，
-        // 是另一条（见 docs/future.md）。
-        if (pos == "fixed")
-            Warn("CSS position:fixed 目前按 absolute 处理（位置以父容器为基准、会随滚动移动）；"
-                 "需要【固定不动】的效果请放在不滚动的层里");
+        // v30：`position: fixed` 是**真的钉在窗口上**，不是"贴父容器"：
+        // 含定位盒换成视口（根节点内容盒），left/top/right/bottom/百分比全按视口解析，
+        // 绘制不吃祖先滚动偏移、不被祖先 overflow 裁剪、层级提到根层级（见 ANCHOR_FIXED）。
+        // 下面所有位置换算统一走 cb（= fixed 时的视口上下文），口径与渲染器重排一致。
+        const bool isFixed = (pos == "fixed");
+        const Ctx& cb = isFixed ? stack.front() : pc;
+        // sticky 是"半固定"（在父容器范围内跟随流式、滚到阈值后钉住），需要滚动时重算
+        // 布局坐标，现在没有那条钩子。静默当成 static 是错的（作者以为写上了），明确告警。
+        if (pos == "sticky")
+            Warn("CSS position:sticky 暂不支持（按 static 处理，不钉在视口边上）；"
+                 "需要整块固定不动的 chrome 请用 position:fixed");
         // 作者到底写没写 left/top —— 必须在这两行"绝对定位补 0"之前记下来，
         // 否则 right/bottom 会被误判成"同时写了 left/right"。
         const bool declaredX = hasX, declaredY = hasY;
@@ -6740,32 +6749,36 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             mt = m[0]; mr = m[1]; mb = m[2]; ml = m[3];
         }
 
-        // 百分比：相对父容器内容盒解析（width 相对父内容宽，height/left/top 相对父内容高）
+        // 百分比：相对**含定位盒**内容盒解析（width 相对内容宽，height/left/top 相对内容高）。
+        // 普通元素 = 父容器内容盒；position:fixed = 视口（cb，见上面的 isFixed）。
         float pcContentH = 0;
         {
-            const BinUINode& pcn = nodes[pc.nodeIdx];
+            const BinUINode& pcn = nodes[cb.nodeIdx];
             pcContentH = pcn.height - 2.0f * pcn.padding;
             if (pcContentH < 0) pcContentH = 0;
         }
-        if (pctX >= 0) lx = pctX * pc.contentW;
+        if (pctX >= 0) lx = pctX * cb.contentW;
         if (pctY >= 0) ly = pctY * pcContentH;
         if (pctH >= 0) lh = pctH * pcContentH;
 
-        // 尺寸约束按父内容盒解析（% 时）后的实际像素值；-1 = 未指定
-        float effMnW = mnW >= 0 ? (mnWp ? mnW * pc.contentW : mnW) : -1;
-        float effMxW = mxW >= 0 ? (mxWp ? mxW * pc.contentW : mxW) : -1;
+        // 尺寸约束按含定位盒内容解析（% 时）后的实际像素值；-1 = 未指定
+        float effMnW = mnW >= 0 ? (mnWp ? mnW * cb.contentW : mnW) : -1;
+        float effMxW = mxW >= 0 ? (mxWp ? mxW * cb.contentW : mxW) : -1;
         float effMnH = mnH >= 0 ? (mnHp ? mnH * pcContentH : mnH) : -1;
         float effMxH = mxH >= 0 ? (mxHp ? mxH * pcContentH : mxH) : -1;
 
         float x, y, w;
         bool flexPlaced = false;
         float baseW = 0, baseH = lh; // 显式声明值（未钳制）：运行时重排基准
-        auto flIt = flexLayouts.find(e.parentIdx);
+        // position:fixed 不参与父级的 flex 排布（CSS：脱离流 = 不是 flex 项）。
+        // 注意 layoutFlex 那边也已经把它从子项里滤掉了，这里再挡一次是防"父级是 flex
+        // 但 fixed 子项恰好落在 flexLayouts 里"的旧产物。
+        auto flIt = isFixed ? flexLayouts.end() : flexLayouts.find(e.parentIdx);
         if (flIt != flexLayouts.end()) {
             auto pIt = flIt->second.find(ei);
             if (pIt != flIt->second.end()) {
                 const float* p = pIt->second;
-                x = pc.ox + p[0]; y = pc.oy + p[1]; w = p[2]; lh = p[3];
+                x = cb.ox + p[0]; y = cb.oy + p[1]; w = p[2]; lh = p[3];
                 flexPlaced = true;
             }
         }
@@ -6775,27 +6788,27 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             if (effMnH >= 0 && lh < effMnH) lh = effMnH;
             if (effMxH >= 0 && lh > effMxH) lh = effMxH;
             // 宽度要先算出来：贴右定位的 x 依赖它
-            if (hasW) w = (pctW >= 0) ? pctW * pc.contentW : parseLen(sw, 0);
-            else      w = pc.contentW - (ml + mr > 0 ? (ml + mr) : 0);
+            if (hasW) w = (pctW >= 0) ? pctW * cb.contentW : parseLen(sw, 0);
+            else      w = cb.contentW - (ml + mr > 0 ? (ml + mr) : 0);
             baseW = w;
             if (effMnW >= 0 && w < effMnW) w = effMnW;
             if (effMxW >= 0 && w > effMxW) w = effMxW;
             if (useRight) {
-                // v30：x = 父内容盒右边 − 偏移 − 自身宽（与渲染器重排同一个式子）
-                const float r = (pctR >= 0) ? pctR * pc.contentW : rightPx;
-                x = pc.ox + pc.contentW - r - w;
-                lx = x - pc.ox;
+                // v30：x = 含定位盒右边 − 偏移 − 自身宽（与渲染器重排同一个式子）
+                const float r = (pctR >= 0) ? pctR * cb.contentW : rightPx;
+                x = cb.ox + cb.contentW - r - w;
+                lx = x - cb.ox;
             } else if (hasX) {
-                x = pc.ox + lx;
+                x = cb.ox + lx;
             } else {
-                x = pc.ox + ml;
+                x = cb.ox + ml;
             }
             if (useBottom) {
                 const float b = (pctB >= 0) ? pctB * pcContentH : bottomPx;
-                y = pc.oy + pcContentH - b - lh;
-                ly = y - pc.oy;
+                y = cb.oy + pcContentH - b - lh;
+                ly = y - cb.oy;
             } else if (hasY) {
-                y = pc.oy + ly;
+                y = cb.oy + ly;
             } else {
                 y = pc.oy + pc.cursorY + mt;
                 pc.cursorY += mt + lh + mb;
@@ -8246,10 +8259,11 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             if (!hasY) sp.flags |= SPEC_FLOW_Y;
             if (!hasW) sp.flags |= SPEC_AUTO_W;
         }
-        sp.relX = x - pc.ox;
-        sp.relY = y - pc.oy;
+        sp.relX = x - cb.ox;
+        sp.relY = y - cb.oy;
         // v30：贴右/贴下 —— 静态布局已经在上面算好落位，这两位是给运行期 resize 重排用的
         // （没有它们，窗口变宽后"贴右"的元素会留在左边）。口径与编译期完全一致。
+        if (isFixed) sp.anchorFlags |= ANCHOR_FIXED;   // 重排的含定位盒 = 视口
         if (useRight) {
             sp.anchorR = (pctR >= 0) ? pctR : rightPx;
             sp.flags |= SPEC_ANCHOR_R;

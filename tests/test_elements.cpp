@@ -2629,6 +2629,142 @@ int run() {
         CHECK(boxOf("in", x, y, w, h) && std::fabs(x - 10.0f) < 0.51f && std::fabs(y - 10.0f) < 0.51f, "v30r: resize 后 inset 仍是左上角固定偏移");
     }
 
+    // ---------- v30：position: fixed（真的钉在窗口上）----------
+    // 关键差别只有一条：含定位盒是**视口**而不是父容器。围绕它验证四件事 ——
+    //   1) 落位/百分比按窗口算（不是按父容器）；
+    //   2) 窗口尺寸变了跟着重算；
+    //   3) 不吃祖先滚动偏移、不被祖先 overflow 裁剪（命中/裁剪/绘制一致）；
+    //   4) 不把祖先的可滚动内容撑高、层级提到根层级（后面的兄弟盖不住）。
+    {
+        const char* ui =
+            "<app_window width=\"640\" height=\"420\" bg=\"#101010\"><html><body>\n"
+            "  <div id=\"scroll\" style=\"position:absolute;left:0;top:0;width:400px;height:200px;"
+            "overflow:auto\">\n"
+            "    <div id=\"tall\" style=\"width:400px;height:600px\"></div>\n"
+            "    <button id=\"fab\" style=\"position:fixed;right:10px;bottom:10px;width:40px;"
+            "height:40px\">F</button>\n"
+            "  </div>\n"
+            "  <div id=\"mini\" style=\"position:absolute;left:400px;top:0;width:100px;height:60px;"
+            "overflow:hidden\">\n"
+            "    <button id=\"fab2\" style=\"position:fixed;right:0;bottom:0;width:30px;"
+            "height:30px\">x</button>\n"
+            "  </div>\n"
+            "  <div id=\"card\" style=\"position:absolute;left:0;top:210px;width:300px;"
+            "height:100px\"></div>\n"
+            "  <div id=\"head\" style=\"width:300px;height:40px\">\n"
+            "    <button id=\"fab3\" style=\"position:fixed;left:0;top:0;width:36px;"
+            "height:36px\">h</button>\n"
+            "  </div>\n"
+            "  <div id=\"after\" style=\"width:300px;height:40px\"></div>\n"
+            "  <div id=\"onTop\" style=\"position:absolute;left:0;top:0;width:10px;"
+            "height:10px\"></div>\n"
+            "  <div id=\"hp\" style=\"position:absolute;left:20px;top:300px;width:300px;height:80px\">\n"
+            "    <div id=\"pc\" style=\"position:fixed;left:10%;top:50%;width:50%;height:20px\"></div>\n"
+            "  </div>\n"
+            "</body></html></app_window>\n";
+        auto res = CompileBinUIEx(ui);
+        // 作者写 position:fixed 不该再被警告"按 absolute 处理"
+        bool fixedWarned = false;
+        for (const auto& wmsg : res.warnings) {
+            if (wmsg.find("position:fixed") != std::string::npos) fixedWarned = true;
+        }
+        CHECK(!fixedWarned, "v30f: position:fixed 不再告警（已经是真 fixed）");
+
+        // sticky 仍未实现：必须告警（静默当成 static 会让作者以为写上了）
+        {
+            auto sres = CompileBinUIEx(
+                "<app_window width=\"100\" height=\"100\"><html><body>"
+                "<div style=\"position:sticky;top:0;width:50px;height:20px\"></div>"
+                "</body></html></app_window>\n");
+            bool stickyWarned = false;
+            for (const auto& m : sres.warnings)
+                if (m.find("sticky") != std::string::npos) stickyWarned = true;
+            CHECK(stickyWarned, "v30f: position:sticky 明确告警（按 static 处理）");
+        }
+
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "v30f: 布局可解析");
+        auto nodeOf = [&](const char* name) -> const BinUIRenderer::NodeInfo* {
+            const uint16_t id = r.findNodeByName(name);
+            for (const auto& n : r.getNodes())
+                if (n.id == id) return &n;
+            return nullptr;
+        };
+        auto boxOf = [&](const char* name, float& x, float& y, float& w, float& h) {
+            const auto* n = nodeOf(name);
+            if (!n) return false;
+            x = n->x; y = n->y; w = n->width; h = n->height;
+            return true;
+        };
+        float x = 0, y = 0, w = 0, h = 0;
+        // ① 落位按视口：640×420（父容器只有 400×200，还带滚动）
+        CHECK(boxOf("fab", x, y, w, h) && std::fabs(x - 590.0f) < 0.51f &&
+              std::fabs(y - 370.0f) < 0.51f,
+              "v30f: fixed 的 right/bottom 按窗口算（不受父容器尺寸/位置影响）");
+        // ② 百分比按视口解析（width:50% = 320，left:10% = 64，top:50% = 210）
+        CHECK(boxOf("pc", x, y, w, h) && std::fabs(x - 64.0f) < 0.51f &&
+              std::fabs(y - 210.0f) < 0.51f && std::fabs(w - 320.0f) < 0.51f,
+              "v30f: fixed 的百分比按视口解析（不是父内容盒）");
+        // ③ 标记正确：fixed 与普通子节点分得开
+        CHECK(r.isFixedPositioned(r.findNodeByName("fab")), "v30f: fab 被标记为 fixed");
+        CHECK(!r.isFixedPositioned(r.findNodeByName("tall")), "v30f: 普通子节点不是 fixed");
+
+        // ④ 不把祖先的可滚动内容撑高（fab2 在 60px 高的容器里、底部贴窗）
+        CHECK(std::fabs(r.contentHeight(r.findNodeByName("mini")) - 0.0f) < 0.51f,
+              "v30f: fixed 子节点不算进容器的可滚动内容高度");
+
+        // ⑤ 不被祖先 overflow 裁剪：clippingAncestors 为空
+        {
+            std::vector<uint16_t> ancs;
+            r.clippingAncestors(r.findNodeByName("fab"), ancs);
+            CHECK(ancs.empty(), "v30f: fixed 不被祖先 overflow 裁剪");
+            r.clippingAncestors(r.findNodeByName("tall"), ancs);
+            CHECK(!ancs.empty() && ancs[0] == r.findNodeByName("scroll"),
+                  "v30f: 普通子节点照旧被滚动容器裁剪");
+        }
+
+        // ⑥ 滚动之后仍然钉在窗口上：滚动偏移 0 时的屏幕坐标处仍能命中
+        CHECK(r.hitTest(595.0f, 375.0f) == r.findNodeByName("fab"),
+              "v30f: 滚动前命中 fixed 按钮");
+        r.scrollTo(r.findNodeByName("scroll"), 0.0f, 200.0f);
+        CHECK(std::fabs((r.scrollState(r.findNodeByName("scroll"))->y) - 200.0f) < 0.51f,
+              "v30f: 滚动确实生效");
+        CHECK(r.hitTest(595.0f, 375.0f) == r.findNodeByName("fab"),
+              "v30f: 滚动后 fixed 按钮仍在原屏幕位置（不吃祖先滚动偏移）");
+        // 普通子节点则跟着滚走：tall 顶到 -200，原位置不再命中它自己
+        CHECK(boxOf("fab", x, y, w, h) && std::fabs(y - 370.0f) < 0.51f,
+              "v30f: 滚动不改 fixed 的布局坐标");
+
+        // ⑦ 层级提到根：fixed 按 CSS 的"positioned 阶段"绘制 —— 在同一个层叠上下文（根）里
+        // 所有定位元素都画在**流式内容之后**。fab3 挂在 #head（流式）里，声明在它后面的流式
+        // 兄弟 #after 不能盖住它；而同样是定位元素的 #card 按 DOM 顺序仍然在它上面（CSS 一致，
+        // 要盖过后面的定位兄弟得写 z-index）。
+        {
+            const auto order = r.drawOrder();
+            const auto& nds = r.getNodes();
+            int posFab3 = -1, posCard = -1, posAfter = -1, posOnTop = -1;
+            for (size_t k = 0; k < order.size(); k++) {
+                const uint16_t id = nds[order[k]].id;
+                if (id == r.findNodeByName("fab3")) posFab3 = (int)k;
+                if (id == r.findNodeByName("card")) posCard = (int)k;
+                if (id == r.findNodeByName("after")) posAfter = (int)k;
+                if (id == r.findNodeByName("onTop")) posOnTop = (int)k;
+            }
+            CHECK(posFab3 > posAfter, "v30f: fixed 在流式内容之后绘制（后面的流式兄弟盖不住它）");
+            CHECK(posCard < posFab3 && posOnTop > posFab3,
+                  "v30f: 同级定位兄弟仍按 DOM 顺序（CSS 一致，要压过它得用 z-index）");
+        }
+
+        // ⑧ 窗口变化后重新按新视口落位
+        r.setSize(800, 500);
+        CHECK(boxOf("fab", x, y, w, h) && std::fabs(x - 750.0f) < 0.51f &&
+              std::fabs(y - 450.0f) < 0.51f,
+              "v30f: resize 后 fixed 重新贴新窗口的右下角");
+        CHECK(boxOf("pc", x, y, w, h) && std::fabs(x - 80.0f) < 0.51f &&
+              std::fabs(w - 400.0f) < 0.51f,
+              "v30f: resize 后 fixed 的百分比按新视口重算");
+    }
+
     if (g_fail == 0) std::printf("test_paint: 全部通过\n");
     return g_fail;
 }

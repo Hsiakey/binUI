@@ -1,0 +1,21 @@
+<html width="660" height="470" bg="#0e1216">
+  <!-- v0.16.36：position: fixed —— 含定位盒 = 视口（不是父容器），不吃祖先滚动偏移、
+       不被祖先 overflow 裁剪、按根层级的 positioned 阶段绘制。只进跨后端比对，
+       不建 GDI 基准图（这条用例的价值是"三个后端画在同一个位置"，不是 GDI 对齐）。
+
+       覆盖：
+       1) fixed 挂在**滚动容器内部**，右侧贴边 + 底部贴边：落位按窗口 660×470 算，
+          不是按容器的 320×220（写错的话它会缩在容器里）；
+       2) 滚动容器里再放一个 fixed 的"角标"，位置应在容器**外面**（不被裁剪）；
+       3) fixed 在流式内容之前声明、后面还有流式兄弟：层级必须提到定位阶段（不被盖住）；
+       4) 百分比 + right/bottom：50% 宽、右侧 20px、底部 20px。 -->
+  <div style="position:absolute;left:20px;top:30px;width:320px;height:220px;overflow:auto;background:#151b21;border-radius:10px">
+    <div style="width:320px;height:600px;background:linear-gradient(180deg,#1b2a38,#0f1620)"></div>
+    <div style="position:fixed;right:20px;bottom:20px;width:120px;height:44px;background:#2f6bf0;border-radius:10px"></div>
+    <div style="position:fixed;left:300px;top:120px;width:60px;height:60px;background:#f0b429;border-radius:6px;border:3px solid #ff5a5a"></div>
+  </div>
+  <div style="position:absolute;left:380px;top:40px;width:240px;height:60px;background:#243040"></div>
+  <div style="position:fixed;right:20px;top:20px;width:140px;height:36px;background:#22c55e;border-radius:8px"></div>
+  <div style="position:fixed;left:10%;bottom:10%;width:50%;height:30px;background:rgba(255,90,150,0.85);border-radius:6px"></div>
+  <div style="position:fixed;left:20px;top:20px;width:60px;height:60px;border-radius:50%;background:#a855f7"></div>
+</html>

@@ -1,7 +1,7 @@
 # binUI - 跨平台描述式 UI 核心
 
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.16.36-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.16.37-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
 [![Format v29](https://img.shields.io/badge/binUI%20format-v29-orange.svg)](include/binui_format.h)
@@ -372,7 +372,8 @@ HTML5 编译规则：
   **行内文本标签**（`h1~h6 p span label a b i em strong small u s strike del ins mark code kbd samp var abbr cite q dfn time sub sup li td th dt dd figcaption summary caption legend title`）一律编成 `BINUI_LABEL`；`<br>`→文本内硬换行（编译成 `'\n'`，并撑开未声明高度的节点），`<li>`→文本（父为 `<ul>` 自动加 `• `，父为 `<ol>` 自动加序号）。
   **没有行内格式化上下文**：行内元素各占一行（`<p>a <b>b</b></p>` 里的 `<b>` 会换行），同一行混排多种样式需要富文本段（未实现，编译期会警告一次）。
 - 定位：支持显式 `x/y/w/h` 属性，或 `style` 中的 `left/top/width/height`；**子元素坐标相对父容器内容盒**（父位置 + padding），未指定坐标的元素在**父容器内**按文档流自上而下堆叠。
-- **贴右 / 贴下（v30，v0.16.36）**：`right` / `bottom` 与 `inset` 四值简写（`inset:10px` / `10px 20px`）。位置 = **父内容盒边 − 偏移 − 自身尺寸**，`%` 相对父内容盒宽/高；编译期算一次落位，运行期 `setSize` 用规格段的 `SPEC_ANCHOR_R` / `ANCHOR_B` **重算一遍**（否则窗口变宽后"贴右"会留在左边）。同时写 `left` 和 `right` 时按 `left`（与 CSS 定宽元素一致，编译期告警）。`position: fixed` 仍按 `absolute` 处理并**明确告警**（"固定不动"需要另一套：不吃祖先滚动偏移 + 以窗口为包含块，见 `docs/future.md`）。
+- **贴右 / 贴下（v30，v0.16.36）**：`right` / `bottom` 与 `inset` 四值简写（`inset:10px` / `10px 20px`）。位置 = **父内容盒边 − 偏移 − 自身尺寸**，`%` 相对父内容盒宽/高；编译期算一次落位，运行期 `setSize` 用规格段的 `SPEC_ANCHOR_R` / `ANCHOR_B` **重算一遍**（否则窗口变宽后"贴右"会留在左边）。同时写 `left` 和 `right` 时按 `left`（与 CSS 定宽元素一致，编译期告警）。
+- **`position: fixed`（v0.16.37）**：真的钉在窗口上（0.16.36 及以前按 `absolute` 处理）。四条语义一起按 CSS 对齐：① 含定位盒 = **视口**（`left/top/right/bottom` 与百分比都按根节点内容盒解析，不再按父容器）；② 绘制**不吃祖先滚动偏移**；③ 不被祖先 `overflow` / `<svg>` 裁剪（命中测试同步）；④ 层级提到根层级的 positioned 阶段 —— 在同一个层叠上下文里画在**流式内容之后**，所以"卡片里声明的 fixed 悬浮按钮"不会被后面的流式兄弟盖住，而同级定位兄弟仍按 DOM 顺序（要压过它得写 `z-index`，与浏览器一致）。另外 `contentHeight`/`contentWidth`/`scrollTo`/flex 布局都会**跳过** fixed 子节点（否则一个悬浮按钮会在滚动容器里凭空撑出可滚区域、在按钮行里挤出一个空位）。`sticky` 还没做（`docs/future.md` 待办）。
 - 层级布局：每个容器有独立流光标，流式子元素排布在容器内部；容器高度不足时自动扩展到容纳其流式内容。
 - 边距：`margin`（及 `margin-top/right/bottom/left`，支持 1~4 值简写）影响流式间距与左右内缩。
 - 内边距：`padding`（及 `padding-top`）存入节点，绘制文本时内缩，并作为子元素的偏移基准。
@@ -419,7 +420,7 @@ HTML5 编译规则：
 - **输入框的强调色可主题化（v14 起）**：输入框的文字/光标/底部 2px 强调线以前写死 `#BB86FC`（紫），现在优先用作者声明的文字色（`paint.textColor`），没声明才回退紫；强调线压到 35% 免得在浅底上成一道黑杠。
 - **GDI 后端补上 SVG 线段**：`BINUI_LINE`（`<line>`/`<polyline>`/`<polygon>`）以前在 GDI 画布后端**没有绘制分支**，一根都画不出来（GL/D3D 正常）。现在按端点包围盒单独裁剪后 `MoveToEx/LineTo`，三端一致。
 - **GDI 单行文本的换行阈值（v21 起统一）**：v14 起 GDI 只在"超宽 20% 以上"才 `DT_WORDBREAK`（当时 GPU 后端画单行从不换行，阈值松一点免得窄盒子里的短标签乱折）。v21 起两端统一成**放不下就折行**：LABEL 按盒子宽度自然换行，详见下面「文字换行（v21，自然排版）」。
-- **已知不生效的 CSS 属性会打编译警告**（每条属性全文档只提示一次）：`letter-spacing`、`word-break`、`visibility`、`float`、`outline`、`cursor`、`grid-template-columns`、`text-overflow`、`object-fit`、静态 `transform`（只有状态伪类里的 `transform:scale()` 生效）、`aspect-ratio`。**`flex-wrap` / `flex-shrink` / `align-self` / `order` / `right` / `bottom` / `inset` 都已实现**（v22 / v30），不再告警。`border` / `font-weight` / `line-height` / `text-decoration` 自 v13、`font-style` / `white-space` 自 v14、`box-shadow` 自 v23（v0.16.14）、`text-shadow` 自 v24（v0.16.16）、`image-slice` 自 v25（v0.16.19）、`filter` 的 `grayscale`/`sepia`/`saturate`/`hue-rotate`/`invert`/`contrast`/`brightness` 自 v26（v0.16.22）起已实现，不再告警；`filter: blur()` / `drop-shadow()` / `url(#f)` 与 `text-shadow` 的第二层仍逐条告警。
+- **已知不生效的 CSS 属性会打编译警告**（每条属性全文档只提示一次）：`letter-spacing`、`word-break`、`visibility`、`float`、`outline`、`cursor`、`grid-template-columns`、`text-overflow`、`object-fit`、`position: sticky`、静态 `transform`（只有状态伪类里的 `transform:scale()` 生效）、`aspect-ratio`。**`flex-wrap` / `flex-shrink` / `align-self` / `order` / `right` / `bottom` / `inset` / `position:fixed` 都已实现**（v22 / v30 / v0.16.37），不再告警。`border` / `font-weight` / `line-height` / `text-decoration` 自 v13、`font-style` / `white-space` 自 v14、`box-shadow` 自 v23（v0.16.14）、`text-shadow` 自 v24（v0.16.16）、`image-slice` 自 v25（v0.16.19）、`filter` 的 `grayscale`/`sepia`/`saturate`/`hue-rotate`/`invert`/`contrast`/`brightness` 自 v26（v0.16.22）起已实现，不再告警；`filter: blur()` / `drop-shadow()` / `url(#f)` 与 `text-shadow` 的第二层仍逐条告警。
 - **HTML 标签/属性也会体检**（只查不改，HTML 模式生效，XML 允许自定义标签）：未识别的标签按容器处理并警告一次；**没有对应实现**的属性（`name`/`for`/`required`/`maxlength`/`pattern`/`tabindex`/`target`/`rel`… ）同样警告一次。认得但只能糊弄过去的标签会说明白它会变成什么（`<table>` 行列堆叠、`<select>` 选项竖排、`<textarea>` 不可编辑、`<details>` 不折叠、`<progress>` 无外观）。`data-*` / `aria-*` 不告警。
 - **元素默认样式（v14 内置 UA 样式表）**：UA 声明是最低优先级 —— 作者写什么都覆盖它。`h1~h6` 加粗（字号梯度 28/24/20/18/16/14），`b/strong/th` 700，`i/em/cite/var/dfn` 斜体，`u/ins` 下划线，`s/del/strike` 删除线，`mark` 浅黄底深字，`hr` 一条 2px 中灰线，`a` 下划线，`pre` 保留原始换行与缩进，`sub/sup` 按 0.75em 行内排（**无基线偏移**）。
 

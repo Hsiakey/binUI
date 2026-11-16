@@ -5,6 +5,54 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.16.37] - 2026-11-16 【格式 v30】
+
+写常见界面的第二个门槛：**`position: fixed` 是真的固定定位**（0.16.36 还只是"按 absolute
+处理 + 告警"）。标题栏、工具条、右下角悬浮按钮、页面角标这类"不随内容滚动"的 chrome，现在
+写 CSS 就能得到浏览器里的那个行为，不再需要"把它塞进一个不滚动的层里"这种绕法。
+
+### 加 — `position: fixed`（`ANCHOR_FIXED`，格式不变，仍 v30）
+
+四条语义一起对上 CSS：
+
+- **含定位盒 = 视口**：`left/top/right/bottom` 与百分比都按**根节点内容盒**解析，不再按父容器。
+  编译期静态布局与运行期重排（`setSize` / 局部重排）走同一份口径 —— 规格段复用 0.16.36 的
+  `SPEC_ANCHOR_R` / `ANCHOR_B`，只多一个 `ANCHOR_FIXED` 位（`anchorFlags` 的空闲位，字节数
+  不变，所以不升格式号）。
+- **不吃祖先滚动偏移**：`drawNodesBinUI` 里 `offX/offY` 的继承链在 fixed 节点处**归零**
+  （`hasVp` 一并清掉，祖先的裁剪视口也到此为止）。实测（`docs/issues/assets/fixed.html`，
+  `offscreen_render --scrollTo 200`）：两帧差异的包围盒正好是滚动容器本身
+  `(20,30)-(338,250)`，五个 fixed 元素逐字节不变 —— 证据图
+  `docs/issues/assets/fixed-scroll.png`（左=未滚、中=差异像素、右=滚 200）。
+- **不被祖先 `overflow` / `<svg>` 裁剪**：`clippingAncestors()` 遇到 fixed 节点就停；fixed
+  节点自己也直接返回空链（它只受根视口约束）。命中测试同步：fixed 节点的祖先链只查可见性，
+  不累加滚动偏移、不判祖先视口。
+- **层级提到根**：`drawOrder()` 把 fixed 节点挂到**根节点的子级**参与排序（子树仍挂在它
+  自己下面）。依据是 CSS 的绘制模型：同一个层叠上下文里所有 positioned 元素都画在**流式
+  内容之后**，于是"卡片里声明的 fixed 按钮"不会被后面声明的流式兄弟盖住；同为定位元素
+  的兄弟仍按 DOM 顺序（要压过它得写 `z-index`，与浏览器一致）。
+
+### 顺带 — 三处配套修正（不改这三处就等于没做）
+
+- `contentHeight()` / `contentWidth()` / `scrollTo()` / `clampScrollOffsets()` 都**跳过
+  fixed 子节点**：否则右下角一个 `fixed` 悬浮按钮会把滚动容器的可滚动内容多算出一截
+  （滚动条凭空变长、能滚到一片空白）。
+- **flex 容器不把 fixed 子项当 flex 项**：`layoutFlex` 的活跃子项里滤掉 `position:fixed`
+  （不滤的话，按钮行里一个 fixed 角标会凭空挤出它的宽度），编译期与重排两侧都挡。
+- GDI 遗留后端只补最小的一条（`offX/offY` 归零）：visible 位置一致，其余（层级 / 裁剪链）
+  本来就在渲染器侧共享。
+
+### 像素门禁
+
+`make test` 新增 12 条断言（落位按视口 640×420、百分比按视口、`isFixedPositioned` 标记、
+不算进滚动内容高、`clippingAncestors` 为空、滚动后命中仍在原位、绘制顺序提到流式之后、
+`setSize(800,500)` 后重新贴边）。新用例 `docs/issues/assets/fixed.html` 进跨后端比对：
+GL vs VK、D3D11 vs GL 均 **0 不同像素**；GDI 基准 16/16 零差异；`make partial` diff 56 /
+max 1 通过；`check_examples` 16 个示例 0 问题。
+
+性能：`drawOrder` 里按**下标**直接读规格段（不走 id → 下标映射），实测 `features` 27.0 µs
+（改前 27.6）、`appshow` 46.5~47.9 µs（改前 47.4），GL 一帧 0.064 / 0.072 ms —— 均在噪声内。
+
 ## [0.16.36] - 2026-11-16 【格式 v30】
 
 写常见界面的第一个门槛：**贴右 / 贴下定位**（`right` / `bottom` / `inset`）。以前只有
