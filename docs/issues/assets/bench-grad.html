@@ -1,0 +1,22 @@
+<html width="1280" height="900" bg="#101418">
+  <!-- draw_bench 的"条带爆炸"用例：12 张 320×180 的 135° 渐变卡。
+       每张卡按真正的渐变轴切条带（逐行取圆角区间 + 沿 x 自适应切段），实测
+       约 3.7k 条/卡 → 整页 45,014 条/帧、≈5.4 MB 顶点。这是 binUI 里唯一
+       还在"每帧一万个四边形"量级的场景，`make bench-draw` 盯着它。
+       为什么用 135°：轴对齐的 90°/180° 只切 1 条/行，压不出条带数；
+       加圆角是为了让每行还要做左右内缩（真实卡片的样子）。 -->
+  <div style="position:absolute;left:30px;top:30px;width:320px;height:180px;border-radius:16px;background:linear-gradient(135deg,#ff7a59,#4a6cf7)"></div>
+  <div style="position:absolute;left:320px;top:30px;width:320px;height:180px;border-radius:16px;background:linear-gradient(135deg,#ff7a59,#4a6cf7)"></div>
+  <div style="position:absolute;left:610px;top:30px;width:320px;height:180px;border-radius:16px;background:linear-gradient(135deg,#ff7a59,#4a6cf7)"></div>
+  <div style="position:absolute;left:900px;top:30px;width:320px;height:180px;border-radius:16px;background:linear-gradient(135deg,#ff7a59,#4a6cf7)"></div>
+
+  <div style="position:absolute;left:30px;top:240px;width:320px;height:180px;border-radius:16px;background:linear-gradient(45deg,#22d3ee,#a855f7)"></div>
+  <div style="position:absolute;left:320px;top:240px;width:320px;height:180px;border-radius:16px;background:linear-gradient(45deg,#22d3ee,#a855f7)"></div>
+  <div style="position:absolute;left:610px;top:240px;width:320px;height:180px;border-radius:16px;background:linear-gradient(45deg,#22d3ee,#a855f7)"></div>
+  <div style="position:absolute;left:900px;top:240px;width:320px;height:180px;border-radius:16px;background:linear-gradient(45deg,#22d3ee,#a855f7)"></div>
+
+  <div style="position:absolute;left:30px;top:450px;width:320px;height:180px;border-radius:16px;background:linear-gradient(225deg,#f97316,#ef4444)"></div>
+  <div style="position:absolute;left:320px;top:450px;width:320px;height:180px;border-radius:16px;background:linear-gradient(225deg,#f97316,#ef4444)"></div>
+  <div style="position:absolute;left:610px;top:450px;width:320px;height:180px;border-radius:16px;background:linear-gradient(225deg,#f97316,#ef4444)"></div>
+  <div style="position:absolute;left:900px;top:450px;width:320px;height:180px;border-radius:16px;background:linear-gradient(225deg,#f97316,#ef4444)"></div>
+</html>

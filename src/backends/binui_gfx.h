@@ -63,6 +63,11 @@ public:
                           uint32_t color) = 0;
     virtual void strokeRounded(float x, float y, float w, float h, float radius,
                                float thickness, uint32_t color) = 0;
+    // （v0.16.33 试过再加一条 `fillBands` 批量原语：把渐变底/边框的千级条带一次发完。
+    //  实测在 GL 上 0.299 → 0.288 ms（3.7%，在噪声内）—— 因为条带贵在"写 6 个顶点"，
+    //  不贵在虚调用。撤回，不留一个没有收益的契约面。真要把那页压下去，得让条带数量
+    //  本身下降：四角带色四边形，或整块做成图层纹理。见 docs/future.md。）
+
     // ---- 图片（v0.16.15：子矩形 + 染色）----
     // u0..v1 是**源图的归一化子矩形**，tint 与纹理相乘（0xFFFFFFFF = 原色）。
     // 为什么需要这两个参数：后端没有"圆角裁剪"能力，圆角图片是"按行切细条、每条只画

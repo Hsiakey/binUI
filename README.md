@@ -1,7 +1,7 @@
 # binUI - 跨平台描述式 UI 核心
 
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.16.32-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.16.33-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
 [![Format v29](https://img.shields.io/badge/binUI%20format-v29-orange.svg)](include/binui_format.h)
@@ -42,7 +42,8 @@ examples/           **使用示例**（一组一个子目录：main.cpp + main.h
                       （8 组示例里 features 就是组件化三形态的活示例；设计稿/原型在 docs/mockups/）
 tests/              **测试用例**（按主题分四个套件：CSS / 元素 / 字体与输入法 / C ABI，
                       产物落 bin/tests/，见 tests/README.md）
-tools/              调试工具：离屏渲染 / 窗口抓取 / 窗口枚举 / 示例 UI 检查 / 编译与解包（见 tools/README.md）
+tools/              调试工具：离屏渲染 / 窗口抓取 / 窗口枚举 / 示例 UI 检查 / 编译与解包 /
+                    绘制基准（draw_bench / gl_shot --bench）（见 tools/README.md）
 docs/               设计文档、图片、设计稿（见 docs/README.md；组件规范见 docs/components.md）
 scripts/            fetch-deps.sh 等辅助脚本
 third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）

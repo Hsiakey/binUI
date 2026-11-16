@@ -375,6 +375,7 @@ TOOL_BINS := \
     $(BIN_DIR)/offscreen_render$(EXT) \
     $(BIN_DIR)/gl_shot$(EXT) \
     $(BIN_DIR)/partial_shot$(EXT) \
+    $(BIN_DIR)/draw_bench$(EXT) \
     $(BIN_DIR)/window_capture$(EXT) \
     $(BIN_DIR)/enum_windows$(EXT) \
     $(BIN_DIR)/pixel_diff$(EXT) \
@@ -430,6 +431,18 @@ $(BIN_DIR)/partial_shot$(EXT): $(BUILD_DIR)/partial_shot.o $(BUILD_DIR)/binui_gl
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^ \
 	    -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
+
+# draw_bench：绘制遍历的 CPU 基准（无 GPU / 无窗口 / 确定性）。
+# 不带任何后端 .o —— 遍历只认 IBinUIGfx，计数后端在工具里就地实现，
+# 所以同一个数字在 GL/VK/D3D11 三端之间可比。--hash 输出整个原语流的哈希，
+# 用来证明"缓存/重构没有改变发出的几何"（比像素更严格）。
+$(BUILD_DIR)/draw_bench.o: tools/draw_bench.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
+
+$(BIN_DIR)/draw_bench$(EXT): $(BUILD_DIR)/draw_bench.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^
 
 # ★ 工具的 .o 必须**单独成规则**：以前把编译写进 exe 的 recipe，于是 -MMD 生成的
 #   build-mingw/vk_window.d 谁都不依赖，结果"改了共享头（binui_draw_nodes.h 等）但工具
@@ -495,6 +508,36 @@ partial: $(BIN_DIR)/partial_shot$(EXT)
 	echo "--- svgdemo hover (屏内任意按钮) ---"; \
 	exit $$fail
 	@echo "tools -> $(TOOL_BINS)"
+
+# =============================================
+# 绘制基准（P0-1 / P0-4 的量化入口，v0.16.33）
+#
+# 以前 docs/future.md 里只有几句一次性手测数字（"约 1052 µs/帧、约 9800 个四边形"），
+# 优化完没法证明真的快了，重构也没法证明没改坏。现在：
+#   make bench-draw  → 纯 CPU 遍历（计数后端，无 GPU/无窗口/确定性，跨后端可比）
+#   make bench-gl    → 真实 GL 后端一帧：绘制(遍历+发射) + 提交+呈现 分开量
+# 两个数字相减 = 后端发射/上传开销，据此决定该优化哪一头。
+# `draw_bench <ui> --hash` 输出整个原语流的哈希：缓存/重构前后必须一致。
+# =============================================
+BENCH_CASES := features animshow appshow fontshow flexshow svgdemo cubedemo texturedemo buttonshow
+BENCH_ASSET := docs/issues/assets
+
+.PHONY: bench-draw
+bench-draw: $(BIN_DIR)/draw_bench$(EXT)
+	@echo "--- traversal (CPU only: layout + bands + cull + primitive dispatch) ---"
+	@for d in $(BENCH_CASES); do \
+	    $(BIN_DIR)/draw_bench$(EXT) $(EXA_DIR)/$$d/main.html --frames 120 --warm 10; \
+	done
+	@echo "--- band blow-up case (12 x 135deg gradient cards) ---"
+	@$(BIN_DIR)/draw_bench$(EXT) $(BENCH_ASSET)/bench-grad.html --frames 120 --warm 10
+
+.PHONY: bench-gl
+bench-gl: $(BIN_DIR)/gl_shot$(EXT)
+	@echo "--- real GL backend: emit vs submit+present ---"
+	@for d in features appshow animshow; do \
+	    $(BIN_DIR)/gl_shot$(EXT) $(EXA_DIR)/$$d/main.html - --bench 60; \
+	done
+	@$(BIN_DIR)/gl_shot$(EXT) $(BENCH_ASSET)/bench-grad.html - --bench 60
 
 # =============================================
 # 像素回归（本机跑，不入 CI）

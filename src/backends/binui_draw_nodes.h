@@ -283,6 +283,11 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     // 而 UCRT 的 getenv 每次都要遍历环境表（≈0.5 µs/次）。一个几千节点的页面光这一项
     // 就要 1 ms+；同样的坑在 Vulkan 后端的 fillRect 里也踩到过（见 binui_vk.cpp）。
     static const bool dbgClip = std::getenv("BINUI_DEBUG_CLIP") != nullptr;
+    // v0.16.33：同一类坑在 clip-path（0.16.24）/ mask（0.16.26）上又踩了一次 —— 那两个
+    // 调试打印写在**节点循环里**，于是每个节点都要 std::getenv 一次。实测这是遍历时间的
+    // 最大单项：132 节点的 animshow 从 152 µs/帧掉到 ~40 µs/帧（`make bench-draw`）。
+    // 教训记在这里：节点循环里只许出现 static const 的结果，不许有函数调用。
+    static const bool dbgClipMask = std::getenv("BINUI_DEBUG_CLIPMASK") != nullptr;
 
     int clipL = 0, clipT = 0, clipR = winW, clipB = winH;
     if (clipRect) {
@@ -844,7 +849,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         // 擦掉（dst *= 1-srcA）。这样任意形状的裁剪都成立，而且只需要一个额外的混合状态。
         // 后端不支持擦除（GDI 遗留路径）或图层池满了 → 退回不裁剪，不会画坏。
         const BinUIRenderer::ClipRecord* clipRec = draw ? renderer.clipPathOf(node.id) : nullptr;
-        if (std::getenv("BINUI_DEBUG_CLIPMASK") && clipRec)
+        if (dbgClipMask && clipRec)
             std::fprintf(stderr, "[clipmask] node=%u pts=%d contours=%d box=(%.1f,%.1f %.1fx%.1f)\n",
                          (unsigned)node.id, (int)clipRec->head.pointCount,
                          (int)clipRec->head.contourCount, (double)clipRec->head.x,
@@ -853,7 +858,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         bool clipLayer = false;
         if (clipRec && clipRec->head.pointCount >= 3 && !clipRec->first.empty()) {
             clipLayer = gfx.pushLayer(cl, ct, cw, ch, 1.0f);
-            if (std::getenv("BINUI_DEBUG_CLIPMASK"))
+            if (dbgClipMask)
                 std::fprintf(stderr, "[clipmask]   pushLayer(%s) layer=(%.1f,%.1f %.1fx%.1f)"
                                     " erase-ok=%d\n", clipLayer ? "ok" : "FAIL",
                              (double)cl, (double)ct, (double)cw, (double)ch,
@@ -875,7 +880,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
         if (maskRecs) {
             const BinUIMaskEntry& mh = (*maskRecs)[0].head;
             maskLayer = gfx.pushLayer(mh.rx, mh.ry, mh.rw, mh.rh, 1.0f);
-            if (std::getenv("BINUI_DEBUG_CLIPMASK"))
+            if (dbgClipMask)
                 std::fprintf(stderr, "[mask] node=%u entries=%d region=(%.1f,%.1f %.1fx%.1f)"
                                     " layer=%s\n", (unsigned)node.id, (int)maskRecs->size(),
                              (double)mh.rx, (double)mh.ry, (double)mh.rw, (double)mh.rh,

@@ -1238,6 +1238,15 @@ bool BinUIGLGdi::presentPacesFrames() const {
     return impl_->ready && impl_->vsync && !impl_->transparent && wglSwapIntervalEXT != nullptr;
 }
 
+// v0.16.33：只提交不呈现 —— 基准工具用来把 "flushAll（顶点上传 + 绘制调用）" 与
+// "MSAA resolve + SwapBuffers" 分开量。SwapBuffers 在窗口可见时会被合成器节流
+// （实测 8.2 ms/帧，正好半个刷新周期），混在一起就量不出 CPU 成本了。
+void BinUIGLGdi::flushFrame() {
+    if (!impl_->ready) return;
+    if (!impl_->makeCurrent()) return;
+    impl_->flushAll();
+}
+
 void BinUIGLGdi::presentViaGdi() {
     if (!impl_->ready) return;
     const bool perfOn = Perf().on;

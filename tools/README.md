@@ -128,3 +128,46 @@ make partial
 为什么它对拍的不是"基准图"：比较对象是**同一状态下的整帧渲染**，所以不需要维护金标准图，
 样式改了也不会失效。
 
+## draw_bench —— 绘制遍历的 CPU 基准（+ 原语流哈希）
+
+回答一个问题：**一帧的 CPU 绘制到底花在哪**。没有 GPU、没有窗口、没有字体光栅化 ——
+遍历只认 `IBinUIGfx`，工具里就地实现一个只计数的后端，所以同一个数字在
+GL / VK / D3D11 三端之间可比（后端差异另用 `gl_shot --bench` 量）。
+
+```bash
+make tools
+# 单个页面：遍历 µs/帧、原语分类、≈四边形数、≈KB/帧
+build-mingw/bin/draw_bench.exe examples/features/main.html --frames 120 --warm 10
+# 只看脏矩形（模拟 hover/动画时的局部重绘）
+build-mingw/bin/draw_bench.exe examples/buttonshow/main.html --clip 278,220,160,80
+# 原语流的 64 位哈希：缓存 / 重构前后必须一模一样
+build-mingw/bin/draw_bench.exe examples/features/main.html --hash
+# 一键跑全部示例 + 条带爆炸用例
+make bench-draw
+```
+
+为什么要有 `--hash`：像素基准只能证明"看起来一样"，原语流哈希能证明"发出去的每个
+四边形都一样"（顺序、坐标、颜色、UV、裁剪、批次边界）。做绘制缓存时，这是唯一能证明
+"没有因为复用而画错一帧"的判据。
+
+`--json` 输出一行 JSON（CI 里好抓）。`--hover x,y` / `--scrollTo y` / `--text id=...`
+用来把页面推进到某个状态再量。
+
+后端的开销用另一个工具量（同一台机器、同一个上下文）：
+
+```bash
+# 真实 GL 后端一帧：绘制(遍历+发射) 与 上传+绘制调用 分开报
+build-mingw/bin/gl_shot.exe examples/appshow/main.html - --bench 60
+make bench-gl
+```
+
+注意它**不含** MSAA resolve / 交换链：窗口一进交换链，present 会被合成器节流到
+8.2 ms/帧（半个刷新周期），量到的就不是 CPU 成本了。所以 bench 模式走
+`flushFrame()`（只 `flushAll`）。
+
+两者相减 = 后端顶点发射/上传的开销。v0.16.33 的实测结论（见
+[docs/future.md](../docs/future.md) 的 P0-1/P0-4）：中等页面遍历 15~47 µs、
+GL「遍历+发射」0.07~0.10 ms、上传 0.01 ms；唯一还在"上万四边形"量级的是
+**对角渐变条带**（12 张 135° 卡 = 43,409 条/帧、≈5 MB 顶点 = 绘制 0.29 ms + 上传 0.14 ms，
+`make bench-draw` 专门盯它）。
+

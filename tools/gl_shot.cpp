@@ -10,6 +10,8 @@
 //
 // 用法: gl_shot <ui file> <out.png> [width] [height]
 #include <cstdio>
+#include <chrono>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -38,9 +40,15 @@ static int GetEncoderClsid(const WCHAR* format, CLSID* clsid) {
 
 int main(int argc, char** argv) {
     if (argc < 3) {
-        std::printf("usage: gl_shot <ui file> <out.png> [width] [height]\n");
+        std::printf("usage: gl_shot <ui file> <out.png> [width] [height] [--bench N]\n");
         return 1;
     }
+    // --bench N：不出图，只量"遍历+发射"和"提交+呈现"各多少毫秒（同一进程、同一个
+    // GL 上下文）。draw_bench 量的是纯 CPU 遍历，这里量的是**带真实后端**的一帧，
+    // 两者相减就是后端的发射/上传开销 —— 判断该优化哪一头的时候靠这个。
+    int benchFrames = 0;
+    for (int i = 1; i + 1 < argc; i++)
+        if (std::string(argv[i]) == "--bench") benchFrames = std::atoi(argv[i + 1]);
 
     binui::CompileResult res = binui::CompileBinUIFileEx(argv[1]);
     for (const auto& w : res.warnings) std::fprintf(stderr, "[gl_shot] warning: %s\n", w.c_str());
@@ -88,6 +96,39 @@ int main(int argc, char** argv) {
 
     gfx.beginFrame(nullptr);
     binui::drawNodesGLGdi(gfx, renderer, nullptr);
+
+    if (benchFrames > 0) {
+        // 不进交换链：`flushFrame()` 只做 flushAll（顶点上传 + 绘制调用），不做 MSAA resolve
+        // 和 SwapBuffers —— 后两者在有合成器节流时是 8 ms/帧起步（实测），混在一起就量不出
+        // CPU 成本了。这里要回答的是"一帧的 CPU 绘制+上传要多少"。
+        // 先跑 5 帧预热（条带缓存/图集/圆角模板/纹理上传都在头几帧里建）
+        for (int i = 0; i < 5; i++) {
+            gfx.beginFrame(nullptr);
+            binui::drawNodesGLGdi(gfx, renderer, nullptr);
+            gfx.flushFrame();
+        }
+        std::vector<double> drawMs, presentMs;
+        for (int i = 0; i < benchFrames; i++) {
+            const auto t0 = std::chrono::steady_clock::now();
+            gfx.beginFrame(nullptr);
+            binui::drawNodesGLGdi(gfx, renderer, nullptr);
+            const auto t1 = std::chrono::steady_clock::now();
+            gfx.flushFrame();
+            const auto t2 = std::chrono::steady_clock::now();
+            drawMs.push_back(std::chrono::duration<double, std::milli>(t1 - t0).count());
+            presentMs.push_back(std::chrono::duration<double, std::milli>(t2 - t1).count());
+        }
+        std::sort(drawMs.begin(), drawMs.end());
+        std::sort(presentMs.begin(), presentMs.end());
+        auto med = [](std::vector<double>& v) { return v.empty() ? 0.0 : v[v.size() / 2]; };
+        std::printf("[gl-bench] %s  %dx%d  %d 帧：绘制(遍历+发射) %.3f ms，上传+绘制调用 %.3f ms，"
+                    "合计 %.3f ms/帧（不含 MSAA resolve / 交换链）\n",
+                    argv[1], W, H, benchFrames, med(drawMs), med(presentMs),
+                    med(drawMs) + med(presentMs));
+        gfx.shutdown();
+        DestroyWindow(hwnd);
+        return 0;
+    }
     // 必须让窗口可见：GDI 对**隐藏**窗口的 StretchDIBits 直接丢弃（不报错），
     // 读回路径会得到一片空白。这跟"能不能画"无关，纯粹是 GDI 的呈现优化。
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);

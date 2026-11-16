@@ -51,6 +51,9 @@ public:
     // 用于 resize 拖拽期间——NVIDIA 驱动在"窗口 resize + SwapBuffers"下会崩
     //（nvoglv64 DrvPresentBuffers），走 GDI 呈现绕开驱动 present 路径。
     void presentViaGdi();
+    // 只提交不呈现（v0.16.33）：flushAll 的顶点上传 + 绘制调用，不做 MSAA resolve/交换链。
+    // 基准工具（gl_shot --bench）用它把 CPU 侧开销和合成器节流分开量。
+    void flushFrame();
 
     // ---------- 立即模式绘制原语（颜色 0xAARRGGBB） ----------
     void fillRect(float x, float y, float w, float h, uint32_t color);
