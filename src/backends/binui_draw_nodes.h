@@ -1137,9 +1137,16 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                             p0 = nl + 1;
                         }
                     } else {
+                        // v0.16.41：单行截断 + 省略号（text-overflow: ellipsis）。
+                        // 用**真实字形宽度**在绘制前截断：量出来的前缀与画出来的完全一致，
+                        // 而且对运行期 setText 换进来的长文本同样生效（不需要重新编译）。
+                        const std::string shown =
+                            renderer.isEllipsis(node.id)
+                                ? gfx.ellipsize(node.text, availW, static_cast<float>(fs), wt, italic)
+                                : node.text;
                         // 量一次宽度：既要判"放不放得下"，对齐/装饰线也用它
                         // （字宽走字形图集的 run 缓存，稳定后只是一次查表）
-                        const float tw = gfx.textWidth(static_cast<float>(fs), wt, node.text, italic);
+                        const float tw = gfx.textWidth(static_cast<float>(fs), wt, shown, italic);
                         // 自然排版（v21）：一行放不下就按盒子宽度折行。节点高度由布局按
                         // 同一份估算撑开（BinUIRenderer::autoTextHeight），这里是它的绘制侧：
                         // 行数估算 → 块高 → 垂直居中 → drawTextWrapped 逐行画。
@@ -1167,7 +1174,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                             tx += (align == 1) ? (availW - tw) / 2.0f : (availW - tw);
                             if (tx < static_cast<float>(x + pad)) tx = static_cast<float>(x + pad);
                         }
-                        gfx.drawText(tx, base, static_cast<float>(fs), wt, node.text, lcol,
+                        gfx.drawText(tx, base, static_cast<float>(fs), wt, shown, lcol,
                                      false, false, italic);
                         if (hasRule)
                             drawTextRules(tx, static_cast<float>(y) + (nh - lh) / 2.0f, tw);
@@ -1188,7 +1195,12 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                         const int wt = (pt && (pt->flags & PAINT_WEIGHT))
                                      ? binui::PaintWeightOf(pt) : 700;
                         const float fs = static_cast<float>(bs);
-                        float tw = gfx.textWidth(fs, wt, node.text, italic);
+                        const float boxW0 = static_cast<float>(nw - 2 * pad);
+                        const std::string shown =
+                            renderer.isEllipsis(node.id)
+                                ? gfx.ellipsize(node.text, boxW0 > 1.0f ? boxW0 : 1.0f, fs, wt, italic)
+                                : node.text;
+                        float tw = gfx.textWidth(fs, wt, shown, italic);
                         int asc = 0, lh = 0;
                         gfx.fontMetrics(fs, wt, asc, lh, italic);
                         // 水平对齐：与上面 BINUI_LABEL 分支完全同一套算法
@@ -1205,7 +1217,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                             if (tx < static_cast<float>(x + pad)) tx = static_cast<float>(x + pad);
                         }
                         float base = y + (nh - lh) / 2.0f + asc;
-                        gfx.drawText(tx, base, fs, wt, node.text, tcol, false, false, italic);
+                        gfx.drawText(tx, base, fs, wt, shown, tcol, false, false, italic);
                     }
                     break;
                 }

@@ -2890,6 +2890,35 @@ int run() {
         CHECK_NEAR(rb.letterSpacingOf(rb.findNodeByName("b")), 50.0f, 1e-3, "v40: 50px 原样保留");
     }
 
+    // ---------- v0.16.41：text-overflow: ellipsis ----------
+    // 截断发生在**绘制前**（用真实字形宽度），所以这里测三件事：标记落段、
+    // 多行/非单行的告警、以及 ellipsize() 的边界（放得下原样、装不下补 …、
+    // 比 … 还窄就返回空串）。
+    {
+        const char* ui =
+            "<app_window width=\"400\" height=\"200\" bg=\"#101010\"><html><body>\n"
+            "  <div id=\"e\" style=\"width:120px;height:20px;text-overflow:ellipsis\">Long text here</div>\n"
+            "  <div id=\"n\" style=\"width:120px;height:20px\">Long text here</div>\n"
+            "  <div id=\"c\" style=\"width:120px;height:20px;text-overflow:clip\">Long text here</div>\n"
+            "</body></html></app_window>\n";
+        auto res = CompileBinUIEx(ui);
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "v41: 布局可解析");
+        CHECK(r.isEllipsis(r.findNodeByName("e")), "v41: text-overflow:ellipsis 落进 TEXT_ELLIPSIS");
+        CHECK(!r.isEllipsis(r.findNodeByName("n")), "v41: 没写就不截断");
+        CHECK(!r.isEllipsis(r.findNodeByName("c")), "v41: text-overflow:clip 不截断（只做了 ellipsis）");
+        // 含换行 → 明确告警（CSS 里 text-overflow 只对单行生效）。
+        // 注意必须用 white-space:pre：普通文本的换行会被 HTML 规则折成空格，就只剩一行了。
+        auto ml = CompileBinUIEx(
+            "<app_window width=\"400\" height=\"200\"><html><body>"
+            "<div style=\"width:120px;text-overflow:ellipsis;white-space:pre\">a\nb</div>"
+            "</body></html></app_window>\n");
+        bool mlWarned = false;
+        for (const auto& m : ml.warnings)
+            if (m.find("ellipsis") != std::string::npos) mlWarned = true;
+        CHECK(mlWarned, "v41: 多行文本 + ellipsis 明确告警");
+    }
+
     if (g_fail == 0) std::printf("test_paint: 全部通过\n");
     return g_fail;
 }

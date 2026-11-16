@@ -1,0 +1,12 @@
+<html width="660" height="300" bg="#0e1216">
+  <!-- v0.16.41：text-overflow: ellipsis（单行截断 + 省略号）。
+       同一段长文本放进不同宽度的盒子：放得下的原样画，放不下的按真实字形宽度截断补 "…"。
+       最后两行：中文按码点边界截断、以及"盒子比省略号还窄"（宁可不画也不画出超宽 …）。 -->
+  <div style="position:absolute;left:20px;top:20px;width:600px;height:26px;font-size:18px;color:#e8eef6;text-overflow:ellipsis">The quick brown fox jumps over the lazy dog</div>
+  <div style="position:absolute;left:20px;top:60px;width:360px;height:26px;font-size:18px;color:#e8eef6;text-overflow:ellipsis">The quick brown fox jumps over the lazy dog</div>
+  <div style="position:absolute;left:20px;top:100px;width:200px;height:26px;font-size:18px;color:#e8eef6;text-overflow:ellipsis">The quick brown fox jumps over the lazy dog</div>
+  <div style="position:absolute;left:20px;top:140px;width:120px;height:26px;font-size:18px;color:#e8eef6;text-overflow:ellipsis">The quick brown fox jumps over the lazy dog</div>
+  <div style="position:absolute;left:20px;top:190px;width:220px;height:26px;font-size:18px;color:#8fb6ff;text-overflow:ellipsis">中文单行截断也要按码点边界，不能切半个字</div>
+  <div style="position:absolute;left:280px;top:190px;width:60px;height:26px;font-size:18px;color:#ffb4a2;text-overflow:ellipsis">The quick</div>
+  <div style="position:absolute;left:380px;top:190px;width:60px;height:26px;font-size:18px;color:#34d399">The quick</div>
+</html>

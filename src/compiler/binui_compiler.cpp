@@ -5700,7 +5700,7 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             static const char* kIgnoredCss[] = {
                 "word-break", "visibility", "float",
                 "outline",
-                "cursor", "grid-template-columns", "text-overflow", "object-fit",
+                "cursor", "grid-template-columns", "object-fit",
                 // v30：right / bottom / inset 已实现（贴右/贴下 + 四值简写），从清单里移除
         "transform", "aspect-ratio",
             };
@@ -7071,6 +7071,22 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             // 这里显式填上（否则下划线会画成透明，看不见）
             if (pflags & (PAINT_UNDERLINE | PAINT_STRIKE | PAINT_OVERLINE))
                 paint.textColor = textCol;
+        }
+
+        // v0.16.41：text-overflow: ellipsis（单行截断 + 省略号）
+        {
+            const std::string tov = lowerStr(TrimCopy(
+                pick(e.attrs, style, "text-overflow", "text-overflow", "")));
+            if (tov == "ellipsis") {
+                paint.textFlags |= TEXT_ELLIPSIS;
+                // CSS 里 text-overflow 只对**单行**生效（配合 white-space:nowrap +
+                // overflow:hidden）。多行文本（含 '\n' 或会折行）在这里明确告警，
+                // 免得作者以为"每行都会被省略号收尾"。
+                if (srcText.find('\n') != std::string::npos)
+                    Warn("text-overflow:ellipsis 只对单行文本生效；这段文本含换行，已按普通多行绘制");
+            } else if (!tov.empty() && tov != "clip" && tov != "auto") {
+                Warn("CSS text-overflow: \"" + tov + "\" 暂不支持（只实现了 ellipsis），已忽略");
+            }
         }
 
         // v14 文字/表单附加标记（斜体 / 占位符 / 只读 / 初始勾选）

@@ -135,6 +135,39 @@ public:
     // 默认空实现 = 不支持的后端（GDI 遗留路径）照常画，只是没有字间距。
     virtual void setLetterSpacing(float px) { (void)px; }
 
+    // 单行截断 + 省略号（v0.16.41：CSS text-overflow: ellipsis）。
+    // 返回"放得下且带 … 的最长前缀"；整串放得下就原样返回。
+    // 默认实现只用本后端自己的 textWidth —— 所以四个后端（含 GDI）自动一致，
+    // 而且与 drawText 用的是同一套度量（不会出现"量着放得下、画出来差一截"）。
+    // maxW < 省略号本身的宽度时返回空串（宁可不画，也不画一个超宽的 "…"）。
+    virtual std::string ellipsize(const std::string& utf8, float maxW, float size,
+                                  int weight, bool italic) {
+        if (utf8.empty() || maxW <= 0.0f) return utf8;
+        if (textWidth(size, weight, utf8, italic) <= maxW) return utf8;
+        static const char* kEll = "\xE2\x80\xA6";     // U+2026 HORIZONTAL ELLIPSIS
+        const float ellW = textWidth(size, weight, kEll, italic);
+        if (ellW > maxW) return std::string();
+        // 二分找最长可行前缀（前缀边界必然落在 UTF-8 起始字节上，见下面的循环）
+        size_t lo = 0, hi = utf8.size();
+        while (lo < hi) {
+            const size_t mid = (lo + hi + 1) / 2;
+            // 退到合法的码点边界（UTF-8 续字节 0b10xxxxxx 不是起点）
+            size_t cut = mid;
+            while (cut > 0 && cut < utf8.size() &&
+                   (static_cast<unsigned char>(utf8[cut]) & 0xC0) == 0x80)
+                cut--;
+            if (cut == 0) { lo = 1; continue; }
+            if (textWidth(size, weight, utf8.substr(0, cut), italic) + ellW <= maxW) lo = cut;
+            else hi = cut - 1;
+            if (lo == hi) break;
+        }
+        size_t cut = lo;
+        while (cut > 0 && cut < utf8.size() &&
+               (static_cast<unsigned char>(utf8[cut]) & 0xC0) == 0x80)
+            cut--;
+        return utf8.substr(0, cut) + kEll;
+    }
+
     // ---- 仿射状态（v0.16.18：文字/图片参与旋转）----
     // 设置之后，**接下来所有原语**的四边形都按 xf（2×3 行主序 [a c e; b d f]）变换：
     //   屏幕 = (a*x + c*y + e, b*x + d*y + f)

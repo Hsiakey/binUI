@@ -5,6 +5,31 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.16.41] - 2026-11-16 【格式 v31】
+
+**`text-overflow: ellipsis`**（单行截断 + 省略号）。列表项名字太长、表格某一列放不下，
+以前只能靠 `overflow:hidden` 硬裁（字被切一半，很难看）。
+
+### 加 — `text-overflow: ellipsis`（`TEXT_ELLIPSIS`，格式不变，仍 v31）
+
+- **截断发生在绘制前，用真实字形宽度**：`IBinUIGfx::ellipsize()`（默认实现，四个后端共用）
+  先量整串，放得下就原样返回；放不下就用**二分**找"最长的、加上 … 仍不超宽"的 UTF-8
+  前缀（回退到码点边界，绝不切半个汉字/emoji），补 `…`。
+- 好处是"量出来的"与"画出来的"天然一致（都用 `textWidth` + 同一份 run 缓存），
+  而且对**运行期 `setText`** 换进来的长文本同样生效 —— 不需要重新编译。
+- 走的是 `textFlags` 的空闲位（`TEXT_ELLIPSIS = 1u << 4`），不新增字段、不升格式号。
+- **多行不适用**：CSS 里 `text-overflow` 只对单行生效，含换行的文本照旧按多行画，
+  编译期明确告警（不静默）；`clip` / `auto` 按"不截断"处理。
+- 顺手把 `text-overflow` 从"已知不生效"清单里移除（否则会同时打一条自相矛盾的告警）。
+
+### 门禁
+
+`make test` 新增 4 条（标记落段、未写不截断、`clip` 不截断、多行 + ellipsis 告警）；
+`docs/issues/assets/text-overflow.html` 进跨后端比对：**GL vs VK、D3D11 vs GL 均
+0 不同像素**（同一个字符串在三种机器上截断位置完全一致）；`make pixels` 16/16 0 差异；
+`make partial` 通过；`check_examples` 16/16。证据图
+`docs/issues/assets/text-overflow.png`（600/360/200/120px 四个宽度 + 中文 + 比 … 还窄的盒子）。
+
 ## [0.16.40] - 2026-11-16 【格式 v31】
 
 **`letter-spacing`**（字间距）。设计稿里"标题加一点字距"是最常见的排版要求之一，

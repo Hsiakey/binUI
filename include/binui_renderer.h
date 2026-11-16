@@ -284,6 +284,8 @@ public:
     bool isPlaceholder(uint16_t nodeId) const { return (textFlagsOf(nodeId) & TEXT_PLACEHOLDER) != 0; }
     // 斜体（<i>/<em>/font-style:italic）
     bool isItalic(uint16_t nodeId) const { return (textFlagsOf(nodeId) & TEXT_ITALIC) != 0; }
+    // v0.16.41：单行截断 + 省略号（CSS text-overflow: ellipsis）
+    bool isEllipsis(uint16_t nodeId) const { return (textFlagsOf(nodeId) & TEXT_ELLIPSIS) != 0; }
     // 输入框的真实值（占位符状态下为空串；此时节点 text 存的是占位符提示语）
     std::string inputValue(uint16_t nodeId) const;
 

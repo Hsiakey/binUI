@@ -497,6 +497,10 @@ enum BinUITextFlag : uint32_t {
     TEXT_PLACEHOLDER = 1u << 1,
     TEXT_READONLY    = 1u << 2, // 只读输入框：可聚焦/可选中，但拒绝编辑
     TEXT_CHECKED     = 1u << 3, // 初始勾选（<input type=checkbox checked>），加载时播种进渲染器
+    // v0.16.41：单行截断 + 省略号（CSS text-overflow: ellipsis）。绘制前按真实字形宽度
+    // 找到最长可行前缀并在末尾补 "…"；放得下就原样画。多行文本（含 '\n'）不适用
+    // （CSS 里 text-overflow 也只对单行生效）—— 那种情况编译期会告警。
+    TEXT_ELLIPSIS    = 1u << 4,
 };
 
 #pragma pack(push, 1)
