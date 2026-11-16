@@ -1301,6 +1301,23 @@ static void AppendBackdropSection(std::vector<uint8_t>& buf,
     if (!data.empty()) memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
 }
 
+// v33：外阴影段（filter: drop-shadow）。与毛玻璃段同一个形状：恒定写出，空 = 只有 0。
+static void AppendDropShadowSection(std::vector<uint8_t>& buf,
+                                    const std::vector<BinUIFilterDropShadowEntry>& items) {
+    std::vector<uint8_t> data;
+    if (!items.empty()) {
+        uint32_t count = (uint32_t)items.size();
+        data.resize(4 + items.size() * sizeof(BinUIFilterDropShadowEntry));
+        memcpy(data.data(), &count, sizeof(count));
+        memcpy(data.data() + 4, items.data(), items.size() * sizeof(BinUIFilterDropShadowEntry));
+    }
+    uint32_t nbytes = (uint32_t)data.size();
+    size_t start = buf.size();
+    buf.resize(start + sizeof(uint32_t) + data.size());
+    memcpy(buf.data() + start, &nbytes, sizeof(nbytes));
+    if (!data.empty()) memcpy(buf.data() + start + sizeof(uint32_t), data.data(), data.size());
+}
+
 // 点用 uint16 归一化存（0..65535 映射包围盒），比 float 省一半且精度远超显示能力。
 struct PendingPath {
     BinUIPathEntry head = {};
@@ -2026,6 +2043,7 @@ std::vector<uint8_t> CompileXML(const std::string& xml, std::vector<std::string>
     AppendClipSection(buf, {});       // v27：这条路径没有裁剪路径
     AppendMaskSection(buf, {});       // v28：XML 路径没有 mask
     AppendBackdropSection(buf, {});   // v29：XML 路径没有毛玻璃
+    AppendDropShadowSection(buf, {}); // v33：XML 路径没有 drop-shadow
     AppendNameSection(buf, nodeNames, offsets);
 
     return buf;
@@ -4605,6 +4623,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::vector<PendingClip> clipNodes;            // v27 裁剪路径段（clip-path）
     std::vector<PendingMask> maskNodes;            // v28 遮罩段（<mask>）
     std::vector<BinUIBackdropEntry> backdropNodes; // v29 毛玻璃段（backdrop-filter）
+    std::vector<BinUIFilterDropShadowEntry> dropShadowNodes; // v33 外阴影段（filter: drop-shadow）
     std::vector<PendingPath> pendingPaths;     // v15 路径段（SVG <path>/<ellipse> 的折线）
     std::vector<std::string> strings;
     strings.push_back(""); // 字符串表首位 = 空串：无文本节点的 textOffset=0 指向空串
@@ -7225,6 +7244,7 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                     binui::ColorMatrix cm = binui::ColorMatrixIdentity();
                     bool anyMatrix = false;
                     bool sawUnsupported = false;
+                    bool sawDropShadow = false;
                     for (const std::string& fn : fns) {
                         const size_t lp = fn.find('(');
                         if (lp == std::string::npos || fn.back() != ')') { sawUnsupported = true; continue; }
@@ -7264,6 +7284,61 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                             }
                             if (bp > 0.0f) paint.blurPx = bp;
                             continue;
+                        } else if (name == "drop-shadow") {
+                            // v33：语法 <color>? && <length>{2,3} —— 两个偏移必填、
+                            // 第三个是模糊、颜色可写在任意位置（缺省 = currentColor）。
+                            // 阴影是"轮廓的影子"，所以它跟 blur 一样走离屏图层（见绘制侧）；
+                            // 这里只按顺序记下参数，多条阴影按书写顺序（写在前面的在上层）。
+                            std::vector<std::string> toks;
+                            {
+                                std::string cur;
+                                int dep = 0;
+                                for (char ch : arg) {
+                                    if (ch == '(') dep++;
+                                    else if (ch == ')' && dep > 0) dep--;
+                                    if ((ch == ' ' || ch == '\t' || ch == ',') && dep == 0) {
+                                        if (!cur.empty()) { toks.push_back(cur); cur.clear(); }
+                                        continue;
+                                    }
+                                    cur += ch;
+                                }
+                                if (!cur.empty()) toks.push_back(cur);
+                            }
+                            float lens[3] = {0.0f, 0.0f, 0.0f};
+                            int nl = 0;
+                            bool hasCol = false;
+                            uint32_t scol = textCol;   // CSS 缺省 = currentColor
+                            for (const std::string& tk : toks) {
+                                const bool isColorTok =
+                                    (!tk.empty() && (tk[0] == '#' ||
+                                                     tk.find('(') != std::string::npos)) ||
+                                    (tk.size() > 1 && (tk[0] == 'r' || tk[0] == 'h' || tk[0] == 'b'));
+                                if (isColorTok) {
+                                    scol = parseColorWith(tk, textCol, "filter: drop-shadow 颜色");
+                                    hasCol = true;
+                                    continue;
+                                }
+                                if (nl < 3) lens[nl++] = parseLen(tk, 0.0f, "filter");
+                            }
+                            (void)hasCol;
+                            if (nl < 2) {
+                                Warn("CSS filter: drop-shadow() 至少要两个偏移量（如 drop-shadow(0 4px 8px #0003)），已忽略");
+                            } else {
+                                float sb = lens[2] > 0.0f ? lens[2] : 0.0f;
+                                if (sb > kMaxFilterBlurPx) {
+                                    sb = kMaxFilterBlurPx;
+                                    Warn("CSS filter: drop-shadow() 的模糊上限 64px，\"" + fn + "\" 按 64px 处理");
+                                }
+                                BinUIFilterDropShadowEntry e = {};
+                                e.nodeId = n.id;
+                                e.dx = lens[0];
+                                e.dy = lens[1];
+                                e.blur = sb;
+                                e.color = scol;
+                                dropShadowNodes.push_back(e);
+                                sawDropShadow = true;
+                            }
+                            continue;
                         } else if (name == "grayscale") {
                             one = binui::FilterGrayscale(amount(arg, 1.0f));
                         } else if (name == "sepia") {
@@ -7295,8 +7370,15 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                         filterNodes.push_back(f);
                     }
                     if (sawUnsupported)
-                        Warn("CSS filter: drop-shadow()/url(#id) 需要离屏合成，已忽略"
-                             "（blur/grayscale/sepia/saturate/hue-rotate/invert/contrast/brightness 已支持）");
+                        Warn("CSS filter: url(#id)（引用 SVG <filter>）需要第二套绘制管线，已忽略"
+                             "（blur/drop-shadow/grayscale/sepia/saturate/hue-rotate/invert/"
+                             "contrast/brightness 已支持）");
+                    // 语义顺序提醒：CSS 里滤镜是**从左到右**复合的，`blur() drop-shadow()`
+                    // 的阴影本该取自"已经糊过"的轮廓。我们的离屏层只做一趟，阴影与本体
+                    // 都取自同一张（未糊的）层内容 —— 两者同写时明确告警，不静默近似。
+                    if (sawDropShadow && paint.blurPx > 0.0f)
+                        Warn("CSS filter: 同时写 blur() 与 drop-shadow() 时，阴影按**未模糊**的"
+                             "轮廓生成（两者共用同一张离屏图）");
                 }
             }
         }
@@ -8676,6 +8758,7 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
     AppendClipSection(buf, clipNodes);
     AppendMaskSection(buf, maskNodes);   // v28 遮罩段
     AppendBackdropSection(buf, backdropNodes);   // v29 毛玻璃段
+    AppendDropShadowSection(buf, dropShadowNodes);   // v33 外阴影段
     AppendNameSection(buf, nodeNames, offsets);
 
     // ---- 6. 二进制组件：编译期离线合并 ----

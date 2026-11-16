@@ -179,6 +179,24 @@ inline int PaintFilterBlurPad(float blurPx) {
     return static_cast<int>(pad > kMaxFilterBlurPx * 3.0f ? kMaxFilterBlurPx * 3.0f : pad);
 }
 
+// 一个节点的离屏图层要外扩多少（v0.16.43）—— 把**所有**会画到盒子外面的效果叠起来：
+//   · filter: blur(N)      → 3σ（上面的 PaintFilterBlurPad）
+//   · filter: drop-shadow  → 它自己的 3σ + 偏移的绝对值（阴影整体挪出去了）
+//     （box-shadow 不走图层，它的外扩在 PaintShadowPad / invalidRect 里单独算）
+// 参数传的是"这个节点自身"的值；后代的图层不需要祖先的外扩，因为祖先的层本来就更大。
+inline int PaintLayerPad(float blurPx, const float* shadowDx, const float* shadowDy,
+                         const float* shadowBlur, int shadowCount) {
+    int pad = PaintFilterBlurPad(blurPx);
+    for (int i = 0; i < shadowCount; i++) {
+        int p = PaintFilterBlurPad(shadowBlur[i]);
+        const int ox = static_cast<int>(std::ceil(std::fabs(shadowDx[i])));
+        const int oy = static_cast<int>(std::ceil(std::fabs(shadowDy[i])));
+        p += ox > oy ? ox : oy;
+        if (p > pad) pad = p;
+    }
+    return pad;
+}
+
 // 圆角矩形在"距边 dy"处的水平内缩（dy 从边的中心算起，超过 radius 就没内缩）
 //   dy = 0   → 内缩 = radius（圆角矩形最高处只剩中间那段）
 //   dy >= r  → 0（进入直边）

@@ -82,8 +82,8 @@ public:
                       float blurPx, float grain) override;      // v29：毛玻璃（v0.16.28 加颗粒）
     // v0.16.10：组透明度的离屏合成（见 binui_gfx.h 的 pushLayer 注释）
     bool pushLayer(float x, float y, float w, float h, float alpha) override;
-    // v0.16.42：filter: blur(Npx) 的模糊层（pop 时先糊掉层内容再按 alpha 合成）
-    bool pushLayerBlurred(float x, float y, float w, float h, float alpha, float blurPx) override;
+    // v0.16.43：带效果（filter: blur / drop-shadow）的离屏图层（pop 时先铺阴影、再糊/合成本体）
+    bool pushLayerEx(float x, float y, float w, float h, const LayerFx& fx) override;
     void popLayer() override;
 
     bool prepareImage(uint16_t index, const uint8_t* data, size_t size,

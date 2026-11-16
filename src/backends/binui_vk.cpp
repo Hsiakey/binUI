@@ -664,6 +664,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         float alpha = 1.0f;
         // v0.16.42：filter: blur(Npx) 的半径（0 = 普通 alpha 层）
         float blur = 0.0f;
+        // v0.16.43：filter: drop-shadow 列表（书写顺序；绘制期逆序）
+        std::vector<BinUIFilterDropShadowEntry> shadows;
     };
     std::vector<LayerFrame> layerStack;
     static constexpr int kMaxLayers = 4;
@@ -2905,7 +2907,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // 组透明度：把"一个节点 + 它的子树"画进离屏层，再整组乘一次 alpha 合成回来。
     // 逐元素乘 alpha 做不到这件事 —— 重叠的孩子会被乘两次（父色暗一档、子色偏色），
     // 那正是 v0.16.8 留下、v0.16.9/v0.16.10 用图层修掉的近似。
-    bool pushLayer(float x, float y, float lw, float lh, float alpha, float blur = 0.0f) {
+    bool pushLayer(float x, float y, float lw, float lh, float alpha, float blur = 0.0f,
+                   const BinUIFilterDropShadowEntry* shadows = nullptr, int shadowCount = 0) {
         if (!ready || !useDynamic || !cmdOpen) return false;
         if (!(lw > 0.0f) || !(lh > 0.0f) || alpha <= 0.0f) return false;   // v27：alpha=1 也允许（裁剪用容器层）
         if (static_cast<int>(layerStack.size()) >= kMaxLayers) { warnLayerLimit(); return false; }
@@ -2918,6 +2921,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         f.idx = idx;
         f.alpha = alpha;
         f.blur = blur;
+        if (shadows && shadowCount > 0) f.shadows.assign(shadows, shadows + shadowCount);
         f.x = x; f.y = y; f.w = lw; f.h = lh;   // 浮点框：合成四边形用（见 LayerFrame）
         f.pl = clipL; f.pt = clipT; f.pr = clipR; f.pb = clipB;
         // 层框 = 元素框 ∩ 当前裁剪（层外的东西本来也不该显示）
@@ -2935,59 +2939,45 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         return true;
     }
 
-    // ---- v0.16.42 filter: blur(Npx)：把**层自己的内容**糊掉再合成 ----
-    // 与 blurBackdrop（毛玻璃）共用同一条降采样链，两处差别：
-    //   · 抓取源是层纹理 —— 糊的是"自己的画面"，不是"身后的背景"；
-    //   · 合成用**正常 alpha 混合**（blurReplace 关掉）—— 叠在背景上，而不是替换背景。
-    // 进入时层渲染作用域必须已经结束（调用方刚 endLayerPass）。
-    bool blurLayerContent(const LayerFrame& f) {
-        // 抓取范围 = **层框 ∩ 进入时的裁剪**，也就是 VK 真正清过的那块（`beginLayerPass`
-        // 的 renderArea）。不能只按层框抓：局部重绘时层框比脏矩形大，环外那块层纹理
-        // 从没被清过（VK 只清 renderArea），照抄进来就会把上一帧的残影拖进模糊里。
-        // 全帧绘制时两者相等（裁剪就是窗口），所以像素门禁上三端仍然逐像素一致。
-        int rx = std::max(0, f.l);
-        int ry = std::max(0, f.t);
-        int rx1 = std::min(w, f.r);
-        int ry1 = std::min(h, f.b);
-        const int rw = rx1 - rx, rh = ry1 - ry;
-        if (rw < 2 || rh < 2) return false;
+    // ---- v0.16.42/43：离屏图层效果（filter: blur / filter: drop-shadow）----
+    // 与 blurBackdrop（毛玻璃）共用同一条降采样链。三者都以"整像素矩形 + 正常 alpha 混合"
+    // 为准，这是三端逐像素一致的前提。进入这些函数时层渲染作用域必须已经结束。
+
+    // 级数：让 2^levels >= 半径 的最小值（1..6）；0 = 不降采样（硬阴影）
+    static int blurLevelsFor(float blurPx) {
+        if (!(blurPx > 0.0f)) return 0;
         int levels = 1;
-        {
-            float v = 2.0f;
-            while (levels < 6 && v < f.blur) { v *= 2.0f; levels++; }
-        }
-        if (!ensureBlurLevel(0, rw, rh)) return false;
-        static const bool traceBlur = std::getenv("BINUI_BLUR_TRACE") != nullptr;
-        if (traceBlur)
-            std::fprintf(stderr, "[vk][blur] 层框 %.2f,%.2f %.2fx%.2f 抓取 %d,%d %dx%d 级数 %d 清区 %d,%d-%d,%d\n",
-                         f.x, f.y, f.w, f.h, rx, ry, rw, rh, levels, f.l, f.t, f.r, f.b);
+        float v = 2.0f;
+        while (levels < 6 && v < blurPx) { v *= 2.0f; levels++; }
+        return levels;
+    }
 
-        // 1) 抓层内容 → level0（层纹理此刻是 COLOR_ATTACHMENT：本帧没人采样过它）
-        {
-            Tex& lt = layers[static_cast<size_t>(f.idx)].tex;
-            blurLevelToTransferDst(blurLv[0]);
-            barrier(lt.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
-                    VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
-                    VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
-                    VK_PIPELINE_STAGE_TRANSFER_BIT);
-            copyImageRegion(lt.image, rx, ry, blurLv[0].tex.image, rw, rh);
-            barrier(lt.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                    VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT,
-                    VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                    VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
-            lt.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
-        }
+    // 区域 = **层框 ∩ 进入时的裁剪**，也就是 VK 真正清过的那块（beginLayerPass 的
+    // renderArea）。不能只按层框算：局部重绘时层框比脏矩形大，框外那块层纹理从没被
+    // 清过（VK 只清 renderArea），照抄进来就会把上一帧的残影拖进模糊/阴影里。
+    // 全帧绘制时两者相等（裁剪就是窗口），所以像素门禁上三端仍然逐像素一致。
+    bool layerRegion(const LayerFrame& f, int& rx, int& ry, int& rw, int& rh) const {
+        rx = std::max(0, f.l);
+        ry = std::max(0, f.t);
+        const int rx1 = std::min(w, f.r);
+        const int ry1 = std::min(h, f.b);
+        rw = rx1 - rx;
+        rh = ry1 - ry;
+        return rw >= 2 && rh >= 2;
+    }
 
-        // 2) 降采样链（与 blurBackdrop 逐字一致：VK 的行 0 = 区域顶部，UV 不翻转）
-        const int sl = clipL, st = clipT, sr = clipR, sb = clipB;
-        bool chainOk = true;
+    // 从 level0 往下建 1..levels 级（与 blurBackdrop 逐字一致：VK 的行 0 = 区域顶部，
+    // UV 不翻转）。返回最终可用的级号（中途失败就是失败前那一级）。
+    int buildChain(int levels) {
+        int finalLevel = 0;
+        if (levels <= 0) return 0;
         blurReplace = true;
         blurForceSingle = true;
-        for (int i = 1; i <= levels && chainOk; i++) {
+        for (int i = 1; i <= levels; i++) {
             const size_t pi = static_cast<size_t>(i - 1);
             const int dw = std::max(1, blurLv[pi].w / 2);
             const int dh = std::max(1, blurLv[pi].h / 2);
-            if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) { chainOk = false; break; }
+            if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) break;
             blurLevelToSampled(blurLv[pi]);
             blurLevelToAttachment(blurLv[static_cast<size_t>(i)]);
             beginBlurLevelPass(blurLv[static_cast<size_t>(i)]);
@@ -2998,34 +2988,111 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             flush();
             g_vk.vkCmdEndRendering(cmd);
             ignoreLayerClip = false;
+            finalLevel = i;
         }
         blurReplace = false;
         blurForceSingle = false;
-        ignoreLayerClip = false;
-        clipL = sl; clipT = st; clipR = sr; clipB = sb;
+        blurLevelToSampled(blurLv[static_cast<size_t>(finalLevel)]);
+        return finalLevel;
+    }
 
-        // 3) 回到父目标（还有外层就回外层，否则回主目标）并合成模糊版
-        //    链失败时**不要**在这里恢复目标：调用方（popLayer）会按普通路径恢复并合成，
-        //    两边都恢复就等于对同一个目标 begin 了两次。
-        if (!chainOk) return false;
-        // 布局转换必须在**渲染作用域之外**做（与 blurBackdrop 同一条顺序：
-        // 先转只读、再恢复目标、再刷新管线）—— 在作用域里转布局对驱动是未定义行为，
-        // 实测表现为"高频内容（图片斜条纹）在模糊后与 GL 差出几十"，低频渐变则看不出来。
-        blurLevelToSampled(blurLv[static_cast<size_t>(levels)]);
+    // 回到父目标（还有外层就回外层，否则回主目标），并把裁剪还原成进入前的
+    void resumeParent(const LayerFrame& f) {
         if (layerStack.empty()) beginMainPass(true);
         else beginLayerPass(layerStack.back().idx, true, layerStack.back());
         clipL = f.pl; clipT = f.pt; clipR = f.pr; clipB = f.pb;
         refreshPipeline();   // 按当前目标的采样数选变体（主目标 4x / 层目标 1x）
+    }
 
+    // 把某一级按**正常 alpha** 合成到当前目标（当前目标必须已经恢复好）
+    void compositeLevel(int level, int x, int y, int rw, int rh, uint32_t col) {
+        emitQuad(static_cast<float>(x), static_cast<float>(y),
+                 static_cast<float>(x + rw), static_cast<float>(y + rh),
+                 0.0f, 0.0f, 1.0f, 1.0f, col,
+                 &blurLv[static_cast<size_t>(level)].tex);
+        flush();
+    }
+
+    // filter: blur —— 抓层内容 → 降采样链 → 正常 alpha 合成回原区域。
+    // 成功返回 true 并已经把结果合成掉了（作用域保持打开）。
+    bool blurLayerContent(const LayerFrame& f) {
+        int rx = 0, ry = 0, rw = 0, rh = 0;
+        if (!layerRegion(f, rx, ry, rw, rh)) return false;
+        if (!ensureBlurLevel(0, rw, rh)) return false;
+        static const bool traceBlur = std::getenv("BINUI_BLUR_TRACE") != nullptr;
+        if (traceBlur)
+            std::fprintf(stderr, "[vk][blur] 层框 %.2f,%.2f %.2fx%.2f 抓取 %d,%d %dx%d 级数 %d\n",
+                         f.x, f.y, f.w, f.h, rx, ry, rw, rh, blurLevelsFor(f.blur));
+        // 抓层内容 → level0（层纹理此时是只读：popLayer 一进来就 layerToSampled 了）
+        {
+            Tex& lt = layers[static_cast<size_t>(f.idx)].tex;
+            setTexLayout(lt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+            blurLevelToTransferDst(blurLv[0]);
+            copyImageRegion(lt.image, rx, ry, blurLv[0].tex.image, rw, rh);
+            setTexLayout(lt, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+        }
+        const int finalLevel = buildChain(blurLevelsFor(f.blur));
+        resumeParent(f);
         const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
         uint32_t col = (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
         Premult(col);
-        emitQuad(static_cast<float>(rx), static_cast<float>(ry),
-                 static_cast<float>(rx1), static_cast<float>(ry1),
-                 0.0f, 0.0f, 1.0f, 1.0f, col,
-                 &blurLv[static_cast<size_t>(levels)].tex);
-        flush();
+        compositeLevel(finalLevel, rx, ry, rw, rh, col);
         return true;
+    }
+
+    // filter: drop-shadow —— 一条外阴影。
+    // 没有着色器就取不到"把 RGB 压成单色、只留轮廓"，所以用两趟混合凑出来：
+    //   1) 阴影色（预乘）铺满 level0 整块区域；
+    //   2) "保留混合"（dst *= srcA）把层内容画一遍 → 得到 (c.rgb*c.a*a, c.a*a)：上色的轮廓，
+    //      形状来自元素自己的 alpha（星形图标的影子是星形，不是方块 —— 与 box-shadow 的本质区别）；
+    //   3) 按阴影半径建链，再按偏移（取整）合成到元素下面。
+    void drawDropShadow(const LayerFrame& f, const BinUIFilterDropShadowEntry& sh) {
+        int rx = 0, ry = 0, rw = 0, rh = 0;
+        if (!layerRegion(f, rx, ry, rw, rh)) return;
+        if (!ensureBlurLevel(0, rw, rh)) return;
+        // 1) + 2)：在 level0 里造出"上色的轮廓"
+        blurReplace = false;
+        blurForceSingle = true;
+        blurLevelToAttachment(blurLv[0]);
+        beginBlurLevelPass(blurLv[0]);      // 清透明 + 小图视口 + 单采样变体
+        clipL = 0; clipT = 0; clipR = rw; clipB = rh;
+        ignoreLayerClip = true;
+        {
+            uint32_t c = sh.color;
+            Premult(c);
+            emitQuad(0.0f, 0.0f, static_cast<float>(rw), static_cast<float>(rh),
+                     0.5f, 0.5f, 0.5f, 0.5f, c, &white);
+            flush();
+            keepOn = true;
+            refreshPipeline();
+            const float u0 = static_cast<float>(rx) / static_cast<float>(w);
+            const float u1 = static_cast<float>(rx + rw) / static_cast<float>(w);
+            const float v0 = static_cast<float>(ry) / static_cast<float>(h);
+            const float v1 = static_cast<float>(ry + rh) / static_cast<float>(h);
+            emitQuad(0.0f, 0.0f, static_cast<float>(rw), static_cast<float>(rh),
+                     u0, v0, u1, v1, 0xFFFFFFFFu, &layers[static_cast<size_t>(f.idx)].tex);
+            flush();
+            keepOn = false;
+        }
+        g_vk.vkCmdEndRendering(cmd);
+        ignoreLayerClip = false;
+        blurForceSingle = false;
+        // 3) 偏移取整（合成四边形恒落在像素边界上，三端一致）
+        const int sdx = static_cast<int>(std::llround(sh.dx));
+        const int sdy = static_cast<int>(std::llround(sh.dy));
+        const int finalLevel = buildChain(blurLevelsFor(sh.blur));
+        if (std::getenv("BINUI_LV_DUMP")) {
+            static int dn = 0;
+            if (dn < 2) {
+                /* 用读回到 buffer 的方式导出（VK 没有 glReadPixels） */
+            }
+            dn++;
+        }
+        resumeParent(f);
+        if (std::getenv("BINUI_BLUR_TRACE"))
+            std::fprintf(stderr, "[vk][shadow] region %d,%d %dx%d 级数 %d 偏移 %d,%d 层框 %.1f,%.1f %.1fx%.1f\n",
+                         rx, ry, rw, rh, finalLevel, sdx, sdy, f.x, f.y, f.w, f.h);
+        compositeLevel(finalLevel, rx + sdx, ry + sdy, rw, rh, 0xFFFFFFFFu);
     }
 
     void popLayer() {
@@ -3034,17 +3101,22 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         const LayerFrame f = layerStack.back();
         layerStack.pop_back();
         endLayerPass();
-        // v0.16.42：模糊层 —— 先糊掉层内容并合成掉；成功就直接收工
+        // 层纹理接下来要当采样源（阴影轮廓 + 本体合成都要采它）
+        layerToSampled(f.idx);
+        // v0.16.43：外阴影先铺（书写顺序里靠前的在上层 → 逆序画）。
+        // 每条阴影各自"恢复目标 → 合成 → 关掉作用域"，这样下一条的降采样链才能重新开场。
+        for (int i = static_cast<int>(f.shadows.size()) - 1; i >= 0; i--) {
+            drawDropShadow(f, f.shadows[static_cast<size_t>(i)]);
+            g_vk.vkCmdEndRendering(cmd);
+        }
+        // v0.16.42：模糊层 —— 糊掉层内容并合成掉；成功就直接收工
         if (f.blur > 0.0f && blurLayerContent(f)) {
-            layers[f.idx].inUse = false;
+            layers[static_cast<size_t>(f.idx)].inUse = false;
             switchBatch(&white);
             return;
         }
-        layerToSampled(f.idx);
         // 回到父目标：还有外层就回外层，否则回主目标
-        if (layerStack.empty()) beginMainPass(true);
-        else beginLayerPass(layerStack.back().idx, true, layerStack.back());
-        clipL = f.pl; clipT = f.pt; clipR = f.pr; clipB = f.pb;
+        resumeParent(f);
         // 合成：四边形就取**层框**本身，UV 用像素坐标除以窗口尺寸。
         // 这样两个性质同时成立（GL/D3D11 同一套写法）：
         //   · 采样是严格 1:1 的 —— 屏幕像素中心 i+0.5 折算过去正好是纹素中心 i+0.5，
@@ -3054,7 +3126,6 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         //     用 translate(10.5px) 的动画用例比出来的）。
         const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
         // 诊断开关：BINUI_VK_LAYER_OPAQUE=1 时合成按 alpha=1 画，用来直接看"层里到底存了什么"
-        //（判断"层内容是空的"还是"合成算错了"，比猜快得多）
         static const bool dbgOpaque = std::getenv("BINUI_VK_LAYER_OPAQUE") != nullptr;
         const float aFinal = dbgOpaque ? 1.0f : a;
         uint32_t col = (static_cast<uint32_t>(aFinal * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
@@ -3065,9 +3136,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         const float fw = f.w, fh = f.h;
         emitQuad(fx, fy, fx + fw, fy + fh, fx / static_cast<float>(w), fy / static_cast<float>(h),
                  (fx + fw) / static_cast<float>(w), (fy + fh) / static_cast<float>(h), col,
-                 &layers[f.idx].tex);
+                 &layers[static_cast<size_t>(f.idx)].tex);
         flush();
-        layers[f.idx].inUse = false;
+        layers[static_cast<size_t>(f.idx)].inUse = false;
         switchBatch(&white);           // 把当前纹理换回纯白（flush 已清空 cur）
     }
 };
@@ -4110,10 +4181,9 @@ bool BinUIVK::pushLayer(float x, float y, float w, float h, float alpha) {
 }
 
 // v0.16.42：filter: blur 的模糊层（框已由调用方按 3σ 外扩并取整）
-bool BinUIVK::pushLayerBlurred(float x, float y, float w, float h, float alpha,
-                               float blurPx) {
-    if (!(blurPx > 0.0f)) return false;
-    return impl_ ? impl_->pushLayer(x, y, w, h, alpha, blurPx) : false;
+bool BinUIVK::pushLayerEx(float x, float y, float w, float h, const LayerFx& fx) {
+    if (!impl_ || (fx.shadowCount > 0 && !fx.shadows)) return false;
+    return impl_->pushLayer(x, y, w, h, fx.alpha, fx.blurPx, fx.shadows, fx.shadowCount);
 }
 
 void BinUIVK::popLayer() {

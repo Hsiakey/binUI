@@ -596,8 +596,10 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # filter-blur（v0.16.42）：五档半径 + 子树模糊 + 渐变圆角 + opacity/blur 合层 + 嵌套两层
 # + 小数坐标 + -webkit- 别名 + 贴窗口边缘。只进跨后端比对（GDI 遗留路径不模糊）。
 # 实测 GL vs VK 0 不同像素（最大通道差 59）、D3D11 vs GL 0 不同像素（最大通道差 2）；
+# drop-shadow（v0.16.43）：外阴影取元素 alpha 上色；本用例覆盖星形轮廓/文字/子树/多阴影/硬阴影/
+# 负偏移/颜色前置/opacity 同用/贴窗口边缘/blur+shadow 同写/方角图片。三端 0 不同像素。
 # 那 59 来自"层里画圆角图片"的既有单采样差异（见 docs/future.md 的工具链已知问题）。
-ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur
+ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 

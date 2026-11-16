@@ -30,7 +30,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v29: 毛玻璃段（backdrop-filter: blur），见 BinUIBackdropEntry
 // v31: 绘制段加 float letterSpacing（48 -> 52 字节）
 // v32: 绘制段加 float blurPx（52 -> 56 字节，CSS filter: blur(Npx)）
-constexpr uint32_t BINUI_VERSION    = 32;   // v32：绘制段加 float blurPx；v30：贴右/贴下定位（right/bottom）的规格段字段
+// v33: 外阴影段（CSS filter: drop-shadow），见 BinUIFilterDropShadowEntry
+constexpr uint32_t BINUI_VERSION    = 33;   // v33：filter: drop-shadow 段；v32：绘制段加 float blurPx
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -751,6 +752,34 @@ struct BinUIBackdropEntry {
 };
 #pragma pack(pop)
 static_assert(sizeof(BinUIBackdropEntry) == 12, "BinUIBackdropEntry must be 12 bytes");
+
+// ============================================================
+// 外阴影段（v33）：CSS filter: drop-shadow(dx dy [blur] color)
+//
+// 布局：uint32 dBytes（0 = 无）+ uint32 dCount + 每条 BinUIFilterDropShadowEntry（20 字节）。
+// 恒定写出，位于毛玻璃段之后、名称段之前。
+//
+// 与 box-shadow 的区别（这也是为什么要单开一段而不是复用阴影段）：
+//   · box-shadow 是**盒子的影子**：圆角矩形的形状，跟内容无关；按环带画在盒子外面。
+//   · drop-shadow 是**轮廓的影子**：元素自身（含子元素、文字、图片、透明区）的
+//     alpha 通道就是形状 —— 一个星形图标投影出来是星形，不是方块。
+//   实现上它必须拿到"元素画完后的一张离屏图"，再取 alpha 上色，所以走的是离屏图层
+//   （与 filter: blur / backdrop-filter 同一套设施），不是一条几何。
+//
+// 阴影按**数组顺序**合成：写在前面的在上层（CSS 同）。也就是说绘制期逆序遍历。
+// ============================================================
+#pragma pack(push, 1)
+struct BinUIFilterDropShadowEntry {
+    uint16_t nodeId;
+    uint16_t flags;      // 保留（目前恒 0）
+    float    dx;         // 偏移（px，可负）
+    float    dy;
+    float    blur;       // 模糊半径（px，0 = 硬边；上限同 filter: blur 的 64）
+    uint32_t color;      // AARRGGBB（缺省 = 当前文字色）
+};
+#pragma pack(pop)
+static_assert(sizeof(BinUIFilterDropShadowEntry) == 20,
+              "BinUIFilterDropShadowEntry must be 20 bytes");
 
 // ============================================================
 // 路径段（v15，恒定写出，位于扩展绘制段之后、名称段之前）

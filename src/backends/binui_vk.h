@@ -98,7 +98,7 @@ public:
     // 需要 Vulkan 1.3 动态渲染；拿不到就返回 false，调用方退回逐元素乘 alpha。
     bool pushLayer(float x, float y, float w, float h, float alpha) override;
     // v0.16.42：filter: blur(Npx) 的模糊层（pop 时先糊掉层内容再按 alpha 合成）
-    bool pushLayerBlurred(float x, float y, float w, float h, float alpha, float blurPx) override;
+    bool pushLayerEx(float x, float y, float w, float h, const LayerFx& fx) override;
     void popLayer() override;
     void setFontName(const char* name) override;
 

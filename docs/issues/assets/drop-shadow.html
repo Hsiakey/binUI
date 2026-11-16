@@ -1,0 +1,45 @@
+<html width="660" height="470" bg="#EEF2F7">
+  <!-- v0.16.43：CSS filter: drop-shadow(dx dy [blur] color)。
+       影子取的是**元素自身的 alpha**（轮廓），不是盒子 —— 星形图标的影子是星形。
+       实现与 filter: blur 共用同一套离屏图层与降采样链：阴影色铺满 → 保留混合乘上层内容的
+       alpha（得到上色的轮廓）→ 降采样 → 按偏移合成到元素下面。只进跨后端比对。 -->
+
+  <!-- ① 轮廓：星形 / 圆角渐变 / 圆形 / 两条阴影叠加 / 硬阴影（blur 0） -->
+  <svg width="110" height="110" style="position:absolute;left:16px;top:16px">
+    <polygon points="55,6 69,41 106,41 76,63 87,100 55,78 23,100 34,63 4,41 41,41"
+             fill="#F0B429" style="filter:drop-shadow(0px 6px 6px rgba(0,0,0,0.45))" />
+  </svg>
+  <div style="position:absolute;left:140px;top:16px;width:100px;height:100px;background:linear-gradient(135deg,#2F6BF0,#14B8A6);border-radius:24px;filter:drop-shadow(6px 8px 4px rgba(0,0,0,0.4))"></div>
+  <div style="position:absolute;left:260px;top:16px;width:100px;height:100px;background:#0B5FA5;border-radius:50px;filter:drop-shadow(0 4px 10px rgba(20,60,140,0.55))"></div>
+  <div style="position:absolute;left:384px;top:16px;width:100px;height:100px;background:#FFFFFF;border-radius:16px;filter:drop-shadow(0 2px 2px rgba(0,0,0,0.4)) drop-shadow(0 8px 12px rgba(0,0,0,0.35))"></div>
+  <div style="position:absolute;left:508px;top:16px;width:100px;height:100px;background:#E11D48;border-radius:50px;filter:drop-shadow(10px 10px 0px #22398F)"></div>
+  <span style="position:absolute;left:16px;top:128px;width:628px;height:16px;font-size:11px;color:#4A5A6E">星形轮廓 / 圆角渐变 / 圆形（10px 半径） / 两条阴影叠加 / 硬阴影（blur 0，红圆 + 蓝圆）</span>
+
+  <!-- ② 文字：轮廓来自字形本身（透明背景时特别明显） -->
+  <span style="position:absolute;left:16px;top:150px;width:420px;height:42px;font-size:34px;color:#16202C;filter:drop-shadow(3px 4px 3px rgba(47,107,240,0.75))">DROP SHADOW</span>
+  <span style="position:absolute;left:452px;top:162px;width:190px;height:16px;font-size:11px;color:#4A5A6E">文字轮廓（字形的 alpha）</span>
+
+  <!-- ③ 子树：卡片 + 子元素合成后**一个**轮廓（子元素之间没有缝） -->
+  <div style="position:absolute;left:16px;top:212px;width:180px;height:84px;background:#FFFFFF;border-radius:14px;filter:drop-shadow(0 6px 8px rgba(0,0,0,0.35))">
+    <span style="position:absolute;left:12px;top:10px;width:156px;height:18px;font-size:13px;color:#16202C">子树轮廓</span>
+    <div style="position:absolute;left:12px;top:36px;width:60px;height:36px;background:#22C55E;border-radius:8px"></div>
+    <div style="position:absolute;left:82px;top:36px;width:60px;height:36px;background:#F0B429;border-radius:18px"></div>
+  </div>
+  <!-- 负偏移 + 大半径（阴影跑到左上） -->
+  <div style="position:absolute;left:212px;top:212px;width:80px;height:80px;background:#A855F7;border-radius:12px;filter:drop-shadow(-8px -6px 12px rgba(102,51,153,0.7))"></div>
+  <!-- 颜色写在最前面（CSS 允许 <color> 在任意位置） -->
+  <div style="position:absolute;left:308px;top:212px;width:80px;height:80px;background:#0B5FA5;border-radius:40px;filter:drop-shadow(#FF5A5A 6px 6px 3px)"></div>
+  <!-- drop-shadow 与组透明度同用：一层同时做两件事 -->
+  <div style="position:absolute;left:404px;top:212px;width:80px;height:80px;background:#14B8A6;border-radius:12px;opacity:0.7;filter:drop-shadow(0 8px 6px #0F766E)"></div>
+  <span style="position:absolute;left:16px;top:302px;width:628px;height:16px;font-size:11px;color:#4A5A6E">子树一个轮廓 / 负偏移 12px 半径 / 颜色写在前面 / drop-shadow + opacity 0.7</span>
+
+  <!-- ④ 贴窗口边缘（外扩被窗口裁掉一部分）/ blur + drop-shadow 同写 / 方角图片 -->
+  <div style="position:absolute;left:-20px;top:328px;width:70px;height:70px;background:#FF5A5A;border-radius:10px;filter:drop-shadow(0 10px 8px rgba(0,0,0,0.55))"></div>
+  <div style="position:absolute;left:96px;top:328px;width:90px;height:70px;background:#22398F;border-radius:10px;filter:blur(2px) drop-shadow(0 6px 6px rgba(0,0,0,0.4))"></div>
+  <div style="position:absolute;left:212px;top:328px;width:84px;height:84px">
+    <img style="position:absolute;left:0px;top:0px;width:84px;height:84px;filter:drop-shadow(5px 6px 6px rgba(0,0,0,0.45))" src="image-round-img.png" />
+  </div>
+  <span style="position:absolute;left:312px;top:352px;width:330px;height:16px;font-size:11px;color:#4A5A6E">贴窗口左侧 / blur(2) + drop-shadow / 方角图片（轮廓 = 图片自己的 alpha）</span>
+
+  <span style="position:absolute;left:16px;top:430px;width:630px;height:20px;font-size:12px;color:#16202C">v33 外阴影段（20 字节/条）：取元素 alpha 上色 → 降采样模糊 → 按偏移叠在下面</span>
+</html>

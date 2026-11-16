@@ -239,15 +239,26 @@ public:
         (void)x; (void)y; (void)w; (void)h; (void)alpha;
         return false;
     }
-    // ---- 模糊图层（v0.16.42：CSS filter: blur(Npx)）----
-    // 与 pushLayer 完全同样的生命周期，唯一的区别是 pop 时**先把图层内容糊掉**再合成：
-    //   1) 把层纹理的 (x,y,w,h) 区域抓下来（调用方已按 PaintFilterBlurPad 外扩过、取整）；
-    //   2) 多级 2× 降采样链（与 backdropBlur 同一条链、同一套级数公式）；
-    //   3) 以**正常 alpha 混合**把模糊版画回同一矩形（不是 replace —— 这里叠在背景上）。
-    // 级数与 backdropBlur 一致：让 2^levels >= blurPx 的最小值（1..6）。
-    // 返回 false = 不支持（GDI 遗留路径）或参数退化 → 调用方退回"不模糊"（只保留 alpha/无层）。
-    virtual bool pushLayerBlurred(float x, float y, float w, float h, float alpha, float blurPx) {
-        (void)x; (void)y; (void)w; (void)h; (void)alpha; (void)blurPx;
+    // ---- 离屏图层的"效果"参数（v0.16.43：把 blur 升级成"一组效果"）----
+    // 一个结构代替一串参数：以后再加效果就不用动接口签名。
+    //   alpha       组 alpha（pop 时整体乘一次；1 = 只做效果）
+    //   blurPx      CSS filter: blur()：pop 时把层内容糊掉再合成
+    //   shadows     CSS filter: drop-shadow()：**轮廓的影子** —— 取层内容的 alpha 上色、
+    //               按各自半径模糊、按各自偏移叠在元素**下面**（数组顺序 = 书写顺序，
+    //               写在前面的在上层，所以绘制期逆序）
+    struct LayerFx {
+        float alpha = 1.0f;
+        float blurPx = 0.0f;
+        const BinUIFilterDropShadowEntry* shadows = nullptr;
+        int shadowCount = 0;
+    };
+
+    // 与 pushLayer 完全同样的生命周期，多出 blur / drop-shadow 两种"pop 时才发生"的效果。
+    // 帧 = 调用方已按 `PaintLayerPad()` 把元素框外扩并取整（模糊/阴影都会摊到盒子外面）。
+    // 返回 false = 后端不支持（GDI 遗留路径）或参数退化 → 调用方自己决定退到什么：
+    //   有 alpha 就退回 pushLayer（只做组透明度），否则不建层。
+    virtual bool pushLayerEx(float x, float y, float w, float h, const LayerFx& fx) {
+        (void)x; (void)y; (void)w; (void)h; (void)fx;
         return false;
     }
     virtual void popLayer() {}

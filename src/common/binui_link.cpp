@@ -75,6 +75,7 @@ struct Doc {
     std::vector<ClipRec> clips;   // v27 裁剪路径段
     std::vector<MaskRec> masks;   // v28 遮罩段
     std::vector<BinUIBackdropEntry> backdrops;   // v29 毛玻璃段
+    std::vector<BinUIFilterDropShadowEntry> dropShadows;   // v33 外阴影段（filter: drop-shadow）
     std::vector<std::pair<uint16_t, std::string>> names;
 };
 
@@ -689,6 +690,36 @@ bool ParseDoc(const void* data, size_t size, Doc& d) {
         if (!ok) r.rewind(mark);
     }
 
+    // ---- 外阴影段（v33）：uint32 bytes + uint32 count + 每条 20 字节 ----
+    {
+        const uint8_t* mark = r.cur();
+        uint32_t bytes = 0;
+        bool ok = false;
+        if (r.u32(bytes)) {
+            if (bytes == 0) {
+                ok = true;
+            } else {
+                const uint8_t* sp = nullptr;
+                if (r.blob(bytes, sp)) {
+                    Reader s(sp, sp + bytes);
+                    uint32_t sc = 0;
+                    if (s.u32(sc)) {
+                        ok = true;
+                        for (uint32_t k = 0; k < sc && ok; k++) {
+                            const uint8_t* hp = nullptr;
+                            if (!s.blob(sizeof(BinUIFilterDropShadowEntry), hp)) { ok = false; break; }
+                            BinUIFilterDropShadowEntry de = {};
+                            memcpy(&de, hp, sizeof(de));
+                            d.dropShadows.push_back(de);
+                        }
+                    }
+                }
+                if (!ok) { d.dropShadows.clear(); r.rewind(mark); }
+            }
+        }
+        if (!ok) r.rewind(mark);
+    }
+
     // ---- 名称段（v8，缺失 = 无命名节点） ----
     {
         uint32_t bytes = 0;
@@ -909,6 +940,15 @@ std::vector<uint8_t> EmitDoc(Doc& d) {
         if (!d.backdrops.empty())
             PutRaw(p4, d.backdrops.data(), d.backdrops.size() * sizeof(BinUIBackdropEntry));
         PutSection(b, p4);
+    }
+    // 外阴影段（v33，恒定写出）
+    {
+        std::vector<uint8_t> p5;
+        PutU32(p5, static_cast<uint32_t>(d.dropShadows.size()));
+        if (!d.dropShadows.empty())
+            PutRaw(p5, d.dropShadows.data(),
+                   d.dropShadows.size() * sizeof(BinUIFilterDropShadowEntry));
+        PutSection(b, p5);
     }
     // 名称段（非空才写）
     if (!namePairs.empty()) {
@@ -1210,6 +1250,15 @@ bool MergeLayout(std::vector<uint8_t>& host, const void* comp, size_t compSize,
         BinUIBackdropEntry r4 = be;
         r4.nodeId = static_cast<uint16_t>(idMap[it->second]);
         h.backdrops.push_back(r4);
+    }
+
+    // ---- 外阴影段（v33）：按 nodeId 重映射 ----
+    for (const BinUIFilterDropShadowEntry& de : c.dropShadows) {
+        auto it = compIdx.find(de.nodeId);
+        if (it == compIdx.end() || it->second == 0) continue;
+        BinUIFilterDropShadowEntry r5 = de;
+        r5.nodeId = static_cast<uint16_t>(idMap[it->second]);
+        h.dropShadows.push_back(r5);
     }
 
     // ---- 组件引用段（组件内再内挂组件时递归） ----

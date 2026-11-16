@@ -873,6 +873,7 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
     // ---- 毛玻璃段（v29）：uint32 bBytes + uint32 bCount + 每条 12 字节 ----
     // 段序（v29）：… / 图片滤镜 / 裁剪路径 / 遮罩 / 毛玻璃 / 名称。
     backdrop_.clear();
+    dropShadows_.clear();
     if (const uint8_t* bp = sectionAt(14)) {
         uint32_t bb = 0;
         memcpy(&bb, bp, sizeof(bb));
@@ -893,7 +894,30 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
         }
     }
 
-    if (const uint8_t* np = sectionAt(15)) {
+    // ---- 外阴影段（v33）：uint32 bytes + uint32 count + 每条 20 字节 ----
+    // 段序（v33）：… / 图片滤镜 / 裁剪路径 / 遮罩 / 毛玻璃 / 外阴影 / 名称。
+    dropShadows_.clear();
+    if (const uint8_t* dp = sectionAt(15)) {
+        uint32_t db = 0;
+        memcpy(&db, dp, sizeof(db));
+        if (db >= sizeof(uint32_t) &&
+            size - static_cast<size_t>(dp - data) >= sizeof(uint32_t) + db) {
+            const uint8_t* q = dp + sizeof(uint32_t);
+            uint32_t dc = 0;
+            memcpy(&dc, q, sizeof(dc));
+            q += sizeof(dc);
+            const uint8_t* qend = dp + sizeof(uint32_t) + db;
+            for (uint32_t i = 0; i < dc && q + sizeof(BinUIFilterDropShadowEntry) <= qend; i++) {
+                BinUIFilterDropShadowEntry de = {};
+                memcpy(&de, q, sizeof(de));
+                q += sizeof(de);
+                if (!nodeIndexById_.count(de.nodeId)) continue;
+                dropShadows_[de.nodeId].push_back(de);
+            }
+        }
+    }
+
+    if (const uint8_t* np = sectionAt(16)) {
         uint32_t nbytes = 0;
         memcpy(&nbytes, np, sizeof(uint32_t));
         if (nbytes > 0 && size - static_cast<size_t>(np - data) >= sizeof(uint32_t) + nbytes) {

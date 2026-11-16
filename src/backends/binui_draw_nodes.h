@@ -432,24 +432,31 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     // v0.16.42：同一套图层也承载 CSS filter: blur(Npx) —— 它同样是"组"语义，只是 pop 时
     // 多一趟"把层内容糊掉再合成"。所以候选集合 = 半透明节点 ∪ 模糊节点，两者的层可以合并
     // （同时写了 opacity 和 filter 的元素只建一层）。
-    struct LayerNode { size_t idx; int lastPos; float op; float blur; };
+    struct LayerNode { size_t idx; int lastPos; float op; };
     std::vector<LayerNode> layerStack;
     float layerAccum = 1.0f;          // 已经由图层承受掉的 alpha 乘积
     // 每个节点的"自己"的 opacity（静态 × 动画）、模糊半径，以及父下标
     std::vector<float> ownOp;
     std::vector<float> ownBlur;
+    // v0.16.43：filter: drop-shadow 的条目（指向渲染器里的段数据，绘制期只读）
+    std::vector<const BinUIFilterDropShadowEntry*> ownShadow;
+    std::vector<int> ownShadowN;
     std::vector<int32_t> pIdx;
     std::unordered_map<size_t, std::pair<int, int>> ownerSpan;   // 层候选：首/末位置
     std::unordered_map<size_t, int> ownerCount;                  // 层候选：子树里画了几个节点
     {
         ownOp.resize(nodeCount, 1.0f);
         ownBlur.assign(nodeCount, 0.0f);
+        ownShadow.assign(nodeCount, nullptr);
+        ownShadowN.assign(nodeCount, 0);
         pIdx.assign(nodeCount, -1);
         bool anyLayerNode = false;
         for (size_t i = 0; i < nodeCount; i++) {
             ownOp[i] = renderer.ownOpacity(nodes[i].id);
             ownBlur[i] = renderer.blurOf(nodes[i].id);
-            if (ownOp[i] < 0.999f || ownBlur[i] > 0.0f) anyLayerNode = true;
+            ownShadow[i] = renderer.dropShadowsOf(nodes[i].id, ownShadowN[i]);
+            if (ownOp[i] < 0.999f || ownBlur[i] > 0.0f || ownShadowN[i] > 0)
+                anyLayerNode = true;
             const uint16_t pid = nodes[i].parentId;
             if (pid != 0xFFFF && pid != nodes[i].id) {
                 const size_t pi = indexOf(pid);
@@ -467,7 +474,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 int32_t a = static_cast<int32_t>(i);
                 for (int guard = 0; a >= 0 && guard < 512; guard++) {
                     const size_t ai = static_cast<size_t>(a);
-                    if (ownOp[ai] < 0.999f || ownBlur[ai] > 0.0f) {
+                    if (ownOp[ai] < 0.999f || ownBlur[ai] > 0.0f || ownShadowN[ai] > 0) {
                         auto it = ownerSpan.find(ai);
                         if (it == ownerSpan.end()) ownerSpan[ai] = { static_cast<int>(pos), static_cast<int>(pos) };
                         else it->second.second = static_cast<int>(pos);
@@ -484,7 +491,8 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             for (const auto& kv : ownerSpan) {
                 const int first = kv.second.first, last = kv.second.second;
                 const int cnt = ownerCount[kv.first];
-                const bool needsLayerAlone = ownBlur[kv.first] > 0.0f;
+                const bool needsLayerAlone =
+                    ownBlur[kv.first] > 0.0f || ownShadowN[kv.first] > 0;
                 if ((cnt >= 2 || needsLayerAlone) && last - first + 1 == cnt) contig[kv.first] = kv.second;
             }
             ownerSpan.swap(contig);
@@ -575,26 +583,39 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 const float bx = on.x - offX[oi2] + s2.offX;
                 const float by = on.y - offY[oi2] + s2.offY;
                 const float bl = ownBlur[oi2];
-                if (bl > 0.0f) {
-                    // 模糊会**溢出盒子**：图层框与合成矩形都按 3σ 外扩并取整。
-                    // 取整是刻意的 —— 层纹理的抓取/回写矩形在三端都是整像素，
-                    // 图层框也跟着整像素走，合成四边形就恒落在像素边界上（三端逐像素一致）。
-                    const int pad = PaintFilterBlurPad(bl);
+                const int sn = ownShadowN[oi2];
+                if (bl > 0.0f || sn > 0) {
+                    // 模糊/阴影都会**溢出盒子**：图层框与合成矩形按各自的外扩叠起来并取整。
+                    // 取整是刻意的 —— 层纹理的抓取/回写矩形在三端都是整像素，图层框也跟着
+                    // 整像素走，合成四边形就恒落在像素边界上（三端逐像素一致）。
+                    std::vector<float> sdx(static_cast<size_t>(sn)), sdy(static_cast<size_t>(sn)),
+                                       sbl(static_cast<size_t>(sn));
+                    for (int k = 0; k < sn; k++) {
+                        sdx[static_cast<size_t>(k)] = ownShadow[oi2][k].dx;
+                        sdy[static_cast<size_t>(k)] = ownShadow[oi2][k].dy;
+                        sbl[static_cast<size_t>(k)] = ownShadow[oi2][k].blur;
+                    }
+                    const int pad = PaintLayerPad(bl, sdx.data(), sdy.data(), sbl.data(), sn);
                     const float lx = std::floor(bx) - static_cast<float>(pad);
                     const float ly = std::floor(by) - static_cast<float>(pad);
                     const float lw = std::ceil(bx + on.width) - std::floor(bx) + static_cast<float>(pad * 2);
                     const float lh = std::ceil(by + on.height) - std::floor(by) + static_cast<float>(pad * 2);
-                    if (gfx.pushLayerBlurred(lx, ly, lw, lh, ownOp[oi2], bl)) {
-                        layerStack.push_back({ oi2, ownerSpan[oi2].second, ownOp[oi2], bl });
+                    IBinUIGfx::LayerFx fx;
+                    fx.alpha = ownOp[oi2];
+                    fx.blurPx = bl;
+                    fx.shadows = ownShadow[oi2];
+                    fx.shadowCount = sn;
+                    if (gfx.pushLayerEx(lx, ly, lw, lh, fx)) {
+                        layerStack.push_back({ oi2, ownerSpan[oi2].second, ownOp[oi2] });
                         layerAccum *= ownOp[oi2];
                     } else if (ownOp[oi2] < 0.999f &&
                                gfx.pushLayer(bx, by, on.width, on.height, ownOp[oi2])) {
-                        // 后端不支持模糊（GDI 遗留路径）：至少把组透明度这一半做对
-                        layerStack.push_back({ oi2, ownerSpan[oi2].second, ownOp[oi2], 0.0f });
+                        // 后端不支持效果（GDI 遗留路径）：至少把组透明度这一半做对
+                        layerStack.push_back({ oi2, ownerSpan[oi2].second, ownOp[oi2] });
                         layerAccum *= ownOp[oi2];
                     }
                 } else if (gfx.pushLayer(bx, by, on.width, on.height, ownOp[oi2])) {
-                    layerStack.push_back({ oi2, ownerSpan[oi2].second, ownOp[oi2], 0.0f });
+                    layerStack.push_back({ oi2, ownerSpan[oi2].second, ownOp[oi2] });
                     layerAccum *= ownOp[oi2];
                 }
             }

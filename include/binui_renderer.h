@@ -196,6 +196,15 @@ public:
         return it == backdrop_.end() ? nullptr : &it->second;
     }
 
+    // v33 外阴影段：节点的 filter: drop-shadow 列表（**书写顺序**：写在前面的在上层）。
+    // 没有条目返回 nullptr，count 写 0。多条阴影是常见写法（贴边硬影 + 大范围柔影）。
+    const BinUIFilterDropShadowEntry* dropShadowsOf(uint16_t nodeId, int& count) const {
+        auto it = dropShadows_.find(nodeId);
+        if (it == dropShadows_.end()) { count = 0; return nullptr; }
+        count = static_cast<int>(it->second.size());
+        return it->second.data();
+    }
+
     // v15 路径段：BINUI_PATH 节点的折线（归一化坐标 + 子路径表；无条目返回 nullptr）
     struct PathRecord {
         BinUIPathEntry head{};
@@ -764,6 +773,7 @@ private:
     std::unordered_map<uint16_t, ClipRecord> clipPaths_;
     std::unordered_map<uint16_t, std::vector<MaskRecord>> masks_;   // v28 遮罩段
     std::unordered_map<uint16_t, BinUIBackdropEntry> backdrop_;     // v29 毛玻璃段
+    std::unordered_map<uint16_t, std::vector<BinUIFilterDropShadowEntry>> dropShadows_;  // v33 外阴影段
     // nodeId -> (textShadows_ 起始下标, 条数)
     std::unordered_map<uint16_t, std::pair<size_t, uint32_t>> textShadowIdx_;
     // v19 路径条带的跨帧缓存（条带数量有上限，条目数也封顶）。

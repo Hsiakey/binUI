@@ -928,6 +928,7 @@ struct BinUID3D::Impl {
         int idx = -1;
         float x = 0, y = 0, w = 0, h = 0, alpha = 1;
         float blur = 0;              // v0.16.42：filter: blur(Npx) 的半径（0 = 普通 alpha 层）
+        std::vector<BinUIFilterDropShadowEntry> shadows;   // v0.16.43：外阴影（书写顺序）
         ID3D11RenderTargetView* prevTarget = nullptr;
     };
     std::vector<LayerTarget> layers;
@@ -1033,7 +1034,8 @@ struct BinUID3D::Impl {
         return static_cast<int>(layers.size() - 1);
     }
 
-    bool pushLayer(float x, float y, float w, float h, float alpha, float blur = 0.0f) {
+    bool pushLayer(float x, float y, float w, float h, float alpha, float blur = 0.0f,
+                   const BinUIFilterDropShadowEntry* shadows = nullptr, int shadowCount = 0) {
         if (!ready || w <= 0.0f || h <= 0.0f || alpha <= 0.0f) return false;   // v27：alpha=1 也允许（裁剪用容器层）
         if (static_cast<int>(layerStack.size()) >= kMaxLayers) { warnLayerLimit(); return false; }
         flushAll();                     // 先把手头的图元画到当前目标（此时还没换 RT）
@@ -1041,6 +1043,7 @@ struct BinUID3D::Impl {
         if (idx < 0) { warnLayerLimit(); return false; }
         LayerFrame f;
         f.idx = idx; f.x = x; f.y = y; f.w = w; f.h = h; f.alpha = alpha; f.blur = blur;
+        if (shadows && shadowCount > 0) f.shadows.assign(shadows, shadows + shadowCount);
         // 父目标 = 外层图层的 RT（嵌套时不能一律回到主目标，否则内层会直接合成到主目标上，
         // 外层那一次 alpha 就漏掉了 —— v0.16.12 用 6 层嵌套用例抓到，差 25% 像素）
         f.prevTarget = layerStack.empty() ? msTarget : layers[layerStack.back().idx].rtv;
@@ -1086,52 +1089,59 @@ struct BinUID3D::Impl {
         return true;
     }
 
-    // ---- v0.16.42 filter: blur(Npx)：把**层自己的内容**糊掉再合成 ----
-    // 与 backdropBlur 共用同一条降采样链，两处差别：
-    //   · 抓取源是层纹理 —— 糊的是"自己的画面"，不是"身后的背景"；
-    //   · 合成用**正常 alpha 混合**（d.blend，不是 blendReplace）—— 叠在背景上。
-    // 进入时父目标已经绑定好（调用方刚换过 RT）。
-    bool blurLayerContent(const LayerFrame& f) {
-        int rx = static_cast<int>(std::floor(f.x));
-        int ry = static_cast<int>(std::floor(f.y));
-        int rx1 = static_cast<int>(std::ceil(f.x + f.w));
-        int ry1 = static_cast<int>(std::ceil(f.y + f.h));
-        rx = std::max(0, rx); ry = std::max(0, ry);
-        rx1 = std::min(winW, rx1); ry1 = std::min(winH, ry1);
-        const int rw = rx1 - rx, rh = ry1 - ry;
-        if (rw < 2 || rh < 2) return false;
+    // ---- v0.16.42/43：离屏图层效果（filter: blur / filter: drop-shadow）----
+    // 与 backdropBlur 共用同一条降采样链；三者都以"整像素矩形 + 正常 alpha 混合"为准
+    // （这是三端逐像素一致的前提）。D3D 的纹理行 0 = 区域顶部，UV 正着来、不翻转。
+    static int blurLevelsFor(float blurPx) {
+        if (!(blurPx > 0.0f)) return 0;
         int levels = 1;
-        {
-            float v = 2.0f;
-            while (levels < 6 && v < f.blur) { v *= 2.0f; levels++; }
-        }
-        if (!ensureBlurLevel(0, rw, rh)) return false;
+        float v = 2.0f;
+        while (levels < 6 && v < blurPx) { v *= 2.0f; levels++; }
+        return levels;
+    }
 
-        // 1) 抓层内容 → level0（DST 是 blurLv[0]，源是层纹理：拷之前两边都得解绑）
-        ID3D11RenderTargetView* nullRt[1] = { nullptr };
-        ctx->OMSetRenderTargets(1, nullRt, nullptr);
-        {
-            ID3D11ShaderResourceView* nullSrv[1] = { nullptr };
-            ctx->PSSetShaderResources(0, 1, nullSrv);
-            D3D11_BOX box = { static_cast<UINT>(rx), static_cast<UINT>(ry), 0,
-                              static_cast<UINT>(rx1), static_cast<UINT>(ry1), 1 };
-            ctx->CopySubresourceRegion(blurLv[0].tex, 0, 0, 0, 0, layers[f.idx].tex, 0, &box);
-        }
-        ID3D11RenderTargetView* back = f.prevTarget;
-        ctx->OMSetRenderTargets(1, &back, nullptr);
+    bool layerRegion(const LayerFrame& f, int& rx, int& ry, int& rw, int& rh) const {
+        int x0 = static_cast<int>(std::floor(f.x));
+        int y0 = static_cast<int>(std::floor(f.y));
+        int x1 = static_cast<int>(std::ceil(f.x + f.w));
+        int y1 = static_cast<int>(std::ceil(f.y + f.h));
+        x0 = std::max(0, x0);
+        y0 = std::max(0, y0);
+        x1 = std::min(winW, x1);
+        y1 = std::min(winH, y1);
+        rx = x0; ry = y0; rw = x1 - x0; rh = y1 - y0;
+        return rw >= 2 && rh >= 2;
+    }
 
-        // 2) 降采样链（与 backdropBlur 逐字一致；D3D 行 0 = 区域顶部，UV 不翻转）
+    // 回父目标 + 视口/投影/混合状态恢复（作用域概念在 D3D 里就是"绑哪个 RT"）
+    void resumeParent(const LayerFrame& f) {
+        ID3D11RenderTargetView* rt = f.prevTarget;
+        ctx->OMSetRenderTargets(1, &rt, nullptr);
+        D3D11_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(winW),
+                              static_cast<float>(winH), 0.0f, 1.0f };
+        ctx->RSSetViewports(1, &vp);
+        float vs[2] = { static_cast<float>(winW), static_cast<float>(winH) };
+        ctx->UpdateSubresource(cb, 0, nullptr, vs, 0, 0);
         const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        D3D11_VIEWPORT prevVp = { 0, 0, static_cast<float>(winW),
-                                  static_cast<float>(winH), 0, 1 };
-        { UINT n = 1; ctx->RSGetViewports(&n, &prevVp); }
+        ctx->OMSetBlendState(blend, bf, 0xFFFFFFFF);
+        curSrv = whiteSrv;
+        curLinear = 0;
+    }
+
+    // 从 level0 往下建 1..levels 级；返回最终可用级号（中途失败就是失败前那一级）
+    int buildChain(int levels) {
+        int finalLevel = 0;
+        if (levels <= 0) return 0;
+        // 降采样趟的批次矩形必须换成"小图局部"（见下），退出时**务必还原** ——
+        // 不还原的话 scissor 会停在最后那一级的大小上（比如 18×17），之后画的
+        // 文字/图元全被裁在那块里，表现为"模糊元素之后的东西整块消失"。
         const int savedSc[4] = { scissor[0], scissor[1], scissor[2], scissor[3] };
+        const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         ctx->OMSetBlendState(blendReplace, bf, 0xFFFFFFFF);
-        bool chainOk = true;
-        for (int i = 1; i <= levels && chainOk; i++) {
+        for (int i = 1; i <= levels; i++) {
             const int dw = std::max(1, blurLv[static_cast<size_t>(i - 1)].w / 2);
             const int dh = std::max(1, blurLv[static_cast<size_t>(i - 1)].h / 2);
-            if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) { chainOk = false; break; }
+            if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) break;
             BlurLevel& L = blurLv[static_cast<size_t>(i)];
             ID3D11RenderTargetView* lrt = L.rtv;
             ctx->OMSetRenderTargets(1, &lrt, nullptr);
@@ -1150,41 +1160,110 @@ struct BinUID3D::Impl {
                      0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu);
             flushAll();
             ignoreLayerClip = false;
+            finalLevel = i;
         }
+        scissor[0] = savedSc[0]; scissor[1] = savedSc[1];
+        scissor[2] = savedSc[2]; scissor[3] = savedSc[3];
+        return finalLevel;
+    }
 
-        // 3) 回父目标 + 正常 alpha 合成模糊版（整数矩形 + 双线性放大）
-        if (!chainOk) {
-            ID3D11RenderTargetView* prt = f.prevTarget;
-            ctx->OMSetRenderTargets(1, &prt, nullptr);
-            ctx->RSSetViewports(1, &prevVp);
-            float vs[2] = { static_cast<float>(winW), static_cast<float>(winH) };
-            ctx->UpdateSubresource(cb, 0, nullptr, vs, 0, 0);
-            ctx->OMSetBlendState(blend, bf, 0xFFFFFFFF);
-            curSrv = whiteSrv; curLinear = 0;
-            scissor[0] = savedSc[0]; scissor[1] = savedSc[1];
-            scissor[2] = savedSc[2]; scissor[3] = savedSc[3];
-            return false;
-        }
-        ID3D11RenderTargetView* prt = f.prevTarget;
-        ctx->OMSetRenderTargets(1, &prt, nullptr);
-        ctx->RSSetViewports(1, &prevVp);
-        float vs[2] = { static_cast<float>(winW), static_cast<float>(winH) };
-        ctx->UpdateSubresource(cb, 0, nullptr, vs, 0, 0);
-        ctx->OMSetBlendState(blend, bf, 0xFFFFFFFF);
-        const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
-        uint32_t col = (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
-        Premult(col);
-        curSrv = blurLv[static_cast<size_t>(levels)].srv;
+    // 把某一级按正常 alpha 合成到当前目标（当前目标必须已经恢复好）
+    void compositeLevel(int level, int x, int y, int rw, int rh, uint32_t col) {
+        curSrv = blurLv[static_cast<size_t>(level)].srv;
         curLinear = 1;
-        scissor[0] = rx; scissor[1] = ry; scissor[2] = rx1; scissor[3] = ry1;
-        emitQuad(static_cast<float>(rx), static_cast<float>(ry),
-                 static_cast<float>(rx1), static_cast<float>(ry1),
+        const int sc[4] = { scissor[0], scissor[1], scissor[2], scissor[3] };
+        scissor[0] = x; scissor[1] = y; scissor[2] = x + rw; scissor[3] = y + rh;
+        emitQuad(static_cast<float>(x), static_cast<float>(y),
+                 static_cast<float>(x + rw), static_cast<float>(y + rh),
                  0.0f, 0.0f, 1.0f, 1.0f, col);
         curSrv = whiteSrv;
         curLinear = 0;
-        scissor[0] = 0; scissor[1] = 0; scissor[2] = winW; scissor[3] = winH;
+        scissor[0] = sc[0]; scissor[1] = sc[1]; scissor[2] = sc[2]; scissor[3] = sc[3];
         flushAll();
+    }
+
+    // filter: blur —— 抓层内容 → 降采样链 → 正常 alpha 合成回原区域
+    bool blurLayerContent(const LayerFrame& f) {
+        int rx = 0, ry = 0, rw = 0, rh = 0;
+        if (!layerRegion(f, rx, ry, rw, rh)) return false;
+        if (!ensureBlurLevel(0, rw, rh)) return false;
+        static const bool traceBlur = std::getenv("BINUI_BLUR_TRACE") != nullptr;
+        if (traceBlur)
+            std::fprintf(stderr, "[d3d11][blur] 层框 %.2f,%.2f %.2fx%.2f 抓取 %d,%d %dx%d 级数 %d\n",
+                         f.x, f.y, f.w, f.h, rx, ry, rw, rh, blurLevelsFor(f.blur));
+        // 1) 抓层内容 → level0（DST 是 blurLv[0]，源是层纹理：拷之前两边都得解绑）
+        ID3D11RenderTargetView* nullRt[1] = { nullptr };
+        ctx->OMSetRenderTargets(1, nullRt, nullptr);
+        {
+            ID3D11ShaderResourceView* nullSrv[1] = { nullptr };
+            ctx->PSSetShaderResources(0, 1, nullSrv);
+            D3D11_BOX box = { static_cast<UINT>(rx), static_cast<UINT>(ry), 0,
+                              static_cast<UINT>(rx + rw), static_cast<UINT>(ry + rh), 1 };
+            ctx->CopySubresourceRegion(blurLv[0].tex, 0, 0, 0, 0,
+                                       layers[static_cast<size_t>(f.idx)].tex, 0, &box);
+        }
+        // 2) 降采样链 + 3) 回父目标合成
+        const int finalLevel = buildChain(blurLevelsFor(f.blur));
+        resumeParent(f);
+        const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
+        uint32_t col = (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
+        Premult(col);
+        compositeLevel(finalLevel, rx, ry, rw, rh, col);
         return true;
+    }
+
+    // filter: drop-shadow —— 一条外阴影（两趟混合凑出"上色的轮廓"，见 GL 后端的说明）
+    void drawDropShadow(const LayerFrame& f, const BinUIFilterDropShadowEntry& sh) {
+        int rx = 0, ry = 0, rw = 0, rh = 0;
+        if (!layerRegion(f, rx, ry, rw, rh)) return;
+        if (!ensureBlurLevel(0, rw, rh)) return;
+        // 1) + 2)：阴影色铺满 level0，再用"保留混合"乘上层内容的 alpha
+        BlurLevel& L0 = blurLv[0];
+        ID3D11RenderTargetView* lrt = L0.rtv;
+        ctx->OMSetRenderTargets(1, &lrt, nullptr);
+        const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        ctx->ClearRenderTargetView(lrt, zero);
+        D3D11_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(rw),
+                              static_cast<float>(rh), 0.0f, 1.0f };
+        ctx->RSSetViewports(1, &vp);
+        float vs[2] = { static_cast<float>(rw), static_cast<float>(rh) };
+        ctx->UpdateSubresource(cb, 0, nullptr, vs, 0, 0);
+        ignoreLayerClip = true;
+        const int savedSc[4] = { scissor[0], scissor[1], scissor[2], scissor[3] };
+        scissor[0] = 0; scissor[1] = 0; scissor[2] = rw; scissor[3] = rh;
+        {
+            const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            uint32_t c = sh.color;
+            Premult(c);
+            curSrv = whiteSrv;
+            curLinear = 0;
+            emitQuad(0.0f, 0.0f, static_cast<float>(rw), static_cast<float>(rh),
+                     0.5f, 0.5f, 0.5f, 0.5f, c);
+            flushAll();
+            // 保留混合：dst *= srcA（层纹理在原屏幕位置的那一块，1:1 对到 level0）
+            ctx->OMSetBlendState(blendKeep, bf, 0xFFFFFFFF);
+            curSrv = layers[static_cast<size_t>(f.idx)].srv;
+            curLinear = 0;
+            const float u0 = static_cast<float>(rx) / static_cast<float>(winW);
+            const float u1 = static_cast<float>(rx + rw) / static_cast<float>(winW);
+            const float v0 = static_cast<float>(ry) / static_cast<float>(winH);
+            const float v1 = static_cast<float>(ry + rh) / static_cast<float>(winH);
+            emitQuad(0.0f, 0.0f, static_cast<float>(rw), static_cast<float>(rh),
+                     u0, v0, u1, v1, 0xFFFFFFFFu);
+            flushAll();
+        }
+        ignoreLayerClip = false;
+        scissor[0] = savedSc[0]; scissor[1] = savedSc[1];
+        scissor[2] = savedSc[2]; scissor[3] = savedSc[3];
+        // 3) 建链 + 按偏移（取整）合成
+        const int finalLevel = buildChain(blurLevelsFor(sh.blur));
+        resumeParent(f);
+        const int sdx = static_cast<int>(std::llround(sh.dx));
+        const int sdy = static_cast<int>(std::llround(sh.dy));
+        if (std::getenv("BINUI_BLUR_TRACE"))
+            std::fprintf(stderr, "[d3d11][shadow] region %d,%d %dx%d 级数 %d 偏移 %d,%d 层框 %.1f,%.1f %.1fx%.1f\n",
+                         rx, ry, rw, rh, finalLevel, sdx, sdy, f.x, f.y, f.w, f.h);
+        compositeLevel(finalLevel, rx + sdx, ry + sdy, rw, rh, 0xFFFFFFFFu);
     }
 
     void popLayer() {
@@ -1192,14 +1271,18 @@ struct BinUID3D::Impl {
         flushAll();                     // 层内容落盘（flushAll 会按层框裁剪）
         const LayerFrame f = layerStack.back();
         layerStack.pop_back();
-        LayerTarget& t = layers[f.idx];
+        LayerTarget& t = layers[static_cast<size_t>(f.idx)];
         ID3D11RenderTargetView* rt = f.prevTarget;
         ctx->OMSetRenderTargets(1, &rt, nullptr);
+        // v0.16.43：外阴影先铺（书写顺序里靠前的在上层 → 逆序画）
+        for (int i = static_cast<int>(f.shadows.size()) - 1; i >= 0; i--)
+            drawDropShadow(f, f.shadows[static_cast<size_t>(i)]);
         // v0.16.42：模糊层 —— 先糊掉层内容并合成掉；成功就直接收工
         if (f.blur > 0.0f && blurLayerContent(f)) {
             t.inUse = false;
             return;
         }
+
         // 合成：层里是**预乘**颜色（混合 ONE/INV_SRC_ALPHA），顶点色也必须预乘 ——
         // 着色器算 (t.rgb * vcol.rgb, t.a * vcol.a)，不预乘的话通道会被整块加进去。
         const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
@@ -2021,10 +2104,9 @@ bool BinUID3D::pushLayer(float x, float y, float w, float h, float alpha) {
 }
 
 // v0.16.42：filter: blur 的模糊层（框已由调用方按 3σ 外扩并取整）
-bool BinUID3D::pushLayerBlurred(float x, float y, float w, float h, float alpha,
-                                float blurPx) {
-    if (!(blurPx > 0.0f)) return false;
-    return impl_ ? impl_->pushLayer(x, y, w, h, alpha, blurPx) : false;
+bool BinUID3D::pushLayerEx(float x, float y, float w, float h, const LayerFx& fx) {
+    if (!impl_ || (fx.shadowCount > 0 && !fx.shadows)) return false;
+    return impl_->pushLayer(x, y, w, h, fx.alpha, fx.blurPx, fx.shadows, fx.shadowCount);
 }
 
 void BinUID3D::popLayer() {

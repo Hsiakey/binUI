@@ -2984,19 +2984,68 @@ int run() {
             "<button id=\"b\" style=\"position:absolute;left:20;top:8;width:80;height:24\">x</button>"
             "</div></body></html></app_window>\n");
         BinUIRenderer r;
-        TEST("v42r: 布局可解析", r.loadLayout(res.layout.data(), res.layout.size()));
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "v42r: 布局可解析");
         float x = 0, y = 0, w = 0, h = 0;
         const bool okCard = r.invalidRect(r.findNodeByName("card"), x, y, w, h, 0.0f);
         // 4px 模糊 → 外扩 ceil(4*3)=12：100-12=88，宽 120+24=144
-        TEST("v42r: 自己带模糊 → 脏矩形含 3σ 外扩",
-             okCard && std::fabs(x - 88.0f) < 0.6f && std::fabs(y - 48.0f) < 0.6f &&
-             std::fabs(w - 144.0f) < 0.6f && std::fabs(h - 64.0f) < 0.6f);
+        CHECK(okCard && std::fabs(x - 88.0f) < 0.6f && std::fabs(y - 48.0f) < 0.6f &&
+                  std::fabs(w - 144.0f) < 0.6f && std::fabs(h - 64.0f) < 0.6f,
+              "v42r: 自己带模糊 → 脏矩形含 3σ 外扩");
         float bx = 0, by = 0, bw = 0, bh = 0;
         const bool okChild = r.invalidRect(r.findNodeByName("b"), bx, by, bw, bh, 0.0f);
         // 子按钮在 (120,68) 80x24；自己的 pad 之外还要加上祖先那 12px
-        TEST("v42r: 祖先带模糊 → 后代的脏矩形也跟着外扩",
-             okChild && bx <= 120.0f - 12.0f + 0.6f && by <= 68.0f - 12.0f + 0.6f &&
-             bx + bw >= 200.0f + 12.0f - 0.6f && by + bh >= 92.0f + 12.0f - 0.6f);
+        CHECK(okChild && bx <= 120.0f - 12.0f + 0.6f && by <= 68.0f - 12.0f + 0.6f &&
+                  bx + bw >= 200.0f + 12.0f - 0.6f && by + bh >= 92.0f + 12.0f - 0.6f,
+              "v42r: 祖先带模糊 → 后代的脏矩形也跟着外扩");
+    }
+
+    // ---------- v0.16.43：filter: drop-shadow() ----------
+    // 编译期只落参数（不画）：阴影是"轮廓的影子"，必须在绘制期拿到元素画完的 alpha，
+    // 所以走外阴影段（v33，20 字节/条），多条按书写顺序。
+    {
+        const char* ui =
+            "<app_window width=\"400\" height=\"260\" bg=\"#101010\"><html><body>\n"
+            "  <div id=\"a\" style=\"width:80px;height:80px;filter:drop-shadow(2px 4px 6px rgba(0,0,0,0.4))\"></div>\n"
+            "  <div id=\"b\" style=\"width:80px;height:80px;filter:drop-shadow(1px 1px 0 #FF0000) drop-shadow(0 8px 12px #00003333)\"></div>\n"
+            "  <div id=\"c\" style=\"width:80px;height:80px;filter:drop-shadow(-6px -6px 3px #00FF0088)\"></div>\n"
+            "  <div id=\"d\" style=\"width:80px;height:80px;filter:drop-shadow(3px 3px)\"></div>\n"
+            "  <div id=\"e\" style=\"width:80px;height:80px\"></div>\n"
+            "</body></html></app_window>\n";
+        auto res = CompileBinUIEx(ui);
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "v43: 布局可解析");
+        int n = 0;
+        const BinUIFilterDropShadowEntry* e = r.dropShadowsOf(r.findNodeByName("a"), n);
+        CHECK(e && n == 1, "v43: 一条阴影落进外阴影段");
+        CHECK(e && std::fabs(e[0].dx - 2.0f) < 1e-3f && std::fabs(e[0].dy - 4.0f) < 1e-3f &&
+                  std::fabs(e[0].blur - 6.0f) < 1e-3f, "v43: 偏移/模糊原样落段");
+        CHECK(e && ((e[0].color >> 24) & 0xFF) == 102, "v43: rgba() 的 alpha 落进颜色");
+        int nb = 0;
+        const BinUIFilterDropShadowEntry* eb = r.dropShadowsOf(r.findNodeByName("b"), nb);
+        CHECK(eb && nb == 2, "v43: 多条阴影按书写顺序落段");
+        CHECK(eb && std::fabs(eb[0].dx - 1.0f) < 1e-3f && eb[0].blur == 0.0f,
+              "v43: 第三条长度的缺省 = 硬阴影（blur 0）");
+        CHECK(eb && std::fabs(eb[1].dy - 8.0f) < 1e-3f && std::fabs(eb[1].blur - 12.0f) < 1e-3f,
+              "v43: 第二条阴影参数独立");
+        int nc = 0;
+        const BinUIFilterDropShadowEntry* ec = r.dropShadowsOf(r.findNodeByName("c"), nc);
+        CHECK(ec && std::fabs(ec[0].dx + 6.0f) < 1e-3f && std::fabs(ec[0].dy + 6.0f) < 1e-3f,
+              "v43: 负偏移原样落段");
+        int nd = 0;
+        const BinUIFilterDropShadowEntry* ed = r.dropShadowsOf(r.findNodeByName("d"), nd);
+        CHECK(ed && nd == 1 && ed[0].blur == 0.0f,
+              "v43: 只有两个偏移也合法（blur 0 = 硬阴影，颜色缺省 currentColor）");
+        int ne = 0;
+        r.dropShadowsOf(r.findNodeByName("e"), ne);
+        CHECK(ne == 0, "v43: 没写 filter 就没有条目");
+        // 图层外扩：阴影的 3σ + 偏移都要算进去
+        const float sdx[1] = { -8.0f };
+        const float sdy[1] = { 6.0f };
+        const float sbl[1] = { 4.0f };
+        CHECK(binui::PaintLayerPad(0.0f, sdx, sdy, sbl, 1) == 12 + 8,
+              "v43: 外扩 = 3σ + |偏移|（取较大者）");
+        CHECK(binui::PaintLayerPad(6.0f, sdx, sdy, sbl, 1) == 20,
+              "v43: 阴影外扩 = 3σ(4)+8 = 20，比自身的 18 大 → 取 20");
     }
 
     if (g_fail == 0) std::printf("test_paint: 全部通过\n");
