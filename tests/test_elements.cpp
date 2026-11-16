@@ -2566,10 +2566,9 @@ int run() {
         // 没有圆角模板 → 返回 0，调用方退回条带（不支持的后端像素不变）
         CHECK(BuildGradientQuads(0, 0, 100, 100, 12.0f, 0, 135.0f, from, to, q, 9) == 0,
               "缺圆角模板时返回 0（交回条带路径）");
-        // 两端 alpha 不同 → 返回 0：整套渐变都是"直线空间插值再预乘"，四角带色是
-        // "顶点色空间插值"，只有 alpha 不变时两者等价（见 binui_paint.h 的说明）
-        CHECK(BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 135.0f, 0xFFFF0000u, 0x00000000u, q, 9) == 0,
-              "两端 alpha 不同时交回条带路径（插值空间不同）");
+        // v0.16.38：两端 alpha 不同也能走四边形（条带路径同步换成预乘空间插值）
+        CHECK(BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 135.0f, 0xFFFF0000u, 0x00000000u, q, 9) == 1,
+              "两端 alpha 不同也走四边形（淡出渐变不再有上万条带）");
         CHECK(BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 135.0f, 0x80FF0000u, 0x800000FFu, q, 9) == 1,
               "两端 alpha 相同（半透明）时仍走四边形");
         // 退化输入
@@ -2584,6 +2583,28 @@ int run() {
             BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 90.0f, 0x80FF0000u, 0x800000FFu, q, 9);
             CHECK(q[0].c[0] == PaintGradPremulColor(0x80FF0000u), "半透明角色已预乘（from 端）");
             CHECK(q[0].c[1] == PaintGradPremulColor(0x800000FFu), "半透明角色已预乘（to 端）");
+        }
+        // v0.16.38：插值在**预乘**空间（CSS Color 4 / 浏览器口径）
+        {
+            // 两端 alpha 相同时与老函数逐位相同（既有像素基准一位都不许变）
+            CHECK(PaintLerpArgbGrad(0x80FF2010u, 0x8000A0F0u, 0.37f) ==
+                  PaintLerpArgb(0x80FF2010u, 0x8000A0F0u, 0.37f),
+                  "alpha 相同 → 预乘插值与直插逐位等价");
+            // 淡出中点的**颜色不变、只有 alpha 减半**（老行为是颜色一起变暗）
+            const uint32_t mid = PaintLerpArgbGrad(0xFFFF7850u, 0x00000000u, 0.5f);
+            CHECK(((mid >> 24) & 0xFFu) == 128u, "淡出中点 alpha = 128");
+            CHECK(((mid >> 16) & 0xFFu) == 255u && ((mid >> 8) & 0xFFu) == 120u &&
+                  (mid & 0xFFu) == 80u, "淡出中点颜色不变（CSS 口径，不是越插越暗）");
+            // 四角带色：淡出渐变的四角预乘色与条带路径算出来的直色**一致**
+            BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 90.0f, 0xFFFF7850u, 0x00000000u, q, 9);
+            CHECK(q[0].c[0] == 0xFFFF7850u, "from 端不透明 → 预乘色 = 原色");
+            CHECK(q[0].c[1] == 0x00000000u, "to 端全透明 → 预乘色 = 0");
+            CHECK(q[0].c[2] == 0xFFFF7850u, "渐变起点那一侧（t=0）不透明 → 预乘色 = 原色");
+            // 同一个 t 上，四角带色用的 `PaintGradColorAtPoint` 与条带用的
+            // `PaintLerpArgbGrad` 必须是**同一个颜色**（只差"预乘/直色"这一次换算）
+            CHECK(PaintGradColorAtPoint(0.5f, 0.0f, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f,
+                                        0xFFFF7850u, 0x00000000u) == PaintGradPremulColor(mid),
+                  "渐变中段：四边形与条带两条路同口径");
         }
     }
 

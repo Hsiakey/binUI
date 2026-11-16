@@ -106,6 +106,42 @@ inline uint32_t PaintLerpArgbDither(uint32_t a, uint32_t b, float t,
     return (chq(24) << 24) | (chd(16, errR) << 16) | (chd(8, errG) << 8) | chd(0, errB);
 }
 
+// 渐变插值（v0.16.38）：**在预乘空间插值**，与 CSS Color 4 / 浏览器一致。
+// 为什么必须单独一个函数：渐变两端 alpha 不同时，"先按直色插值再预乘"（老行为）和
+// "先预乘再插值"（CSS）结果差很远 —— rgba(255,120,80,1) → transparent 的中点在
+// CSS 里是"同一个颜色、alpha 0.5"，老行为却是"颜色也一起变暗"（正中 ≈ (72,40,32)）。
+// 两端 alpha **相同**时两者数学等价（只差整数取整），所以那一支刻意走老函数 ——
+// 既有像素基准一位不变，只有真正需要修的那类渐变才会变。
+inline uint32_t PaintLerpArgbGrad(uint32_t a, uint32_t b, float t) {
+    if (t <= 0.0f) return a;
+    if (t >= 1.0f) return b;
+    const uint32_t aa = (a >> 24) & 0xFFu, ba = (b >> 24) & 0xFFu;
+    if (aa == ba) return PaintLerpArgb(a, b, t);          // 等价分支：逐位不变
+    const float af = (float)aa + ((float)ba - (float)aa) * t;   // 插值后的 alpha
+    const uint32_t oa = ((uint32_t)(af + 0.5f)) & 0xFFu;
+    if (oa == 0u) return 0u;                              // 全透明：RGB 已无意义
+    auto ch = [&](int shift) -> uint32_t {
+        // 预乘端（0..255 尺度）→ 线性插值 → 除回直色
+        const float ca = (float)((a >> shift) & 0xFF) * (float)aa / 255.0f;
+        const float cb = (float)((b >> shift) & 0xFF) * (float)ba / 255.0f;
+        float v = (ca + (cb - ca) * t) * 255.0f / af;
+        if (v < 0.0f) v = 0.0f;
+        if (v > 255.0f) v = 255.0f;
+        return ((uint32_t)(v + 0.5f)) & 0xFFu;
+    };
+    return (oa << 24) | (ch(16) << 16) | (ch(8) << 8) | ch(0);
+}
+
+// 渐变条带的抖动版：alpha 不同的那一支**不抖**（误差扩散定义在直色通道上，
+// 换成预乘空间后"带误差的颜色"已经不是同一个语义，硬抖反而会出现彩边）。
+// 这类渐变的条带通常只有几十条（淡出），抖动收益本来也看不到。
+inline uint32_t PaintLerpArgbGradDither(uint32_t a, uint32_t b, float t,
+                                        float& errR, float& errG, float& errB) {
+    if ((((a >> 24) ^ (b >> 24)) & 0xFFu) != 0u)
+        return PaintLerpArgbGrad(a, b, t);
+    return PaintLerpArgbDither(a, b, t, errR, errG, errB);
+}
+
 // 圆角矩形在"距边 dy"处的水平内缩（dy 从边的中心算起，超过 radius 就没内缩）
 //   dy = 0   → 内缩 = radius（圆角矩形最高处只剩中间那段）
 //   dy >= r  → 0（进入直边）
@@ -344,7 +380,7 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
                 if (aF < 0.0f) aF = 0.0f;
                 if (aF > span - 1.0f) aF = span - 1.0f;
                 const float t = (aF + 0.5f) / span;
-                uint32_t col = PaintLerpArgbDither(p->gradFrom, p->gradTo, t, dithR, dithG, dithB);
+                uint32_t col = PaintLerpArgbGradDither(p->gradFrom, p->gradTo, t, dithR, dithG, dithB);
                 if (cov < 0.998f) col = PaintScaleAlpha(col, cov);
                 float cA = cross0, cLen = crossLen;
                 if (r > 0.5f) {                                             // 圆角区逐行内缩
@@ -367,7 +403,7 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
         if (b2 <= a + 0.001f) continue;
         const float t = (a + b2) * 0.5f / span;
         PaintBand bd;
-        bd.color = PaintLerpArgbDither(p->gradFrom, p->gradTo, t, dithR, dithG, dithB);
+        bd.color = PaintLerpArgbGradDither(p->gradFrom, p->gradTo, t, dithR, dithG, dithB);
         bd.round = false;
         bd.radius = 0;
         if (horizontal) {
@@ -461,12 +497,24 @@ inline uint32_t PaintGradPremulColor(uint32_t c) {
     return (a << 24) | (r << 16) | (g << 8) | b;
 }
 
-// 屏幕上一点 (px,py) 处的渐变颜色（先直线插值、再预乘 —— 与条带路径同口径）
+// 屏幕上一点 (px,py) 处的渐变颜色，返回**预乘色**（四角带色四边形直接用）。
+// v0.16.38：两端 alpha 不同时在**预乘空间**插值（CSS Color 4），且这正是顶点色要的东西 ——
+// GPU 在三角形上插值的本来就是预乘通道，于是"淡出渐变"也是一块精确的四边形，
+// 不再需要为了插值空间不同而退回条带（见 BuildGradientQuads）。
+// 两端 alpha 相同的分支刻意保持老写法（逐位不变），既有像素基准不受影响。
 inline uint32_t PaintGradColorAtPoint(float px, float py, float dx, float dy, float len,
                                       float sx, float sy, uint32_t from, uint32_t to) {
     float t = len > 1e-6f ? (((px - sx) * dx + (py - sy) * dy) / len) : 0.0f;
     t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
-    return PaintGradPremulColor(PaintLerpArgb(from, to, t));
+    if ((((from >> 24) ^ (to >> 24)) & 0xFFu) == 0u)
+        return PaintGradPremulColor(PaintLerpArgb(from, to, t));
+    const uint32_t p0 = PaintGradPremulColor(from), p1 = PaintGradPremulColor(to);
+    auto ch = [&](int shift) -> uint32_t {
+        const float ca = (float)((p0 >> shift) & 0xFF);
+        const float cb = (float)((p1 >> shift) & 0xFF);
+        return ((uint32_t)(ca + (cb - ca) * t + 0.5f)) & 0xFFu;
+    };
+    return (ch(24) << 24) | (ch(16) << 16) | (ch(8) << 8) | ch(0);
 }
 
 inline int BuildFillBandsAngleGrad(uint32_t from, uint32_t to, float angleDeg,
@@ -476,7 +524,7 @@ inline int BuildFillBandsAngleGrad(uint32_t from, uint32_t to, float angleDeg,
     float dx = 0.0f, dy = 0.0f, len = 0.0f, sx = 0.0f, sy = 0.0f;
     PaintGradAxisOf(angleDeg, x, y, w, h, dx, dy, len, sx, sy);
     if (len <= 1e-4f) {                          // 退化：两端色直接铺平
-        out[0] = { x, y, w, h, PaintLerpArgb(from, to, 0.5f), 0.0f, false };
+        out[0] = { x, y, w, h, PaintLerpArgbGrad(from, to, 0.5f), 0.0f, false };
         return 1;
     }
     const float r = radius > 0.5f ? std::min(radius, std::min(w, h) * 0.5f) : 0.0f;
@@ -535,7 +583,7 @@ inline int BuildFillBandsAngleGrad(uint32_t from, uint32_t to, float angleDeg,
             // 永不相等，纵向合并直接失效 —— 实测 180×140 的 135° 卡片从 260 条涨到
             // 7700+ 条、直接撞 cap 退回"垂直近似"（等于没修）。级内恒定的代价是
             // 能看出色阶，这与 SVG 渐变（BuildPathFillBands）是同一条底线。
-            const uint32_t col = PaintLerpArgb(from, to, t);
+            const uint32_t col = PaintLerpArgbGrad(from, to, t);
             // 与上一行同位置同色 → 直接加高（省一个 draw call）
             bool merged = false;
             for (int k = 0; k < openN; k++) {
@@ -986,20 +1034,14 @@ inline int BuildRoundedNineSlice(float x, float y, float w, float h, float radiu
 // 盒子 → 1 个（直角）或 9 个（圆角）四角带色四边形。
 // tpl = 后端圆角模板的边长（RoundTemplateSize(r)）；直角时忽略。
 //
-// **两端 alpha 必须相同**，否则返回 0（调用方退回条带路径）。原因是一条颜色语义：
-//   · 现在的整套渐变（条带 / 路径 / GDI）都是"先在**直线色**空间插值、再预乘"；
-//   · 四角带色是让 GPU 在**顶点色**空间插值，顶点色又必须预乘（着色器不做预乘），
-//     所以只有"两端 alpha 相同"时两条路才逐像素等价（alpha 不变 ⇒ 预乘是线性的）；
-//   · alpha 不同时（`rgba(...,1) → transparent` 这种淡出）两者会差一档 —— 浏览器按
-//     CSS Color 4 在**预乘**空间插值，而 binUI 现在是直线空间插值（老实现如此）。
-// 与其在同一版里顺手改掉所有渐变的淡出观感（那要连条带路径和 GDI 基准图一起动），
-// 这里先**只在 alpha 不变时走四边形**：绝大多数渐变都是这一类，而上万条带的正是它。
-// "淡出渐变的插值空间"记在 docs/future.md 里单独一条待办。
+// v0.16.38：**两端 alpha 不同也能走这条路**（以前返回 0 交回条带）。前提是条带/路径/
+// GDI 一起换成"在预乘空间插值"（`PaintLerpArgbGrad`），与这里的顶点色语义一致：
+// 顶点色是预乘色，GPU 在三个通道上做线性插值，而预乘空间里的线性渐变仍然是
+// 屏幕坐标的仿射函数 —— 于是"淡出渐变"也是一块精确的四边形，不再有上万条带。
 inline int BuildGradientQuads(float x, float y, float w, float h, float radius, int tpl,
                               float angleDeg, uint32_t from, uint32_t to,
                               BinUIGradQuad* out, int cap = 9) {
     if (!out || cap <= 0 || w <= 0.0f || h <= 0.0f) return 0;
-    if (((from >> 24) & 0xFFu) != ((to >> 24) & 0xFFu)) return 0;   // 见上：交回条带
     float dx, dy, len, sx, sy;
     PaintGradAxisOf(angleDeg, x, y, w, h, dx, dy, len, sx, sy);
     const float r = radius > 0.5f ? std::min(radius, std::min(w, h) * 0.5f) : 0.0f;
@@ -1248,7 +1290,9 @@ inline uint32_t PathGradColorAt(const BinUIPathGradient& g, float t) {
             const float o0 = g.stops[i - 1].offset;
             const float span = o1 - o0;
             const float k = span > 1e-6f ? (t - o0) / span : 1.0f;
-            return PaintLerpArgb(g.stops[i - 1].color, g.stops[i].color, k);
+            // v0.16.38：色标之间也在预乘空间插值（SVG 2 / CSS Color 4 同口径）。
+            // stop-opacity 不同的色标以前会把中间段"越插越暗"，浏览器不会。
+            return PaintLerpArgbGrad(g.stops[i - 1].color, g.stops[i].color, k);
         }
     }
     return g.stops[n - 1].color;
