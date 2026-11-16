@@ -299,6 +299,9 @@ GL 后端（900×840，同一进程同一个上下文；绘制 = 遍历 + 顶点
   明确告警）—— 横向 sticky 留到真有人要时再补。
 - **`grid`**：明确不做（`grid-template-columns` 仍在告警清单里）。常见需求用
   `display:flex; flex-wrap:wrap`（v22 已支持）就能写。
+- **`text-overflow: ellipsis`**：单行截断加"…"。现在只能靠 `overflow:hidden` 硬裁
+  （文字被切一半）。实现要点：编译期按估算宽度截断 + 运行期 `setText` 后重算，
+  两处要同一个口径（与 `letter-spacing` 这次的估算改造是同一套设施）。
 
 - **`position: fixed`（v0.16.37）**：含定位盒 = 视口、不吃祖先滚动偏移、不被祖先
   `overflow` 裁剪、层级提到根层级的 positioned 阶段。规格段用 `ANCHOR_FIXED`（`anchorFlags`
@@ -381,8 +384,7 @@ GL 后端（900×840，同一进程同一个上下文；绘制 = 遍历 + 顶点
    ~~`position: fixed`~~（v0.16.37）、~~渐变插值空间~~（v0.16.38）都已完成。
    **选择器组合子早就做了**（v13：`.card .b` / `>` / `+` / `~` + 特异性 + 属性选择器 +
    结构伪类 + `:not()`，`tests/test_css.cpp` 有对应用例；这条待办是过期的，已删）。
-   真正剩下的能力缺口只有 `grid`（明确不做）、
-   `letter-spacing` / `text-overflow` / `filter: blur()` 这几条——
+   真正剩下的能力缺口只有 `text-overflow: ellipsis` 与 `filter: blur()`；`grid` 明确不做——
    都比 P0 剩下的性能项（路径几何多线程）更值得做。
 
 ## 后端支持级别（v0.16.17 定案）：GDI = 遗留（OLD）

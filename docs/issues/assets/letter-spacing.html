@@ -1,0 +1,11 @@
+<html width="660" height="300" bg="#0e1216">
+  <!-- v0.16.40：letter-spacing。三行同样的字：0 / 2px / 6px；最后一行是继承
+       （父容器写 letter-spacing:4px，子元素不再声明）。 -->
+  <div style="position:absolute;left:20px;top:20px;font-size:28px;color:#e8eef6">BITMAP UI 0px</div>
+  <div style="position:absolute;left:20px;top:80px;font-size:28px;letter-spacing:2px;color:#e8eef6">BITMAP UI 2px</div>
+  <div style="position:absolute;left:20px;top:140px;font-size:28px;letter-spacing:6px;color:#e8eef6">BITMAP UI 6px</div>
+  <div style="position:absolute;left:20px;top:200px;letter-spacing:4px;color:#8fb6ff;font-size:24px">
+    <div style="width:600px;height:30px">INHERITED 4px</div>
+  </div>
+  <div style="position:absolute;left:20px;top:250px;font-size:24px;letter-spacing:-1px;color:#ffb4a2">NEGATIVE -1px</div>
+</html>

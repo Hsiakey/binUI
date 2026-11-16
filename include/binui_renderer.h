@@ -267,6 +267,11 @@ public:
     float stickyTopInset(uint16_t nodeId, float portH) const;
 
     // v14 表单/文字附加标记（BinUITextFlag；无扩展绘制条目返回 0）
+    // v0.16.40：字间距（CSS letter-spacing，像素，格式 v31 起进绘制段）。
+    float letterSpacingOf(uint16_t nodeId) const {
+        const BinUIPaintNode* p = paintOf(nodeId);
+        return p ? p->letterSpacing : 0.0f;
+    }
     uint32_t textFlagsOf(uint16_t nodeId) const {
         const BinUIPaintNode* p = paintOf(nodeId);
         return p ? p->textFlags : 0u;

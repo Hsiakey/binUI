@@ -1709,6 +1709,12 @@ void BinUID3D::setTextSubpixel(bool on) {
     impl_->subpixelText = on ? 1 : 0;
 }
 
+// v0.16.40：字间距（CSS letter-spacing）—— 状态进图集，排版与发射同时生效
+void BinUID3D::setLetterSpacing(float px) {
+    if (!impl_) return;
+    impl_->atlas.setLetterSpacing(px);
+}
+
 // v24 文字阴影：状态交给共享图集，三端像素一致
 // v0.16.18 仿射状态：见 GL 后端同名函数（三端语义一致）
 // v26 图片滤镜：矩阵只影响"下一次上传"的像素，并按哈希进纹理缓存键。

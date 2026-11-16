@@ -5,6 +5,35 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.16.40] - 2026-11-16 【格式 v31】
+
+**`letter-spacing`**（字间距）。设计稿里"标题加一点字距"是最常见的排版要求之一，
+以前写了只换来一条告警。
+
+### 加 — `letter-spacing`（格式 v31：绘制段 48 → 52 字节）
+
+- **像素、可负、可继承**：`normal` / `0` 复位；`em` 按字号折算。CSS 里这是**可继承属性**，
+  所以走编译器的 `Ctx` 链（和 `color` 一样），子元素不写就跟着祖先走。
+- **实现是后端图集里的一个排版状态**（`GlyphAtlas::setLetterSpacing` + `IBinUIGfx`
+  同名虚函数）：`textWidth` / `drawText` / `drawTextWrapped`（折行位置 + 居中/右对齐）
+  全都走同一套度量，所以**量出来的宽与画出来的宽永远相等** —— 这正是不给 `drawText`
+  加参数、而用"状态"的原因（否则总有一处忘了传）。整形缓存的 key 带上它
+  （同一个字符串在 0 / 2px 间距下是两份 run），字形位图本身不变。
+- **编译期估算同步**：`EstimateTextWidth / EstimateLineCount / EstimateTextHeight` 都加了
+  字间距参数（每个字符后加一次，含末尾那个 —— 与浏览器一致），于是"自动撑高/自动换行"
+  在编译期与运行期（`autoTextHeight`）用同一口径，不会出现"编译期放得下、运行期画宽一截"。
+- **为什么升格式号**：`BinUIPaintNode` 的三个 `reserve` 字节已被静态 opacity、渐变角度、
+  `filter: brightness` 占满，`flags` 的 16 位也用满。字间距需要小数与负值，塞不进去，
+  所以直接加 `float letterSpacing`（48 → 52 字节），`BINUI_VERSION` 30 → 31。
+
+### 门禁
+
+`make test` 新增 9 条（2px/1.5px/负值原样落段、可继承、`normal` 复位、50px 不设人为上限、
+估算宽度按字符数加间距、CJK 同样每字符一次、间距参与换行行数）；三端渲染
+`docs/issues/assets/letter-spacing.html`：**GL vs VK、D3D11 vs GL 均 0 不同像素**、
+最大通道差 0；`make pixels` 16/16 0 差异；`make partial` 通过。证据图
+`docs/issues/assets/letter-spacing.png`（0 / 2px / 6px / 继承 4px / 负 -1px 五行）。
+
 ## [0.16.39] - 2026-11-16 【格式 v30】
 
 **`position: sticky`**（第三个"写常见界面"的缺口）。分组标题、表头、筛选栏滚到顶就钉住、

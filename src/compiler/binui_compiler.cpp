@@ -4626,6 +4626,9 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         uint32_t textColor;   // 生效文字色（CSS color 的继承值）
         bool     hasText;     // 祖先是否显式给过文字色
         bool     flow;        // 这个容器是被父级流光标摆进去的（不是显式 y / flex）
+        // v0.16.40：生效的 letter-spacing（像素，0 = 未声明）。CSS 里它是**可继承**属性，
+        // 所以走 Ctx 而不是每次重新从 style 里查。放在 flow 之后 = 聚合初始化的第 10 项。
+        float    letterSpacing = 0.0f;
         // ---- SVG（v15）----
         // 约定：绝对坐标 = (ox, oy) + svgXform × 用户坐标。
         // svgXform 只描述"用户坐标 → 本容器内容盒局部坐标"，把 viewBox 与
@@ -4873,7 +4876,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             // 要么留一条大缝、要么把字裁掉）。用编译器自己的字宽估算，与换行同一套度量。
             const bool wContent = lowerStr(sw) == "content";
             if (wContent) sw.clear();
-            const float contentPx = estTextWidth(e.text, curCtx.fontSize) * 1.08f + 4.0f;
+            const float contentPx = estTextWidth(e.text, curCtx.fontSize) * 1.08f + 4.0f;   // 字间距在这里不参与（仅估算槽位宽）
 
             // ---- flex 简写 / 长写属性 ----
             FlexRec rec;
@@ -5695,7 +5698,6 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         // v23 起 box-shadow、v24 起 text-shadow 也实现了，两者都从清单里移除。
         {
             static const char* kIgnoredCss[] = {
-                "letter-spacing",
                 "word-break", "visibility", "float",
                 "outline",
                 "cursor", "grid-template-columns", "text-overflow", "object-fit",
@@ -6517,6 +6519,28 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             curCtx.fontSize = nodeFontSize;
         }
 
+        // v0.16.40：字间距（CSS letter-spacing，**可继承**）。存在扩展绘制段的
+        // `letterSpacing`（float 像素；0 = 未声明）。这里先算出"本元素生效值"，
+        // 下面的行数估算用它，子容器再继承它。
+        float nodeLetterSpacing = pc.letterSpacing;
+        {
+            std::string lsv = TrimCopy(pick(e.attrs, style, "letter-spacing", "letter-spacing", ""));
+            if (!lsv.empty()) {
+                const std::string lsl = lowerStr(lsv);
+                if (lsl == "normal" || lsl == "0" || lsl == "0px") {
+                    nodeLetterSpacing = 0.0f;   // 显式复位（CSS 里 normal = 0）
+                } else {
+                    float px = parseLen(lsv, 0, "letter-spacing");
+                    // em/rem 的换算基准是字号：parseLen 只认 px 一类，em 得自己折
+                    if (lsl.size() > 2 && lsl.compare(lsl.size() - 2, 2, "em") == 0 &&
+                        lsl.compare(lsl.size() - 3, 3, "rem") != 0) {
+                        px = parseLen(lsv.substr(0, lsl.size() - 2), 0, "letter-spacing") * nodeFontSize;
+                    }
+                    if (std::isfinite(px)) nodeLetterSpacing = px;
+                }
+            }
+        }
+
         // 文本节点未声明高度时估算行数并撑开高度。
         // 没有这一步，段落按单行高排布：换行后的第二行会压到下一个元素身上
         // （三个后端都按节点矩形绘制，谁也没办法把节点撑高）。估算口径统一在
@@ -6540,7 +6564,7 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                 avail = sp.pct ? sp.value / 100.0f * pc.contentW : sp.value;
             }
             avail -= type == BINUI_LIST ? 24.0f : 0.0f;   // LIST 文字左右各有 12px 内缩
-            const int lines = EstimateLineCount(srcText, nodeFontSize, avail); // 至少 1 行，'\n' 硬断
+            const int lines = EstimateLineCount(srcText, nodeFontSize, avail, nodeLetterSpacing); // 至少 1 行，'\n' 硬断
             const float needH = (float)lines * step;
             if (needH > lh) lh = needH;
         }
@@ -7035,6 +7059,8 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                     pflags |= PAINT_LINE_HEIGHT;
                 }
             }
+            // v0.16.40：字间距落进 reserve[0]（int8 / ¼ 像素），与上面的生效值同一个来源
+            paint.letterSpacing = nodeLetterSpacing;
             std::string td = pick(e.attrs, style, "decoration", "text-decoration", "");
             if (td.empty() && style.count("text-decoration-line")) td = style.at("text-decoration-line");
             const std::string tdl = lowerStr(td);
@@ -7236,7 +7262,7 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
 
         // 注意 reserve[2]（filter: brightness）没有对应的 PAINT_* 位可用，所以它自己也算
         // "这个节点要出扩展绘制条目"的理由 —— 否则一个只写了 filter 的 <img> 不会进段。
-        if (pflags || paint.textFlags || paint.reserve[2]) {
+        if (pflags || paint.textFlags || paint.reserve[2] || paint.letterSpacing != 0.0f) {
             paint.nodeId = n.id;
             paint.flags = pflags;
             paintNodes.push_back(paint);
@@ -8394,7 +8420,8 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         }
 
         stack.push_back({ n.id, x + pad, y + pad, 0, w - 2 * pad, nodes.size() - 1,
-                          textCol, hasOwnText || pc.hasText, !hasY && !flexPlaced });
+                          textCol, hasOwnText || pc.hasText, !hasY && !flexPlaced,
+                          nodeLetterSpacing });
         {
             // SVG 上下文：坐标系与颜料继承往下传
             Ctx& child = stack.back();

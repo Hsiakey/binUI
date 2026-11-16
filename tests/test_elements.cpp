@@ -2842,6 +2842,54 @@ int run() {
               "v30f: resize 后 fixed 的百分比按新视口重算");
     }
 
+    // ---------- v0.16.40：letter-spacing ----------
+    // 三个口径必须一致：编译期估算（撑高/换行）、绘制段的编码（¼ 像素 int8）、
+    // 后端图集的排版（textWidth / drawText 同一套度量）。这里测前两个 + 继承。
+    {
+        const char* ui =
+            "<app_window width=\"400\" height=\"300\" bg=\"#101010\"><html><body>\n"
+            "  <div id=\"p\" style=\"letter-spacing:4px\">\n"
+            "    <span id=\"inh\" style=\"font-size:16px\">ABC</span>\n"
+            "    <span id=\"own\" style=\"letter-spacing:1.5px\">ABC</span>\n"
+            "    <span id=\"reset\" style=\"letter-spacing:normal\">ABC</span>\n"
+            "    <span id=\"neg\" style=\"letter-spacing:-1px\">ABC</span>\n"
+            "  </div>\n"
+            "  <div id=\"q\" style=\"letter-spacing:2px;height:20px;width:200px\">x</div>\n"
+            "</body></html></app_window>\n";
+        auto res = CompileBinUIEx(ui);
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "v40: 布局可解析");
+        CHECK_NEAR(r.letterSpacingOf(r.findNodeByName("q")), 2.0f, 1e-3, "v40: 2px 原样落进绘制段");
+        CHECK_NEAR(r.letterSpacingOf(r.findNodeByName("inh")), 4.0f, 1e-3, "v40: letter-spacing 可继承");
+        CHECK_NEAR(r.letterSpacingOf(r.findNodeByName("own")), 1.5f, 1e-3, "v40: ¼ 像素精度（1.5px）");
+        CHECK_NEAR(r.letterSpacingOf(r.findNodeByName("reset")), 0.0f, 1e-3, "v40: 显式 normal 复位为 0");
+        CHECK_NEAR(r.letterSpacingOf(r.findNodeByName("neg")), -1.0f, 1e-3, "v40: 负值（收紧）");
+        // 估算口径：每个字符后加一次（含末尾那个），与后端图集一致
+        const float base = EstimateTextWidth("ABC", 10.0f);
+        CHECK_NEAR(EstimateTextWidth("ABC", 10.0f, 2.0f), base + 6.0f, 1e-3,
+                   "v40: 估算宽度按字符数加 letter-spacing（3 个字符 × 2px）");
+        // 行数估算同样吃到字间距：加宽后同一段文字可能多一行
+        CHECK(EstimateLineCount("AAAAAAAAAA", 10.0f, base, 8.0f) >=
+                  EstimateLineCount("AAAAAAAAAA", 10.0f, base),
+              "v40: 字间距参与换行行数估算");
+        // 中文/全角也按"每字符一次"
+        const float cjk = EstimateTextWidth("\xE4\xB8\xAD\xE6\x96\x87", 10.0f);
+        CHECK_NEAR(EstimateTextWidth("\xE4\xB8\xAD\xE6\x96\x87", 10.0f, 1.0f), cjk + 2.0f, 1e-3,
+                   "v40: CJK 同样每字符加一次");
+        // 大值也照原样吃（float 字段，没有人为上限）
+        auto big = CompileBinUIEx(
+            "<app_window width=\"400\" height=\"100\"><html><body>"
+            "<span id=\"b\" style=\"letter-spacing:50px\">x</span>"
+            "</body></html></app_window>\n");
+        bool warned = false;
+        for (const auto& m : big.warnings)
+            if (m.find("letter-spacing") != std::string::npos) warned = true;
+        CHECK(!warned, "v40: 大值字间距不告警（float 字段无上限）");
+        BinUIRenderer rb;
+        CHECK(rb.loadLayout(big.layout.data(), big.layout.size()), "v40: 大值页面可解析");
+        CHECK_NEAR(rb.letterSpacingOf(rb.findNodeByName("b")), 50.0f, 1e-3, "v40: 50px 原样保留");
+    }
+
     if (g_fail == 0) std::printf("test_paint: 全部通过\n");
     return g_fail;
 }

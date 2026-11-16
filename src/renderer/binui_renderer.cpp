@@ -1049,11 +1049,15 @@ float BinUIRenderer::autoTextHeight(size_t idx, float width) const {
     if (avail < 8.0f) avail = 8.0f;   // 极窄时按 8px 兜底（EstimateLineCount 内部也会兜）
     // lineHeight：扩展绘制段的百分数（0 = 未声明，EstimateLineStep 按 1.35×字号）
     int lineHeightPct = 0;
-    if (const BinUIPaintNode* p = paintOf(node.id)) lineHeightPct = p->lineHeight;
+    float letterSpacing = 0.0f;
+    if (const BinUIPaintNode* p = paintOf(node.id)) {
+        lineHeightPct = p->lineHeight;
+        letterSpacing = p->letterSpacing;
+    }
     // 直接采用按宽度算出的高度（窄了换行变高、宽了变矮），但**不低于编译期的基线高度**：
     // 编译器那边是 max(元素默认盒高, 估算高度)，这里漏了基线就会把短文本压扁
     // （13px 的 span 默认盒高 20，估算只有 17.6）。
-    float h = EstimateTextHeight(node.text, fontSize, avail, lineHeightPct);
+    float h = EstimateTextHeight(node.text, fontSize, avail, lineHeightPct, letterSpacing);
     if (spec->autoBase > 0 && h < static_cast<float>(spec->autoBase))
         h = static_cast<float>(spec->autoBase);
     return h;

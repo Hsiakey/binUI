@@ -82,6 +82,7 @@ public:
     void fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic = false);
     // 文字亚像素定位：true = 位置保留小数（图集 LINEAR 采样），动画节点用
     void setTextSubpixel(bool on);
+    void setLetterSpacing(float px);   // v0.16.40：字间距（进图集）
     void setTextShadow(float dx, float dy, float blur, uint32_t color) override;
     bool setAffine(const float xf[6]) override;
     void setImageFilter(const BinUIImageFilter* f) override;   // v26：CSS filter 颜色矩阵

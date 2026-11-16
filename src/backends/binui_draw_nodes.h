@@ -932,6 +932,9 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                                   GfxScaleAlpha(ts[0].color, opacity));
             else
                 gfx.setTextShadow(0.0f, 0.0f, 0.0f, 0u);
+            // v0.16.40 字间距（CSS letter-spacing）：与文字阴影同一个位置设状态 ——
+            // 本节点内所有 textWidth / drawText / drawTextWrapped 都用它，不必逐个调用点传参。
+            gfx.setLetterSpacing(pt ? pt->letterSpacing : 0.0f);
             uint32_t cc = dc;
             uint32_t textCol = GfxScaleAlpha(0xFFFFFFFF, opacity);
             uint32_t accentCol = GfxScaleAlpha(0xFFBB86FC, opacity);

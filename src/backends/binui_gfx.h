@@ -128,6 +128,13 @@ public:
     // 每份相位是一张独立的字形位图（不再靠 LINEAR 采样糊一层），文字既能连续滑又保持锐利。
     virtual void setTextSubpixel(bool on) { (void)on; }
 
+    // 字间距（v0.16.40：CSS letter-spacing）。单位像素，可为负；0 = 关闭。
+    // 为什么做成**状态**而不是给 drawText 加参数：排版（textWidth / drawTextWrapped 的
+    // 折行位置 / 居中对齐）与发射是同一套度量，一个状态就能保证三者永远一致；
+    // 而 drawText/drawTextWrapped/textWidth 的签名一个都不变，调用点零改动。
+    // 默认空实现 = 不支持的后端（GDI 遗留路径）照常画，只是没有字间距。
+    virtual void setLetterSpacing(float px) { (void)px; }
+
     // ---- 仿射状态（v0.16.18：文字/图片参与旋转）----
     // 设置之后，**接下来所有原语**的四边形都按 xf（2×3 行主序 [a c e; b d f]）变换：
     //   屏幕 = (a*x + c*y + e, b*x + d*y + f)

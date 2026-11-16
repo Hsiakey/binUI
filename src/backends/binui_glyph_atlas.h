@@ -265,7 +265,7 @@ public:
     // 而图集格子会膨胀到装不下几个字形 —— 超过的按上限处理。
     static constexpr int kMaxShadowBlurQ = 64;
 
-    // 缓存 key：文本 + 字号 + 字重 + 斜体 + 字体面 + 亚像素相位（FNV-1a）
+    // 缓存 key：文本 + 字号 + 字重 + 斜体 + 字体面 + 亚像素相位 + letter-spacing（FNV-1a）
     uint64_t RunKey(const std::string& s, float size, int weight, bool italic,
                     int phase = 0) const {
         uint64_t h = 1469598103934665603ull;
@@ -285,6 +285,9 @@ public:
         mix(static_cast<uint64_t>(weight));
         mix(italic ? 1u : 0u);
         mix(static_cast<uint64_t>(phase & 3));
+        // v0.16.40：letter-spacing 参与 key（¼ 像素量化）—— 间距不同就是另一份 run
+        mix(static_cast<uint64_t>(static_cast<uint32_t>(
+            static_cast<int32_t>(std::lround(letterSpacing_ * 4.0f)))));
         for (unsigned char c : asciiFont_) {
             h ^= c;
             h *= 1099511628211ull;
@@ -344,6 +347,8 @@ public:
 
     // 文本宽度（像素，逐字形 advance 之和；与 drawText 用的是同一套度量）。
     // 命中整形缓存时直接返回缓存里的总宽，不走解码 + 逐簇度量。
+    // v0.16.40：包含 letter-spacing（每个"字形簇"后加一次，含末尾那个 —— 与浏览器一致，
+    // 所以 textWidth 与 drawText 的实际前进量永远相等）。
     float textWidth(float size, int weight, const std::string& utf8, bool italic) {
         if (!host_ || utf8.empty()) return 0;
         const uint64_t key = RunKey(utf8, size, weight, italic);
@@ -358,11 +363,17 @@ public:
         while (i < cps.size()) {
             const ClusterMetric m = clusterMetric(size, weight, cps.data() + i,
                                                  cps.size() - i, italic);
-            w += m.adv;
+            w += m.adv + letterSpacing_;
             i += m.len;
         }
         return w;
     }
+
+    // letter-spacing（v0.16.40）：每个字形簇后额外的前进量（像素，可为负）。
+    // 只影响排版，不影响字形位图 —— 所以整形缓存的 key 里带上它（同一个字符串在
+    // 0 / 1px 间距下是两份 run）。
+    void setLetterSpacing(float px) { letterSpacing_ = px; }
+    float letterSpacing() const { return letterSpacing_; }
 
     // 行高与基线（主面度量）
     void fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic) {
@@ -467,12 +478,13 @@ public:
                     record(ca->tex, cx, top, static_cast<float>(g->w),
                            static_cast<float>(g->h), gx, gy, static_cast<float>(g->w),
                            static_cast<float>(g->h), t, true);
-                    cx += g->advW;
+                    cx += g->advW + letterSpacing_;
                     i += n;
                     continue;
                 }
             }
             for (size_t k = 0; k < n; k++) drawGray(cps[i + k]);
+            cx += letterSpacing_;      // letter-spacing 按"字形簇"加一次（含末尾那个）
             i += n;
         }
 
@@ -526,8 +538,11 @@ public:
                 if (c == '\n') break;
                 const ClusterMetric m = clusterMetric(size, weight, cps.data() + end,
                                                      cps.size() - end, italic);
-                if (end > pos && w + m.adv > maxW) break;
-                w += m.adv;
+                // 换行宽度也要算上 letter-spacing（否则带间距的长标题会在最后一个字
+                // 刚好越界的地方"多挤一个"，与 textWidth 的结论不一致）
+                const float adv = m.adv + letterSpacing_;
+                if (end > pos && w + adv > maxW) break;
+                w += adv;
                 end += m.len;
             }
             if (end == pos) end++;
@@ -1170,7 +1185,10 @@ private:
     static constexpr const char* kEmojiFont = "Segoe UI Emoji";
 
     IGlyphTexHost* host_ = nullptr;
-    // 整形结果缓存（键 = 文本+字号+字重+斜体+字体面）
+    // letter-spacing（v0.16.40）：每个字形簇后额外的前进量（像素，可为负）。
+    // 排版期唯一的"字间"自由度，所以放在这里而不是每个调用点各传一次。
+    float letterSpacing_ = 0.0f;
+    // 整形结果缓存（键 = 文本+字号+字重+斜体+字体面+letter-spacing）
     std::unordered_map<uint64_t, GlyphRun> runs_;
     uint64_t runClock_ = 0;
     // 图集代数：任何纹理新建/销毁都 ++，缓存条目按它判断是否过期

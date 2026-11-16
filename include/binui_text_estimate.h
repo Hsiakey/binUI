@@ -21,7 +21,10 @@
 namespace binui {
 
 // 估算一段 UTF-8 文本在给定字号下的单行宽度（像素）。'\t' 按 2 个字宽。
-inline float EstimateTextWidth(const std::string& text, float fontSize) {
+// letterSpacing（v0.16.40）：CSS 的 letter-spacing，每个字符后加一次（含末尾那个），
+// 与后端图集的排版完全同口径（否则"编译期放得下、运行期被画宽一截"）。
+inline float EstimateTextWidth(const std::string& text, float fontSize,
+                               float letterSpacing = 0.0f) {
     float w = 0.0f;
     for (size_t i = 0; i < text.size();) {
         const unsigned char c = static_cast<unsigned char>(text[i]);
@@ -38,13 +41,13 @@ inline float EstimateTextWidth(const std::string& text, float fontSize) {
                 cp = (cp << 6) | static_cast<uint32_t>(static_cast<unsigned char>(text[i + k]) & 0x3F);
         }
         i += len;
-        if (cp == '\t') { w += fontSize * 2.0f; continue; }
+        if (cp == '\t') { w += fontSize * 2.0f + letterSpacing; continue; }
         const bool wide = cp >= 0x1100 &&
                           (cp <= 0x115F || (cp >= 0x2E80 && cp <= 0xA4CF) ||
                            (cp >= 0xAC00 && cp <= 0xD7A3) || (cp >= 0xF900 && cp <= 0xFAFF) ||
                            (cp >= 0xFE30 && cp <= 0xFE6F) || (cp >= 0xFF00 && cp <= 0xFF60) ||
                            (cp >= 0xFFE0 && cp <= 0xFFE6) || (cp >= 0x1F300 && cp <= 0x1FAFF));
-        w += wide ? fontSize : fontSize * 0.52f;
+        w += (wide ? fontSize : fontSize * 0.52f) + letterSpacing;
     }
     return w;
 }
@@ -57,7 +60,8 @@ inline float EstimateLineStep(float fontSize, int lineHeightPct) {
 }
 
 // 给定可用宽度 avail 时文本要占几行（至少 1 行；'\n' 硬断行）。
-inline int EstimateLineCount(const std::string& text, float fontSize, float avail) {
+inline int EstimateLineCount(const std::string& text, float fontSize, float avail,
+                             float letterSpacing = 0.0f) {
     if (avail < 8.0f) avail = 8.0f;
     size_t lines = 0;
     size_t p0 = 0;
@@ -65,7 +69,7 @@ inline int EstimateLineCount(const std::string& text, float fontSize, float avai
         const size_t nl = text.find('\n', p0);
         const std::string seg = text.substr(p0, (nl == std::string::npos) ? std::string::npos : nl - p0);
         lines += static_cast<size_t>(
-            std::max(1.0f, std::ceil(EstimateTextWidth(seg, fontSize) / avail)));
+            std::max(1.0f, std::ceil(EstimateTextWidth(seg, fontSize, letterSpacing) / avail)));
         if (nl == std::string::npos) break;
         p0 = nl + 1;
     }
@@ -75,8 +79,8 @@ inline int EstimateLineCount(const std::string& text, float fontSize, float avai
 
 // 文本块应有的高度：行数 × 行距。
 inline float EstimateTextHeight(const std::string& text, float fontSize, float avail,
-                                int lineHeightPct) {
-    return static_cast<float>(EstimateLineCount(text, fontSize, avail)) *
+                                int lineHeightPct, float letterSpacing = 0.0f) {
+    return static_cast<float>(EstimateLineCount(text, fontSize, avail, letterSpacing)) *
            EstimateLineStep(fontSize, lineHeightPct);
 }
 

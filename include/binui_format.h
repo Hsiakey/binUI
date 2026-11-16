@@ -28,7 +28,7 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v27: 裁剪路径段（SVG <clipPath> / clip-path），见 BinUIClipEntry
 // v28: 遮罩段（SVG <mask> / mask），见 BinUIMaskEntry
 // v29: 毛玻璃段（backdrop-filter: blur），见 BinUIBackdropEntry
-constexpr uint32_t BINUI_VERSION    = 30;   // v30：贴右/贴下定位（right/bottom）的规格段字段
+constexpr uint32_t BINUI_VERSION    = 31;   // v31：绘制段加 float letterSpacing（48→52 字节）；v30：贴右/贴下定位（right/bottom）的规格段字段
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -515,9 +515,15 @@ struct BinUIPaintNode {
     uint32_t gradFrom;     // AARRGGBB（渐变起点色）
     uint32_t gradTo;       // AARRGGBB（渐变终点色）
     uint32_t textFlags;    // v14：BinUITextFlag（斜体/占位符/只读/初始勾选）
+    // v31：字间距（CSS letter-spacing，像素，可为负；0 = 未声明）。
+    // 为什么不塞进 reserve：三个 reserve 字节已经被静态 opacity（reserve[0]）、
+    // 渐变角度（reserve[1]）、filter: brightness（reserve[2]）占满；而字间距需要小数
+    // （1.5px 是常用值）与负值，int8 的 ¼ 像素编码既不够直观也不够宽。
+    // flags 的 16 位也已用满，所以直接加字段、升格式号（旧产物一律重建）。
+    float    letterSpacing;
 };
 #pragma pack(pop)
-static_assert(sizeof(BinUIPaintNode) == 48, "BinUIPaintNode must be 48 bytes");
+static_assert(sizeof(BinUIPaintNode) == 52, "BinUIPaintNode must be 52 bytes");
 
 // ============================================================
 // 四角带色四边形（v30）：任意角度线性渐变的几何单元

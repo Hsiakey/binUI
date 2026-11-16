@@ -1528,6 +1528,10 @@ void BinUIGLGdi::strokeRounded(float x, float y, float w, float h, float radius,
     impl_->curTex = impl_->whiteTex;
 }
 
+void BinUIGLGdi::setLetterSpacing(float px) {
+    // v0.16.40：字间距只影响排版，字形位图不变（整形缓存的 key 里带它）
+    impl_->atlas.setLetterSpacing(px);
+}
 void BinUIGLGdi::setTextSubpixel(bool on) {
     // 图集纹理本身已经是 LINEAR（见 GLGlyphTexHost::createTex），这里只切"要不要取整"
     if (impl_) impl_->atlas.snapText = !on;
