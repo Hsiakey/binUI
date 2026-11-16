@@ -1244,9 +1244,12 @@ static void AppendClipSection(std::vector<uint8_t>& buf, const std::vector<Pendi
 // v28 遮罩：一条 = 一组"同亮度"的掩码几何（同一个节点可以有多条，运行期按顺序两趟画）
 struct PendingMask {
     uint16_t nodeId = 0;
+    uint16_t flags = 0;                       // v34：MASK_FLAG_FILL_GRAD
     uint32_t color = 0xFFFFFFFFu;             // AARRGGBB：alpha = 亮度，RGB 恒白
     float rx = 0, ry = 0, rw = 0, rh = 0;     // mask 区域（设备空间，= 图层框）
     float x = 0, y = 0, w = 0, h = 0;         // 本组几何包围盒（归一化基准）
+    bool hasGrad = false;
+    BinUIPathGradient grad = {};              // v34：渐变内容（亮度已折进色标 alpha）
     std::vector<uint32_t> first;
     std::vector<uint8_t>  closed;
     std::vector<uint16_t> pts;
@@ -1265,13 +1268,14 @@ static void AppendMaskSection(std::vector<uint8_t>& buf, const std::vector<Pendi
         for (const PendingMask& m : masks) {
             BinUIMaskEntry e = {};
             e.nodeId = m.nodeId;
-            e.flags = 0;
+            e.flags = m.hasGrad ? MASK_FLAG_FILL_GRAD : uint16_t(0);
             e.color = m.color;
             e.rx = m.rx; e.ry = m.ry; e.rw = m.rw; e.rh = m.rh;
             e.x = m.x; e.y = m.y; e.w = m.w; e.h = m.h;
             e.pointCount = (uint16_t)std::min<size_t>(65535, m.pts.size() / 2);
             e.contourCount = (uint16_t)std::min<size_t>(65535, m.first.size());
             wbytes(&e, sizeof(e));
+            if (m.hasGrad) wbytes(&m.grad, sizeof(m.grad));   // v34：渐变紧跟定长头
             if (!m.first.empty())  wbytes(m.first.data(),  m.first.size()  * sizeof(uint32_t));
             if (!m.closed.empty()) wbytes(m.closed.data(), m.closed.size());
             if (!m.pts.empty())    wbytes(m.pts.data(),    m.pts.size()    * sizeof(uint16_t));
@@ -5476,7 +5480,13 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
     //   当成"外"—— 掩码内容请写不重叠的形状。
     struct SvgMaskChild {
         PathShape shape;
-        uint32_t  color = 0xFFFFFFFFu;   // 已折好亮度
+        uint32_t  color = 0xFFFFFFFFu;   // 已折好亮度（无渐变时用）
+        // v0.16.53：内容可以用**渐变**填充。这里存渐变定义，等几何落到设备空间、
+        // 拿到"本组几何包围盒"之后再折算成 BinUIPathGradient（亮度折进色标 alpha）。
+        bool      hasGrad = false;
+        SvgGradDef grad;
+        float     gbMinX = 0, gbMinY = 0, gbW = 1, gbH = 1;   // 渐变 OBB 基准（kid 自身盒）
+        float     opa = 1.0f;            // fill-opacity × opacity（渐变时要折进色标 alpha）
     };
     struct SvgMaskDef {
         bool  found = false;
@@ -5553,9 +5563,15 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                 if (ParseUrlId(fv2, gid3)) {
                     auto gi3 = svgGrads.find(gid3);
                     if (gi3 != svgGrads.end() && gi3->second.found && !gi3->second.stops.empty()) {
-                        Warn("<mask id=\"" + mid2 + "\"> 的内容不支持渐变（按中间色；"
-                             "要渐变蒙版请拆成多条不同亮度的形状）");
-                        fc = gi3->second.stops[gi3->second.stops.size() / 2].color;
+                        // v0.16.53：渐变内容**真做**（不再按中间色）。几何照旧，颜色交给
+                        // 渐变色标（亮度已折进 alpha），运行期保留趟用 fillGrad 画条带。
+                        kid2.hasGrad = true;
+                        kid2.grad = gi3->second;
+                        kid2.shape.RecomputeBounds();
+                        kid2.gbMinX = kid2.shape.minX;
+                        kid2.gbMinY = kid2.shape.minY;
+                        kid2.gbW = std::max(1e-6f, kid2.shape.Width());
+                        kid2.gbH = std::max(1e-6f, kid2.shape.Height());
                     } else {
                         Warn("<mask id=\"" + mid2 + "\"> 里的 url(#" + gid3 + ") 找不到定义"
                              "（按白色）");
@@ -5581,6 +5597,12 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             const float b2 = (float)(fc & 0xFFu);
             const float a2 = (float)((fc >> 24) & 0xFFu) / 255.0f;
             float lum = (0.2126f * r2 + 0.7152f * g2 + 0.0722f * b2) / 255.0f;
+            if (kid2.hasGrad) {
+                // 渐变：逐点亮度在后面折算，这里只需保证"整体不是全透明"
+                kid2.opa = opa;
+                md2.kids.push_back(std::move(kid2));
+                continue;
+            }
             float alpha = lum * opa * a2;
             if (alpha <= 0.002f) continue;                   // 纯黑 = 完全透明，不用画
             const uint32_t av = (uint32_t)(alpha * 255.0f + 0.5f);
@@ -8275,8 +8297,12 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                             };
                             const float ox3 = regVal(md3.x, md3.xPct, ubw3, md3.units == 1);
                             const float oy3 = regVal(md3.y, md3.yPct, ubh3, md3.units == 1);
-                            const float ww3 = regVal(md3.w, md3.wPct, ubw3, true);
-                            const float hh3 = regVal(md3.h, md3.hPct, ubh3, true);
+                            // v0.16.53 修正：这里以前两处都写死 obb=true，于是
+                            // maskUnits="userSpaceOnUse" 的 width/height 被**乘了一遍元素盒**
+                            // （190×60 的元素 + 200×120 的 mask 区域 → 38000×7200 的图层框）。
+                            // 百分比那一支本来就按元素盒算（见上面的告警），不受影响。
+                            const float ww3 = regVal(md3.w, md3.wPct, ubw3, md3.units == 1);
+                            const float hh3 = regVal(md3.h, md3.hPct, ubh3, md3.units == 1);
                             // objectBoundingBox 的坐标本来就相对元素盒，直接加包围盒原点；
                             // userSpaceOnUse 的是用户坐标，要过 svgX（非 SVG 元素过元素原点）
                             PathMatrix Mreg = (md3.units == 1)
@@ -8300,16 +8326,27 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                             const PathMatrix Mc = (md3.contentUnits == 1)
                                 ? PathMul(PathTranslate(bx3, by3), PathScale(ubw3, ubh3))
                                 : (hasSvgPath ? svgX : PathTranslate(bx3, by3));
-                            // 按亮度分组：同一个 alpha 的几何合成一条（运行期每条一次 draw）
-                            struct MaskGroup { uint32_t color = 0; PathShape shape; };
+                            // 按亮度分组：同一个 alpha 的几何合成一条（运行期每条一次 draw）。
+                            // v0.16.53：**渐变形状自己独占一条** —— 它的颜色不是常量，
+                            // 和别的形状合并就没法表达；一条渐变 = 一条记录。
+                            struct MaskGroup {
+                                uint32_t color = 0;
+                                PathShape shape;
+                                const SvgMaskChild* gradKid = nullptr;
+                            };
                             std::vector<MaskGroup> mgroups;
                             for (const SvgMaskChild& kid3 : md3.kids) {
                                 size_t gi3 = mgroups.size();
-                                for (size_t g4 = 0; g4 < mgroups.size(); g4++)
-                                    if (mgroups[g4].color == kid3.color) { gi3 = g4; break; }
+                                if (!kid3.hasGrad) {
+                                    for (size_t g4 = 0; g4 < mgroups.size(); g4++) {
+                                        if (mgroups[g4].gradKid) continue;
+                                        if (mgroups[g4].color == kid3.color) { gi3 = g4; break; }
+                                    }
+                                }
                                 if (gi3 == mgroups.size()) {
                                     MaskGroup g5;
                                     g5.color = kid3.color;
+                                    g5.gradKid = kid3.hasGrad ? &kid3 : nullptr;
                                     mgroups.push_back(std::move(g5));
                                 }
                                 PathShape tmp3 = kid3.shape;
@@ -8325,6 +8362,81 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                                     dst3.contours.push_back(nc3);
                                 }
                             }
+                            // 渐变折算：把渐变控制点用 M = N ∘ Mc ∘ [kid 盒] ∘ gradientTransform
+                            // 落到"本组几何包围盒归一化"空间（与路径渐变同一套口径）；
+                            // 色标的 alpha 折入**亮度** —— 运行期保留趟那句 dst *= srcA 拿到的
+                            // 就是逐点的掩码亮度，渐变蒙版天然成立。
+                            auto buildMaskGrad = [&](const SvgMaskChild& kid3,
+                                                     const PathShape& shp,
+                                                     BinUIPathGradient& out) -> bool {
+                                const SvgGradDef& g = kid3.grad;
+                                if (g.stops.size() < 2) return false;
+                                // userSpaceOnUse 的百分比按视口尺寸折算（与路径渐变一致）
+                                SvgGradDef gl = g;
+                                if (gl.userSpace && pc.vpW > 1e-6f && pc.vpH > 1e-6f) {
+                                    if (gl.x1Pct) gl.x1 *= pc.vpW;
+                                    if (gl.x2Pct) gl.x2 *= pc.vpW;
+                                    if (gl.cxPct) gl.cx *= pc.vpW;
+                                    if (gl.fxPct) gl.fx *= pc.vpW;
+                                    if (gl.y1Pct) gl.y1 *= pc.vpH;
+                                    if (gl.y2Pct) gl.y2 *= pc.vpH;
+                                    if (gl.cyPct) gl.cy *= pc.vpH;
+                                    if (gl.fyPct) gl.fy *= pc.vpH;
+                                    if (gl.rPct)
+                                        gl.r *= std::sqrt((pc.vpW * pc.vpW + pc.vpH * pc.vpH) * 0.5f);
+                                }
+                                const float bw2 = std::max(1e-6f, shp.Width());
+                                const float bh2 = std::max(1e-6f, shp.Height());
+                                const PathMatrix N = PathMul(PathScale(1.0f / bw2, 1.0f / bh2),
+                                                             PathTranslate(-shp.minX, -shp.minY));
+                                PathMatrix M = PathMul(N, Mc);
+                                if (!gl.userSpace) {   // OBB：默认单位正方形 = kid 自己的盒
+                                    M = PathMul(M, PathMul(PathTranslate(kid3.gbMinX, kid3.gbMinY),
+                                                           PathScale(kid3.gbW, kid3.gbH)));
+                                }
+                                M = PathMul(M, gl.xform);
+                                BinUIPathGradient pg = {};
+                                pg.type = gl.type;
+                                pg.spread = gl.spread;
+                                const int ns = static_cast<int>(
+                                    std::min<size_t>(kPathGradMaxStops, gl.stops.size()));
+                                pg.stopCount = static_cast<uint8_t>(std::max(2, ns));
+                                for (int si = 0; si < ns; si++) {
+                                    float off = gl.stops[si].off;
+                                    off = off < 0.0f ? 0.0f : (off > 1.0f ? 1.0f : off);
+                                    pg.stops[si].offset = off;
+                                    const uint32_t sc = gl.stops[si].color;
+                                    const float r8 = (float)((sc >> 16) & 0xFFu);
+                                    const float g8 = (float)((sc >> 8) & 0xFFu);
+                                    const float b8 = (float)(sc & 0xFFu);
+                                    const float a8 = (float)((sc >> 24) & 0xFFu);
+                                    float lum2 = (0.2126f * r8 + 0.7152f * g8 + 0.0722f * b8) / 255.0f;
+                                    float av2 = (lum2 * (a8 / 255.0f) * kid3.opa);
+                                    av2 = av2 < 0.0f ? 0.0f : (av2 > 1.0f ? 1.0f : av2);
+                                    pg.stops[si].color =
+                                        ((uint32_t)(av2 * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
+                                }
+                                if (ns < 2) pg.stops[1] = pg.stops[0];
+                                if (gl.type == PATH_GRAD_RADIAL) {
+                                    if (gl.xformRotated || std::fabs(M.b) > 1e-4f ||
+                                        std::fabs(M.c) > 1e-4f)
+                                        Warn("<mask id=\"" + mgid + "\"> 的径向渐变内容遇到旋转/斜切："
+                                             "已近似为轴对齐椭圆（改用线性渐变）");
+                                    const PathPointF gc = PathApply(M, gl.cx, gl.cy);
+                                    pg.x1 = gc.x; pg.y1 = gc.y;
+                                    const PathPointF gf = PathApply(M, gl.fx, gl.fy);
+                                    pg.fx = gf.x; pg.fy = gf.y;
+                                    pg.rx = std::fabs(gl.r) * std::sqrt(M.a * M.a + M.b * M.b);
+                                    pg.ry = std::fabs(gl.r) * std::sqrt(M.c * M.c + M.d * M.d);
+                                } else {
+                                    const PathPointF gp1 = PathApply(M, gl.x1, gl.y1);
+                                    const PathPointF gp2 = PathApply(M, gl.x2, gl.y2);
+                                    pg.x1 = gp1.x; pg.y1 = gp1.y;
+                                    pg.x2 = gp2.x; pg.y2 = gp2.y;
+                                }
+                                out = pg;
+                                return true;
+                            };
                             for (MaskGroup& g6 : mgroups) {
                                 if (g6.shape.Empty()) continue;
                                 g6.shape.RecomputeBounds();
@@ -8333,6 +8445,15 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                                 PendingMask pm;
                                 pm.nodeId = n.id;
                                 pm.color = g6.color;
+                                if (g6.gradKid) {
+                                    if (buildMaskGrad(*g6.gradKid, g6.shape, pm.grad)) {
+                                        pm.hasGrad = true;
+                                        pm.color = 0xFFFFFFFFu;   // 亮度全交给渐变色标
+                                    } else {
+                                        Warn("<mask id=\"" + mgid + "\"> 的渐变色标不足 2 个"
+                                             "（按白色全保留）");
+                                    }
+                                }
                                 pm.rx = r0 + pc.ox; pm.ry = r1 + pc.oy;
                                 pm.rw = rw3;        pm.rh = rh3;
                                 pm.x = g6.shape.minX + pc.ox;

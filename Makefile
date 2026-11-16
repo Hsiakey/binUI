@@ -633,7 +633,9 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # 这条用例就是"VK 图层用了 4× MSAA 主管线"的判据：修之前弧线每行差一个像素（17 px / 通道差
 # 200+），修之后 GL/VK/D3D11 三端 0 不同像素、最大通道差 0。覆盖 opacity 层、模糊层、
 # 小数坐标、嵌套两层，以及层里的圆/渐变/细线（确认修法没波及别的图元）。
-# nine-slice（v0.16.51 扩）：九宫格中段四种填充模式 stretch / repeat / round / space 全开，\r\n# 含 space 的"两端也留缝"与"中段比一块还窄时缩成一块"。\r\n# text-shadow-multi（v0.16.50）：多层文字阴影（霓虹 3 层 / 描边 4 层 / 双色偏移 / 继承 /
+# nine-slice（v0.16.51 扩）：九宫格中段四种填充模式 stretch / repeat / round / space 全开，\r\n# 含 space 的"两端也留缝"与"中段比一块还窄时缩成一块"。\r\n# svg-mask（v0.16.53 扩）：遮罩内容用**渐变**填充（横向线性 / 竖向三色标 / 径向聚光）。
+# 渐变的色标 alpha 存的是亮度，保留趟直接按渐变色带画 —— 三端同一份代码，只进跨后端比对。
+# text-shadow-multi（v0.16.50）：多层文字阴影（霓虹 3 层 / 描边 4 层 / 双色偏移 / 继承 /
 # currentColor / 贴边大模糊 / 三个不同模糊半径同时活跃 = 三张阴影图集）。三端同一份图集代码，
 # 只进跨后端比对（GDI 侧另外烘位图，基准图由它生成）。
 ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow blur-quality round-in-layer text-shadow-multi svg-filter

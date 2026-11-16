@@ -1594,7 +1594,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                     }
                 }
             };
-            auto drawMaskPath = [&](uint32_t color) {
+            auto drawMaskPath = [&](uint32_t color, const BinUIPathGradient* grad) {
                 if (mfirst.empty()) return;
                 mcount.clear();
                 for (size_t k = 0; k < mfirst.size(); k++) {
@@ -1606,6 +1606,8 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 BinUIPathEntry ph = {};
                 ph.flags = PATH_FILL;    // 掩码几何一律 even-odd？不：单条几何用 nonzero，
                                          // 补集趟另外打开 PATH_EVENODD（见下）
+                // 渐变靠**这个 flag** 才会被 PaintPathNode 取样（spec.fillGrad 只是载体）
+                if (grad) ph.flags |= PATH_FILL_GRAD;
                 ph.fillColor = color;
                 ph.designW = mw0;
                 ph.designH = mh0;
@@ -1615,6 +1617,9 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 mspec.fillColor = color;
                 mspec.strokeColor = 0;
                 mspec.opacity = 1.0f;
+                // v34：渐变蒙版 —— 保留趟按渐变色带画，色标 alpha 已经是**亮度**，
+                // 于是 dst *= srcA 逐点乘的就是渐变亮度（平滑过渡，不再是一块中间色）。
+                mspec.fillGrad = grad;
                 binui::PaintPathNode(ph, mpts.data(), mfirst.data(), mcount.data(),
                                      mclosed.data(), static_cast<int>(mfirst.size()),
                                      mx0, my0, mw0, mh0, mspec, nullptr, 0, 0, mbuf,
@@ -1637,7 +1642,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 for (const BinUIRenderer::MaskRecord& mr : *maskRecs) {
                     mpts.clear(); mfirst.clear(); mclosed.clear();
                     appendRec(mr);
-                    drawMaskPath(mr.head.color);
+                    drawMaskPath(mr.head.color, mr.hasGrad ? &mr.grad : nullptr);
                 }
                 gfx.setKeepBlend(false);
             }

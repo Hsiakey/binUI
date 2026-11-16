@@ -1452,6 +1452,112 @@ static void TestIssueRegressions() {
         TEST("16.26: 没写 mask → 无条目", masksOfName("k6").empty());
     }
 
+    // ---- 16.53：遮罩的渐变内容（v0.16.53，格式 v34）----
+    // 钉住五件事：
+    //   1. `fill="url(#grad)"` 不再降级成"中间色"，而是生成一条**带渐变**的遮罩记录
+    //      （BinUIMaskEntry.flags bit0 + 紧跟一条 BinUIPathGradient）；
+    //   2. 色标的 alpha = **亮度**（白 → 255、黑 → 0），所以运行期那句 dst *= srcA
+    //      逐点乘的就是渐变亮度；
+    //   3. 渐变坐标是"本组几何包围盒归一化"空间：横向渐变的端点落在 x=0 / x=1；
+    //   4. fill-opacity 折进色标 alpha；渐变形状独占一条记录（不和纯色形状合并）；
+    //   5. 没有渐变的 mask 内容不受影响（仍是一条纯色记录，flags 不置位）。
+    {
+        const char* html = R"HTML(<app_window width="320" height="200" bg="#101014">
+<html width="320" height="200" bg="#101014">
+<body>
+  <svg width="300" height="190" style="position:absolute; left:0; top:0">
+    <defs>
+      <linearGradient id="gm" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#FFFFFF" />
+        <stop offset="1" stop-color="#000000" />
+      </linearGradient>
+      <linearGradient id="gm2" x1="0" y1="0" x2="0" y2="1">
+        <stop offset="0" stop-color="#808080" />
+        <stop offset="1" stop-color="#FFFFFF" />
+      </linearGradient>
+      <mask id="mg" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="120">
+        <rect x="0" y="0" width="200" height="120" fill="url(#gm)" />
+      </mask>
+      <mask id="mg2" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="120">
+        <rect x="0" y="0" width="100" height="120" fill="#FFFFFF" />
+        <rect x="100" y="0" width="100" height="120" fill="url(#gm2)" fill-opacity="0.5" />
+      </mask>
+      <mask id="mflat" maskUnits="userSpaceOnUse" x="0" y="0" width="200" height="120">
+        <rect x="0" y="0" width="200" height="120" fill="#FFFFFF" />
+      </mask>
+    </defs>
+    <rect id="g1" x="10" y="10" width="190" height="100" fill="#3B82F6" mask="url(#mg)" />
+    <rect id="g2" x="10" y="10" width="190" height="100" fill="#3B82F6" mask="url(#mg2)" />
+    <rect id="g3" x="10" y="10" width="190" height="100" fill="#3B82F6" mask="url(#mflat)" />
+  </svg>
+</body></html>
+</app_window>)HTML";
+        const auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("16.53: 渐变遮罩布局可解析", ParseInto(r, res.layout));
+        bool warnedGrad = false;
+        for (const auto& w : res.warnings)
+            if (w.find("不支持渐变") != std::string::npos) warnedGrad = true;
+        TEST("16.53: 不再报\"内容不支持渐变\"", !warnedGrad);
+        auto masksOfName = [&](const char* name) -> std::vector<BinUIRenderer::MaskRecord> {
+            const uint16_t id = r.findNodeByName(name);
+            if (!id) return {};
+            return r.maskOf(id);
+        };
+        // 1) 一条渐变记录
+        const auto m1 = masksOfName("g1");
+        TEST("16.53: 渐变 mask 生成一条记录", m1.size() == 1);
+        if (m1.size() == 1) {
+            const auto& rec = m1[0];
+            TEST("16.53: flags 置位 MASK_FLAG_FILL_GRAD", (rec.head.flags & MASK_FLAG_FILL_GRAD) != 0);
+            TEST("16.53: 读到了渐变本体", rec.hasGrad);
+            TEST("16.53: 线性渐变、两个色标",
+                 rec.grad.type == binui::PATH_GRAD_LINEAR && rec.grad.stopCount == 2);
+            // 2) 色标 alpha = 亮度：白 → 255、黑 → 0
+            TEST("16.53: 白端 alpha 255、黑端 alpha 0",
+                 ((rec.grad.stops[0].color >> 24) & 0xFFu) >= 250 &&
+                 ((rec.grad.stops[1].color >> 24) & 0xFFu) <= 2);
+            // 3) 归一化坐标：横向渐变的端点在 x=0 / x=1（y 同一条线）
+            TEST("16.53: 渐变归一化到本组几何盒（x 0 → 1）",
+                 std::fabs(rec.grad.x1 - 0.0f) < 0.02f && std::fabs(rec.grad.x2 - 1.0f) < 0.02f &&
+                 std::fabs(rec.grad.y1 - rec.grad.y2) < 0.02f);
+        }
+        // 4) 纯色形状 + 渐变形状：两条记录，渐变那条独占；fill-opacity 折进 alpha
+        const auto m2 = masksOfName("g2");
+        TEST("16.53: 纯色 + 渐变 → 两条记录", m2.size() == 2);
+        if (m2.size() == 2) {
+            int solid = 0, grad = 0;
+            for (const auto& rec : m2) {
+                if (rec.hasGrad) {
+                    grad++;
+                    // 灰 #808080 的亮度 ≈ 0.502 → ×0.5 → ≈64；白 → 0.5 → ≈128
+                    const int a0 = (int)((rec.grad.stops[0].color >> 24) & 0xFFu);
+                    const int a1 = (int)((rec.grad.stops[1].color >> 24) & 0xFFu);
+                    TEST("16.53: 渐变色标 alpha = 亮度 × fill-opacity",
+                         std::abs(a0 - 64) <= 3 && std::abs(a1 - 128) <= 3);
+                } else {
+                    solid++;
+                }
+            }
+            TEST("16.53: 纯色记录仍是一条、渐变不与之合并", solid == 1 && grad == 1);
+        }
+        // 4b) 区域宽高（maskUnits="userSpaceOnUse"）不再被乘元素盒 —— v0.16.53 修的老 bug：
+        //     190×60 的元素 + 200×120 的 mask 区域以前会得到 38000×7200 的图层框。
+        if (m1.size() == 1) {
+            // 宽高不再被元素盒放大（修之前是 200×190 = 38000、120×60 = 7200）；
+            // rx/ry 是"元素盒左上 + 用户坐标"（非路径元素以元素原点为用户空间原点）
+            TEST("16.53: userSpaceOnUse 的 mask 区域宽高就是 200×120（不再乘元素盒）",
+                 std::fabs(m1[0].head.rw - 200.0f) < 1.0f &&
+                 std::fabs(m1[0].head.rh - 120.0f) < 1.0f &&
+                 std::fabs(m1[0].head.rx - 10.0f) < 1.0f &&
+                 std::fabs(m1[0].head.ry - 10.0f) < 1.0f);
+        }
+        // 5) 没有渐变的 mask 不受影响
+        const auto m3 = masksOfName("g3");
+        TEST("16.53: 纯色 mask 的 flags 不置位",
+             m3.size() == 1 && (m3[0].head.flags & MASK_FLAG_FILL_GRAD) == 0 && !m3[0].hasGrad);
+    }
+
     // ---- 16.27：毛玻璃 backdrop-filter（v0.16.27，格式 v29 毛玻璃段） ----
     // 钉住五件事：
     //   1. backdrop-filter: blur(Npx) 落进毛玻璃段（renderer.backdropOf），带半径与合成圆角；

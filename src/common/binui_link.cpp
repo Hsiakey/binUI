@@ -29,6 +29,8 @@ struct ClipRec {
 // v28 遮罩段的一条记录（节点 + 区域 + 一组同亮度几何）
 struct MaskRec {
     BinUIMaskEntry head{};
+    bool hasGrad = false;              // v34：渐变内容
+    BinUIPathGradient grad{};
     std::vector<uint32_t> first;
     std::vector<uint8_t>  closed;
     std::vector<uint16_t> pts;
@@ -633,6 +635,12 @@ bool ParseDoc(const void* data, size_t size, Doc& d) {
                             const uint8_t* hp = nullptr;
                             if (!s.blob(sizeof(BinUIMaskEntry), hp)) { ok = false; break; }
                             memcpy(&mr.head, hp, sizeof(BinUIMaskEntry));
+                            if ((mr.head.flags & MASK_FLAG_FILL_GRAD) != 0) {
+                                const uint8_t* gp = nullptr;
+                                if (!s.blob(sizeof(BinUIPathGradient), gp)) { ok = false; break; }
+                                memcpy(&mr.grad, gp, sizeof(BinUIPathGradient));
+                                mr.hasGrad = true;
+                            }
                             const size_t nc = mr.head.contourCount;
                             const size_t np = static_cast<size_t>(mr.head.pointCount) * 2;
                             mr.first.resize(nc);
@@ -927,6 +935,7 @@ std::vector<uint8_t> EmitDoc(Doc& d) {
         PutU32(p3, static_cast<uint32_t>(d.masks.size()));
         for (const MaskRec& mr : d.masks) {
             put(&mr.head, sizeof(mr.head));
+            if (mr.hasGrad) put(&mr.grad, sizeof(mr.grad));   // v34
             if (!mr.first.empty())  put(mr.first.data(),  mr.first.size()  * sizeof(uint32_t));
             if (!mr.closed.empty()) put(mr.closed.data(), mr.closed.size());
             if (!mr.pts.empty())    put(mr.pts.data(),    mr.pts.size()    * sizeof(uint16_t));

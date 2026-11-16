@@ -1,6 +1,6 @@
 <!DOCTYPE html>
-<app_window width="660" height="470" resizable="false">
-<html width="660" height="470">
+<app_window width="660" height="700" resizable="false">
+<html width="660" height="700">
 <head>
 <style>
     body { background: #EEF2F7; color: #16202C; }
@@ -83,7 +83,50 @@
     </svg>
     <span class="cap" style="left:382; top:176">objectBoundingBox 单位</span>
 
-    <span style="position:absolute; left:20; top:392; width:620; height:52; font-size:12px; color:#7A8798">v0.16.26：&lt;mask&gt; 在图层里画两趟 —— 保留趟（dst *= srcA）把掩码几何按亮度乘上去，补集趟（dst *= 1-srcA）把掩码外清零；亮度在编译期折进 alpha，三端零着色器改动</span>
+    <!-- ===== v0.16.53：渐变蒙版（掩码内容用渐变填充） ===== -->
+    <span class="cap" style="left:20; top:392; width:320">渐变蒙版（v0.16.53）：内容渐变不再取中间色</span>
+
+    <!-- 7) 横向线性渐变：左边全保留、右边全透明 -->
+    <svg width="150" height="150" style="position:absolute; left:20; top:412">
+        <defs>
+            <linearGradient id="mgLin" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#FFFFFF" />
+                <stop offset="1" stop-color="#000000" />
+            </linearGradient>
+            <mask id="mGrad1"><rect x="0" y="0" width="150" height="150" fill="url(#mgLin)" /></mask>
+        </defs>
+        <rect x="0" y="0" width="150" height="150" rx="18" fill="#0B5FA5" mask="url(#mGrad1)" />
+    </svg>
+    <span class="cap" style="left:20; top:566">横向线性渐变（白→黑）</span>
+
+    <!-- 8) 竖向 + 三色标：上下保留、中间通透 -->
+    <svg width="150" height="150" style="position:absolute; left:196; top:412">
+        <defs>
+            <linearGradient id="mgV" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stop-color="#FFFFFF" />
+                <stop offset="0.5" stop-color="#000000" />
+                <stop offset="1" stop-color="#FFFFFF" />
+            </linearGradient>
+            <mask id="mGrad2"><rect x="0" y="0" width="150" height="150" fill="url(#mgV)" /></mask>
+        </defs>
+        <rect x="0" y="0" width="150" height="150" rx="18" fill="#C2410C" mask="url(#mGrad2)" />
+    </svg>
+    <span class="cap" style="left:196; top:566">竖向三色标（中间通透）</span>
+
+    <!-- 9) 径向渐变：中间保留、四周淡出（最常见的"聚光"蒙版） -->
+    <svg width="150" height="150" style="position:absolute; left:372; top:412">
+        <defs>
+            <radialGradient id="mgR" cx="0.5" cy="0.5" r="0.5">
+                <stop offset="0.1" stop-color="#FFFFFF" />
+                <stop offset="0.85" stop-color="#000000" />
+            </radialGradient>
+            <mask id="mGrad3"><rect x="0" y="0" width="150" height="150" fill="url(#mgR)" /></mask>
+        </defs>
+        <rect x="0" y="0" width="150" height="150" rx="18" fill="#7C3AED" mask="url(#mGrad3)" />
+    </svg>
+    <span class="cap" style="left:372; top:566">径向渐变（聚光）</span>
+
+    <span style="position:absolute; left:20; top:628; width:620; height:52; font-size:12px; color:#7A8798">v0.16.26：&lt;mask&gt; 在图层里画两趟 —— 保留趟（dst *= srcA）把掩码几何按亮度乘上去，补集趟（dst *= 1-srcA）把掩码外清零；亮度在编译期折进 alpha，三端零着色器改动。v0.16.53：渐变内容的**色标 alpha = 亮度**，保留趟直接按渐变色带画（格式 v34）</span>
 </body>
 </html>
 </app_window>

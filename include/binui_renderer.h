@@ -180,6 +180,9 @@ public:
     // v28 遮罩段：一条 = 一组"同亮度"的几何（同一 nodeId 可以有多条，按顺序两趟画）。
     struct MaskRecord {
         BinUIMaskEntry head{};
+        // v34：这一组的填充是渐变（坐标 = 本组几何包围盒归一化空间，色标 alpha = 亮度）
+        bool hasGrad = false;
+        BinUIPathGradient grad{};
         std::vector<uint32_t> first;
         std::vector<uint8_t>  closed;
         std::vector<uint16_t> pts;

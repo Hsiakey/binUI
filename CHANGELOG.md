@@ -5,6 +5,44 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.16.53] - 2026-11-17 【格式 v34】
+
+**遮罩内容可以用渐变了（`<mask>` 里的 `fill="url(#grad)"`）。**
+P2 表里"掩码内容渐变按中间色"这条收掉，顺手修了一个 v28 就存在的区域缩放 bug。
+
+### 做法
+
+- **不再"取中间色"**：渐变形状生成**一条独立**的遮罩记录 ——
+  `BinUIMaskEntry.flags` 的 bit0（`MASK_FLAG_FILL_GRAD`）置位，定长头后面紧跟一条
+  `BinUIPathGradient`（100 字节）。这就是格式从 v33 → **v34** 的唯一原因。
+- **关键的一步：色标的 alpha 存的是亮度**（白 → 255、黑 → 0，再乘 `fill-opacity` 与
+  `opacity`）。于是运行期保留趟那句 `dst *= srcA` 逐点乘的就是渐变亮度 ——
+  渐变蒙版天然成立，**运行期只多两行**（`mspec.fillGrad = grad` + 置 `PATH_FILL_GRAD`），
+  三端零着色器改动、零新管线。
+- **渐变坐标**折进"本组几何包围盒归一化"空间：`N ∘ Mc ∘ [kid 盒] ∘ gradientTransform`
+  （与 v16 路径渐变同一套口径，radial 的 rx/ry 按 M 两列范数放大）。
+  径向渐变在旋转/斜切下仍按轴对齐椭圆近似并告警（路径渐变同样的限制）。
+- **纯色与渐变不合并**：同亮度的纯色形状照旧合成一条，渐变形状独占一条 —— 否则
+  一条记录只能有一个常量颜色。
+- **顺手修的老 bug（v28 起就有）**：`maskUnits="userSpaceOnUse"` 时 `width/height`
+  被当成 objectBoundingBox 又乘了一遍元素盒（190×60 的元素 + 200×120 的 mask 区域
+  → **38000×7200** 的图层框）。默认单位是 objectBoundingBox，所以平时看不出来；
+  写显式 `maskUnits` 的人会得到一张巨大的离屏层（还可能撞到图层预算）。
+  现在宽高按用户坐标算，单测钉住 200×120。
+
+### 验证
+
+- `test_css` 新增 16.53 段（14 条断言）：渐变记录生成、flags 置位、渐变本体可读、
+  线性 + 两个色标、**白端 alpha 255 / 黑端 alpha 0**、归一化到本组几何盒（x 0 → 1）、
+  纯色 + 渐变 → 两条记录且不合并、色标 alpha = 亮度 × fill-opacity（灰 #808080 × 0.5 ≈ 64、
+  白 × 0.5 ≈ 128）、纯色记录的 flags 不置位、以及区域宽高 200×120 的回归断言；
+- `pixels` 18/18 零差异（GDI 基准图不含 mask，这一例钉的是"格式改动没波及别的段"）；
+- `pixels-vk` 48 例 0 个超容差像素；`anim/svg-mask` 扩到 660×700（新增横向线性、
+  竖向三色标、径向聚光三例），**GL/VK 0 像素差、最大通道差 0**；
+  `pixels-d3d11` 只有既有的 `anim/affine-text` 那 6 像素；
+- `make test` 全 PASS、`partial` OK、`check_examples` 16 例 0 问题、`make check-guard` 0 报告。
+- 证据图：`docs/issues/assets/svg-mask-gradient.png`（下半部分是三个渐变蒙版）。
+
 ## [0.16.52] - 2026-11-17 【格式 v33】
 
 **`<pattern>` 的 `patternTransform` 整份生效了：旋转 / 斜切也不再按轴对齐近似。**

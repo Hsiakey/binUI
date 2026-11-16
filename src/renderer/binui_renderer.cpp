@@ -847,6 +847,13 @@ bool BinUIRenderer::loadLayout(const uint8_t* data, size_t size) {
                 MaskRecord mr;
                 memcpy(&mr.head, q, sizeof(BinUIMaskEntry));
                 q += sizeof(BinUIMaskEntry);
+                // v34：flag 置位时紧跟一条渐变（亮度已折进色标 alpha）
+                if ((mr.head.flags & MASK_FLAG_FILL_GRAD) != 0) {
+                    if (q + sizeof(BinUIPathGradient) > qend) break;
+                    memcpy(&mr.grad, q, sizeof(BinUIPathGradient));
+                    mr.hasGrad = true;
+                    q += sizeof(BinUIPathGradient);
+                }
                 const size_t nc = mr.head.contourCount;
                 const size_t np = static_cast<size_t>(mr.head.pointCount) * 2;
                 if (q + nc * sizeof(uint32_t) + nc > qend) break;

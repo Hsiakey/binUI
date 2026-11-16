@@ -31,7 +31,8 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v31: 绘制段加 float letterSpacing（48 -> 52 字节）
 // v32: 绘制段加 float blurPx（52 -> 56 字节，CSS filter: blur(Npx)）
 // v33: 外阴影段（CSS filter: drop-shadow），见 BinUIFilterDropShadowEntry
-constexpr uint32_t BINUI_VERSION    = 33;   // v33：filter: drop-shadow 段；v32：绘制段加 float blurPx
+// v34: 遮罩段的渐变内容（BinUIMaskEntry.flags bit0 = 记录后跟一条 BinUIPathGradient）
+constexpr uint32_t BINUI_VERSION    = 34;   // v34：遮罩的渐变内容；v33：filter: drop-shadow 段
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -726,6 +727,7 @@ static_assert(sizeof(BinUIClipEntry) == 24, "BinUIClipEntry must be 24 bytes");
 //
 // 布局：uint32 mBytes（0 = 无）+ uint32 mCount + 每条：
 //     BinUIMaskEntry                    定长头（44 字节）
+//     BinUIPathGradient                 可选渐变（v34，flags bit0 = MASK_FLAG_FILL_GRAD）
 //     uint32 contourFirst[contourCount] 每条子路径的起始点下标
 //     uint8  contourClosed[contourCount]
 //     uint16 points[2*pointCount]       归一化点（0..65535 映射**本组几何**包围盒 x/y/w/h）
@@ -742,9 +744,14 @@ static_assert(sizeof(BinUIClipEntry) == 24, "BinUIClipEntry must be 24 bytes");
 // 亮度口径：sRGB 系数 0.2126R + 0.7152G + 0.0722B，再乘 fill-opacity / opacity。
 // ============================================================
 #pragma pack(push, 1)
+// v34：这一组的填充是**渐变**（渐变紧跟在定长头之后）。渐变坐标是"本组几何包围盒归一化"
+// 空间（与路径渐变同口径），色标的 alpha 已经折入**亮度**——于是运行期那句
+// "dst *= srcA" 拿到的就是逐点的掩码亮度，渐变蒙版天然成立。
+constexpr uint16_t MASK_FLAG_FILL_GRAD = 0x0001;
+
 struct BinUIMaskEntry {
     uint16_t nodeId;       // 被遮罩的元素
-    uint16_t flags;        // 保留（目前恒 0）
+    uint16_t flags;        // bit0 = MASK_FLAG_FILL_GRAD（v34；其余位保留）
     uint32_t color;        // AARRGGBB：alpha = 掩码亮度，RGB 恒白
     float    rx, ry, rw, rh;   // mask 区域（图层框，设备空间）
     float    x, y, w, h;       // 本组几何的包围盒（归一化基准，设备空间）
