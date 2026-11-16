@@ -173,6 +173,15 @@ struct CountGfx : IBinUIGfx {
         return true;
     }
     void popLayer() override { Mix(13); }
+    // v30：任意角度渐变 = 四角带色四边形。计数后端必须"支持"它，否则量到的永远是
+    // 条带兜底路径（那就等于没改）。
+    bool fillGradientQuad(float x, float y, float w, float h, float radius,
+                          float angleDeg, uint32_t from, uint32_t to) override {
+        Count(9, radius > 0.5f ? 9 : 1);
+        Mix(19); MixF(x); MixF(y); MixF(w); MixF(h); MixF(radius); MixF(angleDeg);
+        Mix(from); Mix(to);
+        return true;
+    }
     bool prepareImage(uint16_t index, const uint8_t*, size_t, uint32_t gen) override {
         Mix(14); Mix(index); Mix(gen);
         return true;
@@ -192,9 +201,9 @@ struct CountGfx : IBinUIGfx {
     }
 };
 
-const char* kKindNames[9] = {
+const char* kKindNames[10] = {
     "fillRect", "fillRounded", "fillRoundedXf", "fillLine", "strokeRounded",
-    "drawImageEx", "drawImageNine", "drawText", "backdropBlur"
+    "drawImageEx", "drawImageNine", "drawText", "backdropBlur", "fillGradientQuad"
 };
 
 double NowUs() {
@@ -333,7 +342,7 @@ int main(int argc, char** argv) {
                     "  |  原语 %.0f、≈四边形 %.0f、≈%.1f KB / 帧\n",
                     frames, avg, p50, p95, primsPerFrame, quadsPerFrame, kbPerFrame);
         std::printf("[bench] 分类：");
-        for (int k = 0; k < 9; k++) {
+        for (int k = 0; k < 10; k++) {
             if (!g.byKind[k]) continue;
             std::printf("%s %.0f  ", kKindNames[k], static_cast<double>(g.byKind[k]) / perFrame);
         }

@@ -52,6 +52,9 @@ public:
                   uint32_t color) override;
     void strokeRounded(float x, float y, float w, float h, float radius,
                        float thickness, uint32_t color) override;
+    // 任意角度线性渐变（v30）：四角带色四边形 + 圆角模板，1~9 个四边形代替上千条带。
+    bool fillGradientQuad(float x, float y, float w, float h, float radius,
+                          float angleDeg, uint32_t from, uint32_t to) override;
     void drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
                      float x, float y, float w, float h, uint32_t tint) override;
     void drawImageNine(uint16_t index, float x, float y, float w, float h,

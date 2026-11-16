@@ -3679,6 +3679,41 @@ void BinUIVK::fillRounded(float x, float y, float w, float h, float radius, uint
                    q[i].u0, q[i].v0, q[i].u1, q[i].v1, color, &rt.tex);
 }
 
+// v30：四角带色四边形（任意角度渐变）。顶点写法与 emitQuadUV 一致，只是每个顶点
+// 各自一个颜色 —— 顶点色是逐顶点属性，着色器不动（三端的顶点结构都是 20 字节）。
+bool BinUIVK::fillGradientQuad(float x, float y, float w, float h, float radius,
+                               float angleDeg, uint32_t from, uint32_t to) {
+    Impl& d = *impl_;
+    if (!d.ready || w <= 0.0f || h <= 0.0f) return false;
+    const float r = radius > 0.5f ? std::min(radius, std::min(w, h) * 0.5f) : 0.0f;
+    Impl::Tex* tex = &d.white;
+    int tpl = 0;
+    if (r > 0.5f) {
+        const int rr = std::max(1, static_cast<int>(std::lround(r)));
+        Impl::RoundTex& rt = d.roundFor(rr, false);
+        if (!rt.tex.image) return false;        // 没模板：交回条带路径（像素不变）
+        tex = &rt.tex;
+        tpl = rt.t;
+    }
+    binui::BinUIGradQuad q[9];
+    const int n = binui::BuildGradientQuads(x, y, w, h, r, tpl, angleDeg, from, to, q, 9);
+    if (n <= 0) return false;
+    for (int i = 0; i < n; i++) {
+        VkVertex* o = d.vertRoom(6);
+        if (!o) return true;                    // 撞顶点硬上限：已告警，剩下的不发
+        d.switchBatch(tex);
+        o[0] = VkVertex{ q[i].x, q[i].y, q[i].c[0], q[i].u0, q[i].v0 };
+        o[1] = VkVertex{ q[i].x + q[i].w, q[i].y, q[i].c[1], q[i].u1, q[i].v0 };
+        o[2] = VkVertex{ q[i].x, q[i].y + q[i].h, q[i].c[2], q[i].u0, q[i].v1 };
+        o[3] = o[2];
+        o[4] = o[1];
+        o[5] = VkVertex{ q[i].x + q[i].w, q[i].y + q[i].h, q[i].c[3], q[i].u1, q[i].v1 };
+        d.vcount += 6;
+        d.cur.count += 2;
+    }
+    return true;
+}
+
 void BinUIVK::fillLine(float x0, float y0, float x1, float y1, float width, uint32_t color) {
     Impl& d = *impl_;
     if (!d.ready || width <= 0) return;

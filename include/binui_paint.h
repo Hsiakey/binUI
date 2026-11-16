@@ -421,22 +421,64 @@ inline int BuildFillBands(const BinUIPaintNode* p, float x, float y, float w, fl
 //
 // 返回条带数；返回 -1 表示这个尺寸下条带放不下（调用方退回老三方向近似）。
 // ============================================================
+// ============================================================
+// 任意角度渐变（v30）：渐变轴 + 四角带色几何
+// ------------------------------------------------------------
+// 0.16.13 起任意角度渐变是"逐行 1px 条带 + 沿 x 自适应切段"，一张 320×180 的 135°
+// 卡片实测约 3.7k 条。条带的锅在于**表示**：颜色是逐条恒定的纯色矩形，只能靠"切得
+// 足够细"逼近渐变。而线性渐变在屏幕空间就是仿射函数，仿射函数被三角形上的线性插值
+// 精确复现 —— 一个四边形（两个三角形）+ 四角带色就是精确解。
+//
+// 于是这里给出两条平行实现，由调用方按后端能力选：
+//   · BuildFillBandsAngleGrad —— 条带（GDI 遗留路径、圆角模板缺失时的兜底）；
+//   · BuildGradientQuads      —— 四角带色（GL / Vulkan / D3D11）。
+// 两者几何口径完全一样（同一个 PaintGradAxisOf），所以盒子/角度不会两边算不一样。
+// ============================================================
+
+// CSS linear-gradient 的角度 → 渐变轴。0deg = to top（屏幕 y 向下），90deg = to right；
+// 规范里渐变线过盒中心、长度 = |w·dx| + |h·dy|，于是四角正好投影到两端。
+// 顺带给出 t=0 端的起点 (sx,sy)，调用方算 t 时不用再减中心。
+inline void PaintGradAxisOf(float angleDeg, float x, float y, float w, float h,
+                            float& dx, float& dy, float& len, float& sx, float& sy) {
+    const float kPi = 3.14159265358979323846f;
+    const float th = angleDeg * (kPi / 180.0f);
+    dx = std::sin(th);
+    dy = -std::cos(th);
+    len = std::fabs(w * dx) + std::fabs(h * dy);
+    sx = x + w * 0.5f - dx * len * 0.5f;
+    sy = y + h * 0.5f - dy * len * 0.5f;
+}
+
+// 与三个后端各自那份 Premult 同一公式（整数、(c*a)/255）。放在这里算一次，
+// 是为了让"四角带色"这条路在三端写出来的顶点颜色逐字节相同。
+inline uint32_t PaintGradPremulColor(uint32_t c) {
+    const uint32_t a = (c >> 24) & 0xFFu;
+    if (a == 255u) return c;
+    if (a == 0u) return 0u;
+    const uint32_t r = (((c >> 16) & 0xFFu) * a) / 255u;
+    const uint32_t g = (((c >> 8) & 0xFFu) * a) / 255u;
+    const uint32_t b = ((c & 0xFFu) * a) / 255u;
+    return (a << 24) | (r << 16) | (g << 8) | b;
+}
+
+// 屏幕上一点 (px,py) 处的渐变颜色（先直线插值、再预乘 —— 与条带路径同口径）
+inline uint32_t PaintGradColorAtPoint(float px, float py, float dx, float dy, float len,
+                                      float sx, float sy, uint32_t from, uint32_t to) {
+    float t = len > 1e-6f ? (((px - sx) * dx + (py - sy) * dy) / len) : 0.0f;
+    t = t < 0.0f ? 0.0f : (t > 1.0f ? 1.0f : t);
+    return PaintGradPremulColor(PaintLerpArgb(from, to, t));
+}
+
 inline int BuildFillBandsAngleGrad(uint32_t from, uint32_t to, float angleDeg,
                                    float x, float y, float w, float h, float radius,
                                    PaintBand* out, int cap) {
     if (!out || cap <= 0 || w <= 0.0f || h <= 0.0f) return 0;
-    const float kPi = 3.14159265358979323846f;
-    const float th = angleDeg * (kPi / 180.0f);
-    const float dx = std::sin(th);
-    const float dy = -std::cos(th);              // CSS：0deg = to top，屏幕 y 向下
-    // CSS 规范：渐变线过盒中心，长度 = |w·dx| + |h·dy| —— 于是四个角正好投影到两端。
-    const float len = std::fabs(w * dx) + std::fabs(h * dy);
+    float dx = 0.0f, dy = 0.0f, len = 0.0f, sx = 0.0f, sy = 0.0f;
+    PaintGradAxisOf(angleDeg, x, y, w, h, dx, dy, len, sx, sy);
     if (len <= 1e-4f) {                          // 退化：两端色直接铺平
         out[0] = { x, y, w, h, PaintLerpArgb(from, to, 0.5f), 0.0f, false };
         return 1;
     }
-    const float sx = x + w * 0.5f - dx * len * 0.5f;
-    const float sy = y + h * 0.5f - dy * len * 0.5f;
     const float r = radius > 0.5f ? std::min(radius, std::min(w, h) * 0.5f) : 0.0f;
 
     // 色阶密度与 SVG 渐变同一口径（每 ~2 设备像素一级，8~96 级），横向切段据此推出来。
@@ -940,6 +982,50 @@ inline int BuildRoundedNineSlice(float x, float y, float w, float h, float radiu
     push(x + c, y + c, mx, my, s0, s0, s1, s1);                   // 中
     return n;
 }
+
+// 盒子 → 1 个（直角）或 9 个（圆角）四角带色四边形。
+// tpl = 后端圆角模板的边长（RoundTemplateSize(r)）；直角时忽略。
+//
+// **两端 alpha 必须相同**，否则返回 0（调用方退回条带路径）。原因是一条颜色语义：
+//   · 现在的整套渐变（条带 / 路径 / GDI）都是"先在**直线色**空间插值、再预乘"；
+//   · 四角带色是让 GPU 在**顶点色**空间插值，顶点色又必须预乘（着色器不做预乘），
+//     所以只有"两端 alpha 相同"时两条路才逐像素等价（alpha 不变 ⇒ 预乘是线性的）；
+//   · alpha 不同时（`rgba(...,1) → transparent` 这种淡出）两者会差一档 —— 浏览器按
+//     CSS Color 4 在**预乘**空间插值，而 binUI 现在是直线空间插值（老实现如此）。
+// 与其在同一版里顺手改掉所有渐变的淡出观感（那要连条带路径和 GDI 基准图一起动），
+// 这里先**只在 alpha 不变时走四边形**：绝大多数渐变都是这一类，而上万条带的正是它。
+// "淡出渐变的插值空间"记在 docs/future.md 里单独一条待办。
+inline int BuildGradientQuads(float x, float y, float w, float h, float radius, int tpl,
+                              float angleDeg, uint32_t from, uint32_t to,
+                              BinUIGradQuad* out, int cap = 9) {
+    if (!out || cap <= 0 || w <= 0.0f || h <= 0.0f) return 0;
+    if (((from >> 24) & 0xFFu) != ((to >> 24) & 0xFFu)) return 0;   // 见上：交回条带
+    float dx, dy, len, sx, sy;
+    PaintGradAxisOf(angleDeg, x, y, w, h, dx, dy, len, sx, sy);
+    const float r = radius > 0.5f ? std::min(radius, std::min(w, h) * 0.5f) : 0.0f;
+    auto shade = [&](float qx, float qy, float qw, float qh,
+                     float u0, float v0, float u1, float v1, BinUIGradQuad& q) {
+        q.x = qx; q.y = qy; q.w = qw; q.h = qh;
+        q.u0 = u0; q.v0 = v0; q.u1 = u1; q.v1 = v1;
+        q.c[0] = PaintGradColorAtPoint(qx, qy, dx, dy, len, sx, sy, from, to);
+        q.c[1] = PaintGradColorAtPoint(qx + qw, qy, dx, dy, len, sx, sy, from, to);
+        q.c[2] = PaintGradColorAtPoint(qx, qy + qh, dx, dy, len, sx, sy, from, to);
+        q.c[3] = PaintGradColorAtPoint(qx + qw, qy + qh, dx, dy, len, sx, sy, from, to);
+    };
+    if (r <= 0.5f) {                       // 直角：一个四边形，四角带色
+        shade(x, y, w, h, 0.0f, 0.0f, 1.0f, 1.0f, out[0]);
+        return 1;
+    }
+    if (tpl <= 0 || cap < 9) return 0;      // 没有圆角模板 → 交回条带路径
+    PaintQuad q9[9];
+    const int n = BuildRoundedNineSlice(x, y, w, h, r, tpl, q9, 9);
+    if (n <= 0) return 0;
+    const int m = n < cap ? n : cap;
+    for (int i = 0; i < m; i++)
+        shade(q9[i].x, q9[i].y, q9[i].w, q9[i].h, q9[i].u0, q9[i].v0, q9[i].u1, q9[i].v1, out[i]);
+    return m;
+}
+
 
 // 文字装饰线条（下划线/删除线/上划线）：返回要画的条数，最多 3
 inline int BuildTextRuleBands(const BinUIPaintNode* p, float x, float textTop, float w,

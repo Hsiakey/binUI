@@ -1,0 +1,24 @@
+<html width="660" height="470" bg="#101418">
+  <!-- v0.16.34：任意角度渐变走"四角带色四边形"（0.16.32 及以前是逐行 1px 条带）。
+       这条用例专门压新路径的几个关键点，**只进跨后端比对**（GL vs VK vs D3D11），
+       不建 GDI 基准图 —— GDI 仍是条带，两者在"端点 alpha 不同"的渐变上本就有差异
+       （条带是"先插值再预乘"，GPU 逐顶点插值的是预乘色 = CSS Color 4 的规范做法）。
+
+       覆盖：
+       1) 135°/45°/225° 三个方向（对角轴，条带时代每张 2k~4k 条）；
+       2) 端点 alpha 不同（1 → 0）：预乘插值的语义就在这一条上；
+       3) 圆角 0 / 8 / 24 / 胶囊（圆角走九宫格 + 圆角模板，AA 与 fillRounded 一致）；
+       4) 小数坐标（left: 20.5px）：非整数几何，条带时代会落成台阶。 -->
+  <div style="position:absolute;left:20.5px;top:20px;width:140px;height:100px;background:linear-gradient(135deg,#ff7a59,#4a6cf7)"></div>
+  <div style="position:absolute;left:180px;top:20px;width:140px;height:100px;border-radius:8px;background:linear-gradient(45deg,#22d3ee,#a855f7)"></div>
+  <div style="position:absolute;left:340px;top:20px;width:140px;height:100px;border-radius:24px;background:linear-gradient(225deg,#f97316,#ef4444)"></div>
+  <div style="position:absolute;left:500px;top:20px;width:140px;height:100px;border-radius:50px;background:linear-gradient(135deg,#facc15,#16a34a)"></div>
+
+  <div style="position:absolute;left:20px;top:150px;width:140px;height:100px;background:linear-gradient(135deg,rgba(255,120,80,1),rgba(0,0,0,0))"></div>
+  <div style="position:absolute;left:180px;top:150px;width:140px;height:100px;border-radius:8px;background:linear-gradient(45deg,rgba(74,108,247,1),rgba(0,0,0,0))"></div>
+  <div style="position:absolute;left:340px;top:150px;width:140px;height:100px;border-radius:24px;background:linear-gradient(180deg,rgba(34,211,238,1),rgba(0,0,0,0))"></div>
+  <div style="position:absolute;left:500px;top:150px;width:140px;height:100px;border-radius:50px;background:linear-gradient(90deg,rgba(168,85,247,1),rgba(0,0,0,0))"></div>
+
+  <div style="position:absolute;left:20px;top:280px;width:300px;height:160px;border-radius:16px;background:linear-gradient(135deg,#1e3a8a,#0ea5e9)"></div>
+  <div style="position:absolute;left:340px;top:280px;width:300px;height:160px;border-radius:16px;background:linear-gradient(315deg,rgba(250,204,21,1),rgba(0,0,0,0))"></div>
+</html>

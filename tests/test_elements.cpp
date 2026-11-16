@@ -2458,6 +2458,135 @@ int run() {
               "半径超过条带上限时退回直角四条");
     }
 
+    // ---------- 四角带色四边形（v30：任意角度渐变的精确解） ----------
+    // 这一段的判据不是"看起来差不多"，而是数学：
+    //   线性渐变在屏幕空间是仿射函数，四角取色 + 三角形线性插值必须与解析解一致；
+    //   圆角盒必须仍然九块铺满（面积和 = w·h，UV 不越界）。
+    {
+        const uint32_t from = 0xFFFF0000u, to = 0xFF0000FFu;
+        BinUIGradQuad q[9];
+
+        // 直角盒 = 一个四边形，几何就是盒子本身
+        {
+            const int n = BuildGradientQuads(10, 20, 200, 120, 0.0f, 0, 135.0f, from, to, q, 9);
+            CHECK(n == 1, "直角盒只产生 1 个四边形");
+            CHECK_NEAR(q[0].x, 10.0f, 1e-6f, "四边形 x = 盒子 x");
+            CHECK_NEAR(q[0].y, 20.0f, 1e-6f, "四边形 y = 盒子 y");
+            CHECK_NEAR(q[0].w, 200.0f, 1e-6f, "四边形 w = 盒子 w");
+            CHECK_NEAR(q[0].h, 120.0f, 1e-6f, "四边形 h = 盒子 h");
+            CHECK_NEAR(q[0].u0, 0.0f, 1e-6f, "直角时 UV 从 0 起");
+            CHECK_NEAR(q[0].u1, 1.0f, 1e-6f, "直角时 UV 到 1 止");
+        }
+
+        // CSS 角度语义：0deg = to top（底边 from、顶边 to），90deg = to right（左 from、右 to）
+        {
+            BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 0.0f, from, to, q, 9);
+            CHECK(q[0].c[2] == from, "0deg：左下角 = from（渐变从下往上）");
+            CHECK(q[0].c[0] == to, "0deg：左上角 = to");
+            BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 90.0f, from, to, q, 9);
+            CHECK(q[0].c[0] == from, "90deg：左上角 = from（渐变从左往右）");
+            CHECK(q[0].c[1] == to, "90deg：右上角 = to");
+            BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 180.0f, from, to, q, 9);
+            CHECK(q[0].c[0] == from, "180deg：上边 = from（渐变从上往下）");
+            CHECK(q[0].c[2] == to, "180deg：下边 = to");
+        }
+
+        // 对角角度：盒子的两个对角正好落在渐变线两端（t=0 与 t=1）
+        {
+            const float W = 320.0f, H = 180.0f;
+            for (float ang : {45.0f, 135.0f, 225.0f, 315.0f}) {
+                float dx, dy, len, sx, sy;
+                PaintGradAxisOf(ang, 0, 0, W, H, dx, dy, len, sx, sy);
+                float tmin = 1e9f, tmax = -1e9f;
+                const float cx[4] = { 0, W, 0, W }, cy[4] = { 0, 0, H, H };
+                for (int c = 0; c < 4; c++) {
+                    const float t = ((cx[c] - sx) * dx + (cy[c] - sy) * dy) / len;
+                    tmin = std::min(tmin, t);
+                    tmax = std::max(tmax, t);
+                }
+                CHECK_NEAR(tmin, 0.0f, 1e-4f, "对角渐变：最小 t = 0（四角投影到渐变线端）");
+                CHECK_NEAR(tmax, 1.0f, 1e-4f, "对角渐变：最大 t = 1");
+            }
+        }
+
+        // 精确性：四边形内部任一点按"三角形线性插值"还原出来的颜色 == 解析渐变色
+        // （这就是"四角带色能代替上千条带"的全部根据；差 1 是 8bit 舍入）
+        {
+            const float W = 320.0f, H = 180.0f, ang = 135.0f;
+            BuildGradientQuads(0, 0, W, H, 0.0f, 0, ang, from, to, q, 9);
+            float dx, dy, len, sx, sy;
+            PaintGradAxisOf(ang, 0, 0, W, H, dx, dy, len, sx, sy);
+            int worst = 0;
+            for (int gy = 1; gy < 10; gy++) {
+                for (int gx = 1; gx < 10; gx++) {
+                    const float px = W * (float)gx / 10.0f, py = H * (float)gy / 10.0f;
+                    // 三角形 (0,1,2)：TL, TR, BL —— 与后端 emitQuad 的划分一致
+                    const float u = px / W, v = py / H;       // 双线性权重（三角形内等价）
+                    const uint32_t want =
+                        PaintGradColorAtPoint(px, py, dx, dy, len, sx, sy, from, to);
+                    auto lerpCh = [&](int shift) {
+                        const float a = (float)((q[0].c[0] >> shift) & 0xFFu);
+                        const float b = (float)((q[0].c[1] >> shift) & 0xFFu);
+                        const float c = (float)((q[0].c[2] >> shift) & 0xFFu);
+                        const float d = (float)((q[0].c[3] >> shift) & 0xFFu);
+                        // 两个三角形的重心插值：沿对角线 TL-BR 拼接
+                        const float top = a + (b - a) * u;
+                        const float bot = c + (d - c) * u;
+                        return top + (bot - top) * v;
+                    };
+                    for (int shift = 0; shift <= 24; shift += 8) {
+                        const int got = (int)(lerpCh(shift) + 0.5f);
+                        const int exp = (int)((want >> shift) & 0xFFu);
+                        worst = std::max(worst, std::abs(got - exp));
+                    }
+                }
+            }
+            CHECK(worst <= 1, "四角带色插值必须与解析渐变一致（误差 ≤ 1 LSB）");
+        }
+
+        // 圆角盒：九块铺满、UV 合法、四角颜色与对应几何角一致
+        {
+            const float W = 200.0f, H = 120.0f, R = 12.0f;
+            const int tpl = RoundTemplateSize(static_cast<int>(R));
+            const int n = BuildGradientQuads(5, 7, W, H, R, tpl, 135.0f, from, to, q, 9);
+            CHECK(n == 9, "圆角盒 = 九块");
+            float area = 0.0f;
+            for (int i = 0; i < n; i++) {
+                area += q[i].w * q[i].h;
+                CHECK(q[i].u0 >= -1e-6f && q[i].u1 <= 1.0f + 1e-6f &&
+                      q[i].v0 >= -1e-6f && q[i].v1 <= 1.0f + 1e-6f, "圆角块 UV 不越界");
+            }
+            CHECK_NEAR(area, W * H, 1e-2f, "九块面积和 = 盒子面积（无缝无重叠）");
+            // 第一块（左上角片）的四角必须就是盒子左上的那四个点
+            CHECK_NEAR(q[0].x, 5.0f, 1e-6f, "左上角片贴盒子左边");
+            CHECK_NEAR(q[0].y, 7.0f, 1e-6f, "左上角片贴盒子上边");
+            CHECK_NEAR(q[0].w, R, 1e-6f, "角片边长 = 半径");
+        }
+
+        // 没有圆角模板 → 返回 0，调用方退回条带（不支持的后端像素不变）
+        CHECK(BuildGradientQuads(0, 0, 100, 100, 12.0f, 0, 135.0f, from, to, q, 9) == 0,
+              "缺圆角模板时返回 0（交回条带路径）");
+        // 两端 alpha 不同 → 返回 0：整套渐变都是"直线空间插值再预乘"，四角带色是
+        // "顶点色空间插值"，只有 alpha 不变时两者等价（见 binui_paint.h 的说明）
+        CHECK(BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 135.0f, 0xFFFF0000u, 0x00000000u, q, 9) == 0,
+              "两端 alpha 不同时交回条带路径（插值空间不同）");
+        CHECK(BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 135.0f, 0x80FF0000u, 0x800000FFu, q, 9) == 1,
+              "两端 alpha 相同（半透明）时仍走四边形");
+        // 退化输入
+        CHECK(BuildGradientQuads(0, 0, 0, 100, 0.0f, 0, 135.0f, from, to, q, 9) == 0,
+              "w=0 不产生块");
+        CHECK(BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 135.0f, from, to, nullptr, 9) == 0,
+              "out 为空不崩");
+        CHECK(BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 135.0f, from, to, q, 0) == 0,
+              "cap=0 不产生块");
+        // 半透明：四角颜色必须是**预乘**后的值（否则三端字节不一致）
+        {
+            BuildGradientQuads(0, 0, 100, 100, 0.0f, 0, 90.0f, 0x80FF0000u, 0x800000FFu, q, 9);
+            CHECK(q[0].c[0] == PaintGradPremulColor(0x80FF0000u), "半透明角色已预乘（from 端）");
+            CHECK(q[0].c[1] == PaintGradPremulColor(0x800000FFu), "半透明角色已预乘（to 端）");
+        }
+    }
+
     if (g_fail == 0) std::printf("test_paint: 全部通过\n");
     return g_fail;
 }

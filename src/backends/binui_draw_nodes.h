@@ -288,6 +288,9 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     // 最大单项：132 节点的 animshow 从 152 µs/帧掉到 ~40 µs/帧（`make bench-draw`）。
     // 教训记在这里：节点循环里只许出现 static const 的结果，不许有函数调用。
     static const bool dbgClipMask = std::getenv("BINUI_DEBUG_CLIPMASK") != nullptr;
+    // v30：把任意角度渐变从"四角带色四边形"强制退回"逐行条带"（对照/排查用）。
+    // 同样只查一次 —— 节点循环里不许出现函数调用。
+    static const bool noGradQuad = std::getenv("BINUI_NO_GRAD_QUAD") != nullptr;
 
     int clipL = 0, clipT = 0, clipR = winW, clipB = winH;
     if (clipRect) {
@@ -946,6 +949,19 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 binui::PaintBand* bp = bands;
                 int bcap = binui::kMaxPaintBands;
                 const std::vector<binui::PaintBand>* cached = nullptr;
+                // v30：任意角度渐变**先试四角带色四边形**（GL/VK/D3D11 都支持）：
+                // 一个四边形（圆角是九宫格）就等价于精确的线性渐变 —— 以前这条路要切
+                // 3.7k 条 1px 条带（12 张卡 = 43,409 条/帧、≈5 MB 顶点）。
+                // 后端返回 false（GDI 遗留路径 / 圆角模板缺失）就落到下面的条带路径，
+                // 像素与 0.16.32 逐位相同。`BINUI_NO_GRAD_QUAD=1` 可强制走老路径做对照。
+                if (!noGradQuad && ptGrad && (ptGrad->flags & binui::PAINT_GRADIENT) &&
+                    ptGrad->reserve[1] != 0) {
+                    if (gfx.fillGradientQuad(static_cast<float>(x), static_cast<float>(y),
+                                             static_cast<float>(nw), static_cast<float>(nh),
+                                             radius, static_cast<float>(ptGrad->reserve[1] - 1),
+                                             ptGrad->gradFrom, ptGrad->gradTo))
+                        return;
+                }
                 // 任意角度渐变（v0.16.13）：条带是千级，走"按节点缓存 + 堆缓冲"。
                 // 缓存键覆盖了影响条带的全部输入，所以坐标/颜色一变就自动重算。
                 if (ptGrad && (ptGrad->flags & binui::PAINT_GRADIENT) && ptGrad->reserve[1] != 0) {

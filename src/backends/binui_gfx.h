@@ -63,10 +63,25 @@ public:
                           uint32_t color) = 0;
     virtual void strokeRounded(float x, float y, float w, float h, float radius,
                                float thickness, uint32_t color) = 0;
+    // ---- 任意角度线性渐变（v30：四角带色四边形）----
+    // 语义：在 (x,y,w,h) 这个盒子里按 CSS `linear-gradient(<angleDeg>, from, to)` 填色，
+    // 圆角 radius 用的是**同一张角片模板**（AA 与 fillRounded 一致）。
+    // 实现要点：线性渐变在屏幕空间是仿射函数，三角形线性插值能精确复现它，所以
+    // "一个四边形（直角）/ 九宫格（圆角）+ 四角各取一次色"就是精确解 —— 而以前这条路
+    // 要把 320×180 的 135° 卡片切成 3,694 条 1px 条带（见 binui_paint.h 的说明）。
+    // 四角颜色由共享的 BuildGradientQuads 算好并**预乘**，后端只写顶点，三端逐字节一致。
+    // 返回 false = 这个后端不做（GDI 遗留路径）或圆角模板缺失 → 调用方退回条带路径，
+    // 所以不支持的后端像素一位不变。
+    virtual bool fillGradientQuad(float x, float y, float w, float h, float radius,
+                                  float angleDeg, uint32_t from, uint32_t to) {
+        (void)x; (void)y; (void)w; (void)h; (void)radius; (void)angleDeg;
+        (void)from; (void)to;
+        return false;
+    }
     // （v0.16.33 试过再加一条 `fillBands` 批量原语：把渐变底/边框的千级条带一次发完。
     //  实测在 GL 上 0.299 → 0.288 ms（3.7%，在噪声内）—— 因为条带贵在"写 6 个顶点"，
     //  不贵在虚调用。撤回，不留一个没有收益的契约面。真要把那页压下去，得让条带数量
-    //  本身下降：四角带色四边形，或整块做成图层纹理。见 docs/future.md。）
+    //  本身下降：就是上面这条 fillGradientQuad。见 docs/future.md。）
 
     // ---- 图片（v0.16.15：子矩形 + 染色）----
     // u0..v1 是**源图的归一化子矩形**，tint 与纹理相乘（0xFFFFFFFF = 原色）。

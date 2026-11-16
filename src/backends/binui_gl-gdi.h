@@ -63,6 +63,10 @@ public:
                        uint32_t color, const float xf[6]);
     // 线段（端点 x0,y0 -> x1,y1，宽度像素，实心旋转四边形）
     void fillLine(float x0, float y0, float x1, float y1, float width, uint32_t color);
+    // 任意角度线性渐变（v30）：四角带色四边形 + 圆角模板，1~9 个四边形代替上千条带。
+    // 返回 false = 没模板/未就绪 → 调用方退回条带路径。
+    bool fillGradientQuad(float x, float y, float w, float h, float radius,
+                          float angleDeg, uint32_t from, uint32_t to) override;
     void strokeRounded(float x, float y, float w, float h, float radius,
                        float thickness, uint32_t color);
     // 文本：x/y 为基线（centerH/centerV 时 x/y 为矩形中心）

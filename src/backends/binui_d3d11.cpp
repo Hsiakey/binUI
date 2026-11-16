@@ -1490,6 +1490,48 @@ void BinUID3D::fillRect(float x, float y, float w, float h, uint32_t color) {
     impl_->emitQuad(x, y, x + w, y + h, 0, 0, 1, 1, color);
 }
 
+// v30：四角带色四边形（任意角度渐变）。顶点写法与 emitQuadUV 一致，只是每个顶点
+// 各自一个颜色 —— 顶点色是逐顶点属性，着色器不动。
+bool BinUID3D::fillGradientQuad(float x, float y, float w, float h, float radius,
+                                float angleDeg, uint32_t from, uint32_t to) {
+    if (!impl_->ready || w <= 0.0f || h <= 0.0f) return false;
+    const float r = radius > 0.5f ? std::min(radius, std::min(w, h) * 0.5f) : 0.0f;
+    ID3D11ShaderResourceView* srv = impl_->whiteSrv;
+    int tpl = 0;
+    if (r > 0.5f) {
+        const int rr = std::max(1, static_cast<int>(std::lround(r)));
+        RoundTex& rt = impl_->roundFor(rr, false);
+        if (!rt.srv) return false;              // 没模板：交回条带路径（像素不变）
+        srv = rt.srv;
+        tpl = rt.t;
+    }
+    binui::BinUIGradQuad q[9];
+    const int n = binui::BuildGradientQuads(x, y, w, h, r, tpl, angleDeg, from, to, q, 9);
+    if (n <= 0) return false;
+    impl_->curLinear = (r > 0.5f) ? 1 : 0;
+    impl_->curSrv = srv;
+    auto sw = [](uint32_t c) {
+        return (c & 0xFF00FF00u) | ((c & 0xFFu) << 16) | ((c >> 16) & 0xFFu);
+    };
+    for (int i = 0; i < n; i++) {
+        D3DVertex* o = impl_->vertRoom(6);
+        if (!o) return true;                    // 撞顶点硬上限：已告警，剩下的不发
+        impl_->beginBatch();
+        const uint32_t c0 = sw(q[i].c[0]), c1 = sw(q[i].c[1]);
+        const uint32_t c2 = sw(q[i].c[2]), c3 = sw(q[i].c[3]);
+        const float x0 = q[i].x, y0 = q[i].y, x1 = q[i].x + q[i].w, y1 = q[i].y + q[i].h;
+        o[0] = D3DVertex{ x0, y0, c0, q[i].u0, q[i].v0 };
+        o[1] = D3DVertex{ x1, y0, c1, q[i].u1, q[i].v0 };
+        o[2] = D3DVertex{ x0, y1, c2, q[i].u0, q[i].v1 };
+        o[3] = o[2];
+        o[4] = o[1];
+        o[5] = D3DVertex{ x1, y1, c3, q[i].u1, q[i].v1 };
+        impl_->vcount += 6;
+        impl_->batches[impl_->curBatch].count++;
+    }
+    return true;
+}
+
 void BinUID3D::fillLine(float x0, float y0, float x1, float y1, float width, uint32_t color) {
     if (!impl_->ready || width <= 0) return;
     float dx = x1 - x0, dy = y1 - y0;

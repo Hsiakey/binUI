@@ -988,7 +988,27 @@ struct BinUIGLGdi::Impl {
         batches[curBatch].count++;
     }
 
-    void flushAll() {
+    // v30：四角带色四边形（任意角度渐变）。顶点写法与 emitQuadUV 逐字一致，只是
+// **每个顶点各自一个颜色** —— 顶点色本来就是逐顶点属性，着色器不用改。
+void emitQuadUVColor(const BinUIGradQuad& q) {
+    GLVertex* o = vertRoom(6);
+    if (!o) return;
+    beginBatch();
+    auto sw = [](uint32_t c) {
+        return (c & 0xFF00FF00u) | ((c & 0xFFu) << 16) | ((c >> 16) & 0xFFu);
+    };
+    const uint32_t c0 = sw(q.c[0]), c1 = sw(q.c[1]), c2 = sw(q.c[2]), c3 = sw(q.c[3]);
+    o[0] = GLVertex{ q.x, q.y, c0, q.u0, q.v0 };
+    o[1] = GLVertex{ q.x + q.w, q.y, c1, q.u1, q.v0 };
+    o[2] = GLVertex{ q.x, q.y + q.h, c2, q.u0, q.v1 };
+    o[3] = o[2];
+    o[4] = o[1];
+    o[5] = GLVertex{ q.x + q.w, q.y + q.h, c3, q.u1, q.v1 };
+    vcount += 6;
+    batches[curBatch].count++;
+}
+
+void flushAll() {
         if (vcount == 0 || !vb) return;
         glBufferDataP(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vcount * sizeof(GLVertex)),
                       verts.data(), GL_DYNAMIC_DRAW);
@@ -1330,6 +1350,29 @@ void BinUIGLGdi::fillRect(float x, float y, float w, float h, uint32_t color) {
     impl_->curTex = impl_->whiteTex;
     Premult(color);
     impl_->emitQuad(x, y, x + w, y + h, 0, 0, 1, 1, color);
+}
+
+bool BinUIGLGdi::fillGradientQuad(float x, float y, float w, float h, float radius,
+                                  float angleDeg, uint32_t from, uint32_t to) {
+    if (!impl_ || !impl_->ready || w <= 0.0f || h <= 0.0f) return false;
+    Impl& d = *impl_;
+    const float r = radius > 0.5f ? std::min(radius, std::min(w, h) * 0.5f) : 0.0f;
+    GLuint tex = d.whiteTex;
+    int tpl = 0;
+    if (r > 0.5f) {
+        const int rr = std::max(1, static_cast<int>(std::lround(r)));
+        RoundTex& rt = d.roundFor(rr, false);
+        if (!rt.tex) return false;              // 没模板：交回条带路径（像素不变）
+        tex = rt.tex;
+        tpl = rt.t;
+    }
+    binui::BinUIGradQuad q[9];
+    const int n = binui::BuildGradientQuads(x, y, w, h, r, tpl, angleDeg, from, to, q, 9);
+    if (n <= 0) return false;
+    d.curTex = tex;
+    for (int i = 0; i < n; i++) d.emitQuadUVColor(q[i]);
+    d.curTex = d.whiteTex;
+    return true;
 }
 
 void BinUIGLGdi::fillLine(float x0, float y0, float x1, float y1, float width, uint32_t color) {
