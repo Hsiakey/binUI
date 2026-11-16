@@ -767,6 +767,32 @@ inline float PathScaleFactor(const PathMatrix& m) {
     return std::sqrt(det);
 }
 
+// 仿射求逆（v0.16.52：patternTransform 的平铺网格要在 tile 空间枚举，需要 T⁻¹）。
+// det ≈ 0（退化：某轴被压成 0、或 90° 斜切到无限）返回 false，调用方按"不可逆"处理。
+inline bool PathInvert(const PathMatrix& m, PathMatrix& out) {
+    const float det = m.a * m.d - m.b * m.c;
+    if (std::fabs(det) < 1e-9f) return false;
+    const float inv = 1.0f / det;
+    out.a =  m.d * inv;
+    out.b = -m.b * inv;
+    out.c = -m.c * inv;
+    out.d =  m.a * inv;
+    out.e = -(out.a * m.e + out.c * m.f);
+    out.f = -(out.b * m.e + out.d * m.f);
+    return true;
+}
+
+// 线性部分是不是"相似变换"（旋转/镜像 + 等比缩放）：是则圆笔仍是圆，描边线宽精确；
+// 不是（斜切/非等比）时圆笔变成椭圆，而 binUI 的路径段只有一个 strokeW ——
+// 只能按几何平均宽度近似，调用方应当告警（见 patternTransform 的旋转/斜切）。
+inline bool PathIsSimilarity(const PathMatrix& m, float tol = 1e-4f) {
+    const float s1 = m.a * m.a + m.b * m.b;      // 第一列长²
+    const float s2 = m.c * m.c + m.d * m.d;      // 第二列长²
+    const float dot = m.a * m.c + m.b * m.d;     // 两列的点积（正交 = 0）
+    const float sc = std::max(std::max(s1, s2), 1.0f);
+    return std::fabs(s1 - s2) <= tol * sc && std::fabs(dot) <= tol * sc;
+}
+
 // ============================================================
 // SVG transform 属性 → 矩阵
 //

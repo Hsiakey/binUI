@@ -4692,7 +4692,7 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         // v24：生效的文字阴影（CSS text-shadow 是**继承属性**：卡片上写一次，卡片里
         // 所有文字都带）。空 = 本子树没有阴影；写了 none / 全透明就从这里清掉。
         // v0.16.50：**多层**（数组顺序 = 绘制顺序，见 binui_format.h 的段注释）。
-        std::vector<BinUITextShadow> tsLayers;
+        std::vector<BinUITextShadow> tsLayers{};
     };
 
     // 根节点固定 id 0，位于坐标原点。画布默认白色；<app_window bg>/<html bg> 覆盖
@@ -8542,25 +8542,102 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                      "（元素不填充）");
             } else {
                 const SvgPatternDef& pd2 = pit->second;
+                bool fallback = false;      // true = 退回"第一种颜色实填"
+                // v0.16.52：patternTransform **整份**生效。以前只吃"平移 + 缩放"，
+                // 旋转/斜切按轴对齐近似（旋转过的 tile 被画成轴对齐，斜线纹理整个歪掉）。
+                //
+                // 两种情形分开放，是为了让**老页面逐位不变**：
+                //   · 轴对齐（b = c = 0）：网格仍按老办法在**用户空间**枚举
+                //     （格原点先过 T、步长乘 a/d）；
+                //   · 有旋转/斜切：平铺网格是一个**平行四边形格**，枚举改到 "tile 空间"
+                //     （= 施加 patternTransform 之前的坐标系）做 —— 把元素包围盒的四角
+                //     用 T⁻¹ 变换回去取 aabb 就是枚举范围，每块再整体乘 T 回到用户空间。
+                PathMatrix tf, tfInv;
+                bool rotated = false;
                 if (pd2.hasTf) {
-                    if (pd2.tf.b != 0.0f || pd2.tf.c != 0.0f)
-                        Warn("patternTransform 的旋转/斜切不支持（按轴对齐近似）");
-                    const PathPointF go = PathApply(pd2.tf, gx, gy);
-                    gx = go.x; gy = go.y;
-                    tw *= pd2.tf.a; th *= pd2.tf.d;
+                    tf = pd2.tf;
+                    if (!PathInvert(tf, tfInv)) {
+                        Warn("<pattern id=\"" + patternFillId + "\"> 的 patternTransform "
+                             "不可逆（行列式为 0），图案不填充");
+                        fallback = true;
+                    } else {
+                        rotated = std::fabs(tf.b) > 1e-6f || std::fabs(tf.c) > 1e-6f;
+                        if (!rotated) {
+                            const PathPointF go = PathApply(tf, gx, gy);
+                            gx = go.x; gy = go.y;
+                            tw *= tf.a; th *= tf.d;
+                        }
+                    }
                 }
-                const float txa = std::fabs(tw), tya = std::fabs(th);
-                const int k0 = (int)std::floor((patUBx - gx) / txa);
-                const int k1 = (int)std::ceil((patUBx + ubw - gx) / txa);
-                const int l0 = (int)std::floor((patUBy - gy) / tya);
-                const int l1 = (int)std::ceil((patUBy + ubh - gy) / tya);
-                const long long ntiles = (long long)(k1 - k0 + 1) * (long long)(l1 - l0 + 1);
+                // 斜切下圆笔变成椭圆，而路径段只有一个 strokeW → 只能按几何平均宽度画。
+                // 旋转/等比缩放是**精确**的（相似变换），所以只在非相似时告警。
+                if (rotated && !PathIsSimilarity(tf)) {
+                    bool strokeKid = false;
+                    for (const SvgPatternChild& kid : pd2.kids)
+                        if (kid.hasStroke && kid.strokeW > 0.0f) strokeKid = true;
+                    if (strokeKid)
+                        Warn("<pattern id=\"" + patternFillId + "\"> 的 patternTransform 带斜切："
+                             "描边按几何平均宽度画（SVG 规范是椭圆笔，路径段只存一个线宽）");
+                }
+                // 枚举范围：轴对齐用绝对步长（老口径）；旋转/斜切在 tile 空间取元素包围盒的 aabb
+                const float gxT = gx, gyT = gy;                         // 格原点（tile 空间）
+                const float twT = std::fabs(tw), thT = std::fabs(th);   // 格步长（tile 空间）
+                float bx0 = patUBx, by0 = patUBy;
+                float bx1 = patUBx + ubw, by1 = patUBy + ubh;
+                if (rotated) {
+                    float mx0 = 1e30f, my0 = 1e30f, mx1 = -1e30f, my1 = -1e30f;
+                    const float cx4[4] = { patUBx, patUBx + ubw, patUBx + ubw, patUBx };
+                    const float cy4[4] = { patUBy, patUBy, patUBy + ubh, patUBy + ubh };
+                    for (int ci = 0; ci < 4; ci++) {
+                        const PathPointF q4 = PathApply(tfInv, cx4[ci], cy4[ci]);
+                        mx0 = std::min(mx0, q4.x); mx1 = std::max(mx1, q4.x);
+                        my0 = std::min(my0, q4.y); my1 = std::max(my1, q4.y);
+                    }
+                    bx0 = mx0; bx1 = mx1; by0 = my0; by1 = my1;
+                }
+                const float txa = rotated ? (twT > 0.0f ? twT : 1.0f) : std::fabs(tw);
+                const float tya = rotated ? (thT > 0.0f ? thT : 1.0f) : std::fabs(th);
+                const int k0 = (int)std::floor((bx0 - gxT) / txa);
+                const int k1 = (int)std::ceil((bx1 - gxT) / txa);
+                const int l0 = (int)std::floor((by0 - gyT) / tya);
+                const int l1 = (int)std::ceil((by1 - gyT) / tya);
+                // 一块 tile 落在哪、要不要画：**同一份判定**给"预算估计"和"真正展开"用。
+                // 旋转/斜切时枚举范围是 T⁻¹ 之后的 aabb（比实际覆盖的区域大 √2 倍量级），
+                // 所以预算必须数**真的会画的块**，否则斜着的图案会被误判成"太大"而退回纯色
+                // （第一版就是这样：rotate(30) 的 178 块被估成 420 块，直接降级）。
+                auto tileAt = [&](int kk2, int ll2, float& ox2, float& oy2) -> bool {
+                    ox2 = gxT + (float)kk2 * txa;
+                    oy2 = gyT + (float)ll2 * tya;
+                    if (rotated) {
+                        // 平行四边形格：算这一块在用户空间的外接 aabb 再和元素盒比
+                        float ux0 = 1e30f, uy0 = 1e30f, ux1 = -1e30f, uy1 = -1e30f;
+                        const float corx[4] = { ox2, ox2 + txa, ox2 + txa, ox2 };
+                        const float cory[4] = { oy2, oy2, oy2 + tya, oy2 + tya };
+                        for (int ci = 0; ci < 4; ci++) {
+                            const PathPointF q5 = PathApply(tf, corx[ci], cory[ci]);
+                            ux0 = std::min(ux0, q5.x); ux1 = std::max(ux1, q5.x);
+                            uy0 = std::min(uy0, q5.y); uy1 = std::max(uy1, q5.y);
+                        }
+                        if (ux1 <= patUBx || uy1 <= patUBy ||
+                            ux0 >= patUBx + ubw || uy0 >= patUBy + ubh) return false;
+                        return true;
+                    }
+                    // 整块落在元素包围盒外 → 裁掉也看不见
+                    return !(ox2 + txa <= patUBx || oy2 + tya <= patUBy ||
+                             ox2 >= patUBx + ubw || oy2 >= patUBy + ubh);
+                };
+                long long ntiles = 0;
+                for (int kk2 = k0; kk2 <= k1; kk2++)
+                    for (int ll2 = l0; ll2 <= l1; ll2++) {
+                        float ax = 0.0f, ay = 0.0f;
+                        if (tileAt(kk2, ll2, ax, ay)) ntiles++;
+                    }
                 size_t ptsPerTile = 0;
                 for (const SvgPatternChild& kid : pd2.kids) ptsPerTile += kid.shape.pts.size();
                 const long long kMaxTiles = 400;
                 const long long kMaxPts = 60000;
-                bool fallback = false;
-                if (ntiles > kMaxTiles || (long long)ptsPerTile * ntiles > kMaxPts) {
+                if (!fallback && (ntiles > kMaxTiles ||
+                                  (long long)ptsPerTile * ntiles > kMaxPts)) {
                     Warn("<pattern id=\"" + patternFillId + "\"> 平铺展开太大（" +
                          std::to_string(ntiles) + " 块 × " + std::to_string(ptsPerTile) +
                          " 点），退回用第一种颜色实填（把 tile 调大或平铺区域调小）");
@@ -8621,15 +8698,14 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                         cb = PathMul(vb, cb);
                     }
                     strokeK = PathScaleFactor(svgX) * PathScaleFactor(cb);
-                    for (int kk = k0; kk <= k1; kk++) {
-                        for (int ll = l0; ll <= l1; ll++) {
-                            const float ox2 = gx + kk * txa;
-                            const float oy2 = gy + ll * tya;
-                            // 整块落在元素包围盒外 → 裁掉也看不见，直接跳过
-                            if (ox2 + txa <= patUBx || oy2 + tya <= patUBy ||
-                                ox2 >= patUBx + ubw || oy2 >= patUBy + ubh) continue;
-                            const PathMatrix md = PathMul(svgX,
-                                PathMul(PathTranslate(ox2, oy2), cb));
+                    if (rotated) strokeK *= PathScaleFactor(tf);   // det 可乘：面积比相乘
+                    for (int kk2 = k0; kk2 <= k1; kk2++) {
+                        for (int ll2 = l0; ll2 <= l1; ll2++) {
+                            float ox2 = 0.0f, oy2 = 0.0f;
+                            if (!tileAt(kk2, ll2, ox2, oy2)) continue;
+                            const PathMatrix md = rotated
+                                ? PathMul(svgX, PathMul(tf, PathMul(PathTranslate(ox2, oy2), cb)))
+                                : PathMul(svgX, PathMul(PathTranslate(ox2, oy2), cb));
                             for (const SvgPatternChild& kid : pd2.kids) {
                                 PathShape tmp = kid.shape;
                                 TransformShape(tmp, md);

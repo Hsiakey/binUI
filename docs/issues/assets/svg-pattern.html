@@ -1,6 +1,6 @@
 <!DOCTYPE html>
-<app_window width="660" height="470" resizable="false">
-<html width="660" height="470">
+<app_window width="660" height="820" resizable="false">
+<html width="660" height="820">
 <head>
 <style>
     body { background: #EEF2F7; color: #16202C; }
@@ -85,7 +85,59 @@
     </svg>
     <span class="cap" style="left:382; top:176">开放曲线 + 图案</span>
 
-    <span style="position:absolute; left:20; top:392; width:620; height:52; font-size:12px; color:#7A8798">v0.16.25：&lt;pattern&gt; 在编译期平铺展开成普通路径 —— 同色同笔的 tile 合成一个节点，每个节点再挂一条"元素自身轮廓"的裁剪记录（v27 补集擦除），运行期与三个后端零改动</span>
+    <!-- ===== v0.16.52：patternTransform 的旋转 / 斜切（整份仿射，不再轴对齐近似） ===== -->
+    <span class="cap" style="left:20; top:384; width:320">patternTransform 旋转 / 斜切 / 缩放（v0.16.52）</span>
+
+    <!-- 7) rotate(30)：竖条阴影线整体转 30°。老实现会画成轴对齐的竖条 -->
+    <svg width="160" height="150" style="position:absolute; left:20; top:404">
+        <defs>
+            <pattern id="rot30" width="10" height="10" patternUnits="userSpaceOnUse"
+                     patternTransform="rotate(30)">
+                <line x1="0" y1="0" x2="0" y2="10" stroke="#1D4ED8" stroke-width="4" />
+            </pattern>
+        </defs>
+        <rect x="6" y="14" width="148" height="120" rx="10" fill="url(#rot30)" />
+    </svg>
+    <span class="cap" style="left:20; top:560">rotate(30) 的竖条</span>
+
+    <!-- 8) rotate(45)：棋盘转成菱形网格 -->
+    <svg width="160" height="150" style="position:absolute; left:196; top:404">
+        <defs>
+            <pattern id="rot45" width="14" height="14" patternUnits="userSpaceOnUse"
+                     patternTransform="rotate(45)">
+                <rect x="0" y="0" width="7" height="7" fill="#0F766E" />
+                <rect x="7" y="7" width="7" height="7" fill="#14B8A6" />
+            </pattern>
+        </defs>
+        <rect x="6" y="14" width="148" height="120" rx="10" fill="url(#rot45)" />
+    </svg>
+    <span class="cap" style="left:196; top:560">rotate(45) 的菱形格</span>
+
+    <!-- 9) skewX(20)：砖块被剪斜（斜切下描边只能按几何平均宽度画，编译期会告警） -->
+    <svg width="160" height="150" style="position:absolute; left:372; top:404">
+        <defs>
+            <pattern id="skew20" width="16" height="10" patternUnits="userSpaceOnUse"
+                     patternTransform="skewX(20)">
+                <rect x="0" y="0" width="15" height="9" fill="#B45309" />
+            </pattern>
+        </defs>
+        <rect x="6" y="14" width="148" height="120" rx="10" fill="url(#skew20)" />
+    </svg>
+    <span class="cap" style="left:372; top:560">skewX(20) 的斜砖</span>
+
+    <!-- 10) rotate(-20) + scale(1.4)：圆点阵（旋转是相似变换 → 描边/圆都精确） -->
+    <svg width="160" height="150" style="position:absolute; left:20; top:576">
+        <defs>
+            <pattern id="rotdots" width="12" height="12" patternUnits="userSpaceOnUse"
+                     viewBox="0 0 10 10" patternTransform="rotate(-20) scale(1.4)">
+                <circle cx="5" cy="5" r="3.2" fill="#7C3AED" />
+            </pattern>
+        </defs>
+        <rect x="6" y="14" width="148" height="120" rx="10" fill="url(#rotdots)" />
+    </svg>
+    <span class="cap" style="left:20; top:734; width:300">rotate(-20) scale(1.4) 圆点</span>
+
+    <span style="position:absolute; left:20; top:772; width:620; height:40; font-size:12px; color:#7A8798">v0.16.25：&lt;pattern&gt; 在编译期平铺展开成普通路径 —— 同色同笔的 tile 合成一个节点，每个节点再挂一条"元素自身轮廓"的裁剪记录（v27 补集擦除），运行期与三个后端零改动</span>
 </body>
 </html>
 </app_window>

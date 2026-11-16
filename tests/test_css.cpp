@@ -1073,6 +1073,119 @@ static void TestIssueRegressions() {
         }
     }
 
+    // ---- 16.52：patternTransform 的旋转/斜切（v0.16.52）----
+    // 钉住四件事：
+    //   1. `rotate()` 真的转：内容是一条 40×4 的横条，转 90° 之后展开节点的盒子变成
+    //      4×40（宽高互换）—— 老实现按轴对齐近似，这里会仍是 40×4；
+    //   2. `skewX()` 真的斜：横条被剪成 40 + 4·tan30° ≈ 42.31 宽；
+    //   3. 旋转是**相似变换** → 描边宽度精确、不该报"斜切"的告警；斜切才告警；
+    //   4. 不可逆（scale(0)）→ 告警并退回纯色实填（不是画错，也不是什么都不画）。
+    {
+        const char* html = R"HTML(<app_window width="320" height="200" bg="#101014">
+<html width="320" height="200" bg="#101014">
+<body>
+  <svg width="300" height="190" style="position:absolute; left:0; top:0">
+    <defs>
+      <pattern id="rot" width="200" height="200" patternTransform="rotate(90)">
+        <rect x="0" y="0" width="40" height="4" fill="#0B5FA5" />
+      </pattern>
+      <pattern id="skw" width="200" height="200" patternTransform="skewX(30)"
+               patternUnits="userSpaceOnUse">
+        <rect x="0" y="0" width="40" height="4" fill="#0F766E" stroke="#22CC88"
+              stroke-width="2" />
+      </pattern>
+      <pattern id="plain" width="200" height="200">
+        <rect x="0" y="0" width="40" height="4" fill="#C2410C" />
+      </pattern>
+      <pattern id="sing" width="200" height="200" patternTransform="scale(0)">
+        <rect x="0" y="0" width="40" height="4" fill="#777777" />
+      </pattern>
+    </defs>
+    <rect id="a1" x="-8" y="0" width="16" height="60" fill="url(#rot)" />
+    <rect id="a2" x="0" y="40" width="50" height="8" fill="url(#skw)" />
+    <rect id="a3" x="0" y="80" width="10" height="10" fill="url(#plain)" />
+    <rect id="a4" x="0" y="120" width="10" height="10" fill="url(#sing)" />
+  </svg>
+</body></html>
+</app_window>)HTML";
+        const auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("16.52: patternTransform 布局可解析", ParseInto(r, res.layout));
+        // 展开出来的几何：一个节点里可能有多个 tile 的轮廓（都挂在同一个 PathGroup 上），
+        // 所以取**第一条子路径**的包围盒 —— 每一块形状都一样，转没转一眼就能看出来。
+        auto firstContourBox = [&](const char* name, float& bw, float& bh) -> bool {
+            const uint16_t pid = r.findNodeByName(name);
+            for (const auto& ni : r.getNodes()) {
+                if (ni.parentId != pid || ni.type != BINUI_PATH) continue;
+                const auto* pr = r.pathOf(ni.id);
+                if (!pr || pr->first.empty() || pr->count.empty()) continue;
+                const uint32_t s0 = pr->first[0], c0 = pr->count[0];
+                float u0 = 1e9f, v0 = 1e9f, u1 = -1e9f, v1 = -1e9f;
+                for (uint32_t i = s0; i < s0 + c0 && i < pr->pts.size() / 2; i++) {
+                    const float u = pr->pts[i * 2] / 65535.0f;
+                    const float v = pr->pts[i * 2 + 1] / 65535.0f;
+                    u0 = std::min(u0, u); u1 = std::max(u1, u);
+                    v0 = std::min(v0, v); v1 = std::max(v1, v);
+                }
+                bw = (u1 - u0) * (float)ni.width;
+                bh = (v1 - v0) * (float)ni.height;
+                return true;
+            }
+            return false;
+        };
+        float w1 = 0, h1 = 0, w2 = 0, h2 = 0, w3 = 0, h3 = 0;
+        TEST("16.52: rotate(90) 后 40×4 的横条变成 4×40（宽高互换）",
+             firstContourBox("a1", w1, h1) && std::fabs(w1 - 4.0f) <= 1.5f &&
+             std::fabs(h1 - 40.0f) <= 1.5f);
+        TEST("16.52: 没写 patternTransform 的仍按老行为（40×4）",
+             firstContourBox("a3", w3, h3) && std::fabs(w3 - 40.0f) <= 1.5f &&
+             std::fabs(h3 - 4.0f) <= 1.5f);
+        TEST("16.52: skewX(30) 把横条剪宽（40 + 4·tan30 ≈ 42.3）",
+             firstContourBox("a2", w2, h2) && std::fabs(w2 - 42.31f) <= 1.5f &&
+             std::fabs(h2 - 4.0f) <= 1.5f);
+        bool rotatedWarn = false, skewWarn = false, singularWarn = false;
+        for (const auto& w : res.warnings) {
+            if (w.find("旋转/斜切不支持") != std::string::npos) rotatedWarn = true;
+            if (w.find("斜切：描边按几何平均宽度画") != std::string::npos) skewWarn = true;
+            if (w.find("不可逆") != std::string::npos) singularWarn = true;
+        }
+        TEST("16.52: 不再报\"旋转/斜切不支持\"", !rotatedWarn);
+        TEST("16.52: 斜切 + 描边 → 告警（椭圆笔只存一个线宽）", skewWarn);
+        TEST("16.52: scale(0) → 告警不可逆", singularWarn);
+        {
+            // 不可逆 → fallback：唯一一个节点的形状是**元素自己**（纯色实填），盒子 = 元素盒
+            const uint16_t pid4 = r.findNodeByName("a4");
+            int n4 = 0;
+            float w4 = 0, h4 = 0;
+            for (const auto& ni : r.getNodes()) {
+                if (ni.parentId != pid4 || ni.type != BINUI_PATH) continue;
+                n4++;
+                w4 = (float)ni.width; h4 = (float)ni.height;
+            }
+            TEST("16.52: 不可逆时退回纯色实填（元素盒 10×10 一块）", n4 == 1 &&
+                 std::fabs(w4 - 10.0f) <= 1.5f && std::fabs(h4 - 10.0f) <= 1.5f);
+        }
+        // 求逆与相似判定的单元检查
+        {
+            binui::PathMatrix m = binui::PathRotate(37.0f);
+            m = binui::PathMul(binui::PathTranslate(11.0f, -7.0f), binui::PathScale(2.0f, 3.0f));
+            binui::PathMatrix inv;
+            const bool okInv = binui::PathInvert(m, inv);
+            const binui::PathPointF back =
+                binui::PathApply(inv, binui::PathApply(m, 5.0f, 9.0f).x,
+                                      binui::PathApply(m, 5.0f, 9.0f).y);
+            TEST("16.52: PathInvert 往返回到原点",
+                 okInv && std::fabs(back.x - 5.0f) < 1e-3f && std::fabs(back.y - 9.0f) < 1e-3f);
+            binui::PathMatrix zero = binui::PathScale(0.0f, 1.0f);
+            TEST("16.52: PathInvert 对退化矩阵返回 false",
+                 !binui::PathInvert(zero, inv));
+            TEST("16.52: 旋转+等比缩放是相似变换（描边精确）",
+                 binui::PathIsSimilarity(binui::PathRotate(23.0f)));
+            binui::PathMatrix sk = { 1.0f, 0.0f, 0.577f, 1.0f, 0.0f, 0.0f };
+            TEST("16.52: skewX 不是相似变换（要告警）", !binui::PathIsSimilarity(sk));
+        }
+    }
+
     // ---- 16.24：SVG <clipPath> / clip-path（v27 裁剪路径段） ----
     // 钉住四件事：
     //   1. clip-path: url(#id) 落进裁剪段（renderer.clipPathOf），包围盒是**设备空间**的；
