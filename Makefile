@@ -602,7 +602,11 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # blur-quality（v0.16.44）：分离高斯。小元素 + 大半径（旧实现最难看的一组：14px 圆点糊成十字、
 # 6px 细条糊成方块）+ 边缘剖面（16px 半径的水平线）+ 文字 blur(3) / drop-shadow(10) + 毛玻璃
 # 10~32px。只进跨后端比对；观感差异看 docs/issues/assets/blur-quality.png。
-ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow blur-quality
+# round-in-layer（v0.16.45）：1× 离屏层里的**圆角图片**（按行切细条 → 每条左右边是小数）。
+# 这条用例就是"VK 图层用了 4× MSAA 主管线"的判据：修之前弧线每行差一个像素（17 px / 通道差
+# 200+），修之后 GL/VK/D3D11 三端 0 不同像素、最大通道差 0。覆盖 opacity 层、模糊层、
+# 小数坐标、嵌套两层，以及层里的圆/渐变/细线（确认修法没波及别的图元）。
+ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow blur-quality round-in-layer
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 

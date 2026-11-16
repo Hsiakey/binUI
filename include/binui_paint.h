@@ -188,15 +188,12 @@ inline int PaintFilterBlurPad(float blurPx) {
 // 口径：σ = 半径（CSS `blur(N)` / `drop-shadow(0 0 N)` 的定义），所以外扩恰好是 3σ = 3N，
 // 与上面的 PaintFilterBlurPad 一致。
 //
-// **为什么最小是 1 级（不许 0 级）**：0 级意味着"合成时把抓下来的区域 1:1 拷回去"。那么层里
-// 任何 1 像素级的差异都会原样上屏 —— 而 1× 离屏层里的**圆角图片**正好有一处既有的三端差异
-// （GL 与 VK 的圆角模板相位差 1px，17 个像素、单通道差 200+；只写 `opacity:0.98` 包一个圆角
-// `<img>` 就能复现，与模糊无关，见 docs/future.md）。降一级顺带做了 2×2 平均，把这个相位差
-// 摊平成"网格量化"级别（实测最大通道差回到 59 以下，与 v0.16.42/43 持平）。
-// 等圆角模板那边对齐了，这里可以放开到 0。
+// 0 级 = 不降采样（合成时把抓下来的区域 1:1 拷回去）：σ 很小时用它，省一趟填充。
+// v0.16.44 曾把最小级数定成 1，用来把"1× 层里圆角图片"的一处三端差异摊平；v0.16.45 修掉
+// 了那个差异的真正原因（VK 图层用了 4× MSAA 主管线），所以 0 级重新放开。
 inline int PaintFilterBlurLevel(float blurPx) {
     if (!(blurPx > 0.0f)) return 0;
-    int levels = 1;   // ★ 至少降一级，理由见下
+    int levels = 0;
     while (levels < 5 && blurPx / static_cast<float>(1 << (levels + 1)) >= 2.0f) levels++;
     return levels;
 }

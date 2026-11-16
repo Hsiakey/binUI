@@ -1,0 +1,59 @@
+<html width="660" height="470" bg="#EEF2F7">
+  <!-- v0.16.45：**1× 离屏层里的圆角图片**（这条用例是"VK 图层用错管线"的判据）。
+       圆角图片是按行切细条的（BuildImageBands），每条的左右边是**小数**；主目标有 4× MSAA
+       兜底，所以大半径的弧线看起来是平滑的。层目标是单采样，如果层里画的东西用的是
+       4× MSAA 管线变体（v0.16.44 及以前 VK 就是这样：beginLayerPass 时 layerStack 还是空的，
+       refreshPipeline 按主目标选了主管线），采样数状态与目标不一致，弧线每行会差一个像素
+       （实测 17 个像素、单通道差 200+）。修法是 pushLayer 在 push_back 之后再选一次管线。
+       本页只进跨后端比对；判据是三端 0 不同像素。 -->
+
+  <!-- ① 圆角图片 + 组透明度：最纯粹的复现（没有 filter，也没有模糊） -->
+  <div style="position:absolute;left:16px;top:16px;width:92px;height:92px;opacity:0.98">
+    <img style="position:absolute;left:0px;top:0px;width:92px;height:92px;border-radius:14px" src="image-round-img.png" />
+  </div>
+  <!-- ② 同一个图片但半径大得多（弧线更平，差一像素的像素更多） -->
+  <div style="position:absolute;left:124px;top:16px;width:92px;height:92px;opacity:0.7">
+    <img style="position:absolute;left:0px;top:0px;width:92px;height:92px;border-radius:46px" src="image-round-img.png" />
+  </div>
+  <!-- ③ 小数坐标 + 小半径：边界卡在像素中心附近最容易翻 */
+  <div style="position:absolute;left:236.4px;top:16.7px;width:92px;height:92px;opacity:0.9">
+    <img style="position:absolute;left:0px;top:0px;width:92px;height:92px;border-radius:8px" src="image-round-img.png" />
+  </div>
+  <!-- ④ 圆角图片 + 模糊（两层叠加：外层模糊层里还有一层组透明度） -->
+  <div style="position:absolute;left:348px;top:16px;width:92px;height:92px;filter:blur(2px)">
+    <img style="position:absolute;left:0px;top:0px;width:92px;height:92px;border-radius:20px" src="image-round-img.png" />
+  </div>
+  <!-- ⑤ 对比：同样的圆角图片不套层（主目标 4× MSAA 路径，一直是 0 差异） -->
+  <div style="position:absolute;left:556px;top:16px;width:92px;height:92px">
+    <img style="position:absolute;left:0px;top:0px;width:92px;height:92px;border-radius:14px" src="image-round-img.png" />
+  </div>
+  <span style="position:absolute;left:16px;top:116px;width:624px;height:16px;font-size:11px;color:#4A5A6E">层内 r14 / 层内 r46（大弧线）/ 层内小数坐标 r8 / 层内 blur(2) r20 / 不套层 r14（对照）</span>
+
+  <!-- ⑥ 层里的其它亚像素几何：旋转矩形、圆、细线、文字（确认修法没有波及别的图元） -->
+  <div style="position:absolute;left:16px;top:150px;width:180px;height:110px;opacity:0.85">
+    <div style="position:absolute;left:14px;top:12px;width:60px;height:60px;background:#2F6BF0;border-radius:30px"></div>
+    <div style="position:absolute;left:88px;top:16px;width:70px;height:70px;background:#F0B429;border-radius:12px"></div>
+    <span style="position:absolute;left:14px;top:82px;width:150px;height:18px;font-size:13px;color:#16202C">层里的文字与圆</span>
+  </div>
+  <div style="position:absolute;left:212px;top:150px;width:180px;height:110px;opacity:0.5">
+    <div style="position:absolute;left:0px;top:0px;width:180px;height:110px;background:linear-gradient(135deg,#14B8A6,#E11D48);border-radius:24px"></div>
+  </div>
+  <div style="position:absolute;left:408px;top:150px;width:240px;height:110px;opacity:0.98">
+    <div style="position:absolute;left:0px;top:10px;width:240px;height:2px;background:#16202C"></div>
+    <div style="position:absolute;left:0px;top:40px;width:140px;height:1px;background:#16202C"></div>
+    <div style="position:absolute;left:20px;top:60px;width:120px;height:30px;background:#0F766E;border-radius:15px"></div>
+  </div>
+  <span style="position:absolute;left:16px;top:270px;width:624px;height:16px;font-size:11px;color:#4A5A6E">层里的圆/圆角矩形/渐变圆角 / 层里的 1~2px 细线与胶囊</span>
+
+  <!-- ⑦ 嵌套层（内层是"非最外层"，走的是另一条分支：beginLayerPass 时 layerStack 非空） -->
+  <div style="position:absolute;left:16px;top:300px;width:300px;height:140px;opacity:0.9">
+    <div style="position:absolute;left:0px;top:0px;width:300px;height:140px;background:#243040;border-radius:16px"></div>
+    <div style="position:absolute;left:20px;top:20px;width:100px;height:100px;opacity:0.6">
+      <img style="position:absolute;left:0px;top:0px;width:100px;height:100px;border-radius:18px" src="image-round-img.png" />
+    </div>
+    <div style="position:absolute;left:140px;top:20px;width:140px;height:100px;background:#22C55E;border-radius:20px;opacity:0.75"></div>
+  </div>
+  <span style="position:absolute;left:330px;top:370px;width:310px;height:32px;font-size:11px;color:#4A5A6E">嵌套两层：外层 opacity 0.9 里再套 opacity 0.6 的圆角图片</span>
+
+  <span style="position:absolute;left:16px;top:446px;width:630px;height:20px;font-size:12px;color:#16202C">v0.16.45：图层管线按"层目标 = 单采样"重新选一次（修 VK 弧线每行差 1px）</span>
+</html>

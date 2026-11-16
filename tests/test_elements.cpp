@@ -3053,14 +3053,14 @@ int run() {
     // 几个纹素 → 放大回来是梯形/平台）。抽头：每纹素一个、覆盖 ±3σ、权重和正好 255。
     {
         CHECK(binui::PaintFilterBlurLevel(0.0f) == 0, "v44: blur(0) 不降采样（硬阴影）");
-        CHECK(binui::PaintFilterBlurLevel(0.5f) == 1, "v44: 极小半径也至少降一级（1:1 合成会暴露圆角模板相位差）");
-        CHECK(binui::PaintFilterBlurLevel(1.0f) == 1, "v44: σ=1 走 1 级（σ_level 0.5 纹素）");
+        CHECK(binui::PaintFilterBlurLevel(0.5f) == 0, "v44: σ<1 不降采样（全分辨率处理，省一趟填充）");
+        CHECK(binui::PaintFilterBlurLevel(1.0f) == 0, "v44: σ=1 仍在全分辨率（σ_level=1 纹素）");
         CHECK(binui::PaintFilterBlurLevel(4.0f) == 1, "v44: σ=4 → 降 1 级（σ 2 纹素）");
         CHECK(binui::PaintFilterBlurLevel(18.0f) == 3, "v44: σ=18 → 降 3 级（σ 2.25 纹素）");
         CHECK(binui::PaintFilterBlurLevel(64.0f) == 5, "v44: 上限 64px → 降 5 级（σ 2 纹素）");
         CHECK(binui::PaintFilterBlurLevel(200.0f) == 5, "v44: 超过上限也钳在 5 级");
         // σ_level 落在 [1,4) 是这条规则的判据（再小就白扫像素，再大就丢形状）
-        for (int lv = 1; lv <= 5; lv++) {
+        for (int lv = 0; lv <= 5; lv++) {
             const float b = 2.0f * static_cast<float>(1 << lv);
             CHECK(binui::PaintFilterBlurLevel(b) == lv, "v44: 2×2^lv 的档位正好落在本级");
             CHECK(binui::PaintFilterBlurLevel(b * 1.9f) == lv, "v44: 档位之内仍然留在本级");

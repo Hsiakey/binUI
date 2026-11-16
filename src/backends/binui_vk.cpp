@@ -2957,6 +2957,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         clipL = f.l; clipT = f.t; clipR = f.r; clipB = f.b;   // 层内只画层框里的内容
         layers[idx].inUse = true;
         layerStack.push_back(f);
+        refreshPipeline();   // ★ 必须在这里再选一次：上面 beginLayerPass 时 layerStack 还是空的，
+                             // refreshPipeline 会按"主目标"选 4× MSAA 主管线，而层目标是单采样
         return true;
     }
 
