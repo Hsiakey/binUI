@@ -428,28 +428,35 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
     //     被 z-index 打散的子树退回逐元素乘法，只是近似，不会画错顺序；
     //   · 层数受后端限制（GL 池子 4 层），pushLayer 返回 false 就退回逐元素模式；
     //   · 进了层就把这些祖先的 alpha 从子节点颜色里"除回来"（层在 pop 时整体乘一次）。
-    struct LayerNode { size_t idx; int lastPos; float op; };
+    //
+    // v0.16.42：同一套图层也承载 CSS filter: blur(Npx) —— 它同样是"组"语义，只是 pop 时
+    // 多一趟"把层内容糊掉再合成"。所以候选集合 = 半透明节点 ∪ 模糊节点，两者的层可以合并
+    // （同时写了 opacity 和 filter 的元素只建一层）。
+    struct LayerNode { size_t idx; int lastPos; float op; float blur; };
     std::vector<LayerNode> layerStack;
     float layerAccum = 1.0f;          // 已经由图层承受掉的 alpha 乘积
-    // 每个节点的"自己"的 opacity（静态 × 动画），以及父下标
+    // 每个节点的"自己"的 opacity（静态 × 动画）、模糊半径，以及父下标
     std::vector<float> ownOp;
+    std::vector<float> ownBlur;
     std::vector<int32_t> pIdx;
     std::unordered_map<size_t, std::pair<int, int>> ownerSpan;   // 层候选：首/末位置
     std::unordered_map<size_t, int> ownerCount;                  // 层候选：子树里画了几个节点
     {
         ownOp.resize(nodeCount, 1.0f);
+        ownBlur.assign(nodeCount, 0.0f);
         pIdx.assign(nodeCount, -1);
-        bool anyOp = false;
+        bool anyLayerNode = false;
         for (size_t i = 0; i < nodeCount; i++) {
             ownOp[i] = renderer.ownOpacity(nodes[i].id);
-            if (ownOp[i] < 0.999f) anyOp = true;
+            ownBlur[i] = renderer.blurOf(nodes[i].id);
+            if (ownOp[i] < 0.999f || ownBlur[i] > 0.0f) anyLayerNode = true;
             const uint16_t pid = nodes[i].parentId;
             if (pid != 0xFFFF && pid != nodes[i].id) {
                 const size_t pi = indexOf(pid);
                 if (pi != static_cast<size_t>(-1)) pIdx[i] = static_cast<int32_t>(pi);
             }
         }
-        if (anyOp) {
+        if (anyLayerNode) {
             // 一次遍历统计每个半透明祖先覆盖的绘制位置（首、末、个数）
             for (size_t pos = 0; pos < order.size(); pos++) {
                 const size_t i = order[pos];
@@ -460,7 +467,7 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 int32_t a = static_cast<int32_t>(i);
                 for (int guard = 0; a >= 0 && guard < 512; guard++) {
                     const size_t ai = static_cast<size_t>(a);
-                    if (ownOp[ai] < 0.999f) {
+                    if (ownOp[ai] < 0.999f || ownBlur[ai] > 0.0f) {
                         auto it = ownerSpan.find(ai);
                         if (it == ownerSpan.end()) ownerSpan[ai] = { static_cast<int>(pos), static_cast<int>(pos) };
                         else it->second.second = static_cast<int>(pos);
@@ -471,11 +478,14 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
             }
             // 只保留"连续"的候选（跨度长度 == 覆盖的节点数），并且至少覆盖 2 个节点 ——
             // 一个孤零零的半透明叶子不需要图层（逐元素乘 alpha 就是精确值），建层反而要多一次 flush。
+            // 模糊节点是例外：一个没有后代的元素（一张图、一段文字）也必须建层，那正是
+            // 最常见的写法 —— 逐元素根本没有"模糊"这个近似可退。
             std::unordered_map<size_t, std::pair<int, int>> contig;
             for (const auto& kv : ownerSpan) {
                 const int first = kv.second.first, last = kv.second.second;
                 const int cnt = ownerCount[kv.first];
-                if (cnt >= 2 && last - first + 1 == cnt) contig[kv.first] = kv.second;
+                const bool needsLayerAlone = ownBlur[kv.first] > 0.0f;
+                if ((cnt >= 2 || needsLayerAlone) && last - first + 1 == cnt) contig[kv.first] = kv.second;
             }
             ownerSpan.swap(contig);
         }
@@ -564,8 +574,27 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                 const auto s2 = renderer.drawState(on.id);
                 const float bx = on.x - offX[oi2] + s2.offX;
                 const float by = on.y - offY[oi2] + s2.offY;
-                if (gfx.pushLayer(bx, by, on.width, on.height, ownOp[oi2])) {
-                    layerStack.push_back({ oi2, ownerSpan[oi2].second, ownOp[oi2] });
+                const float bl = ownBlur[oi2];
+                if (bl > 0.0f) {
+                    // 模糊会**溢出盒子**：图层框与合成矩形都按 3σ 外扩并取整。
+                    // 取整是刻意的 —— 层纹理的抓取/回写矩形在三端都是整像素，
+                    // 图层框也跟着整像素走，合成四边形就恒落在像素边界上（三端逐像素一致）。
+                    const int pad = PaintFilterBlurPad(bl);
+                    const float lx = std::floor(bx) - static_cast<float>(pad);
+                    const float ly = std::floor(by) - static_cast<float>(pad);
+                    const float lw = std::ceil(bx + on.width) - std::floor(bx) + static_cast<float>(pad * 2);
+                    const float lh = std::ceil(by + on.height) - std::floor(by) + static_cast<float>(pad * 2);
+                    if (gfx.pushLayerBlurred(lx, ly, lw, lh, ownOp[oi2], bl)) {
+                        layerStack.push_back({ oi2, ownerSpan[oi2].second, ownOp[oi2], bl });
+                        layerAccum *= ownOp[oi2];
+                    } else if (ownOp[oi2] < 0.999f &&
+                               gfx.pushLayer(bx, by, on.width, on.height, ownOp[oi2])) {
+                        // 后端不支持模糊（GDI 遗留路径）：至少把组透明度这一半做对
+                        layerStack.push_back({ oi2, ownerSpan[oi2].second, ownOp[oi2], 0.0f });
+                        layerAccum *= ownOp[oi2];
+                    }
+                } else if (gfx.pushLayer(bx, by, on.width, on.height, ownOp[oi2])) {
+                    layerStack.push_back({ oi2, ownerSpan[oi2].second, ownOp[oi2], 0.0f });
                     layerAccum *= ownOp[oi2];
                 }
             }

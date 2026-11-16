@@ -1,0 +1,58 @@
+<html width="660" height="470" bg="#EEF2F7">
+  <!-- v0.16.42：CSS filter: blur(Npx)。组语义 —— 节点连同整棵子树先画进离屏图层，
+       再把图层内容按半径做多级 2× 降采样模糊，最后正常 alpha 合成回来。
+       只进跨后端比对（GL vs VK / D3D11），不建 GDI 基准图：GDI 遗留路径不模糊。 -->
+  <div style="position:absolute;left:16px;top:16px;width:92px;height:92px" >
+    <img style="position:absolute;left:0px;top:0px;width:92px;height:92px;border-radius:14px" src="image-round-img.png" />
+  </div>
+  <div style="position:absolute;left:128px;top:16px;width:92px;height:92px;filter:blur(2px)">
+    <img style="position:absolute;left:0px;top:0px;width:92px;height:92px;border-radius:14px" src="image-round-img.png" />
+  </div>
+  <div style="position:absolute;left:240px;top:16px;width:92px;height:92px;filter:blur(5px)">
+    <img style="position:absolute;left:0px;top:0px;width:92px;height:92px;border-radius:14px" src="image-round-img.png" />
+  </div>
+  <div style="position:absolute;left:352px;top:16px;width:92px;height:92px;filter:blur(10px)">
+    <img style="position:absolute;left:0px;top:0px;width:92px;height:92px;border-radius:14px" src="image-round-img.png" />
+  </div>
+  <div style="position:absolute;left:464px;top:16px;width:92px;height:92px;filter:blur(20px)">
+    <img style="position:absolute;left:0px;top:0px;width:92px;height:92px;border-radius:14px" src="image-round-img.png" />
+  </div>
+  <span style="position:absolute;left:16px;top:112px;width:540px;height:16px;font-size:11px;color:#4A5A6E">原图 / blur(2px) / blur(5px) / blur(10px) / blur(20px) —— 半径越大，边缘越往下摊开</span>
+
+  <!-- 子树模糊：文字、子元素、圆角、投影都在同一张层里被糊掉 -->
+  <div style="position:absolute;left:16px;top:140px;width:200px;height:86px;background:#FFFFFF;border-radius:12px;border:1px solid #C9D6E4">
+    <span style="position:absolute;left:12px;top:10px;width:176px;height:18px;font-size:13px;color:#16202C">清晰卡片</span>
+    <span style="position:absolute;left:12px;top:34px;width:176px;height:16px;font-size:11px;color:#7A8798">子元素不受影响</span>
+  </div>
+  <div style="position:absolute;left:236px;top:140px;width:200px;height:86px;background:#FFFFFF;border-radius:12px;border:1px solid #C9D6E4;filter:blur(4px)">
+    <span style="position:absolute;left:12px;top:10px;width:176px;height:18px;font-size:13px;color:#16202C">模糊卡片</span>
+    <span style="position:absolute;left:12px;top:34px;width:176px;height:16px;font-size:11px;color:#7A8798">文字一起糊</span>
+  </div>
+  <div style="position:absolute;left:456px;top:140px;width:188px;height:86px;background:linear-gradient(135deg,#2F6BF0,#14B8A6);border-radius:26px;filter:blur(8px)"></div>
+  <span style="position:absolute;left:456px;top:230px;width:188px;height:16px;font-size:11px;color:#4A5A6E">渐变 + 圆角 + blur(8)</span>
+
+  <!-- 模糊层与组透明度是同一条层：两者写在一起只建一层 -->
+  <div style="position:absolute;left:16px;top:258px;width:120px;height:70px;background:#F0B429;border-radius:10px;opacity:0.6"></div>
+  <div style="position:absolute;left:150px;top:258px;width:120px;height:70px;background:#F0B429;border-radius:10px;filter:blur(4px)"></div>
+  <div style="position:absolute;left:284px;top:258px;width:120px;height:70px;background:#F0B429;border-radius:10px;filter:blur(4px);opacity:0.6"></div>
+  <span style="position:absolute;left:16px;top:332px;width:388px;height:16px;font-size:11px;color:#4A5A6E">opacity 0.6 / blur(4) / blur(4)+opacity 0.6（一层同时做两件事）</span>
+
+  <!-- 嵌套：外层 blur(3) 里再放一个 blur(9) 的圆 —— 层套层，两次降采样链 -->
+  <div style="position:absolute;left:420px;top:252px;width:224px;height:96px;background:#243040;border-radius:14px;filter:blur(3px)">
+    <div style="position:absolute;left:24px;top:20px;width:88px;height:56px;background:#22C55E;border-radius:28px;filter:blur(9px)"></div>
+    <div style="position:absolute;left:126px;top:28px;width:40px;height:40px;background:#FFFFFF;border-radius:20px"></div>
+  </div>
+
+  <!-- 小数坐标 + 只写 -webkit-filter：图层框取整后合成四边形仍落在像素边界上 -->
+  <div style="position:absolute;left:16.4px;top:360px;width:96px;height:60px;background:#A855F7;border-radius:8px;-webkit-filter:blur(6px)"></div>
+  <span style="position:absolute;left:126px;top:376px;width:220px;height:16px;font-size:11px;color:#4A5A6E">小数坐标 left:16.4 + -webkit-filter</span>
+
+  <!-- 贴着窗口左上角：抓取矩形被窗口裁掉一部分，合成只用裁后那块 -->
+  <div style="position:absolute;left:-28px;top:-24px;width:80px;height:70px;background:#FF5A5A;border-radius:10px;filter:blur(9px)"></div>
+
+  <!-- blur 与不支持函数同写：drop-shadow 告警忽略，blur 照常生效 -->
+  <div style="position:absolute;left:356px;top:360px;width:110px;height:60px;background:#0B5FA5;border-radius:10px;filter:blur(3px) drop-shadow(2px 2px 4px rgba(0,0,0,0.4))"></div>
+  <span style="position:absolute;left:476px;top:382px;width:170px;height:16px;font-size:11px;color:#4A5A6E">blur 生效，drop-shadow 忽略</span>
+
+  <span style="position:absolute;left:16px;top:432px;width:630px;height:20px;font-size:12px;color:#16202C">v32 绘制段 blurPx：先整组进离屏层，再降采样模糊（级数 1..6），最后按 alpha 合成 —— 三端同一套链</span>
+</html>

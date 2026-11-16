@@ -165,6 +165,20 @@ inline float PaintStickyShiftY(float naturalTop, float h,
     return t - naturalTop;
 }
 
+// ---- CSS filter: blur(Npx)（v0.16.42）----
+// 上限 64px：底下那条降采样链最多 6 级（2^6 = 64），再大的半径只是把已经糊成一片的
+// 画面继续糊，却要多扫几遍整块区域。编译器按这个值钳制并告警。
+inline constexpr float kMaxFilterBlurPx = 64.0f;
+
+// 模糊会**溢出元素盒子**：离屏图层与合成矩形都要外扩这么多（像素，已向上取整）。
+// 3σ 是高斯"肉眼看不到尾巴"的经验距离；降采样链的等效 σ ≈ 半径，与 box-shadow 的
+// 3σ 取法同一个口径。返回整数：图层框与合成四边形都走整像素，三端才能逐像素一致。
+inline int PaintFilterBlurPad(float blurPx) {
+    if (!(blurPx > 0.0f)) return 0;
+    const float pad = std::ceil(blurPx * 3.0f);
+    return static_cast<int>(pad > kMaxFilterBlurPx * 3.0f ? kMaxFilterBlurPx * 3.0f : pad);
+}
+
 // 圆角矩形在"距边 dy"处的水平内缩（dy 从边的中心算起，超过 radius 就没内缩）
 //   dy = 0   → 内缩 = radius（圆角矩形最高处只剩中间那段）
 //   dy >= r  → 0（进入直边）

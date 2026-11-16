@@ -272,6 +272,12 @@ public:
         const BinUIPaintNode* p = paintOf(nodeId);
         return p ? p->letterSpacing : 0.0f;
     }
+    // v32：CSS filter: blur(Npx) 的半径（0 = 没写）。这是**组**属性：绘制期要把该节点
+    // 连同整棵子树包进离屏图层再模糊（见 backends/binui_draw_nodes.h 的图层候选逻辑）。
+    float blurOf(uint16_t nodeId) const {
+        const BinUIPaintNode* p = paintOf(nodeId);
+        return p ? p->blurPx : 0.0f;
+    }
     uint32_t textFlagsOf(uint16_t nodeId) const {
         const BinUIPaintNode* p = paintOf(nodeId);
         return p ? p->textFlags : 0u;

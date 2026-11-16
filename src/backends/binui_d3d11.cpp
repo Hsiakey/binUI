@@ -927,6 +927,7 @@ struct BinUID3D::Impl {
     struct LayerFrame {
         int idx = -1;
         float x = 0, y = 0, w = 0, h = 0, alpha = 1;
+        float blur = 0;              // v0.16.42：filter: blur(Npx) 的半径（0 = 普通 alpha 层）
         ID3D11RenderTargetView* prevTarget = nullptr;
     };
     std::vector<LayerTarget> layers;
@@ -1032,14 +1033,14 @@ struct BinUID3D::Impl {
         return static_cast<int>(layers.size() - 1);
     }
 
-    bool pushLayer(float x, float y, float w, float h, float alpha) {
+    bool pushLayer(float x, float y, float w, float h, float alpha, float blur = 0.0f) {
         if (!ready || w <= 0.0f || h <= 0.0f || alpha <= 0.0f) return false;   // v27：alpha=1 也允许（裁剪用容器层）
         if (static_cast<int>(layerStack.size()) >= kMaxLayers) { warnLayerLimit(); return false; }
         flushAll();                     // 先把手头的图元画到当前目标（此时还没换 RT）
         const int idx = acquireLayer();
         if (idx < 0) { warnLayerLimit(); return false; }
         LayerFrame f;
-        f.idx = idx; f.x = x; f.y = y; f.w = w; f.h = h; f.alpha = alpha;
+        f.idx = idx; f.x = x; f.y = y; f.w = w; f.h = h; f.alpha = alpha; f.blur = blur;
         // 父目标 = 外层图层的 RT（嵌套时不能一律回到主目标，否则内层会直接合成到主目标上，
         // 外层那一次 alpha 就漏掉了 —— v0.16.12 用 6 层嵌套用例抓到，差 25% 像素）
         f.prevTarget = layerStack.empty() ? msTarget : layers[layerStack.back().idx].rtv;
@@ -1085,6 +1086,107 @@ struct BinUID3D::Impl {
         return true;
     }
 
+    // ---- v0.16.42 filter: blur(Npx)：把**层自己的内容**糊掉再合成 ----
+    // 与 backdropBlur 共用同一条降采样链，两处差别：
+    //   · 抓取源是层纹理 —— 糊的是"自己的画面"，不是"身后的背景"；
+    //   · 合成用**正常 alpha 混合**（d.blend，不是 blendReplace）—— 叠在背景上。
+    // 进入时父目标已经绑定好（调用方刚换过 RT）。
+    bool blurLayerContent(const LayerFrame& f) {
+        int rx = static_cast<int>(std::floor(f.x));
+        int ry = static_cast<int>(std::floor(f.y));
+        int rx1 = static_cast<int>(std::ceil(f.x + f.w));
+        int ry1 = static_cast<int>(std::ceil(f.y + f.h));
+        rx = std::max(0, rx); ry = std::max(0, ry);
+        rx1 = std::min(winW, rx1); ry1 = std::min(winH, ry1);
+        const int rw = rx1 - rx, rh = ry1 - ry;
+        if (rw < 2 || rh < 2) return false;
+        int levels = 1;
+        {
+            float v = 2.0f;
+            while (levels < 6 && v < f.blur) { v *= 2.0f; levels++; }
+        }
+        if (!ensureBlurLevel(0, rw, rh)) return false;
+
+        // 1) 抓层内容 → level0（DST 是 blurLv[0]，源是层纹理：拷之前两边都得解绑）
+        ID3D11RenderTargetView* nullRt[1] = { nullptr };
+        ctx->OMSetRenderTargets(1, nullRt, nullptr);
+        {
+            ID3D11ShaderResourceView* nullSrv[1] = { nullptr };
+            ctx->PSSetShaderResources(0, 1, nullSrv);
+            D3D11_BOX box = { static_cast<UINT>(rx), static_cast<UINT>(ry), 0,
+                              static_cast<UINT>(rx1), static_cast<UINT>(ry1), 1 };
+            ctx->CopySubresourceRegion(blurLv[0].tex, 0, 0, 0, 0, layers[f.idx].tex, 0, &box);
+        }
+        ID3D11RenderTargetView* back = f.prevTarget;
+        ctx->OMSetRenderTargets(1, &back, nullptr);
+
+        // 2) 降采样链（与 backdropBlur 逐字一致；D3D 行 0 = 区域顶部，UV 不翻转）
+        const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        D3D11_VIEWPORT prevVp = { 0, 0, static_cast<float>(winW),
+                                  static_cast<float>(winH), 0, 1 };
+        { UINT n = 1; ctx->RSGetViewports(&n, &prevVp); }
+        const int savedSc[4] = { scissor[0], scissor[1], scissor[2], scissor[3] };
+        ctx->OMSetBlendState(blendReplace, bf, 0xFFFFFFFF);
+        bool chainOk = true;
+        for (int i = 1; i <= levels && chainOk; i++) {
+            const int dw = std::max(1, blurLv[static_cast<size_t>(i - 1)].w / 2);
+            const int dh = std::max(1, blurLv[static_cast<size_t>(i - 1)].h / 2);
+            if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) { chainOk = false; break; }
+            BlurLevel& L = blurLv[static_cast<size_t>(i)];
+            ID3D11RenderTargetView* lrt = L.rtv;
+            ctx->OMSetRenderTargets(1, &lrt, nullptr);
+            const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            ctx->ClearRenderTargetView(lrt, zero);
+            D3D11_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(dw),
+                                  static_cast<float>(dh), 0.0f, 1.0f };
+            ctx->RSSetViewports(1, &vp);
+            float vs[2] = { static_cast<float>(dw), static_cast<float>(dh) };
+            ctx->UpdateSubresource(cb, 0, nullptr, vs, 0, 0);
+            ignoreLayerClip = true;
+            scissor[0] = 0; scissor[1] = 0; scissor[2] = dw; scissor[3] = dh;
+            curSrv = blurLv[static_cast<size_t>(i - 1)].srv;
+            curLinear = 1;
+            emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
+                     0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu);
+            flushAll();
+            ignoreLayerClip = false;
+        }
+
+        // 3) 回父目标 + 正常 alpha 合成模糊版（整数矩形 + 双线性放大）
+        if (!chainOk) {
+            ID3D11RenderTargetView* prt = f.prevTarget;
+            ctx->OMSetRenderTargets(1, &prt, nullptr);
+            ctx->RSSetViewports(1, &prevVp);
+            float vs[2] = { static_cast<float>(winW), static_cast<float>(winH) };
+            ctx->UpdateSubresource(cb, 0, nullptr, vs, 0, 0);
+            ctx->OMSetBlendState(blend, bf, 0xFFFFFFFF);
+            curSrv = whiteSrv; curLinear = 0;
+            scissor[0] = savedSc[0]; scissor[1] = savedSc[1];
+            scissor[2] = savedSc[2]; scissor[3] = savedSc[3];
+            return false;
+        }
+        ID3D11RenderTargetView* prt = f.prevTarget;
+        ctx->OMSetRenderTargets(1, &prt, nullptr);
+        ctx->RSSetViewports(1, &prevVp);
+        float vs[2] = { static_cast<float>(winW), static_cast<float>(winH) };
+        ctx->UpdateSubresource(cb, 0, nullptr, vs, 0, 0);
+        ctx->OMSetBlendState(blend, bf, 0xFFFFFFFF);
+        const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
+        uint32_t col = (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
+        Premult(col);
+        curSrv = blurLv[static_cast<size_t>(levels)].srv;
+        curLinear = 1;
+        scissor[0] = rx; scissor[1] = ry; scissor[2] = rx1; scissor[3] = ry1;
+        emitQuad(static_cast<float>(rx), static_cast<float>(ry),
+                 static_cast<float>(rx1), static_cast<float>(ry1),
+                 0.0f, 0.0f, 1.0f, 1.0f, col);
+        curSrv = whiteSrv;
+        curLinear = 0;
+        scissor[0] = 0; scissor[1] = 0; scissor[2] = winW; scissor[3] = winH;
+        flushAll();
+        return true;
+    }
+
     void popLayer() {
         if (layerStack.empty()) return;
         flushAll();                     // 层内容落盘（flushAll 会按层框裁剪）
@@ -1093,6 +1195,11 @@ struct BinUID3D::Impl {
         LayerTarget& t = layers[f.idx];
         ID3D11RenderTargetView* rt = f.prevTarget;
         ctx->OMSetRenderTargets(1, &rt, nullptr);
+        // v0.16.42：模糊层 —— 先糊掉层内容并合成掉；成功就直接收工
+        if (f.blur > 0.0f && blurLayerContent(f)) {
+            t.inUse = false;
+            return;
+        }
         // 合成：层里是**预乘**颜色（混合 ONE/INV_SRC_ALPHA），顶点色也必须预乘 ——
         // 着色器算 (t.rgb * vcol.rgb, t.a * vcol.a)，不预乘的话通道会被整块加进去。
         const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
@@ -1911,6 +2018,13 @@ void BinUID3D::setTextShadow(float dx, float dy, float blur, uint32_t color) {
 
 bool BinUID3D::pushLayer(float x, float y, float w, float h, float alpha) {
     return impl_ ? impl_->pushLayer(x, y, w, h, alpha) : false;
+}
+
+// v0.16.42：filter: blur 的模糊层（框已由调用方按 3σ 外扩并取整）
+bool BinUID3D::pushLayerBlurred(float x, float y, float w, float h, float alpha,
+                                float blurPx) {
+    if (!(blurPx > 0.0f)) return false;
+    return impl_ ? impl_->pushLayer(x, y, w, h, alpha, blurPx) : false;
 }
 
 void BinUID3D::popLayer() {

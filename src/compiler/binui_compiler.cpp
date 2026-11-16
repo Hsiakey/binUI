@@ -8,6 +8,7 @@
 #include "binui_text_estimate.h"   // 文本尺寸粗估：与渲染器运行期 setText 重算共用同一口径
 #include "binui_flex_layout.h"     // flex 布局：与渲染器运行期重排共用同一份实现
 #include "binui_filter.h"          // CSS filter 的颜色矩阵：编译期合成，后端解码时逐像素应用
+#include "binui_paint.h"           // kMaxFilterBlurPx / PaintFilterBlurPad：模糊半径与图层外扩口径
 
 #include <fstream>
 #include <sstream>
@@ -7168,14 +7169,18 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         }
 
         // ---- v0.16.15 / v26：CSS filter ----
-        // 两条落点，按"能不能用顶点色乘出来"分工：
+        // 三条落点，按"能不能用顶点色乘出来 / 要不要离屏合成"分工：
         //   · brightness() → 乘一个灰度顶点色，系数存扩展绘制段 reserve[2]（1..255，0 = 未声明）；
         //   · grayscale/sepia/saturate/hue-rotate/invert/contrast → RGB 上的一次仿射变换，
         //     顶点色乘不出来，编译期按书写顺序合成成 3×3+偏移写进滤镜段（v26），
         //     后端解码图片后逐像素跑一遍（详见 include/binui_filter.h）。
-        // blur()/drop-shadow()/url(#f) 需要离屏合成，暂时不做，逐条告警。
+        //   · blur() → 组语义（节点 + 整棵子树），只能离屏：半径写进绘制段 blurPx（v32），
+        //     绘制期把子树包进图层、按半径降采样模糊后再合成（与 backdrop-filter 同一条链）。
+        // drop-shadow()/url(#f) 仍需另一套离屏语义（阴影要偏移+着色+再叠回本体），
+        // 本轮未做，逐条告警。
         {
             auto fit = style.find("filter");
+            if (fit == style.end()) fit = style.find("-webkit-filter");
             if (fit != style.end()) {
                 const std::string fv = LowerCopy(TrimCopy(fit->second));
                 if (!fv.empty() && fv != "none") {
@@ -7219,10 +7224,10 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                     };
                     binui::ColorMatrix cm = binui::ColorMatrixIdentity();
                     bool anyMatrix = false;
-                    bool sawBlur = false;
+                    bool sawUnsupported = false;
                     for (const std::string& fn : fns) {
                         const size_t lp = fn.find('(');
-                        if (lp == std::string::npos || fn.back() != ')') { sawBlur = true; continue; }
+                        if (lp == std::string::npos || fn.back() != ')') { sawUnsupported = true; continue; }
                         const std::string name = fn.substr(0, lp);
                         const std::string arg = fn.substr(lp + 1, fn.size() - lp - 2);
                         binui::ColorMatrix one;
@@ -7238,6 +7243,26 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                             } else if (k > 1.0f) {
                                 Warn("CSS filter: brightness() 只支持乘暗（0~1），\"" + fn + "\" 按 1 处理");
                             }
+                            continue;
+                        } else if (name == "blur") {
+                            // CSS：blur() 只接受**长度**（px / em / rem），0 = 没事干。
+                            // 百分比在 CSS Filter Effects 里对 blur() 无效（那是 SVG 的
+                            // stdDeviation 语法），写错就按 0 处理并告警。
+                            const std::string a2 = TrimCopy(arg);
+                            float bp = 0.0f;
+                            if (!a2.empty() && a2.back() == '%') {
+                                Warn("CSS filter: blur() 只支持长度（如 blur(4px)），百分比已忽略");
+                            } else {
+                                bp = parseLen(a2, 0.0f, "filter");
+                                if (bp < 0.0f) bp = 0.0f;
+                                // 上限 64px：降采样链最多 6 级（2^6），再大的半径只是把
+                                // 已经糊成一片的画面继续糊，却要多扫几遍整块区域。
+                                if (bp > kMaxFilterBlurPx) {
+                                    bp = kMaxFilterBlurPx;
+                                    Warn("CSS filter: blur() 上限 64px，\"" + fn + "\" 按 64px 处理");
+                                }
+                            }
+                            if (bp > 0.0f) paint.blurPx = bp;
                             continue;
                         } else if (name == "grayscale") {
                             one = binui::FilterGrayscale(amount(arg, 1.0f));
@@ -7255,7 +7280,7 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                             known = false;
                         }
                         if (!known) {
-                            sawBlur = true;
+                            sawUnsupported = true;
                             continue;
                         }
                         cm = binui::ColorMatrixMul(one, cm);   // 先写的先作用
@@ -7269,16 +7294,17 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                         for (int k = 0; k < 3; k++) f.offset[k] = cm.o[k];
                         filterNodes.push_back(f);
                     }
-                    if (sawBlur)
-                        Warn("CSS filter: blur()/drop-shadow()/url(#id) 需要离屏合成，已忽略"
-                             "（grayscale/sepia/saturate/hue-rotate/invert/contrast/brightness 已支持）");
+                    if (sawUnsupported)
+                        Warn("CSS filter: drop-shadow()/url(#id) 需要离屏合成，已忽略"
+                             "（blur/grayscale/sepia/saturate/hue-rotate/invert/contrast/brightness 已支持）");
                 }
             }
         }
 
         // 注意 reserve[2]（filter: brightness）没有对应的 PAINT_* 位可用，所以它自己也算
         // "这个节点要出扩展绘制条目"的理由 —— 否则一个只写了 filter 的 <img> 不会进段。
-        if (pflags || paint.textFlags || paint.reserve[2] || paint.letterSpacing != 0.0f) {
+        if (pflags || paint.textFlags || paint.reserve[2] || paint.letterSpacing != 0.0f ||
+            paint.blurPx != 0.0f) {
             paint.nodeId = n.id;
             paint.flags = pflags;
             paintNodes.push_back(paint);

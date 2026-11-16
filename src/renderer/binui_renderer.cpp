@@ -4354,6 +4354,29 @@ bool BinUIRenderer::invalidRect(uint16_t nodeId, float& x, float& y, float& w, f
         // （实测 6 个像素差 1）。多 1px 换来"局部重绘 = 整帧"的逐位一致。
         if (shN > 0 || (ts && tsN > 0)) { padX += 1.0f; padY += 1.0f; }
     }
+    // v0.16.42：filter: blur() 也会画到盒子外面（3σ 外扩），而且**这条链是有方向的**：
+    //   · 自己带 blur → 自己那圈模糊要重绘；
+    //   · 祖先带 blur → 自己的变化会被祖先那圈模糊**摊到盒子外面**（子元素动一下，
+    //     父元素模糊后的边上也会变），所以祖先的 pad 也算进本节点的脏矩形。
+    // 不这么算的话，hover 一个"模糊卡片里的按钮"会在卡片边缘留下没被擦掉的旧模糊。
+    {
+        auto addBlurPad = [&](uint16_t id) {
+            const int bp = PaintFilterBlurPad(blurOf(id));
+            if (bp <= 0) return;
+            padX += static_cast<float>(bp);
+            padY += static_cast<float>(bp);
+        };
+        addBlurPad(nodeId);
+        uint16_t cur = nodeId;
+        for (int guard = 0; guard < 64; guard++) {
+            auto ci = nodeIndexById_.find(cur);
+            if (ci == nodeIndexById_.end()) break;
+            const uint16_t pid = nodes_[ci->second].parentId;
+            if (pid == 0xFFFF || pid == cur) break;
+            addBlurPad(pid);
+            cur = pid;
+        }
+    }
     l -= padX; t -= padY; r += padX; b += padY;
     // 输出**整像素**矩形：外壳拿到之后会 `(int)` 截断，浮点值 202.7 截成 202 就少
     // 盖 0.7px（实测脏矩形最外一圈阴影因此差 1）。这里直接向外取整，调用方截断变成

@@ -28,7 +28,9 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v27: 裁剪路径段（SVG <clipPath> / clip-path），见 BinUIClipEntry
 // v28: 遮罩段（SVG <mask> / mask），见 BinUIMaskEntry
 // v29: 毛玻璃段（backdrop-filter: blur），见 BinUIBackdropEntry
-constexpr uint32_t BINUI_VERSION    = 31;   // v31：绘制段加 float letterSpacing（48→52 字节）；v30：贴右/贴下定位（right/bottom）的规格段字段
+// v31: 绘制段加 float letterSpacing（48 -> 52 字节）
+// v32: 绘制段加 float blurPx（52 -> 56 字节，CSS filter: blur(Npx)）
+constexpr uint32_t BINUI_VERSION    = 32;   // v32：绘制段加 float blurPx；v30：贴右/贴下定位（right/bottom）的规格段字段
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -525,9 +527,15 @@ struct BinUIPaintNode {
     // （1.5px 是常用值）与负值，int8 的 ¼ 像素编码既不够直观也不够宽。
     // flags 的 16 位也已用满，所以直接加字段、升格式号（旧产物一律重建）。
     float    letterSpacing;
+    // v32：CSS filter: blur(Npx) 的模糊半径（像素，0 = 未声明）。
+    // 语义是**组**的：作用在"这个节点 + 它整棵子树"合成后的画面上（CSS Filter Effects
+    // 的规定），所以绘制期要把它包进离屏图层再模糊，而不是逐图元处理。
+    // 与 backdrop-filter: blur 的关系：那个模糊的是**身后的背景**（抓当前目标），
+    // 这个是模糊**自己**（抓自己的图层），底层的降采样链是同一套。
+    float    blurPx;
 };
 #pragma pack(pop)
-static_assert(sizeof(BinUIPaintNode) == 52, "BinUIPaintNode must be 52 bytes");
+static_assert(sizeof(BinUIPaintNode) == 56, "BinUIPaintNode must be 56 bytes");
 
 // ============================================================
 // 四角带色四边形（v30）：任意角度线性渐变的几何单元

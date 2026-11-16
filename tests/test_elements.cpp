@@ -2919,6 +2919,86 @@ int run() {
         CHECK(mlWarned, "v41: 多行文本 + ellipsis 明确告警");
     }
 
+    // ---------- v0.16.42：filter: blur() ----------
+    // 编译期只落一个半径（绘制段 blurPx），真正"糊"在绘制期（整组进离屏层 + 降采样链）。
+    // 这里测四件事：半径落段、上限钳制、百分比/非法值告警、以及 blur 与其它 filter
+    // 函数可以同时存在（颜色矩阵照旧写滤镜段）。
+    {
+        const char* ui =
+            "<app_window width=\"400\" height=\"200\" bg=\"#101010\"><html><body>\n"
+            "  <div id=\"b\" style=\"width:80px;height:80px;filter:blur(4px)\"></div>\n"
+            "  <div id=\"z\" style=\"width:80px;height:80px;filter:blur(0)\"></div>\n"
+            "  <div id=\"n\" style=\"width:80px;height:80px\"></div>\n"
+            "  <div id=\"w\" style=\"width:80px;height:80px;-webkit-filter:blur(2.5px)\"></div>\n"
+            "  <img id=\"m\" style=\"width:80px;height:80px;filter:blur(6px) grayscale(100%)\" />\n"
+            "</body></html></app_window>\n";
+        auto res = CompileBinUIEx(ui);
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "v42: 布局可解析");
+        CHECK(std::fabs(r.blurOf(r.findNodeByName("b")) - 4.0f) < 1e-3f, "v42: blur(4px) 落进绘制段");
+        CHECK(r.blurOf(r.findNodeByName("z")) == 0.0f, "v42: blur(0) 等于不模糊");
+        CHECK(r.blurOf(r.findNodeByName("n")) == 0.0f, "v42: 没写 filter 就没有半径");
+        CHECK(std::fabs(r.blurOf(r.findNodeByName("w")) - 2.5f) < 1e-3f,
+              "v42: -webkit-filter 别名 + 小数半径");
+        CHECK(std::fabs(r.blurOf(r.findNodeByName("m")) - 6.0f) < 1e-3f,
+              "v42: blur 与颜色矩阵函数可以同写");
+        // 上限 64px（降采样链最多 6 级）：超了钳制并告警
+        auto big = CompileBinUIEx(
+            "<app_window width=\"400\" height=\"100\"><html><body>"
+            "<div id=\"g\" style=\"width:40px;height:40px;filter:blur(200px)\"></div>"
+            "</body></html></app_window>\n");
+        bool capWarned = false;
+        for (const auto& m : big.warnings)
+            if (m.find("64px") != std::string::npos) capWarned = true;
+        CHECK(capWarned, "v42: 超过 64px 明确告警");
+        BinUIRenderer rg;
+        CHECK(rg.loadLayout(big.layout.data(), big.layout.size()), "v42: 大半径页面可解析");
+        CHECK(std::fabs(rg.blurOf(rg.findNodeByName("g")) - 64.0f) < 1e-3f, "v42: 半径钳到 64px");
+        // 百分比对 CSS blur() 无效（那是 SVG stdDeviation 的语法）→ 按 0 处理并告警
+        auto pct = CompileBinUIEx(
+            "<app_window width=\"400\" height=\"100\"><html><body>"
+            "<div id=\"p\" style=\"width:40px;height:40px;filter:blur(50%)\"></div>"
+            "</body></html></app_window>\n");
+        bool pctWarned = false;
+        for (const auto& m : pct.warnings)
+            if (m.find("百分比") != std::string::npos) pctWarned = true;
+        CHECK(pctWarned, "v42: blur(百分比) 明确告警");
+        BinUIRenderer rp;
+        CHECK(rp.loadLayout(pct.layout.data(), pct.layout.size()), "v42: 百分比页面可解析");
+        CHECK(rp.blurOf(rp.findNodeByName("p")) == 0.0f, "v42: 百分比按 0 处理");
+        // 图层外扩口径：3σ、向上取整、上限 192（64×3）
+        CHECK(binui::PaintFilterBlurPad(0.0f) == 0, "v42: 无模糊不外扩");
+        CHECK(binui::PaintFilterBlurPad(2.0f) == 6, "v42: 2px → 外扩 6");
+        CHECK(binui::PaintFilterBlurPad(2.5f) == 8, "v42: 2.5px → 外扩 8（向上取整）");
+        CHECK(binui::PaintFilterBlurPad(64.0f) == 192, "v42: 64px → 外扩 192");
+    }
+
+    // ---- v0.16.42：filter: blur() 的失效矩形 ----
+    // 模糊画到盒子外面（3σ），而且**祖先的模糊会把后代的变化摊出去** —— 两条都要算进
+    // invalidRect，否则 hover 之后模糊边缘会留一圈没人擦的旧像素。
+    {
+        auto res = CompileBinUIEx(
+            "<app_window width=\"400\" height=\"200\"><html><body>"
+            "<div id=\"card\" style=\"position:absolute;left:100;top:60;width:120;height:40;"
+            "filter:blur(4px)\">"
+            "<button id=\"b\" style=\"position:absolute;left:20;top:8;width:80;height:24\">x</button>"
+            "</div></body></html></app_window>\n");
+        BinUIRenderer r;
+        TEST("v42r: 布局可解析", r.loadLayout(res.layout.data(), res.layout.size()));
+        float x = 0, y = 0, w = 0, h = 0;
+        const bool okCard = r.invalidRect(r.findNodeByName("card"), x, y, w, h, 0.0f);
+        // 4px 模糊 → 外扩 ceil(4*3)=12：100-12=88，宽 120+24=144
+        TEST("v42r: 自己带模糊 → 脏矩形含 3σ 外扩",
+             okCard && std::fabs(x - 88.0f) < 0.6f && std::fabs(y - 48.0f) < 0.6f &&
+             std::fabs(w - 144.0f) < 0.6f && std::fabs(h - 64.0f) < 0.6f);
+        float bx = 0, by = 0, bw = 0, bh = 0;
+        const bool okChild = r.invalidRect(r.findNodeByName("b"), bx, by, bw, bh, 0.0f);
+        // 子按钮在 (120,68) 80x24；自己的 pad 之外还要加上祖先那 12px
+        TEST("v42r: 祖先带模糊 → 后代的脏矩形也跟着外扩",
+             okChild && bx <= 120.0f - 12.0f + 0.6f && by <= 68.0f - 12.0f + 0.6f &&
+             bx + bw >= 200.0f + 12.0f - 0.6f && by + bh >= 92.0f + 12.0f - 0.6f);
+    }
+
     if (g_fail == 0) std::printf("test_paint: 全部通过\n");
     return g_fail;
 }

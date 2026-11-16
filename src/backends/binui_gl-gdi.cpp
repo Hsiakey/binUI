@@ -311,7 +311,8 @@ struct BinUIGLGdi::Impl {
     // 代价是每层一张整窗纹理（1280×720 ≈ 3.7 MB），所以池子限 4 层，超了就让调用方退回
     // 逐元素乘 alpha。底色/边框/文字/图片都走同一套 quad，所以这一层不改任何绘制代码。
     struct LayerTarget { GLuint tex = 0, fbo = 0; bool inUse = false; };
-    struct LayerFrame { int idx = -1; float x = 0, y = 0, w = 0, h = 0, alpha = 1; GLint prevFbo = 0; };
+    // v0.16.42：blur > 0 的层在 pop 时先把自己糊掉再合成（见 blurLayerContent）。
+    struct LayerFrame { int idx = -1; float x = 0, y = 0, w = 0, h = 0; float alpha = 1; float blur = 0; GLint prevFbo = 0; };
     std::vector<LayerTarget> layers;
     std::vector<LayerFrame> layerStack;
     static constexpr int kMaxLayers = 4;
@@ -350,7 +351,7 @@ struct BinUIGLGdi::Impl {
         curFbo = f;
     }
 
-    bool pushLayer(float x, float y, float w, float h, float alpha) {
+    bool pushLayer(float x, float y, float w, float h, float alpha, float blur = 0.0f) {
         if (!ready || w <= 0.0f || h <= 0.0f || alpha <= 0.0f) return false;   // v27：alpha=1 也允许（裁剪用的纯容器层）
         if (static_cast<int>(layerStack.size()) >= kMaxLayers) { warnLayerLimit(); return false; }
         // 顺序很重要：先把"当前目标"和手头的图元收拾干净，再去碰层缓冲 ——
@@ -362,7 +363,7 @@ struct BinUIGLGdi::Impl {
         LayerTarget& t = layers[idx];
         t.inUse = true;
         LayerFrame f;
-        f.idx = idx; f.x = x; f.y = y; f.w = w; f.h = h; f.alpha = alpha;
+        f.idx = idx; f.x = x; f.y = y; f.w = w; f.h = h; f.alpha = alpha; f.blur = blur;
         f.prevFbo = prevFbo;
         bindFbo(t.fbo);
         glDisable(GL_SCISSOR_TEST);
@@ -429,12 +430,97 @@ struct BinUIGLGdi::Impl {
         return true;
     }
 
+    // ---- v0.16.42 filter: blur(Npx)：把**层自己的内容**糊掉再合成 ----
+    // 与 backdropBlur 用的是同一条降采样链（同一套级数公式、同一条 UV 翻转），差别只有两处：
+    //   · 抓取源是层纹理（不是当前目标）—— 糊的是"自己的画面"，不是"身后的背景"；
+    //   · 合成用**正常 alpha 混合**（不是 replace）—— 叠在背景上，而不是替换背景。
+    // 层纹理是整窗的，所以按窗口裁剪后的矩形与层框逐像素对应，UV 恒为 0..1。
+    // 成功返回 true（合成已完成）；false 时调用方走普通合成（内容不变，只是没糊）。
+    bool blurLayerContent(const LayerFrame& f, GLuint layerFbo, GLuint prevFbo) {
+        int rx = static_cast<int>(std::floor(f.x));
+        int ry = static_cast<int>(std::floor(f.y));
+        int rx1 = static_cast<int>(std::ceil(f.x + f.w));
+        int ry1 = static_cast<int>(std::ceil(f.y + f.h));
+        rx = std::max(0, rx); ry = std::max(0, ry);
+        rx1 = std::min(winW, rx1); ry1 = std::min(winH, ry1);
+        const int rw = rx1 - rx, rh = ry1 - ry;
+        if (rw < 2 || rh < 2) return false;
+        int levels = 1;
+        {
+            float v = 2.0f;
+            while (levels < 6 && v < f.blur) { v *= 2.0f; levels++; }
+        }
+        if (!ensureBlurLevel(0, rw, rh)) return false;
+        static const bool traceBlur = std::getenv("BINUI_BLUR_TRACE") != nullptr;
+        if (traceBlur)
+            std::fprintf(stderr, "[gl][blur] 层框 %.2f,%.2f %.2fx%.2f 抓取 %d,%d %dx%d 级数 %d\n",
+                         f.x, f.y, f.w, f.h, rx, ry, rw, rh, levels);
+
+        // [DEBUG] 导出层纹理与 level0，供比对
+        // 1) 抓层内容 → level0（GL 的 FBO 行从下往上，世界 y 从上往下，翻转）
+        glDisable(GL_SCISSOR_TEST);   // glBlitFramebuffer 受 scissor 裁剪
+        glBindFramebufferP(GL_READ_FRAMEBUFFER, layerFbo);
+        glBindFramebufferP(GL_DRAW_FRAMEBUFFER, blurLv[0].fbo);
+        curFbo = blurLv[0].fbo;
+        {
+            const int by = winH - ry1;
+            glBlitFramebufferP(rx, by, rx1, by + rh, 0, 0, rw, rh,
+                               GL_COLOR_BUFFER_BIT, GL_NEAREST);
+        }
+        bindFbo(prevFbo);
+        // 2) 降采样链（与 backdropBlur 逐字一致）
+        glBlendFunc(GL_ONE, GL_ZERO);
+        ignoreLayerClip = true;
+        bool chainOk = true;
+        for (int i = 1; i <= levels && chainOk; i++) {
+            const int dw = std::max(1, blurLv[static_cast<size_t>(i - 1)].w / 2);
+            const int dh = std::max(1, blurLv[static_cast<size_t>(i - 1)].h / 2);
+            if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) { chainOk = false; break; }
+            bindFbo(blurLv[static_cast<size_t>(i)].fbo);
+            glViewport(0, 0, dw, dh);
+            glUniform2fP(uniView, static_cast<float>(dw), static_cast<float>(dh));
+            glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
+            glClear(GL_COLOR_BUFFER_BIT);
+            curTex = blurLv[static_cast<size_t>(i - 1)].tex;
+            emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
+                     0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFFFu);
+            flushAll();
+        }
+        ignoreLayerClip = false;
+        bindFbo(prevFbo);
+        glViewport(0, 0, winW, winH);
+        glUniform2fP(uniView, static_cast<float>(winW), static_cast<float>(winH));
+        glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);   // 合成趟：正常预乘 alpha
+
+        if (!chainOk) { curTex = whiteTex; glEnable(GL_SCISSOR_TEST); return false; }
+
+        // 3) 合成模糊版：整数矩形 + 双线性放大 + 组 alpha（顶点色预乘）
+        const float a = f.alpha < 0.0f ? 0.0f : (f.alpha > 1.0f ? 1.0f : f.alpha);
+        uint32_t col = (static_cast<uint32_t>(a * 255.0f + 0.5f) << 24) | 0x00FFFFFFu;
+        Premult(col);
+        curTex = blurLv[static_cast<size_t>(levels)].tex;
+        emitQuad(static_cast<float>(rx), static_cast<float>(ry),
+                 static_cast<float>(rx1), static_cast<float>(ry1),
+                 0.0f, 1.0f, 1.0f, 0.0f, col);
+        flushAll();
+        curTex = whiteTex;
+        glEnable(GL_SCISSOR_TEST);
+        return true;
+    }
+
     void popLayer() {
         if (layerStack.empty()) return;
         flushAll();                       // 层内容落盘（flushAll 会按层框裁剪）
         const LayerFrame f = layerStack.back();
         layerStack.pop_back();
         LayerTarget& t = layers[f.idx];
+        // v0.16.42：模糊层 —— 先把层内容糊掉并合成掉；成功就直接收工
+        const bool blurred = (f.blur > 0.0f) && blurLayerContent(f, t.fbo, f.prevFbo);
+        if (blurred) {
+            curTex = whiteTex;
+            t.inUse = false;
+            return;
+        }
         bindFbo(f.prevFbo);
         // 合成：把层纹理按 alpha 画回父目标。层里存的是**预乘**颜色（混合是 ONE/ONE_MINUS_SRC_ALPHA），
         // 着色器输出 t.rgb*vcol.rgb / t.a*vcol.a，所以 vcol 全给 alpha 就是"整组乘一次"。
@@ -1709,6 +1795,13 @@ void BinUIGLGdi::setImageFilter(const BinUIImageFilter* f) {
 
 bool BinUIGLGdi::pushLayer(float x, float y, float w, float h, float alpha) {
     return impl_ ? impl_->pushLayer(x, y, w, h, alpha) : false;
+}
+
+// v0.16.42：filter: blur 的模糊层（框已由调用方按 3σ 外扩并取整）
+bool BinUIGLGdi::pushLayerBlurred(float x, float y, float w, float h, float alpha,
+                                  float blurPx) {
+    if (!(blurPx > 0.0f)) return false;
+    return impl_ ? impl_->pushLayer(x, y, w, h, alpha, blurPx) : false;
 }
 
 void BinUIGLGdi::popLayer() {

@@ -593,7 +593,11 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # roundtex-lru（v0.12.8）：一页里 >48 种圆角半径，专门压"圆角模板 LRU 淘汰"——
 # 淘汰时如果当场删纹理，本帧已经录进批次的四边形还在引用它，跨后端比对会看到某几块
 # 圆角被画成整块纯色。这条用例只进跨后端比对（GL vs VK / D3D11），不建 GDI 基准图。
-ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow
+# filter-blur（v0.16.42）：五档半径 + 子树模糊 + 渐变圆角 + opacity/blur 合层 + 嵌套两层
+# + 小数坐标 + -webkit- 别名 + 贴窗口边缘。只进跨后端比对（GDI 遗留路径不模糊）。
+# 实测 GL vs VK 0 不同像素（最大通道差 59）、D3D11 vs GL 0 不同像素（最大通道差 2）；
+# 那 59 来自"层里画圆角图片"的既有单采样差异（见 docs/future.md 的工具链已知问题）。
+ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 

@@ -239,6 +239,17 @@ public:
         (void)x; (void)y; (void)w; (void)h; (void)alpha;
         return false;
     }
+    // ---- 模糊图层（v0.16.42：CSS filter: blur(Npx)）----
+    // 与 pushLayer 完全同样的生命周期，唯一的区别是 pop 时**先把图层内容糊掉**再合成：
+    //   1) 把层纹理的 (x,y,w,h) 区域抓下来（调用方已按 PaintFilterBlurPad 外扩过、取整）；
+    //   2) 多级 2× 降采样链（与 backdropBlur 同一条链、同一套级数公式）；
+    //   3) 以**正常 alpha 混合**把模糊版画回同一矩形（不是 replace —— 这里叠在背景上）。
+    // 级数与 backdropBlur 一致：让 2^levels >= blurPx 的最小值（1..6）。
+    // 返回 false = 不支持（GDI 遗留路径）或参数退化 → 调用方退回"不模糊"（只保留 alpha/无层）。
+    virtual bool pushLayerBlurred(float x, float y, float w, float h, float alpha, float blurPx) {
+        (void)x; (void)y; (void)w; (void)h; (void)alpha; (void)blurPx;
+        return false;
+    }
     virtual void popLayer() {}
 
     // ---- 图片（generation 变化时重新上传）----
