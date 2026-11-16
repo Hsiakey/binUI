@@ -376,6 +376,7 @@ TOOL_BINS := \
     $(BIN_DIR)/gl_shot$(EXT) \
     $(BIN_DIR)/partial_shot$(EXT) \
     $(BIN_DIR)/draw_bench$(EXT) \
+    $(BIN_DIR)/path_bench$(EXT) \
     $(BIN_DIR)/window_capture$(EXT) \
     $(BIN_DIR)/enum_windows$(EXT) \
     $(BIN_DIR)/pixel_diff$(EXT) \
@@ -543,6 +544,19 @@ bench-draw: $(BIN_DIR)/draw_bench$(EXT)
 	done
 	@echo "--- band blow-up case (12 x 135deg gradient cards) ---"
 	@$(BIN_DIR)/draw_bench$(EXT) $(BENCH_ASSET)/bench-grad.html --frames 120 --warm 10
+
+$(BUILD_DIR)/path_bench.o: tools/path_bench.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
+
+$(BIN_DIR)/path_bench$(EXT): $(BUILD_DIR)/path_bench.o $(LIB_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^
+
+# 路径填充几何的 CPU 成本（P0-3）：纯 CPU、无窗口、确定性，硬边/AA 分开报
+.PHONY: bench-path
+bench-path: $(BIN_DIR)/path_bench$(EXT)
+	@$(BIN_DIR)/path_bench$(EXT) 50
 
 .PHONY: bench-gl
 bench-gl: $(BIN_DIR)/gl_shot$(EXT)

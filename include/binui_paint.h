@@ -1475,6 +1475,66 @@ struct PaintPath {
     bool Valid() const { return pts && first && count && contours > 0; }
 };
 
+// ============================================================
+// 扫描线填充的边表（v0.16.48）
+//
+// 以前两个填充器都是"每行重扫路径的全部边"：行内工作量 = 行数 × 边数，AA 还要再乘
+// 4（每像素行 4 条子扫描线）。300×300 的复杂图标实测 199 µs、50 个图标 3.3 ms。
+//
+// 这里把边摊平一次、按 y 起点排序，运行期用**活动边表**（AET）只保留"跨过这一行"的边 ——
+// 行内工作量变成 O(活动边数)，与路径总复杂度脱钩。交点仍然用**与以前逐字相同**的表达式
+// `(yc - ay) / (by - ay)` 算，所以输出逐位不变（像素门禁 0 差异就是这条的证据）。
+// ============================================================
+struct PaintScanEdge {
+    float ax, ay, bx, by;   // 原始端点（顺序不能反：交点式子依赖它）
+    float yb, ye;           // 覆盖的 y 区间 [yb, ye)
+    int   dir;              // +1 上→下 / -1 下→上（nonzero 环绕计数用）
+};
+
+inline int BuildPaintScanEdges(const PaintPath& path, std::vector<PaintScanEdge>& out) {
+    out.clear();
+    if (!path.Valid()) return 0;
+    size_t total = 0;
+    for (int c = 0; c < path.contours; c++)
+        if (path.count[c] >= 2) total += path.count[c];
+    out.reserve(total);
+    for (int c = 0; c < path.contours; c++) {
+        const uint32_t first = path.first[c];
+        const uint32_t cnt = path.count[c];
+        if (cnt < 2) continue;
+        for (uint32_t i = 0; i < cnt; i++) {
+            const uint32_t ia = first + i;
+            const uint32_t ib = first + (i + 1) % cnt;
+            const float ax = path.pts[ia * 2], ay = path.pts[ia * 2 + 1];
+            const float bx = path.pts[ib * 2], by = path.pts[ib * 2 + 1];
+            if (ay == by) continue;                       // 水平边不产生交点
+            PaintScanEdge e;
+            e.ax = ax; e.ay = ay; e.bx = bx; e.by = by;
+            e.yb = (ay < by) ? ay : by;
+            e.ye = (ay < by) ? by : ay;
+            e.dir = (ay < by) ? 1 : -1;
+            out.push_back(e);
+        }
+    }
+    std::sort(out.begin(), out.end(),
+              [](const PaintScanEdge& a, const PaintScanEdge& b) { return a.yb < b.yb; });
+    return static_cast<int>(out.size());
+}
+
+// 活动边表的一步：把"这一行区间 [y0, y1) 内可能产生交点"的边挑进 active。
+// 边表已按 y 起点排序 → 游标只前进；上一行留下但已经完全在上方的边就地丢弃。
+inline void ActivateScanEdges(const std::vector<PaintScanEdge>& edges, int nEdges,
+                              int& cursor, std::vector<int>& active, int y0, int y1) {
+    const float yTop = static_cast<float>(y0);
+    const float yBottom = static_cast<float>(y1);
+    while (cursor < nEdges && edges[static_cast<size_t>(cursor)].yb < yBottom)
+        active.push_back(cursor++);
+    size_t w = 0;
+    for (size_t i = 0; i < active.size(); i++)
+        if (edges[static_cast<size_t>(active[i])].ye > yTop) active[w++] = active[i];
+    active.resize(w);
+}
+
 // 扫描线填充。clip 为设备像素裁剪盒（通常是节点包围盒）。
 // shade 决定每条带的颜色（纯色或 v16 渐变）；rowStep>1 是降级模式（行更粗、条带更少）。
 // truncated = true 表示撞上 cap / 交点上限，调用方应放大 rowStep 重试。
@@ -1506,25 +1566,25 @@ inline int BuildPathFillBands(const PaintPath& path, bool evenOdd,
         openN = w;
     };
 
+    // 活动边表（v0.16.48）：边只扫一遍，行内只碰"跨过这一行"的几条
+    static thread_local std::vector<PaintScanEdge> scanEdges;
+    static thread_local std::vector<int> scanActive;
+    const int nScanEdges = BuildPaintScanEdges(path, scanEdges);
+    if (nScanEdges <= 0) return 0;
+    int scanCursor = 0;
+    scanActive.clear();
+
     for (int y = yBegin; y < yEnd; y += rowStep) {
         const float yc = (float)y + (float)rowStep * 0.5f;
         int nc = 0;
         bool overflow = false;
-        for (int c = 0; c < path.contours && !overflow; c++) {
-            const uint32_t first = path.first[c];
-            const uint32_t cnt = path.count[c];
-            if (cnt < 2) continue;
-            for (uint32_t i = 0; i < cnt; i++) {
-                const uint32_t ia = first + i;
-                const uint32_t ib = first + (i + 1) % cnt;
-                const float ax = path.pts[ia * 2], ay = path.pts[ia * 2 + 1];
-                const float bx = path.pts[ib * 2], by = path.pts[ib * 2 + 1];
-                if (ay == by) continue;                       // 水平边不产生交点
-                if ((ay <= yc) == (by <= yc)) continue;       // 半开区间，顶点不重复计数
-                if (nc >= kMaxPathCrossings) { overflow = true; break; }
-                const float t = (yc - ay) / (by - ay);
-                crossings[nc++] = { ax + t * (bx - ax), ay < by ? 1 : -1 };
-            }
+        ActivateScanEdges(scanEdges, nScanEdges, scanCursor, scanActive, y, y + rowStep);
+        for (size_t ei = 0; ei < scanActive.size() && !overflow; ei++) {
+            const PaintScanEdge& e = scanEdges[(size_t)scanActive[ei]];
+            if ((e.ay <= yc) == (e.by <= yc)) continue;       // 半开区间，顶点不重复计数
+            if (nc >= kMaxPathCrossings) { overflow = true; break; }
+            const float t = (yc - e.ay) / (e.by - e.ay);
+            crossings[nc++] = { e.ax + t * (e.bx - e.ax), e.dir };
         }
         if (overflow) {                                   // 交点太多：降级重来
             if (truncated) *truncated = true;
@@ -1673,29 +1733,29 @@ inline int BuildPathFillBandsAA(const PaintPath& path, bool evenOdd,
         openN = w;
     };
 
+    // 活动边表（v0.16.48）：4 条子扫描线共用同一份"本行候选边"
+    static thread_local std::vector<PaintScanEdge> scanEdges;
+    static thread_local std::vector<int> scanActive;
+    const int nScanEdges = BuildPaintScanEdges(path, scanEdges);
+    if (nScanEdges <= 0) return 0;
+    int scanCursor = 0;
+    scanActive.clear();
+
     int n = 0;
     for (int y = yBegin; y < yEnd; y++) {
         std::fill(covAcc.begin(), covAcc.end(), static_cast<uint16_t>(0));
+        ActivateScanEdges(scanEdges, nScanEdges, scanCursor, scanActive, y, y + 1);
         // ---- 1. 纵向子采样，累加覆盖率 ----
         for (int sr = 0; sr < kPathAASubRows; sr++) {
             const float yc = (float)y + ((float)sr + 0.5f) / (float)kPathAASubRows;
             int nc = 0;
             bool overflow = false;
-            for (int c = 0; c < path.contours && !overflow; c++) {
-                const uint32_t first = path.first[c];
-                const uint32_t cnt = path.count[c];
-                if (cnt < 2) continue;
-                for (uint32_t i = 0; i < cnt; i++) {
-                    const uint32_t ia = first + i;
-                    const uint32_t ib = first + (i + 1) % cnt;
-                    const float ax = path.pts[ia * 2], ay = path.pts[ia * 2 + 1];
-                    const float bx = path.pts[ib * 2], by = path.pts[ib * 2 + 1];
-                    if (ay == by) continue;
-                    if ((ay <= yc) == (by <= yc)) continue;
-                    if (nc >= kMaxPathCrossings) { overflow = true; break; }
-                    const float t = (yc - ay) / (by - ay);
-                    crossings[nc++] = { ax + t * (bx - ax), ay < by ? 1 : -1 };
-                }
+            for (size_t ei = 0; ei < scanActive.size() && !overflow; ei++) {
+                const PaintScanEdge& e = scanEdges[(size_t)scanActive[ei]];
+                if ((e.ay <= yc) == (e.by <= yc)) continue;
+                if (nc >= kMaxPathCrossings) { overflow = true; break; }
+                const float t = (yc - e.ay) / (e.by - e.ay);
+                crossings[nc++] = { e.ax + t * (e.bx - e.ax), e.dir };
             }
             if (overflow) {
                 if (truncated) *truncated = true;
