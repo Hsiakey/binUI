@@ -1456,6 +1456,19 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
             // 显式定位（absolute/explicit）：百分比或编译期锚点
             x = (spec->flags & SPEC_PCT_X) ? c.ox + spec->pctX * c.cw : c.ox + spec->relX;
             y = (spec->flags & SPEC_PCT_Y) ? c.oy + spec->pctY * c.ch : c.oy + spec->relY;
+            // v30：贴右 / 贴下（CSS right / bottom）。与编译期同一个式子：
+            //   位置 = 父内容盒边 − 偏移 − 自身尺寸
+            // 不这么写的话，窗口变宽后"贴右"的元素会留在左边（静态布局是对的，一 resize 就错）。
+            if (spec->flags & SPEC_ANCHOR_R) {
+                const float r = (spec->flags & SPEC_ANCHOR_R_PCT) ? spec->anchorR * c.cw
+                                                                 : spec->anchorR;
+                x = c.ox + c.cw - r - w;
+            }
+            if (spec->anchorFlags & ANCHOR_B) {
+                const float b = (spec->anchorFlags & ANCHOR_B_PCT) ? spec->anchorB * c.ch
+                                                                  : spec->anchorB;
+                y = c.oy + c.ch - b - h;
+            }
         } else {
             x = c.ox + (node.x - c.ox); // 无规格：保持原位
             y = c.oy + (node.y - c.oy);

@@ -287,6 +287,17 @@ GL 后端（900×840，同一进程同一个上下文；绘制 = 遍历 + 顶点
   变成模板 AA（`docs/issues/assets/grad-quad-aa.png`）。三端逐像素 0 差异。
   **限定**：两端 alpha 不同的渐变不走这条路（插值空间不同，见下条）。
 
+### 待办（v0.16.36 记录）
+
+- **`position: fixed`（真·固定定位）**：现在按 `absolute` 处理 —— 位置以父容器为基准、
+  并且**会跟着容器滚动**。编译器已经明确告警（"需要【固定不动】的效果请放在不滚动的层里"）。
+  真做的话需要两件事：① 包含块换成窗口（不受祖先盒影响）；② 绘制时不吃祖先的滚动偏移
+  （`drawNodesBinUI` 里的 `offX/offY` 链）。规格段已经有 `SPEC_ANCHOR_R/B` 可以复用，
+  再加一个 `SPEC_VIEWPORT_ANCHOR` 位即可。`sticky` 更复杂（滚动位置钳制 + 容器边界），
+  排在 fixed 之后。
+- **`grid`**：明确不做（`grid-template-columns` 仍在告警清单里）。常见需求用
+  `display:flex; flex-wrap:wrap`（v22 已支持）就能写。
+
 ### 待办（v0.16.34 记录）
 
 - **渐变的 alpha 插值空间**：binUI 全链路（条带 / 路径渐变 / GDI / 四角带色）都是

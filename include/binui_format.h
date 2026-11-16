@@ -28,7 +28,7 @@ constexpr uint32_t BINUI_HTML_MAGIC = 0x4D544858; // 'XHTM' 由 XML 或 HTML5 �
 // v27: 裁剪路径段（SVG <clipPath> / clip-path），见 BinUIClipEntry
 // v28: 遮罩段（SVG <mask> / mask），见 BinUIMaskEntry
 // v29: 毛玻璃段（backdrop-filter: blur），见 BinUIBackdropEntry
-constexpr uint32_t BINUI_VERSION    = 29;
+constexpr uint32_t BINUI_VERSION    = 30;   // v30：贴右/贴下定位（right/bottom）的规格段字段
 
 enum BinUINodeType : uint8_t {
     BINUI_ROOT   = 0,
@@ -118,6 +118,20 @@ enum BinUISpecFlag : uint16_t {
     // v22：该子项的主轴基准尺寸是"内容估算出来的"（width:content / flex-basis:content）。
     // 运行期换文本后可以按同一口径重算，不用把编译期的估算值锁死。
     SPEC_BASIS_CONTENT = 1 << 13,
+    // ---- v30：从右/下边贴边定位（CSS 的 right / bottom / inset）----
+    // 绝对定位节点可以只写 right（或 bottom），位置由**父内容盒的宽/高**减去偏移与自身尺寸
+    // 算出来。编译期已经算好落位（静态布局本来就不动），这两位是给运行期 resize 重排用的：
+    // 没有它们，窗口变宽后 right 定位的元素会留在左边（"贴右"变成"贴左"）。
+    SPEC_ANCHOR_R     = 1 << 14,   // anchorR 有效（像素）
+    SPEC_ANCHOR_R_PCT = 1 << 15,   // anchorR 是父内容盒宽的百分比（0..1）
+    // bottom 复用 anchorB + 下面这个"高半字节"标记：flags 只有 16 位，已经用满 14 位，
+    // 所以 bottom 的百分比标记放在 reserve 里（见 BinUISpecNode::anchorFlags）。
+};
+
+// v30：锚定位的附加标记（BinUISpecNode::anchorFlags）
+enum BinUIAnchorFlag : uint8_t {
+    ANCHOR_B      = 1 << 0,   // anchorB 有效（像素）
+    ANCHOR_B_PCT  = 1 << 1,   // anchorB 是父内容盒高的百分比（0..1）
 };
 
 #pragma pack(push, 1)
@@ -147,9 +161,14 @@ struct BinUISpecNode {
     uint8_t  basisKind;    // flexBasis 的含义：0=无（基准 0）1=像素 2=百分比（0..1，相对主轴内容盒）
     float    flexBasis;    // 主轴基准尺寸（flex-basis 解析后的值）
     float    flexCross;    // 交叉轴基准尺寸（像素；作者的声明值或元素默认盒高）
+    // ---- v30：贴右/贴下定位（见 BinUISpecFlag 的 SPEC_ANCHOR_R 与 BinUIAnchorFlag）----
+    float    anchorR;      // right 偏移（SPEC_ANCHOR_R：像素；SPEC_ANCHOR_R_PCT：0..1）
+    float    anchorB;      // bottom 偏移（ANCHOR_B：像素；ANCHOR_B_PCT：0..1）
+    uint8_t  anchorFlags;  // BinUIAnchorFlag（bottom 那两个标记；flags 的 16 位已用满）
+    uint8_t  reserve2[3];  // 对齐填充
 };
 #pragma pack(pop)
-static_assert(sizeof(BinUISpecNode) == 84, "BinUISpecNode must be 84 bytes");
+static_assert(sizeof(BinUISpecNode) == 96, "BinUISpecNode must be 96 bytes");
 
 #pragma pack(push, 1)
 struct BinUISpecFlex {

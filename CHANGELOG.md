@@ -5,6 +5,52 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.16.36] - 2026-11-16 【格式 v30】
+
+写常见界面的第一个门槛：**贴右 / 贴下定位**（`right` / `bottom` / `inset`）。以前只有
+`left`/`top`，所以"右下角的浮标""右上角的关闭按钮"只能用硬编码坐标拼，窗口一变就错位。
+
+### 加 — `right` / `bottom` / `inset`（`SPEC_ANCHOR_R` / `ANCHOR_B`，格式 v30）
+
+- **语义**：位置 = 父内容盒边 − 偏移 − 自身尺寸；`%` 相对父内容盒宽/高（`right:20%` 是
+  "离右边 20% 宽"）。`inset` 支持 1/2/4 值简写，等价于 `top/right/bottom/left`，
+  **长属性优先**（作者同时写了 `right` 和 `inset` 时 `right` 赢，与 CSS 层叠一致）。
+- **两处都要算**：编译期静态布局算一次落位；运行期 `setSize` / 局部重排再按规格段的
+  `SPEC_ANCHOR_R` / `ANCHOR_B` 重算 —— 只改编译期的话，静态页面对，窗口一拉宽"贴右"
+  的元素就留在左边。测试里专门钉了这一对（编译期 640 宽 → `x=500`；`setSize(800)` 后
+  → `x=660`）。
+- **冲突与误用都明确告警**，不静默二选一：`left`+`right` 同时写（按 left，与 CSS 定宽
+  元素一致）、没有 `position:absolute` 却写 `right`、`top`+`bottom` 同时写。
+- `right`/`bottom`/`inset` 从"已知不生效"清单里移除。
+
+### 修 — `position: fixed` 现在是**明确告警**，不再静默当成 absolute
+
+它一直按 `absolute` 处理（位置以父容器为基准、并且跟着容器滚动）—— 这条路本身没错，
+但"静默"是错的：作者写 fixed 就是想要"不随滚动移动"。现在编译期直接说清楚，并给替代
+方案（放进不滚动的层里）。真做 fixed 需要"包含块换成窗口 + 绘制时不吃祖先滚动偏移"，
+记进 `docs/future.md` 待办（`sticky` 排在它后面）。
+
+### 顺带 — README 的"不生效 CSS"清单纠错
+
+清单里还挂着 `flex-wrap` / `flex-shrink` / `align-self` / `order` —— 它们在 v22 就已经
+实现了（`include/binui_flex_layout.h` 支持换行/收缩/逐项对齐/排序），实测
+`display:flex;flex-wrap:wrap` 能正常换行。清单按编译器**实际**告警的集合重写：
+`letter-spacing`、`word-break`、`visibility`、`float`、`outline`、`cursor`、
+`grid-template-columns`、`text-overflow`、`object-fit`、静态 `transform`、`aspect-ratio`。
+
+### 格式 v30
+
+`BinUISpecNode` 84 → 92 →（补齐对齐）**96 字节**：末尾加 `anchorR` / `anchorB` /
+`anchorFlags` / `reserve2[3]`，`SPEC_ANCHOR_R` / `SPEC_ANCHOR_R_PCT` 占用 flags 的第 14/15 位，
+bottom 的两个标记放在 `anchorFlags` 里（flags 16 位已经用满）。UI 全在运行时从 HTML 编译，
+没有兼容负担。
+
+### 门禁
+
+`make test`（新增 12 条断言：贴右/贴下/两者/百分比/inset/left+right 冲突 + 5 条 resize
+重算）、`make pixels`（16 张 GDI 基准 0 差异）、`make pixels-vk`、`make pixels-d3d11`、
+`make partial`、`check_examples`。
+
 ## [0.16.35] - 2026-11-16
 
 **P0-1「层缓存」实测关闭**（它是欠缺清单里最老的一条），顺带把那几毫秒里真正的大头修掉：

@@ -2606,7 +2606,9 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "padding", "padding-top", "padding-right", "padding-bottom", "padding-left",
         "margin", "margin-top", "margin-right", "margin-bottom", "margin-left",
         "min-width", "max-width", "min-height", "max-height",
-        "display", "position", "left", "top", "overflow", "opacity", "align",
+        "display", "position", "left", "top", "right", "bottom", "overflow", "opacity", "align",
+        // v30：inset 四值简写 + 长属性（贴右/贴下）
+        "inset", "inset-top", "inset-right", "inset-bottom", "inset-left",
         "resize",
         "flex", "flex-direction", "justify-content", "align-items", "gap",
         // v22：flex 属性补齐（简写/收缩/基准/换行/逐项对齐/排序）
@@ -5693,7 +5695,8 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                 "word-break", "visibility", "float",
                 "outline",
                 "cursor", "grid-template-columns", "text-overflow", "object-fit",
-                "right", "bottom", "inset", "transform", "aspect-ratio",
+                // v30：right / bottom / inset 已实现（贴右/贴下 + 四值简写），从清单里移除
+        "transform", "aspect-ratio",
             };
             for (const char* k : kIgnoredCss)
                 if (style.count(k))
@@ -6645,6 +6648,23 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
 
         if (!sx.empty()) { auto p = ParseLenPct(sx, 0, curCtx, "left"); lx = p.value; if (p.pct) pctX = p.value / 100.0f; hasX = true; }
         if (!sy.empty()) { auto p = ParseLenPct(sy, 0, curCtx, "top"); ly = p.value; if (p.pct) pctY = p.value / 100.0f; hasY = true; }
+        // v30：贴右 / 贴下（CSS right / bottom / inset）。位置 = 父内容盒宽高 − 偏移 − 自身尺寸，
+        // 而自身尺寸要到下面才算得出来，所以这里只解析偏移，落位在 w/lh 定下来之后。
+        const std::string sr = pick(e.attrs, style, "right", "right", "");
+        const std::string sb = pick(e.attrs, style, "bottom", "bottom", "");
+        float rightPx = -1.0f, bottomPx = -1.0f, pctR = -1.0f, pctB = -1.0f;
+        if (!sr.empty()) { auto p = ParseLenPct(sr, 0, curCtx, "right"); rightPx = p.value; if (p.pct) pctR = p.value / 100.0f; }
+        if (!sb.empty()) { auto p = ParseLenPct(sb, 0, curCtx, "bottom"); bottomPx = p.value; if (p.pct) pctB = p.value / 100.0f; }
+        // inset：四值简写（1/2/4 个值都按 CSS 的简写规则展开），等价于 top/right/bottom/left。
+        // 只展开作者**没单独写**的边（长属性优先，与 CSS 层叠一致）。
+        if (style.count("inset") || style.count("inset-top")) {
+            const auto ins = parseBox(style, "inset", "inset-top", "inset-right",
+                                      "inset-bottom", "inset-left", -1.0f);
+            if (ins[0] >= 0 && !hasY) { ly = ins[0]; hasY = true; }
+            if (ins[2] >= 0 && sb.empty()) { bottomPx = ins[2]; pctB = -1.0f; }
+            if (ins[3] >= 0 && !hasX) { lx = ins[3]; hasX = true; }
+            if (ins[1] >= 0 && sr.empty()) { rightPx = ins[1]; pctR = -1.0f; }
+        }
         if (!sw.empty()) { auto p = ParseLenPct(sw, 0, curCtx, "width"); if (p.pct) pctW = p.value / 100.0f; hasW = true; }
         if (!sh.empty()) { auto p = ParseLenPct(sh, 0, curCtx, "height"); lh = p.value; if (p.pct) pctH = p.value / 100.0f; }
 
@@ -6667,9 +6687,49 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         // position:absolute/fixed 且未显式 left/top：视为 (0,0)（脱离文档流 + 绘制在最上层）
         std::string pos = lowerStr(style.count("position") ? style.at("position") : "");
         bool isAbs = (pos == "absolute" || pos == "fixed");
+        // v30：`position: fixed` 现在按 absolute 处理（贴父容器、会跟着滚动）—— 这是**静默**的
+        // 语义偏差，必须告警。真要"固定不动"得让 fixed 节点不吃祖先滚动偏移、以窗口为包含块，
+        // 是另一条（见 docs/future.md）。
+        if (pos == "fixed")
+            Warn("CSS position:fixed 目前按 absolute 处理（位置以父容器为基准、会随滚动移动）；"
+                 "需要【固定不动】的效果请放在不滚动的层里");
+        // 作者到底写没写 left/top —— 必须在这两行"绝对定位补 0"之前记下来，
+        // 否则 right/bottom 会被误判成"同时写了 left/right"。
+        const bool declaredX = hasX, declaredY = hasY;
         if (isAbs) {
             if (!hasX) { lx = 0; hasX = true; }
             if (!hasY) { ly = 0; hasY = true; }
+        }
+        // v30：贴右/贴下只在"脱离文档流"或已经写了 left/top 的节点上生效（CSS 的 static
+        // 元素本来就不认 right/bottom）。同时写 left 和 right 时按 left 定位 —— 定宽元素
+        // 在 CSS 里也是 left 赢，这里明确告警而不是静默二选一。
+        const bool outOfFlow = isAbs || hasX || hasY;
+        bool useRight = false, useBottom = false;
+        if (rightPx >= 0 || pctR >= 0) {
+            if (!outOfFlow && !hasX) {
+                Warn("CSS right 只对 position:absolute/fixed 生效，本节点没有定位，按未声明处理");
+                rightPx = -1.0f; pctR = -1.0f;
+            } else if (declaredX) {
+                Warn("同时写了 left 和 right：按 left 定位（CSS 在元素有确定宽度时也是 left 赢）");
+                rightPx = -1.0f; pctR = -1.0f;
+            } else {
+                useRight = true;
+                // right 定位的节点仍然"有 x"，只是 x 要在宽度算出来之后才能定 ——
+                // 这里把 hasX 置上（脱离流式），lx 稍后覆盖。
+                hasX = true;
+            }
+        }
+        if (bottomPx >= 0 || pctB >= 0) {
+            if (!outOfFlow && !hasY) {
+                Warn("CSS bottom 只对 position:absolute/fixed 生效，本节点没有定位，按未声明处理");
+                bottomPx = -1.0f; pctB = -1.0f;
+            } else if (declaredY) {
+                Warn("同时写了 top 和 bottom：按 top 定位（CSS 在元素有确定高度时也是 top 赢）");
+                bottomPx = -1.0f; pctB = -1.0f;
+            } else {
+                useBottom = true;
+                hasY = true;
+            }
         }
 
         // margin 仅在流式布局中生效
@@ -6714,18 +6774,32 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             // 高度先钳制再推进流光标（约束高度影响流式堆叠位置）
             if (effMnH >= 0 && lh < effMnH) lh = effMnH;
             if (effMxH >= 0 && lh > effMxH) lh = effMxH;
-            if (hasX) x = pc.ox + lx;
-            else      x = pc.ox + ml;
-            if (hasY) y = pc.oy + ly;
-            else {
-                y = pc.oy + pc.cursorY + mt;
-                pc.cursorY += mt + lh + mb;
-            }
+            // 宽度要先算出来：贴右定位的 x 依赖它
             if (hasW) w = (pctW >= 0) ? pctW * pc.contentW : parseLen(sw, 0);
             else      w = pc.contentW - (ml + mr > 0 ? (ml + mr) : 0);
             baseW = w;
             if (effMnW >= 0 && w < effMnW) w = effMnW;
             if (effMxW >= 0 && w > effMxW) w = effMxW;
+            if (useRight) {
+                // v30：x = 父内容盒右边 − 偏移 − 自身宽（与渲染器重排同一个式子）
+                const float r = (pctR >= 0) ? pctR * pc.contentW : rightPx;
+                x = pc.ox + pc.contentW - r - w;
+                lx = x - pc.ox;
+            } else if (hasX) {
+                x = pc.ox + lx;
+            } else {
+                x = pc.ox + ml;
+            }
+            if (useBottom) {
+                const float b = (pctB >= 0) ? pctB * pcContentH : bottomPx;
+                y = pc.oy + pcContentH - b - lh;
+                ly = y - pc.oy;
+            } else if (hasY) {
+                y = pc.oy + ly;
+            } else {
+                y = pc.oy + pc.cursorY + mt;
+                pc.cursorY += mt + lh + mb;
+            }
         }
 
         // padding：节点只有一个 padding 字段（内缩 + 子元素基准都用它），
@@ -8174,6 +8248,18 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         }
         sp.relX = x - pc.ox;
         sp.relY = y - pc.oy;
+        // v30：贴右/贴下 —— 静态布局已经在上面算好落位，这两位是给运行期 resize 重排用的
+        // （没有它们，窗口变宽后"贴右"的元素会留在左边）。口径与编译期完全一致。
+        if (useRight) {
+            sp.anchorR = (pctR >= 0) ? pctR : rightPx;
+            sp.flags |= SPEC_ANCHOR_R;
+            if (pctR >= 0) sp.flags |= SPEC_ANCHOR_R_PCT;
+        }
+        if (useBottom) {
+            sp.anchorB = (pctB >= 0) ? pctB : bottomPx;
+            sp.anchorFlags |= ANCHOR_B;
+            if (pctB >= 0) sp.anchorFlags |= ANCHOR_B_PCT;
+        }
         sp.ml = ml; sp.mr = mr; sp.mt = mt; sp.mb = mb;
         sp.minW = mnW; sp.maxW = mxW; sp.minH = mnH; sp.maxH = mxH;
         if (mnWp) sp.flags |= SPEC_MINW_PCT;

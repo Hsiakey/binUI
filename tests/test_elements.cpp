@@ -2587,6 +2587,48 @@ int run() {
         }
     }
 
+    // ---------- v30：贴右 / 贴下（CSS right / bottom / inset）----------
+    // 两个口径必须一致：编译期静态布局、运行期 setSize 重排（用的是规格段的 SPEC_ANCHOR_*）。
+    // 只测编译期的话，"贴右"在窗口变宽后留在左边这种错完全测不出来。
+    {
+        const char* ui =
+            "<app_window width=\"640\" height=\"420\" bg=\"#101010\"><html><body>\n"
+            "  <div id=\"host\" style=\"position:absolute;left:0;top:0;width:100%;height:100%\">\n"
+            "    <div id=\"r\"  style=\"position:absolute;right:20px;top:20px;width:120px;height:50px\"></div>\n"
+            "    <div id=\"b\"  style=\"position:absolute;left:20px;bottom:20px;width:120px;height:50px\"></div>\n"
+            "    <div id=\"rb\" style=\"position:absolute;right:20px;bottom:20px;width:120px;height:50px\"></div>\n"
+            "    <div id=\"pc\" style=\"position:absolute;right:20%;top:50%;width:100px;height:40px\"></div>\n"
+            "    <div id=\"in\" style=\"position:absolute;inset:10px;width:60px;height:30px\"></div>\n"
+            "    <div id=\"bo\" style=\"position:absolute;left:20px;right:20px;top:200px;width:120px;height:30px\"></div>\n"
+            "  </div>\n"
+            "</body></html></app_window>\n";
+        auto res = CompileBinUIEx(ui);
+        BinUIRenderer r;
+        CHECK(r.loadLayout(res.layout.data(), res.layout.size()), "v30r: 布局可解析");
+        auto boxOf = [&](const char* name, float& x, float& y, float& w, float& h) {
+            const uint16_t id = r.findNodeByName(name);
+            for (const auto& n : r.getNodes())
+                if (n.id == id) { x = n.x; y = n.y; w = n.width; h = n.height; return true; }
+            return false;
+        };
+        float x = 0, y = 0, w = 0, h = 0;
+        // 640×420 的容器
+        CHECK(boxOf("r", x, y, w, h) && std::fabs(x - 500.0f) < 0.51f && std::fabs(y - 20.0f) < 0.51f, "v30r: right 落位 = 容器宽 - 偏移 - 自身宽");
+        CHECK(boxOf("b", x, y, w, h) && std::fabs(x - 20.0f) < 0.51f && std::fabs(y - 350.0f) < 0.51f, "v30r: bottom 落位 = 容器高 - 偏移 - 自身高");
+        CHECK(boxOf("rb", x, y, w, h) && std::fabs(x - 500.0f) < 0.51f && std::fabs(y - 350.0f) < 0.51f, "v30r: right + bottom 同时生效");
+        CHECK(boxOf("pc", x, y, w, h) && std::fabs(x - 412.0f) < 0.51f && std::fabs(y - 210.0f) < 0.51f, "v30r: right 支持百分比（20% of 640 = 128）");
+        CHECK(boxOf("in", x, y, w, h) && std::fabs(x - 10.0f) < 0.51f && std::fabs(y - 10.0f) < 0.51f, "v30r: inset 四值简写 = left/top");
+        CHECK(boxOf("bo", x, y, w, h) && std::fabs(x - 20.0f) < 0.51f, "v30r: left 与 right 同时写时 left 赢");
+
+        // 运行期重排：窗口变宽变高之后必须重新贴边（规格段的 SPEC_ANCHOR_*）
+        r.setSize(800, 500);
+        CHECK(boxOf("r", x, y, w, h) && std::fabs(x - 660.0f) < 0.51f, "v30r: resize 后 right 重新贴边");
+        CHECK(boxOf("b", x, y, w, h) && std::fabs(y - 430.0f) < 0.51f, "v30r: resize 后 bottom 重新贴边");
+        CHECK(boxOf("rb", x, y, w, h) && std::fabs(x - 660.0f) < 0.51f && std::fabs(y - 430.0f) < 0.51f, "v30r: resize 后 right+bottom 一起重算");
+        CHECK(boxOf("pc", x, y, w, h) && std::fabs(x - 540.0f) < 0.51f, "v30r: resize 后百分比 right 重算（20% of 800 = 160）");
+        CHECK(boxOf("in", x, y, w, h) && std::fabs(x - 10.0f) < 0.51f && std::fabs(y - 10.0f) < 0.51f, "v30r: resize 后 inset 仍是左上角固定偏移");
+    }
+
     if (g_fail == 0) std::printf("test_paint: 全部通过\n");
     return g_fail;
 }
