@@ -1558,6 +1558,93 @@ static void TestIssueRegressions() {
              m3.size() == 1 && (m3[0].head.flags & MASK_FLAG_FILL_GRAD) == 0 && !m3[0].hasGrad);
     }
 
+    // ---- 16.54：mask-type（v0.16.54）----
+    // 钉住五件事：
+    //   1. 默认 / mask-type="luminance"：颜色**亮度**当 alpha（#808080 → ≈128）；
+    //   2. mask-type="alpha"：亮度不参与，只取内容自己的 alpha（#808080 → 255）；
+    //   3. alpha 型下 fill-opacity / opacity 仍然乘（0.5 → ≈128）；
+    //   4. 渐变内容同样跟着变（色标 alpha 不再被亮度压暗）；
+    //   5. 认不出的值、写在非 <mask> 元素上，都要点名告警。
+    {
+        const char* html = R"HTML(<app_window width="320" height="200" bg="#101014">
+<html width="320" height="200" bg="#101014">
+<body>
+  <svg width="300" height="190" style="position:absolute; left:0; top:0">
+    <defs>
+      <mask id="lum" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="60">
+        <rect x="0" y="0" width="120" height="60" fill="#808080" />
+      </mask>
+      <mask id="alp" mask-type="alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="60">
+        <rect x="0" y="0" width="120" height="60" fill="#808080" />
+      </mask>
+      <mask id="alpHalf" mask-type="alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="60">
+        <rect x="0" y="0" width="120" height="60" fill="#FF0000" opacity="0.5" />
+      </mask>
+      <mask id="lumExplicit" mask-type="luminance" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="60">
+        <rect x="0" y="0" width="120" height="60" fill="#808080" />
+      </mask>
+      <linearGradient id="g54" x1="0" y1="0" x2="1" y2="0">
+        <stop offset="0" stop-color="#808080" />
+        <stop offset="1" stop-color="#404040" />
+      </linearGradient>
+      <mask id="gradAlp" mask-type="alpha" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="60">
+        <rect x="0" y="0" width="120" height="60" fill="url(#g54)" />
+      </mask>
+      <mask id="badType" mask-type="foo" maskUnits="userSpaceOnUse" x="0" y="0" width="120" height="60">
+        <rect x="0" y="0" width="120" height="60" fill="#808080" />
+      </mask>
+    </defs>
+    <rect id="e1" x="10" y="10" width="100" height="40" fill="#3B82F6" mask="url(#lum)" />
+    <rect id="e2" x="10" y="10" width="100" height="40" fill="#3B82F6" mask="url(#alp)" />
+    <rect id="e3" x="10" y="10" width="100" height="40" fill="#3B82F6" mask="url(#alpHalf)" />
+    <rect id="e4" x="10" y="10" width="100" height="40" fill="#3B82F6" mask="url(#lumExplicit)" />
+    <rect id="e5" x="10" y="10" width="100" height="40" fill="#3B82F6" mask="url(#gradAlp)" />
+    <rect id="e6" x="10" y="10" width="100" height="40" fill="#3B82F6" mask="url(#badType)" />
+    <rect id="e7" x="10" y="10" width="100" height="40" fill="#3B82F6" mask-type="alpha" />
+  </svg>
+</body></html>
+</app_window>)HTML";
+        const auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("16.54: mask-type 布局可解析", ParseInto(r, res.layout));
+        auto alphaOf = [&](const char* name) -> int {
+            const uint16_t id = r.findNodeByName(name);
+            if (!id) return -1;
+            const auto& ms = r.maskOf(id);
+            if (ms.empty()) return -1;
+            return (int)((ms[0].head.color >> 24) & 0xFFu);
+        };
+        // 1) 默认亮度：#808080 的亮度 ≈ 0.502 → ≈128
+        TEST("16.54: 默认（luminance）灰色 → ≈128", std::abs(alphaOf("e1") - 128) <= 2);
+        TEST("16.54: 显式 mask-type=\"luminance\" 同默认",
+             std::abs(alphaOf("e4") - 128) <= 2);
+        // 2) alpha 型：亮度不参与 → 255
+        TEST("16.54: mask-type=alpha 灰色 → 255", alphaOf("e2") == 255);
+        // 3) alpha 型仍乘 opacity：0.5 → ≈128（颜色不重要，红色亮度本来只有 ~0.21）
+        TEST("16.54: alpha 型仍乘 opacity（0.5 → ≈128）",
+             std::abs(alphaOf("e3") - 128) <= 2);
+        // 4) 渐变内容：alpha 型下色标 alpha 不再被亮度压暗
+        {
+            const uint16_t id = r.findNodeByName("e5");
+            std::vector<BinUIRenderer::MaskRecord> ms;
+            if (id) ms = r.maskOf(id);
+            TEST("16.54: 渐变内容沿用 mask-type=alpha",
+                 ms.size() == 1 && ms[0].hasGrad &&
+                 ((ms[0].grad.stops[0].color >> 24) & 0xFFu) >= 250 &&
+                 ((ms[0].grad.stops[1].color >> 24) & 0xFFu) >= 250);
+        }
+        // 5) 告警：认不出的值 + 写在非 <mask> 元素上
+        {
+            bool warnBad = false, warnPlace = false;
+            for (const auto& w : res.warnings) {
+                if (w.find("mask-type 只认 luminance / alpha") != std::string::npos) warnBad = true;
+                if (w.find("mask-type 只对 <mask> 元素自身生效") != std::string::npos) warnPlace = true;
+            }
+            TEST("16.54: 认不出的 mask-type 值要告警", warnBad);
+            TEST("16.54: mask-type 写在普通元素上要告警", warnPlace);
+        }
+    }
+
     // ---- 16.27：毛玻璃 backdrop-filter（v0.16.27，格式 v29 毛玻璃段） ----
     // 钉住五件事：
     //   1. backdrop-filter: blur(Npx) 落进毛玻璃段（renderer.backdropOf），带半径与合成圆角；

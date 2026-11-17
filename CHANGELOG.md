@@ -5,6 +5,36 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.16.54] - 2026-11-17 【格式 v34】
+
+**遮罩补上 `mask-type="luminance | alpha"`。** 这是 CSS Masking 里"用亮度还是用内容自己的
+alpha 当遮罩"的开关；以前一律按亮度，于是"白色半透明圆"这种素材会被当成"白色 = 全保留"。
+零格式改动 —— `BinUIMaskEntry.color` 的 alpha 本来就存最终取值，只是编译期少折一个系数。
+
+### 做法
+
+- 编译期只差一个乘数：`luminance`（默认，SVG 1.1 语义）折入
+  `0.2126R + 0.7152G + 0.0722B`；`alpha` 型**不折**，取颜色 alpha × `fill-opacity` × `opacity`。
+  渐变内容的色标同理（`alpha` 型下 `#808080 → #FF7A00` 的渐变整条保持不透明）。
+- 于是同一份 `#808080` 内容：`luminance` 得 ≈128（半透）、`alpha` 得 255（全保留）——
+  单测与证据图都按这个差额钉。
+- 认不出的值（`mask-type="foo"`）点名告警并按 luminance 处理；写在**非 `<mask>` 元素**上
+  也点名告警（它只描述 `<mask>` 自己，写了别指望生效）。
+- 顺手把这几个属性补进 HTML 属性白名单（`mask-type`，含 `masktype` 的驼峰写法），
+  否则会被当成"未实现属性"告警并丢弃 —— 这一条踩过：先只改了编译器、没改白名单，
+  渲染出来两种语义一模一样，`gl_shot` 的日志里才看到那句"未实现，已忽略"。
+
+### 验证
+
+- `test_css` 新增 16.54 段（8 条断言）：默认 luminance 灰色 ≈128、显式 `luminance` 同默认、
+  `alpha` 灰色 = 255、`alpha` 型仍乘 `opacity`（0.5 → ≈128）、渐变内容沿用 `alpha` 型
+  （两个色标都 ≥250）、认不出的值要告警、写在普通元素上要告警；
+- `pixels` 18/18 零差异；`pixels-vk` 全部用例 0 个超容差像素；`anim/svg-mask` 扩到 660×1090
+  （新增 luminance / alpha / alpha+opacity / alpha 型渐变四例），**GL/VK 0 像素差、通道差 0**；
+  `pixels-d3d11` 只剩既有的 `anim/affine-text` 6 像素；
+- `make test` 全 PASS、`partial` OK、`check_examples` 16 例 0 问题、`make check-guard` 0 报告。
+- 证据图：`docs/issues/assets/svg-mask-type.png`（同一份 #808080 内容，左半透、右全保留）。
+
 ## [0.16.53] - 2026-11-17 【格式 v34】
 
 **遮罩内容可以用渐变了（`<mask>` 里的 `fill="url(#grad)"`）。**

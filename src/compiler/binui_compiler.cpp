@@ -2654,8 +2654,8 @@ static const std::unordered_set<std::string>& UsedHtmlAttrs() {
         "clip-path", "clippathunits",
         // v0.16.25：SVG <pattern>
         "patternunits", "patterncontentunits", "patterntransform",
-        // v0.16.26：SVG <mask>
-        "mask", "maskunits", "maskcontentunits",
+        // v0.16.26：SVG <mask>（v0.16.54 起也认 mask-type）
+        "mask", "maskunits", "maskcontentunits", "mask-type",
         // v0.16.49：九宫格中段填充模式
         "image-slice", "nine-slice", "border-image-repeat",
         // v0.16.27：CSS backdrop-filter
@@ -5492,6 +5492,9 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         bool  found = false;
         int   units = 1;          // maskUnits：0 = userSpaceOnUse  1 = objectBoundingBox（默认）
         int   contentUnits = 0;   // maskContentUnits：0 = userSpaceOnUse（默认） 1 = objectBoundingBox
+        // v0.16.54：mask-type —— 0 = luminance（SVG/默认：用**亮度**当 alpha），
+        // 1 = alpha（CSS Masking：直接用内容自己的 alpha，颜色亮度不参与）
+        int   alphaType = 0;
         bool  hasX = false, hasY = false, hasW = false, hasH = false;
         float x = -0.1f, y = -0.1f, w = 1.2f, h = 1.2f;
         bool  xPct = false, yPct = false, wPct = false, hPct = false;
@@ -5517,6 +5520,21 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             auto it = me2.attrs.find("maskcontentunits");
             if (it != me2.attrs.end())
                 md2.contentUnits = lowerStr(TrimCopy(it->second)) == "objectboundingbox" ? 1 : 0;
+        }
+        {
+            // v0.16.54：mask-type="luminance | alpha"（CSS Masking）。
+            // 默认 luminance（SVG 1.1 的语义）；alpha 时内容颜色**只贡献 alpha**，
+            // 于是"白色半透明圆"= 半透明掩码，而不是"白色 = 全保留、灰色 = 半保留"。
+            auto it = me2.attrs.find("mask-type");
+            if (it == me2.attrs.end()) it = me2.attrs.find("masktype");
+            if (it != me2.attrs.end()) {
+                const std::string mv2 = lowerStr(TrimCopy(it->second));
+                if (mv2 == "alpha") md2.alphaType = 1;
+                else if (mv2 == "luminance" || mv2.empty()) md2.alphaType = 0;
+                else
+                    Warn("<mask id=\"" + mid2 + "\"> 的 mask-type 只认 luminance / alpha：\"" +
+                         mv2 + "\"（按 luminance 处理）");
+            }
         }
         // 区域：缺省 -10% .. 120%（SVG 规范默认值）；百分比按元素盒的比例算
         auto region = [&](const char* key, float& out, bool& has, bool& pct) {
@@ -5597,6 +5615,9 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             const float b2 = (float)(fc & 0xFFu);
             const float a2 = (float)((fc >> 24) & 0xFFu) / 255.0f;
             float lum = (0.2126f * r2 + 0.7152f * g2 + 0.0722f * b2) / 255.0f;
+            // v0.16.54：mask-type="alpha" 时颜色亮度不参与，只看 alpha（fill-opacity /
+            // opacity 照旧要乘）—— 两者在"白色"上等价，在灰/彩色上差很远。
+            if (md2.alphaType == 1) lum = 1.0f;
             if (kid2.hasGrad) {
                 // 渐变：逐点亮度在后面折算，这里只需保证"整体不是全透明"
                 kid2.opa = opa;
@@ -8254,6 +8275,12 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
         // ---- v0.16.26：<mask>（v28 遮罩段） ----
         // 掩码几何在编译期折算到设备空间并按"亮度分组"，运行期只做两趟混合。
         // 元素自己照常画（不像 pattern 要交给 tile），只是画完在图层里被乘一次 alpha。
+        // v0.16.54：mask-type 是**<mask> 元素**的属性（CSS Masking），写在别的元素上无效 ——
+        // 这条仓库的规矩是"写了没效果必须说出来"，所以点名。
+        if (e.attrs.count("mask-type") || e.attrs.count("masktype") || style.count("mask-type")) {
+            Warn("mask-type 只对 <mask> 元素自身生效（写在 " + e.tag +
+                 " 上被忽略）：它描述的是\"用亮度还是 alpha 当遮罩\"");
+        }
         if (!svgMasks.empty()) {
             std::string mv = style.count("mask") ? TrimCopy(style.at("mask")) : "";
             if (mv.empty() && e.attrs.count("mask")) mv = TrimCopy(e.attrs.at("mask"));
@@ -8411,6 +8438,8 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                                     const float b8 = (float)(sc & 0xFFu);
                                     const float a8 = (float)((sc >> 24) & 0xFFu);
                                     float lum2 = (0.2126f * r8 + 0.7152f * g8 + 0.0722f * b8) / 255.0f;
+                                    // v0.16.54：mask-type="alpha" 时渐变色标也只贡献 alpha
+                                    if (md3.alphaType == 1) lum2 = 1.0f;
                                     float av2 = (lum2 * (a8 / 255.0f) * kid3.opa);
                                     av2 = av2 < 0.0f ? 0.0f : (av2 > 1.0f ? 1.0f : av2);
                                     pg.stops[si].color =

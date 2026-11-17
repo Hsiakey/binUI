@@ -822,6 +822,13 @@ tile 空间做 —— 把元素包围盒的四角用 `T⁻¹` 变换回去取 aa
 `width/height` 以前被当成 objectBoundingBox 又乘了一遍元素盒（190×60 的元素 + 200×120 的
 区域 → 38000×7200 的图层框），现在是用户坐标。
 
+**`mask-type`（v0.16.54）**：`mask-type="luminance | alpha"` 决定"用亮度还是用内容自己的
+alpha"当遮罩（默认 `luminance`，即 SVG 1.1 的语义）。编译期只差一个系数：`alpha` 型不把
+`0.2126R + 0.7152G + 0.0722B` 折进去，直接取颜色 alpha × `fill-opacity` × `opacity`
+（渐变内容的色标同理）。所以同一份 `#808080` 内容，`luminance` 得到 ≈128 的半透、
+`alpha` 得到 255 的全保留 —— **零格式改动**（`BinUIMaskEntry.color` 的 alpha 本来就存
+最终取值）。写在非 `<mask>` 元素上会点名告警（那条属性只描述 `<mask>` 自己）。
+
 已知边界（都会告警）：内容里的 `<g>` 不展开；**重叠形状会被乘两次**（重叠区更暗），补集趟的 even-odd 也会把重叠区
 当成"外" —— 掩码内容请写不重叠的形状；`mask-type="alpha"` 未做（一律按亮度）；GDI 遗留
 后端不参与（`supportsMask()` 返回 false → 元素照常画，不遮罩）。

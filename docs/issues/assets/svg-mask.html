@@ -1,6 +1,6 @@
 <!DOCTYPE html>
-<app_window width="660" height="700" resizable="false">
-<html width="660" height="700">
+<app_window width="660" height="1090" resizable="false">
+<html width="660" height="1090">
 <head>
 <style>
     body { background: #EEF2F7; color: #16202C; }
@@ -126,7 +126,57 @@
     </svg>
     <span class="cap" style="left:372; top:566">径向渐变（聚光）</span>
 
-    <span style="position:absolute; left:20; top:628; width:620; height:52; font-size:12px; color:#7A8798">v0.16.26：&lt;mask&gt; 在图层里画两趟 —— 保留趟（dst *= srcA）把掩码几何按亮度乘上去，补集趟（dst *= 1-srcA）把掩码外清零；亮度在编译期折进 alpha，三端零着色器改动。v0.16.53：渐变内容的**色标 alpha = 亮度**，保留趟直接按渐变色带画（格式 v34）</span>
+    <!-- ===== v0.16.54：mask-type（luminance / alpha） ===== -->
+    <span class="cap" style="left:20; top:644; width:520">mask-type（v0.16.54）：同一份内容，#808080 灰在两种语义下差一倍</span>
+
+    <!-- 11) 默认 luminance：#808080 → 半透 -->
+    <svg width="150" height="150" style="position:absolute; left:20; top:664">
+        <defs>
+            <mask id="mtLum"><rect x="0" y="0" width="150" height="150" fill="#808080" /></mask>
+        </defs>
+        <rect x="0" y="0" width="150" height="150" rx="18" fill="#0B5FA5" mask="url(#mtLum)" />
+    </svg>
+    <span class="cap" style="left:20; top:818; width:150">luminance 默认（半透）</span>
+
+    <!-- 12) alpha：#808080 → 全不透明（亮度不参与） -->
+    <svg width="150" height="150" style="position:absolute; left:196; top:664">
+        <defs>
+            <mask id="mtAlpha" mask-type="alpha">
+                <rect x="0" y="0" width="150" height="150" fill="#808080" />
+            </mask>
+        </defs>
+        <rect x="0" y="0" width="150" height="150" rx="18" fill="#0B5FA5" mask="url(#mtAlpha)" />
+    </svg>
+    <span class="cap" style="left:196; top:818; width:150">mask-type=alpha（全保留）</span>
+
+    <!-- 13) alpha + opacity：#FF0000 @0.5 → 半透（颜色亮度不参与，只有 alpha 起作用） -->
+    <svg width="150" height="150" style="position:absolute; left:372; top:664">
+        <defs>
+            <mask id="mtAlphaHalf" mask-type="alpha">
+                <rect x="0" y="0" width="150" height="150" fill="#FF0000" opacity="0.5" />
+            </mask>
+        </defs>
+        <rect x="0" y="0" width="150" height="150" rx="18" fill="#0B5FA5"
+              mask="url(#mtAlphaHalf)" />
+    </svg>
+    <span class="cap" style="left:372; top:818; width:180">alpha + opacity 0.5（半透）</span>
+
+    <!-- 14) alpha 型的渐变内容：色标不再被亮度压暗 -->
+    <svg width="150" height="150" style="position:absolute; left:20; top:842">
+        <defs>
+            <linearGradient id="mtGrad" x1="0" y1="0" x2="1" y2="0">
+                <stop offset="0" stop-color="#808080" />
+                <stop offset="1" stop-color="#FF7A00" />
+            </linearGradient>
+            <mask id="mtGradMask" mask-type="alpha">
+                <rect x="0" y="0" width="150" height="150" fill="url(#mtGrad)" />
+            </mask>
+        </defs>
+        <rect x="0" y="0" width="150" height="150" rx="18" fill="#7C3AED"
+              mask="url(#mtGradMask)" />
+    </svg>
+    <span class="cap" style="left:20; top:996; width:300">alpha 型的渐变内容（色标只有 alpha 生效）</span>
+    <span style="position:absolute; left:20; top:1030; width:620; height:52; font-size:12px; color:#7A8798">v0.16.26：&lt;mask&gt; 在图层里画两趟 —— 保留趟（dst *= srcA）把掩码几何按亮度乘上去，补集趟（dst *= 1-srcA）把掩码外清零；亮度在编译期折进 alpha，三端零着色器改动。v0.16.53：渐变内容的**色标 alpha = 亮度**，保留趟直接按渐变色带画（格式 v34）；v0.16.54：`mask-type="luminance\\|alpha"` 决定"用亮度还是用 alpha"，alpha 型下颜色亮度完全不参与（只乘 fill-opacity / opacity）</span>
 </body>
 </html>
 </app_window>
