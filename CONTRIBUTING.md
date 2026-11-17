@@ -106,14 +106,22 @@ mingw32-make SHELL=sh test
 | `MAJOR`（大版本） | 不兼容变更（删接口、改语义） | `0.x → 1.0.0` |
 
 - `PATCH` 到 999 就不再往上加：下一个改动进位成 `MINOR+1`、`PATCH` 归 0。
+- **别把 `PATCH` 当计数器用**。这条是踩过坑才写进来的：`0.16.0 → 0.16.54` 那四天里
+  55 个版本有 47 条其实是**新功能**（filter 原语链、九宫格四种平铺、多层 `text-shadow`、
+  遮罩渐变……），全压在 `PATCH` 位上，结果"这个号变了多大"彻底读不出来。
+  判据很简单：**这次提交能不能只看 patch 号就知道只是修 bug？** 不能就动 `MINOR`。
+- **一批一个发布**。同一轮工作里的多项改动攒在一起发，不要一个改动一个 tag；
+  发布说明按批汇总（参见 `0.17.0` 那种"收编进本版的能力"表）。
 - **别把它和下面两个“版本”混了**：
   - `BINUI_VERSION`（`include/binui_format.h`）是**二进制布局格式号**，只在节点/段结构变化时 +1，
     旧 `.bui` 必须重编 —— 和发布版本无关；
   - `BINUI_C_ABI_VERSION`（`include/binui_c.h`）只在 C ABI 的结构体/函数签名不兼容时 +1。
 - **发版清单**（少一处就会出现“库说 0.2.0、Cargo 说 0.3.0”这种不一致）：
-  1. `CMakeLists.txt` 的 `project(... VERSION x.y.z)`；
+  1. `CMakeLists.txt` 的 `project(... VERSION x.y.z)`（它跟库版本走；曾经停在 `0.9.1`
+     好几个月没人发现，因为唯一的检查口是配置时那行 `STATUS "binUI v..."`）；
   2. `src/binui_c.cpp` 的 `binui_version()` 返回值；
-  3. `bindings/rust/Cargo.toml` 与 `Cargo.lock`（Go/Python 绑定读库，不用改）；
+  3. `bindings/rust/Cargo.toml` 与 `Cargo.lock` —— 注意它是 Rust 绑定**自己的**版本，
+     不必等于库版本（当前 `0.9.1` 对 `0.17.0` 是有意为之）；Go/Python 绑定读库，不用改；
   4. `README.md` 顶部的 version 徽章；
   5. `CHANGELOG.md` 把 `[Unreleased]` 的内容整理进 `## [x.y.z] - YYYY-MM-DD`，Unreleased 留空；
   6. `git tag -a vx.y.z -m "binUI x.y.z"`（tag 打在发版提交上）。
