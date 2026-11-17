@@ -8776,6 +8776,7 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                     return !(ox2 + txa <= patUBx || oy2 + tya <= patUBy ||
                              ox2 >= patUBx + ubw || oy2 >= patUBy + ubh);
                 };
+                bool warnedPatStrokeClip = false;   // 只告警一次
                 long long ntiles = 0;
                 for (int kk2 = k0; kk2 <= k1; kk2++)
                     for (int ll2 = l0; ll2 <= l1; ll2++) {
@@ -8856,10 +8857,35 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
                             const PathMatrix md = rotated
                                 ? PathMul(svgX, PathMul(tf, PathMul(PathTranslate(ox2, oy2), cb)))
                                 : PathMul(svgX, PathMul(PathTranslate(ox2, oy2), cb));
+                            // v0.17.2：内容的 tile 框（设备空间，凸）。内容的变换是
+                            // svgX·[tf]·T(格原点)·cb，而 cb 已经把内容映射进 (0,0)-(txa,tya)，
+                            // 所以 tile 框就是"不含 cb 的那半"作用在这个矩形上的像 ——
+                            // 轴对齐时是矩形，旋转/斜切时是平行四边形，两者都凸。
+                            const PathMatrix tileM = rotated
+                                ? PathMul(svgX, PathMul(tf, PathTranslate(ox2, oy2)))
+                                : PathMul(svgX, PathTranslate(ox2, oy2));
+                            const PathPointF win[4] = {
+                                PathApply(tileM, 0.0f, 0.0f),
+                                PathApply(tileM, txa, 0.0f),
+                                PathApply(tileM, txa, tya),
+                                PathApply(tileM, 0.0f, tya) };
                             for (const SvgPatternChild& kid : pd2.kids) {
                                 PathShape tmp = kid.shape;
                                 TransformShape(tmp, md);
                                 if (tmp.Empty()) continue;
+                                // 只对**真的越界**的内容裁：正常写法（内容不越出 tile）像素
+                                // 一位不变。越界 + 有描边时告警 —— 几何裁剪会在 tile 边界上
+                                // 多画一条线（规范要的是"渲染后裁剪"，代价见 docs/svg.md 14.3）。
+                                if (!ShapeInsideConvex(tmp, win)) {
+                                    if (kid.hasStroke && kid.strokeW > 0.0f && !warnedPatStrokeClip) {
+                                        Warn("<pattern id=\"" + patternFillId +
+                                             "\"> 的内容越出 tile 框且带描边：几何裁剪会在 tile "
+                                             "边界上多画一条线（见 docs/svg.md 14.3）");
+                                        warnedPatStrokeClip = true;
+                                    }
+                                    ClipShapeConvex(tmp, win);
+                                    if (tmp.Empty()) continue;
+                                }
                                 if (kid.hasFill) appendTo(groups[groupOf(kid, false)].shape, tmp);
                                 if (kid.hasStroke && kid.strokeW > 0.0f)
                                     appendTo(groups[groupOf(kid, true)].shape, tmp);

@@ -1725,6 +1725,87 @@ static void TestIssueRegressions() {
         TEST("16.55: 缓存 key 区分线宽与颜色", k1 != k3 && k1 != k4);
     }
 
+    // ---- 16.56：pattern 内容裁到 tile 框（v0.17.2）----
+    // ClipShapeConvex 是凸窗口的 Sutherland-Hodgman（<pattern> 的 tile 在设备空间可能是
+    // 矩形，也可能是 patternTransform 旋转/斜切后的平行四边形 —— 两者都凸）。钉住四件事：
+    //   1. 完全在窗口里的形状：ShapeInsideConvex 为真、裁剪不改点数（正常写法零变化）；
+    //   2. 跨窗口：裁剪后点全在窗口里，且面积 = 交集面积；
+    //   3. 完全在外：裁完为空；
+    //   4. 平行四边形窗口同样成立，且裁剪后面积不超过窗口面积。
+    {
+        using binui::PathPointF;
+        using binui::PathShape;
+        auto makeRect = [](float x, float y, float w, float h) {
+            PathShape s;
+            const float xs[4] = { x, x + w, x + w, x };
+            const float ys[4] = { y, y, y + h, y + h };
+            for (int i = 0; i < 4; i++) s.pts.push_back({ xs[i], ys[i] });
+            s.contours.push_back({ 0, 4, true });
+            s.RecomputeBounds();
+            return s;
+        };
+        auto areaOf = [](const PathShape& s) {
+            double a = 0.0;
+            for (const auto& c : s.contours) {
+                double sum = 0.0;
+                for (uint32_t i = 0; i < c.count; i++) {
+                    const PathPointF& p = s.pts[c.first + i];
+                    const PathPointF& q = s.pts[c.first + (i + 1) % c.count];
+                    sum += static_cast<double>(p.x) * q.y - static_cast<double>(q.x) * p.y;
+                }
+                a += sum * 0.5;
+            }
+            return a < 0 ? -a : a;
+        };
+        const PathPointF winSq[4] = { { 0, 0 }, { 40, 0 }, { 40, 40 }, { 0, 40 } };
+        // 1) 完全在窗口内：判定为内，裁剪不改点数
+        {
+            PathShape s = makeRect(10, 10, 20, 20);
+            const bool inside = binui::ShapeInsideConvex(s, winSq);
+            const size_t before = s.pts.size();
+            binui::ClipShapeConvex(s, winSq);
+            TEST("16.56: 完全在 tile 内的内容判定为内、点数不变",
+                 inside && s.pts.size() == before);
+        }
+        // 2) 跨窗口：面积 = 交集（[0,20]x[0,20] = 400）
+        {
+            PathShape s = makeRect(-10, -10, 30, 30);
+            TEST("16.56: 越出 tile 的内容判定为越界", !binui::ShapeInsideConvex(s, winSq));
+            binui::ClipShapeConvex(s, winSq);
+            bool allInside = !s.Empty();
+            for (const PathPointF& p : s.pts) {
+                if (p.x < -0.01f || p.x > 40.01f || p.y < -0.01f || p.y > 40.01f)
+                    allInside = false;
+            }
+            TEST("16.56: 裁剪后所有点都在 tile 内", allInside);
+            TEST("16.56: 裁剪后面积等于交集面积", std::fabs(areaOf(s) - 400.0) < 0.5);
+        }
+        // 3) 完全在外：裁完为空
+        {
+            PathShape s = makeRect(50, 50, 20, 20);
+            binui::ClipShapeConvex(s, winSq);
+            TEST("16.56: 完全在 tile 外的形状裁完为空", s.Empty());
+        }
+        // 4) 平行四边形窗口（旋转 30 度再平移，模拟 patternTransform 的格）
+        {
+            const float ang = 3.14159265f / 6.0f;
+            const float ca = std::cos(ang), sa = std::sin(ang);
+            auto rot = [&](float x, float y) {
+                return PathPointF{ ca * x - sa * y + 100.0f, sa * x + ca * y + 100.0f };
+            };
+            const PathPointF winP[4] = { rot(0, 0), rot(40, 0), rot(40, 40), rot(0, 40) };
+            const PathPointF center = rot(20, 20);
+            const PathShape small = makeRect(center.x - 12, center.y - 12, 24, 24);
+            TEST("16.56: 平行四边形窗口内的小块判定为内",
+                 binui::ShapeInsideConvex(small, winP));
+            PathShape big = makeRect(70, 70, 60, 60);
+            binui::ClipShapeConvex(big, winP);
+            const double bigArea = areaOf(big);
+            TEST("16.56: 平行四边形窗口裁剪后非空且面积不超过窗口",
+                 !big.Empty() && bigArea > 0.0 && bigArea <= 1600.5);
+        }
+    }
+
     // ---- 16.27：毛玻璃 backdrop-filter（v0.16.27，格式 v29 毛玻璃段） ----
     // 钉住五件事：
     //   1. backdrop-filter: blur(Npx) 落进毛玻璃段（renderer.backdropOf），带半径与合成圆角；

@@ -794,6 +794,92 @@ inline bool PathIsSimilarity(const PathMatrix& m, float tol = 1e-4f) {
 }
 
 // ============================================================
+// 凸窗口裁剪（v0.17.2）：Sutherland-Hodgman
+//
+// 用途：`<pattern>` 的内容必须裁到自己的 tile 框（SVG 规范：tile 框外不画）。而 tile 在
+// 设备空间可能是**矩形**（轴对齐）也可能是**平行四边形**（`patternTransform` 带旋转/斜切），
+// 两种情况都是凸窗口，所以一套算法就够 —— 沿窗口四条边逐条切半平面，边交点线性插值。
+//
+// 已知边界（写进 docs/svg.md）：
+//   · 凹轮廓被切出来之后，沿窗口边界会有零宽的"桥"（面积 0）。填充用 nonzero 时不可见；
+//     even-odd 下与"自交轮廓"是同一类问题（见 14.3 那条）。
+//   · 这是**几何**裁剪，不是渲染后裁剪 —— 被切出来的新边会跟着描边画出来（tile 边界上多
+//     一条线）。所以调用方只对"真的越界"的内容裁，并对"越界 + 有描边"告警。
+// ============================================================
+inline void ClipShapeConvex(PathShape& s, const PathPointF win[4]) {
+    if (s.Empty() || !win) return;
+    // 窗口顶点顺序可能顺时针也可能逆时针（变换里含镜像就会翻），用有向面积定符号
+    float area2 = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        const PathPointF& a = win[i];
+        const PathPointF& b = win[(i + 1) % 4];
+        area2 += a.x * b.y - b.x * a.y;
+    }
+    const float sign = area2 >= 0.0f ? 1.0f : -1.0f;
+    std::vector<PathPointF> cur, next;
+    std::vector<PathPointF> outPts;
+    std::vector<PathShape::Contour> outContours;
+    for (const PathShape::Contour& c : s.contours) {
+        if (c.count < 3) continue;
+        cur.assign(s.pts.begin() + c.first, s.pts.begin() + c.first + c.count);
+        for (int e = 0; e < 4 && !cur.empty(); e++) {
+            const PathPointF& w0 = win[e];
+            const PathPointF& w1 = win[(e + 1) % 4];
+            const float ex = w1.x - w0.x, ey = w1.y - w0.y;
+            auto side = [&](const PathPointF& p) {
+                return sign * (ex * (p.y - w0.y) - ey * (p.x - w0.x));
+            };
+            next.clear();
+            const size_t n = cur.size();
+            for (size_t i = 0; i < n; i++) {
+                const PathPointF& p = cur[i];
+                const PathPointF& q = cur[(i + 1) % n];
+                const float dp = side(p), dq = side(q);
+                const bool pin = dp >= 0.0f, qin = dq >= 0.0f;
+                if (pin) next.push_back(p);
+                if (pin != qin) {
+                    const float den = dp - dq;
+                    const float t = (den != 0.0f) ? dp / den : 0.0f;
+                    next.push_back({ p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t });
+                }
+            }
+            cur.swap(next);
+        }
+        if (cur.size() < 3) continue;
+        PathShape::Contour nc;
+        nc.first = static_cast<uint32_t>(outPts.size());
+        nc.count = static_cast<uint32_t>(cur.size());
+        nc.closed = true;            // 填充时一律按闭合处理，裁剪后也按闭合
+        outPts.insert(outPts.end(), cur.begin(), cur.end());
+        outContours.push_back(nc);
+    }
+    s.pts.swap(outPts);
+    s.contours.swap(outContours);
+    s.RecomputeBounds();
+}
+
+// 形状是否完全落在凸窗口里（完全在内就不必裁剪 —— 默认情形，像素一位不变）
+inline bool ShapeInsideConvex(const PathShape& s, const PathPointF win[4]) {
+    if (s.Empty() || !win) return true;
+    float area2 = 0.0f;
+    for (int i = 0; i < 4; i++) {
+        const PathPointF& a = win[i];
+        const PathPointF& b = win[(i + 1) % 4];
+        area2 += a.x * b.y - b.x * a.y;
+    }
+    const float sign = area2 >= 0.0f ? 1.0f : -1.0f;
+    for (const PathPointF& p : s.pts) {
+        for (int e = 0; e < 4; e++) {
+            const PathPointF& w0 = win[e];
+            const PathPointF& w1 = win[(e + 1) % 4];
+            const float ex = w1.x - w0.x, ey = w1.y - w0.y;
+            if (sign * (ex * (p.y - w0.y) - ey * (p.x - w0.x)) < 0.0f) return false;
+        }
+    }
+    return true;
+}
+
+// ============================================================
 // SVG transform 属性 → 矩阵
 //
 // 支持 translate / scale / rotate / skewX / skewY / matrix，可按空格/逗号串联，
