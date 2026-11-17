@@ -433,6 +433,10 @@ struct BinUIGLGdi::Impl {
     }
     // 降采样趟把图元画进小 FBO 时，坐标是"小图局部"的，不能再用层框去裁
     bool ignoreLayerClip = false;
+    // 诊断（BINUI_GL_VERTS=1）：本帧上传了多少顶点 / 字节。P0-4「脏节点上传」的账必须用
+    // 实测数据算 —— bench-draw 的"1 个原语 ≈ 1 个四边形"是估算，看不到描边自 v0.17.1
+    // 起走 CPU 条带后被拆成 2~8 个四边形这一层。
+    size_t frameVerts = 0;
 
     // 取一套以 (w0,h0) 为第 0 级的链：命中复用，否则新建（超过 kMaxBlurSets 淘汰最久未用）。
     bool selectBlurSet(int w0, int h0) {
@@ -1294,6 +1298,7 @@ void emitQuadUVColor(const BinUIGradQuad& q) {
 
 void flushAll() {
         if (vcount == 0 || !vb) return;
+        frameVerts += vcount;
         glBufferDataP(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vcount * sizeof(GLVertex)),
                       verts.data(), GL_DYNAMIC_DRAW);
         // 正在画进图层时，每条批次再和层框求交（层外的内容不该出现在层里）
@@ -1417,6 +1422,7 @@ void BinUIGLGdi::beginFrame(const void* clipRect) {
     // 只复位计数，不 clear()：缓冲已经预分配到 kMaxVerts，clear() 每次会把
     // 2 MB 全部析构再由 vertRoom 重新 resize 一遍（白白 memset 一次）。
     impl_->vcount = 0;
+    impl_->frameVerts = 0;
     impl_->batches.clear();
     impl_->curBatch = static_cast<size_t>(-1);
     impl_->scissorDepth = 0;
@@ -1545,6 +1551,12 @@ void BinUIGLGdi::flushFrame() {
     if (!impl_->ready) return;
     if (!impl_->makeCurrent()) return;
     impl_->flushAll();
+    static const bool traceVerts = std::getenv("BINUI_GL_VERTS") != nullptr;
+    if (traceVerts)
+        std::fprintf(stderr, "[gl][verts] %zu 顶点 %.1f KB（%zu 个四边形）\n",
+                     impl_->frameVerts,
+                     static_cast<double>(impl_->frameVerts * sizeof(GLVertex)) / 1024.0,
+                     impl_->frameVerts / 6);
 }
 
 void BinUIGLGdi::presentViaGdi() {
