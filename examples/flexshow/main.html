@@ -16,7 +16,9 @@
   · <html>/<body> 不是节点，flex 要写在一个 width:100%;height:100% 的 div 上；
   · 节点只有一个 padding 字段，四值简写只取第一个；左右不同请用嵌套容器；
   · 父级是 column flex 且子项写了 flex:N，子项高度就由父级分配（写百分比会被覆盖）；
-  · flex-shrink 未实现：加 min-width 保护，别指望它会自动收缩。
+  · flex-shrink **已实现**（`binui_flex_layout.h` 按 shrink×basis 加权收缩）。反过来要注意：
+    column 方向的滚动列表里，子项默认 shrink=1，容器一矮就被压扁 —— 写 `flex-shrink: 0` 关掉它
+    （`#list` 里那 12 行就是这么写的）。
 -->
 <app_window width="1100" height="720" bg="#F4F7FC" title="自适应布局">
 <html width="100%" height="100%" bg="#F4F7FC">
@@ -36,7 +38,10 @@
         .btn:hover { background: #DCE5F2; transform: scale(1.03); }
         .bar { background: #3E8BFF; border-radius: 4; }
         .bar-alt { background: #7FB2FF; border-radius: 4; }
-        .row { background: #F7FAFF; border: 1px solid #EAF0FA; border-radius: 8; }
+        .row { background: #F7FAFF; border: 1px solid #EAF0FA; border-radius: 8;
+          /* 滚动列表里的行必须关掉收缩：容器高度不够时默认 shrink=1 会把 32px 的行
+             压成十几像素，行里的文字却还是 16px，于是文字溢出到相邻行、看起来像被切掉。 */
+          flex-shrink: 0; }
         .side-item { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 8; font-size: 12px; color: #38445A; }
     </style>
 </head>

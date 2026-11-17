@@ -1,0 +1,51 @@
+<html width="660" height="300" bg="#F4F7FC">
+<head>
+<style>
+  body { font-size: 13px; color: #1F2A37; }
+  .card { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 14; }
+  .card-title { font-size: 12px; font-weight: 700; color: #1F2A37; }
+  .note { font-size: 11px; color: #8A9AAD; }
+  .row { background: #F7FAFF; border-radius: 8; }
+  .row0 { background: #F7FAFF; border-radius: 8; flex-shrink: 0; }
+  .lab { font-size: 11px; color: #66768C; }
+</style>
+</head>
+<body>
+  <div style="width:100%; height:100%; padding:10; display:flex; gap:12">
+    <!-- 左：没写 flex-shrink:0 —— 容器一矮，行被压扁，文字溢出到相邻行 -->
+    <div class="card" style="width:308; height:100%; padding:14; display:flex; flex-direction:column; gap:6">
+      <span class="card-title" style="width:100%; height:16">✗ 没写 flex-shrink:0</span>
+      <span class="note" style="width:100%; height:14">行被压到十几个像素，文字溢出、看着像被切</span>
+      <div style="display:flex; flex-direction:column; gap:6; flex:1; overflow:auto">
+        <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 01 · 滚动容器里的行</span></div>
+        <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 02 · 高度由内容撑开</span></div>
+        <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 03 · 不影响外层布局</span></div>
+        <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 04 · 滚轮可滚</span></div>
+        <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 05 · 视口 = flex 分配高度</span></div>
+        <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 06 · 窗口一矮就出滚动条</span></div>
+        <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 07 · 内容超出被裁剪</span></div>
+        <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 08 · 不会把窗口撑高</span></div>
+        <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 09 · 试试把窗口拉高</span></div>
+        <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 10 · 滚动范围随之变化</span></div>
+      </div>
+    </div>
+    <!-- 右：写了 flex-shrink:0 —— 行保持 32px，视口外的部分靠滚 -->
+    <div class="card" style="width:308; height:100%; padding:14; display:flex; flex-direction:column; gap:6">
+      <span class="card-title" style="width:100%; height:16">✓ flex-shrink:0</span>
+      <span class="note" style="width:100%; height:14">行保持 32px，超出的靠滚动</span>
+      <div style="display:flex; flex-direction:column; gap:6; flex:1; overflow:auto">
+        <div class="row0" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 01 · 滚动容器里的行</span></div>
+        <div class="row0" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 02 · 高度由内容撑开</span></div>
+        <div class="row0" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 03 · 不影响外层布局</span></div>
+        <div class="row0" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 04 · 滚轮可滚</span></div>
+        <div class="row0" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 05 · 视口 = flex 分配高度</span></div>
+        <div class="row0" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 06 · 窗口一矮就出滚动条</span></div>
+        <div class="row0" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 07 · 内容超出被裁剪</span></div>
+        <div class="row0" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 08 · 不会把窗口撑高</span></div>
+        <div class="row0" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 09 · 试试把窗口拉高</span></div>
+        <div class="row0" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 10 · 滚动范围随之变化</span></div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

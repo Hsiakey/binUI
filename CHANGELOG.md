@@ -5,6 +5,44 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.17.4] - 2026-11-17 【格式 v34】
+
+**修 flexshow 的滚动列表：`flex:1 + overflow:auto` 里的行被压扁、文字溢出。**
+
+现象：窗口拉矮时，那张"② flex:1 + overflow:auto"卡里 12 行条目被压到十几像素，
+而行里的 16px 文字没跟着缩 —— 文字溢出到相邻行，看上去像被纵向切掉一半；更怪的是
+**滚动条仍然出现**（滚动范围按未压缩的 32px 算），于是"既压扁又出滚动条"。
+
+根因不是排版引擎的偏差：CSS 里 flex 子项默认 `flex-shrink: 1`，容器高度不足就会收缩。
+`include/binui_flex_layout.h` 一直按 `shrink × basis` 加权收缩（这行为是对的），
+问题是示例没写 `flex-shrink: 0` —— 于是行被压扁，而滚动范围又按声明高度算。
+
+### 做法
+
+- `examples/flexshow/main.html` 的 `.row` 加 `flex-shrink: 0`：行保持 32px，视口外的部分
+  靠滚动，这才是滚动列表该有的样子。
+- 顺手改掉示例头部那条**过期提醒**：原文写"flex-shrink 未实现：加 min-width 保护"，
+  而它 v22 起就实现了（`docs/ui_orchestration.md` 里一直写着"默认 1、真参与收缩计算"）——
+  这条错提醒正是这次踩坑的原因。
+- `docs/ui_orchestration.md` 补一条规则：`display:flex; flex-direction:column; overflow:auto`
+  的滚动列表**必须显式关掉收缩**，并写清"压扁 + 仍有滚动条"这个组合症状。
+
+### 验证
+
+- 新判据页 `docs/issues/assets/flex-scroll-shrink.html`（同尺寸左右对照：左边不写
+  `flex-shrink:0`、右边写了）：三端 **0 不同像素、最大通道差 0**；
+- `examples/flexshow` 在 1100×720 与 341×274 两个尺寸下重渲染确认（后者就是原来塌掉的尺寸）：
+  行恢复 32px、文字完整、滚动条正常；
+- `check_examples` 16 例 0 问题。
+
+### 同时修掉的度量缺口（bench）
+
+`tools/draw_bench.cpp` 以前把 `fillLine` 记成 **1 个四边形**，而三个 GPU 后端自 v0.17.1 起
+会把一段线拆成 2~8 个 CPU 覆盖率条带 —— svgdemo 估 2456、实测 **6985**（2.8 倍），
+cubedemo 估 329、实测 **2081**（6.3 倍）。现在它调同一份 `binui::BuildLineBandsAA` 数条带
+并复用同一套条带缓存（命中只重放），"遍历 µs"与真实后端一致（svgdemo 18.5 µs，
+不加缓存会是 178 µs）。`docs/future.md` 的两张性能表按实测重写。
+
 ## [0.17.3] - 2026-11-17 【格式 v34】
 
 **毛玻璃 / `filter: blur` 的降采样链按尺寸池化。** 以前三个后端都只维护**一套**链，
