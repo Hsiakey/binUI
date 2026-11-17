@@ -6,6 +6,7 @@
 | [bindings.md](bindings.md) | **C ABI 与语言绑定**：三条设计约束（定长 POD / 无回调 / UTF-8）、最小流程、线程与窗口规则、键盘与中文输入、未覆盖能力、新增语言步骤 |
 | [keyboard_focus.md](keyboard_focus.md) | **键盘焦点系统**：焦点控制 / 文本编辑 / 鼠标三态与按键表、WASD 移焦点、方向键滚哪个容器、回车两段式、焦点环（:focus-visible + 2 秒自动熄灭）、宿主接法；末尾是层级焦点导航（下潜 / 上浮）的未来开发计划（未实现） |
 | [app_layout.md](app_layout.md) | **应用散装形态**：exe 真实路径解析、UI 文件 6 级查找顺序、`src` 相对规则、`.bex` 容器的映射契约 |
+| [startup.md](startup.md) | **启动耗时实测**：`BINUI_STARTUP`/`BINUI_STARTUP_FILE`/`BINUI_FRAME_EXIT` 三个探针怎么用、本机 660 ms 到首帧的逐段归属（binUI 自己只占 ~35 ms，其余是建窗/GL 上下文/首次 SwapBuffers 的一次性系统与驱动成本）、以及"用 PowerShell 重定向 stderr 量启动会凭空多 3 秒"这个坑 |
 | [components.md](components.md) | **组件化**：`<use src="x.bum.html">` 编译期内联、参数/合并/CSS 作用域规则、`.bum` 二进制与运行时挂载、目录结构 |
 | [svg.md](svg.md) | **SVG 支持（P1 已实现）**：现状实测、`BINUI_PATH` 节点 + v15 路径段的格式、编译期 viewBox/变换/继承、三端共用扫描线填充、四阶段拆分与验收 |
 | [vulkan.md](vulkan.md) | **Vulkan 后端调研（结论：现在 NO-GO）**：本机实测（loader 1.4.341 / RTX 4060 Ti）、三份节点遍历的重复（749/694/530 行）与 `IBinUIGfx` 抽取方案、Windows 独立翻转对 GL/Vulkan 同样生效、透明窗口只能读回、局部重绘必须用持久累积帧、原语映射表、20~30 人日估算、GO/NO-GO 条件 |

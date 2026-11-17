@@ -5,6 +5,64 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.18.0] - 2026-11-17 【格式 v34】
+
+**启动耗时：把"首帧之前"逐段量出来，并修好一把会骗人的尺子。**
+
+（本版没有渲染改动：`BINUI_VERSION` 仍是 v34，三个 GPU 后端的输出与 0.17.6 逐像素相同。）
+
+### 一、修尺子：PowerShell 重定向 stderr 会让每次 `fflush` 花掉 1.1 秒
+
+0.17.6 报给用户的段数是**用 `Start-Process -RedirectStandardError` 量出来的**，同一份
+二进制只换收集方式：
+
+| 收集方式 | `UiApp ctor` 读数 |
+|---|---|
+| 控制台直连 | **3.5 ms** |
+| `Start-Process -RedirectStandardError file` | **1207 ms** |
+
+差别不在程序，在子进程 stderr 被重定向后**每次 `fflush(stderr)` 要 ~1.1 s**（写穿透 +
+杀软逐次扫描）：三段日志凭空多出 3 秒。所以探针改成两条路：
+
+* `BINUI_STARTUP=1` 仍写 stderr（交互式看方便）；
+* `BINUI_STARTUP_FILE=<path>` 用**自己的 `fopen("ab") + fwrite + fclose`** 写文件（一次
+  ~0.1 ms），量启动一律走这条；
+* 时间戳在写日志**之前**取，日志开销不计入本段。
+
+### 二、分段：窗口创建 / GL 上下文 / 首帧各占多少
+
+新增里程碑（`open: DPI+class`、`open: SPI_GETWORKAREA`、`open: CreateWindowEx`、
+`frame1: begin / beginFrame / draw_ / present done`，GL 后端再加 `GL context / LoadGL /
+shaders / state+framebuffer / font atlas`）。本机 flexshow 实测到首帧 **662 ms**：
+
+| 段 | ms | 归属 |
+|---|---|---|
+| 编译 + 装载布局 | 3.5 | binUI |
+| `CreateWindowEx` | **200** | 系统（进程内第一个窗口的一次性成本） |
+| GL 上下文 | **145** | 显卡驱动 |
+| GLSL 编译 | 15 | 驱动 |
+| GL 状态 + 帧缓冲 + 字体图集 | 3 | binUI |
+| 首帧遍历 + 顶点上传 | 31 | binUI |
+| 首帧 `SwapBuffers` | **227** | 驱动 / DWM |
+
+**binUI 自己只占 ~35 ms（5%）**。三项大头是**一次性**的：最小对照实验里，裸
+`CreateWindowExW` 在同一个进程里第一个窗口 156 ms、第二个 23 ms；`[perf]` 显示
+`呈现 avg=11.67 max=227.18`（只有第一帧异常）。所以这里没有可优化项 —— 把一次性成本
+挪位置（先隐藏建窗、GL 就绪再显示）总时长不变，只是把"白窗等待"换成"晚 500 ms 出窗"。
+对照实验留在 `tools/win_create_time.cpp`，完整数据见 [docs/startup.md](docs/startup.md)。
+
+### 三、`BINUI_FRAME_EXIT=n`：画满 n 帧自己退
+
+自动化量测以前靠 `Stop-Process -Force` 强杀，缓冲里的诊断会连带丢掉。现在：
+
+* 设了它就直接走 `requestExit()`，**正常退出**（`wglDeleteContext` + CRT 退出都跑完）；
+* 静态页面本来只画 1 帧（没脏区不出帧），所以 n>1 时外壳会 `invalidateAll()` 强制重绘，
+  "n 帧"才真的会发生；
+* `BINUI_PERF=1` 的短跑也会在 `close()` 里 `PerfFlush()` 打印一份统计（不再只有 exit 一行）。
+
+已知的一个读数陷阱也写进文档：设 `BINUI_FRAME_EXIT=1` 时，进程墙钟比"首帧画完"多
+220~265 ms —— 那是驱动卸载与 CRT 退出，不是画面没画完。
+
 ## [0.17.6] - 2026-11-17 【格式 v34】
 
 **flexshow 拖窗口变矮时"缩成一坨"，以及启动慢的分段测量。**

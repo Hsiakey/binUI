@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "binui_gfx.h"   // IBinUIGfx：draw 回调只认接口，不认具体后端
+#include "binui_paths.h" // binui::ex::StartupMark / StartupNowMs（BINUI_STARTUP 启动分段）
 
 #include "binui_renderer.h"
 #include "platform/binui_win32_foreground.h"   // BinUIForceForeground：把窗口提到前台
@@ -1181,6 +1182,7 @@ inline void BinUIAppT<Gfx>::syncImeContext() {
 template <class Gfx>
 inline int BinUIAppT<Gfx>::run() {
     if (!open()) return 1;
+    binui::ex::StartupMark("open done (window visible)");
     // 空闲时的醒来间隔 = 一个帧预算（以前固定 1ms）。输入本来就会立刻唤醒
     // MsgWaitForMultipleObjectsEx，1ms 纯属"每秒空转 1000 次"——稳态每帧的 update_
     // 都要跑一遍（宿主在 update_ 里才能决定脏区），于是后台闲着也烧 0.6% 一个核。
@@ -1238,9 +1240,11 @@ template <class Gfx>
 inline bool BinUIAppT<Gfx>::open() {
     SetProcessDPIAware();
     if (!ensureClass()) return false;
+    binui::ex::StartupMark("open: DPI+class");
 
     RECT work = { 0, 0, 800, 600 };
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
+    binui::ex::StartupMark("open: SPI_GETWORKAREA");
     int winW = std::min(width_, static_cast<int>(work.right - work.left));
     int winH = std::min(height_, static_cast<int>(work.bottom - work.top));
     int winX = work.left + ((work.right - work.left) - winW) / 2;
@@ -1264,6 +1268,7 @@ inline bool BinUIAppT<Gfx>::open() {
     }
     hwnd_ = hwnd;
     childMode_ = false;
+    binui::ex::StartupMark("open: CreateWindowEx");
     // 记下建窗时的 DPI（BINUI_FORCE_DPI 可覆盖）。换屏后 WM_DPICHANGED 会更新它，
     // 并通过 setDpiChangedFn 的回调通知宿主。
     dpi_ = dpiOf(hwnd);
@@ -1283,6 +1288,7 @@ inline bool BinUIAppT<Gfx>::open() {
         hwnd_ = nullptr;
         return false;
     }
+    binui::ex::StartupMark("open: gfx.init total");
     // WS_VISIBLE 只保证"可见"，SetFocus 只改本线程键盘焦点 —— 都不会把窗口提到
     // 前台，于是从控制台启动时窗口被 cmd 压在后面。这里补一次显式前台化。
     BinUIForceForeground(hwnd);
@@ -1576,6 +1582,7 @@ template <class Gfx>
 inline void BinUIAppT<Gfx>::close() {
     running_ = false;
     if (Perf().on && Perf().drawn > 0) {
+        PerfFlush();   // 短跑（BINUI_FRAME_EXIT）也要一份统计，否则只有 exit 一行空话
         std::fprintf(stderr, "[perf] exit: %lld frames drawn\n", Perf().drawn);
         std::fflush(stderr);
     }
@@ -1731,14 +1738,22 @@ template <class Gfx>
 inline void BinUIAppT<Gfx>::renderOnce() {
     FramePerf& perf = Perf();
     const double t0 = perf.on ? NowMs() : 0.0;
+    // 首帧分段：BINUI_STARTUP 时把"第一帧"再拆成 beginFrame / draw_ / present 三截，
+    // 否则只知道"首帧花了 300ms"，不知道是遍历上传慢还是 SwapBuffers 冷启动慢。
+    const bool sp = binui::ex::StartupOn();
+    static int probeFrame = -1;   // -1 = 还没出过帧
     applyPendingResize();
     const double t1 = perf.on ? NowMs() : 0.0;
     lastDrew_ = false;
     if (dirty_ && gfx_.isReady()) {
+        const bool firstDraw = (probeFrame < 0);
+        if (sp && firstDraw) binui::ex::StartupMark("frame1: begin");
         lastDrew_ = true;
         int rc[4] = { dirtyL_, dirtyT_, dirtyR_, dirtyB_ };
         gfx_.beginFrame(rc);
+        if (sp && firstDraw) binui::ex::StartupMark("frame1: beginFrame (msaa)");
         if (draw_) draw_(gfx_, rc);
+        if (sp && firstDraw) binui::ex::StartupMark("frame1: draw_ (verts)");
         const double t2 = perf.on ? NowMs() : 0.0;
         // 拖拽 resize 期与"客户区铺满显示器"时都走 GDI 贴屏：
         // 前者绕开 NVIDIA 在 resize+SwapBuffers 组合下的崩溃，
@@ -1757,6 +1772,10 @@ inline void BinUIAppT<Gfx>::renderOnce() {
                                  std::chrono::steady_clock::now() - pStart).count();
             if (pacedByPresent() && lastPresentMs_ < frameBudget_.count() / 1000.0 * 0.5)
                 DwmFlush();
+        }
+        if (sp && firstDraw) {
+            binui::ex::StartupMark("frame1: present done");
+            probeFrame = 0;
         }
         dirty_ = false;
         if (perf.on) {
@@ -1791,6 +1810,24 @@ inline void BinUIAppT<Gfx>::renderOnce() {
             perf.sumTotal += t3 - t0;
             if (t3 - t0 > perf.maxTotal) perf.maxTotal = t3 - t0;
             if (perf.frames >= 600) PerfFlush();
+        }
+    }
+    // 启动分段 + 自动退出（量测/截图用）：
+    //   BINUI_STARTUP → 首帧画完的绝对耗时（窗口可见到第一帧真正上屏）
+    //   BINUI_FRAME_EXIT=n → 画满 n 帧就正常退出，免得外部 Stop-Process 强杀把
+    //   还在缓冲区里的诊断输出一起带走
+    if (lastDrew_) {
+        static const int frameExit = [] {
+            const char* e = std::getenv("BINUI_FRAME_EXIT");
+            return e && *e ? std::atoi(e) : 0;
+        }();
+        static int startupFrames = 0;
+        ++startupFrames;
+        if (frameExit > 0) {
+            // 强制连出 n 帧：静态页面本来只画 1 帧（没脏区就不出帧），n>1 就成了"永远不退出"。
+            // 量测要的是"画够 n 帧自己退"，不是外部 Stop-Process 强杀（那样缓冲里的诊断会丢）。
+            if (startupFrames >= frameExit) requestExit();
+            else invalidateAll();
         }
     }
 }

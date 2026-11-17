@@ -37,19 +37,55 @@ namespace ex {
 //
 // 示例程序"双击后要等一会才出窗口"时用它分段：编译/装载布局、UiApp 构造（窗口 + GL 上下文
 // + 字体引擎）、首帧。不开环境变量时只多一次 getenv 的静态判断，零额外开销。
+// 计时原点：进程里**第一次**取时间的那一刻（示例就是在 main 开头），之后所有
+// "从进程开始算"的分段都相对它。库代码（GL 初始化、窗口外壳）拿不到 main 里的
+// tBoot，就靠这个共享原点。
+inline double& StartupOriginRef() {
+    static double t0 = 0.0;
+    return t0;
+}
 inline double StartupNowMs() {
     using namespace std::chrono;
-    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+    const double now = duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+    if (StartupOriginRef() == 0.0) StartupOriginRef() = now;
+    return now;
 }
-inline void StartupMark(double t0, const char* what) {
+inline double StartupOriginMs() { return StartupOriginRef(); }
+
+inline bool StartupOn() {
     static const bool on = [] {
         const char* e = std::getenv("BINUI_STARTUP");
-        return e && *e && std::strcmp(e, "0") != 0;
+        const char* f = std::getenv("BINUI_STARTUP_FILE");
+        return (e && *e && std::strcmp(e, "0") != 0) || (f && *f);
     }();
-    if (!on) return;
-    std::fprintf(stderr, "[startup] %-34s %7.1f ms\n", what, StartupNowMs() - t0);
+    return on;
+}
+
+inline void StartupMark(double t0, const char* what) {
+    if (!StartupOn()) return;
+    const double ms = StartupNowMs() - t0;   // 先取时间，再写日志：日志开销不计入本段
+    char line[192];
+    const int n = std::snprintf(line, sizeof(line), "[startup] %-34s %7.1f ms\n", what, ms);
+    if (n <= 0) return;
+    // BINUI_STARTUP_FILE：**别用 PowerShell 的 -RedirectStandardError 量启动**。
+    // 这台机器上把子进程的 stderr 重定向到文件后，每次 fflush 要 ~1.1 s（写穿透 +
+    // 杀软逐次扫描），三段日志就凭空多出 3 秒多 —— 量出来的是重定向的开销，不是
+    // 程序的开销（实测 console 直连 3.5 ms，重定向同一行 1207 ms）。所以分段日志
+    // 写我们自己的 fopen 句柄。
+    const char* path = std::getenv("BINUI_STARTUP_FILE");
+    if (path && *path) {
+        if (std::FILE* f = std::fopen(path, "ab")) {
+            std::fwrite(line, 1, static_cast<size_t>(n), f);
+            std::fclose(f);
+        }
+        return;
+    }
+    std::fputs(line, stderr);
     std::fflush(stderr);   // 进程被强杀时也不丢这一行
 }
+
+// 相对进程原点的分段（库内部用：拿不到 main 的 t0）
+inline void StartupMark(const char* what) { StartupMark(StartupOriginMs(), what); }
 
 // ============ 基础路径工具 ============
 

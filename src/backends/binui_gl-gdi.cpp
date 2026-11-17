@@ -6,6 +6,7 @@
 // 预乘 alpha 混合、纹理 × 顶点色、NDC 映射 viewSize。
 // 文字渲染委托 binui_font_renderer（FreeType + HarfBuzz），与平台解耦。
 #include "backends/binui_gl-gdi.h"
+#include "binui_paths.h"   // binui::ex::StartupNowMs / StartupMark（BINUI_STARTUP 启动分段）
 
 #ifndef _WIN32
 #error "binui_gl is Windows-only (WGL); port by replacing context/swap with GLX/EGL"
@@ -1378,19 +1379,27 @@ bool BinUIGLGdi::init(void* hwnd, int width, int height, bool vsync) {
     impl_->scissor[2] = width;
     impl_->scissor[3] = height;
 
+    // 启动分段：BINUI_STARTUP=1 时把 init 拆到每一步（首帧慢时才知道是哪一步慢）
+    const double t0 = binui::ex::StartupNowMs();
     if (!impl_->createContext()) { impl_->shutdown(); return false; }
+    binui::ex::StartupMark(t0, "GL context (WGL 3.3)");
     if (!LoadGL()) { impl_->shutdown(); return false; }
+    binui::ex::StartupMark(t0, "GL LoadGL (proc)");
     if (!impl_->createProgram()) { impl_->shutdown(); return false; }
+    binui::ex::StartupMark(t0, "GL shaders");
     if (!impl_->createState()) { impl_->shutdown(); return false; }
     if (!impl_->createOffscreen()) { impl_->shutdown(); return false; }
+    binui::ex::StartupMark(t0, "GL state+framebuffer");
     glViewport(0, 0, width, height);
     glUniform2fP(impl_->uniView, static_cast<float>(width), static_cast<float>(height));
     impl_->atlas.setHost(&impl_->glyphHost);
     impl_->atlas.initFonts();
+    binui::ex::StartupMark(t0, "font atlas initFonts");
     wglSwapIntervalEXT = reinterpret_cast<PFNWGLSWAPINTERVALEXT>(
         GetGLProc("wglSwapIntervalEXT"));
     if (impl_->vsync && wglSwapIntervalEXT) wglSwapIntervalEXT(1);
     impl_->ready = true;
+    binui::ex::StartupMark(t0, "GL init total");
     return true;
 }
 
