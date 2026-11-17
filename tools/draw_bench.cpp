@@ -34,7 +34,9 @@ namespace {
 
 // ---------------------------------------------------------------- 计数后端
 // 只实现契约，不做任何光栅化。四边形数按各后端真实的展开规则估：
-//   fillRect/fillLine/drawImageEx = 1（圆角图片的条带是遍历自己发的，一条一算）
+//   fillRect/drawImageEx = 1（圆角图片的条带是遍历自己发的，一条一算）；
+//   fillLine = **真实条带数**（v0.17.1 起后端走 CPU 覆盖率条带，这里调同一份
+//   BuildLineBandsAA 数，否则斜线会被低估 2~3 倍 —— svgdemo 估 2456 / 实测 6985）
 //   fillRounded = 半径 > 0 ? 九宫格 9 : 1
 //   strokeRounded = 9 × 线宽层数（后端按同心环叠厚度）
 //   drawText/drawTextWrapped = 码点数（每字形一个四边形）
@@ -95,7 +97,35 @@ struct CountGfx : IBinUIGfx {
         for (int i = 0; i < 6; i++) MixF(xf[i]);
     }
     void fillLine(float x0, float y0, float x1, float y1, float width, uint32_t c) override {
-        Count(3, 1);
+        // v0.17.4：**按真实条带数**记账。v0.17.1 起三个 GPU 后端把描边改成 CPU 覆盖率条带
+        // （一段线拆成 2~8 个四边形，斜线按像素行拆），而这个计数后端以前一律记 1 —— 于是
+        // "≈四边形/KB"严重低估：svgdemo 估 2456 个四边形，后端实测 6985（**2.8 倍**）。
+        // 这里跑同一份 BuildLineBandsAA 数条带；顺带让"遍历"计时也包含这段真实 CPU 成本
+        // （GL/VK/D3D11 的 fillLine 就是这么做的，不算进来反而是低估）。
+        // 与三个 GPU 后端同一套条带缓存（binui::LineBandCache）：命中的帧只重放，
+        // 不重算覆盖率。不加这一层的话这里给的是"每帧重算"的上界 —— cubedemo 上会报
+        // 89 µs，而真实 GL 后端是 45 µs（命中缓存）。
+        const uint64_t key = binui::MakeLineBandKey(x0, y0, x1, y1, width, c);
+        auto& cache = binui::LineBandCache();
+        auto it = cache.find(key);
+        uint64_t nb = 0;
+        if (it != cache.end()) {
+            nb = it->second.size();
+        } else {
+            static thread_local std::vector<binui::PaintBand> lbands;
+            static thread_local std::vector<uint16_t> lcov;
+            if (lbands.size() < static_cast<size_t>(binui::kMaxPathBands))
+                lbands.resize(binui::kMaxPathBands);
+            const int n2 = binui::BuildLineBandsAA(x0, y0, x1, y1, width, c, lbands.data(),
+                                                   static_cast<int>(lbands.size()), lcov);
+            if (n2 > 0) {
+                if (cache.size() >= binui::kLineBandCacheCap) cache.clear();
+                std::vector<binui::PaintBand>& slot = cache[key];
+                slot.assign(lbands.begin(), lbands.begin() + n2);
+                nb = slot.size();
+            }
+        }
+        Count(3, nb > 0 ? nb : 1u);
         Mix(4); MixF(x0); MixF(y0); MixF(x1); MixF(y1); MixF(width); Mix(c);
     }
     void strokeRounded(float x, float y, float w, float h, float r, float th,
