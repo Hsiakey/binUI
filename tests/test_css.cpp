@@ -1841,6 +1841,38 @@ static void TestIssueRegressions() {
              std::fabs(heightOf("a") - 32.0f) < 0.5f);
     }
 
+    // ---- 16.58：flex:1 的项会被压到 0，min-height 才兜得住（v0.17.6）----
+    // 浏览器里 flex 项的 `min-height` 默认是 `auto`（= 不小于自己的内容），所以"容器变矮"
+    // 最多把项压到内容高度、再多就溢出。binUI **没有实现这个 auto**，默认无下限 ——
+    // flexshow 拖窗口变矮时"'柱子"被压到 7px、"列表视口压到 7px 什么都看不见"就是这个。
+    // 这里把差异钉成断言（将来实现 auto 时这两条会改成"不小于内容高"）：
+    //   ① 没写 min-height 的 flex:1 项在空间不足时被压到 0；
+    //   ② 写了 min-height 的项守住下限（容器因此在主轴溢出）。
+    {
+        const char* html = R"HTML(<html width="300" height="200"><body>
+  <div id="box" style="display:flex; flex-direction:column; height:20">
+    <div id="a" style="flex:1"></div>
+    <div id="b" style="flex:1; min-height:50"></div>
+  </div>
+</body></html>)HTML";
+        const auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("16.58: 挤压容器页可解析",
+             !res.layout.empty() && r.loadLayout(res.layout.data(), res.layout.size()));
+        auto heightOf = [&](const char* name) -> float {
+            const uint16_t nid = r.findNodeByName(name);
+            for (const auto& nd : r.getNodes())
+                if (nd.id == nid) return nd.height;
+            return -1.0f;
+        };
+        TEST("16.58: 没写 min-height 的 flex:1 项被压到 0", heightOf("a") < 1.0f);
+        TEST("16.58: 写了 min-height 的项守住下限（50）",
+             heightOf("b") >= 49.5f);
+        // 运行期重排同一条规则也成立
+        r.setSize(300, 400);
+        TEST("16.58: setSize 之后 min-height 仍然守住", heightOf("b") >= 49.5f);
+    }
+
     // ---- 16.27：毛玻璃 backdrop-filter（v0.16.27，格式 v29 毛玻璃段） ----
     // 钉住五件事：
     //   1. backdrop-filter: blur(Npx) 落进毛玻璃段（renderer.backdropOf），带半径与合成圆角；

@@ -19,6 +19,10 @@
   · flex-shrink **已实现**（`binui_flex_layout.h` 按 shrink×basis 加权收缩）。反过来要注意：
     column 方向的滚动列表里，子项默认 shrink=1，容器一矮就被压扁 —— 写 `flex-shrink: 0` 关掉它
     （`#list` 里那 12 行就是这么写的）。
+  · **`flex:1` 的项在容器变矮时会被压到 0**（binUI 没实现 flex 项的 `min-height: auto`
+    语义 —— 浏览器里 flex 项不会小于自己的内容，这里会）。所以图表格、列表这类
+    "必须留出可用高度"的区域要显式写 `min-height`：本页 `#main` 280 / `#chart` 130 /
+    `#list` 120。窗口拖到比这还矮时整页会溢出（底部被窗口裁掉），而不是把每块都压成一坨。
 -->
 <app_window width="1100" height="720" bg="#F4F7FC" title="自适应布局">
 <html width="100%" height="100%" bg="#F4F7FC">
@@ -84,11 +88,11 @@
         </div>
 
         <!-- ③ 图表 + 列表：左 flex:1、右固定 320 -->
-        <div id="main" style="display:flex; flex:1; gap:12">
+        <div id="main" style="display:flex; flex:1; gap:12; min-height:280">
             <div id="chart-card" class="card" style="flex:1; height:100%; padding:14; display:flex; flex-direction:column">
                 <span class="card-title" style="width:100%; height:16">① 柱高用百分比（相对这张卡片的内容高度）</span>
                 <span class="note" style="width:100%; height:14">窗口拉高，柱子跟着变高；拉矮就变矮</span>
-                <div id="chart" style="display:flex; align-items:flex-end; gap:10; flex:1; margin-top:10">
+                <div id="chart" style="display:flex; align-items:flex-end; gap:10; flex:1; margin-top:10; min-height:130">
                     <div id="bar1" class="bar" style="flex:1; height:38%"></div>
                     <div id="bar2" class="bar-alt" style="flex:1; height:62%"></div>
                     <div id="bar3" class="bar" style="flex:1; height:84%"></div>
@@ -101,7 +105,7 @@
             <div id="list-card" class="card" style="width:320; height:100%; padding:14; display:flex; flex-direction:column; gap:6">
                 <span class="card-title" style="width:100%; height:16">② flex:1 + overflow:auto</span>
                 <span class="note" style="width:100%; height:14">视口高度跟窗口走，条目多了自己滚</span>
-                <div id="list" style="display:flex; flex-direction:column; gap:6; flex:1; overflow:auto">
+                <div id="list" style="display:flex; flex-direction:column; gap:6; flex:1; overflow:auto; min-height:120">
                     <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 01 · 滚动容器里的行</span></div>
                     <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 02 · 高度由内容撑开</span></div>
                     <div class="row" style="width:100%; height:32; padding:7"><span class="lab" style="width:100%; height:16">条目 03 · 不影响外层布局</span></div>

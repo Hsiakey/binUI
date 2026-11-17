@@ -26,6 +26,7 @@ int main(int argc, char* argv[]) {
     ::ShowWindow(::GetConsoleWindow(), SW_HIDE);
 #endif
 
+    const double tBoot = binui::ex::StartupNowMs();   // BINUI_STARTUP=1 时打分段耗时
     BinUIRenderer renderer;
     const std::string uiPath = binui::ex::ResolveUI(args, "flexshow", "main.html");
     CompileResult res;
@@ -40,6 +41,7 @@ int main(int argc, char* argv[]) {
     for (const auto& w : res.warnings)
         std::fprintf(stderr, "[flexshow] warning: %s\n", w.c_str());
     if (!renderer.loadLayout(res.layout.data(), res.layout.size())) return 1;
+    binui::ex::StartupMark(tBoot, "compile + load layout");
 
     const auto& wd = renderer.windowDesc();
     const auto& nodes = renderer.getNodes();
@@ -47,6 +49,11 @@ int main(int argc, char* argv[]) {
     int height = wd.present ? (int)wd.height : (nodes.empty() ? 720  : (int)nodes[0].height);
 
     UiApp app(width, height);
+    binui::ex::StartupMark(tBoot, "UiApp ctor");
+    if (std::getenv("BINUI_BOOT_EXIT")) {
+        binui::ex::StartupMark(tBoot, "main path total (no event loop)");
+        return 0;
+    }
     app.setWindowOptions(wd.present ? wd.resizable() : true, wd.present ? wd.aspect : 0,
                          wd.present && wd.transparent(), wd.present ? wd.title.c_str() : "自适应布局");
 

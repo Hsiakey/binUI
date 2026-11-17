@@ -18,6 +18,8 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <chrono>
+#include <cstring>
 #include <unordered_map>
 #include <vector>
 
@@ -30,6 +32,24 @@
 
 namespace binui {
 namespace ex {
+
+// ============ 启动耗时探针（BINUI_STARTUP=1）============
+//
+// 示例程序"双击后要等一会才出窗口"时用它分段：编译/装载布局、UiApp 构造（窗口 + GL 上下文
+// + 字体引擎）、首帧。不开环境变量时只多一次 getenv 的静态判断，零额外开销。
+inline double StartupNowMs() {
+    using namespace std::chrono;
+    return duration<double, std::milli>(steady_clock::now().time_since_epoch()).count();
+}
+inline void StartupMark(double t0, const char* what) {
+    static const bool on = [] {
+        const char* e = std::getenv("BINUI_STARTUP");
+        return e && *e && std::strcmp(e, "0") != 0;
+    }();
+    if (!on) return;
+    std::fprintf(stderr, "[startup] %-34s %7.1f ms\n", what, StartupNowMs() - t0);
+    std::fflush(stderr);   // 进程被强杀时也不丢这一行
+}
 
 // ============ 基础路径工具 ============
 

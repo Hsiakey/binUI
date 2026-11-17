@@ -1,4 +1,5 @@
 // app_win32.cpp - 极简 Win32 应用外壳 + GDI 节点绘制后端（⚠ 遗留/OLD，见 drawNodesGDI 上方）
+#include "binui_paths.h"   // binui::ex::StartupNowMs / StartupMark（BINUI_STARTUP 启动分段）
 #include "app_win32.h"
 
 #ifndef _WIN32
@@ -384,6 +385,8 @@ void BinUIApp::maximize() {
 }
 
 int BinUIApp::run() {
+    // BINUI_STARTUP=1：量"窗口创建 → 首帧"这段（启动慢时最容易漏掉的一截）
+    const double tRun = binui::ex::StartupNowMs();
     // DPI 感知：布局坐标使用物理像素，避免窗口被系统缩放放大超出屏幕
     SetProcessDPIAware();
 
@@ -431,9 +434,11 @@ int BinUIApp::run() {
     SetWindowPos(reinterpret_cast<HWND>(hwnd_), nullptr, 0, 0, 0, 0,
         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
     ShowWindow(reinterpret_cast<HWND>(hwnd_), SW_SHOW);
+    binui::ex::StartupMark(tRun, "CreateWindow+Show");
     // SW_SHOW 不一定能抢到前台（前台锁），从控制台启动时窗口会被 cmd 压住
     BinUIForceForeground(reinterpret_cast<HWND>(hwnd_));
     UpdateWindow(reinterpret_cast<HWND>(hwnd_));
+    binui::ex::StartupMark(tRun, "UpdateWindow = first frame");
 
     auto lastTime = std::chrono::high_resolution_clock::now();
     running_ = true;
