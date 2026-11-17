@@ -685,7 +685,18 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         Tex tex;          // image/view/ds：复用 Tex，销毁/描述符/采样器都是现成的
         int w = 0, h = 0; // 这一级的实际尺寸（= 图尺寸）
     };
-    std::vector<BlurLevel> blurLv;
+    // v0.17.3：降采样链按尺寸池化（与 GL 同一套语义）。以前只有一套链，第 0 级尺寸由
+    // 第一个毛玻璃节点决定，同帧第二个不同尺寸的节点就把整条链重建成新尺寸 —— 而"大玻璃卡
+    // + 小玻璃按钮 + 模糊浮层"同页很常见。淘汰的图走既有的 retiredBlurTex 两代延迟释放。
+    struct BlurSet {
+        int w0 = 0, h0 = 0;
+        int tick = 0;
+        std::vector<BlurLevel> lv;   // 0..5 降采样 + 7 暂存
+    };
+    std::vector<BlurSet> blurSets;
+    int activeBlur = -1;
+    int blurTick = 0;
+    static constexpr size_t kMaxBlurSets = 16;
     // 同一帧里换尺寸会重建，而旧图仍被**已录制但还没提交**的 draw 引用
     // （vkDeviceWaitIdle 救不了 —— 命令还没提交）。所以分两代延迟释放：
     // 本帧淘汰的进 retiredBlurTex，present 里等过上一帧 fence 之后换成 prev，再下一帧才真放。
@@ -2507,11 +2518,13 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     }
 
     void destroyBlurLevels() {
-        for (BlurLevel& b : blurLv) {
-            if (b.tex.image) freeTex(b.tex);
-            b.w = b.h = 0;
-        }
-        blurLv.clear();
+        for (BlurSet& s : blurSets)
+            for (BlurLevel& b : s.lv) {
+                if (b.tex.image) freeTex(b.tex);
+                b.w = b.h = 0;
+            }
+        blurSets.clear();
+        activeBlur = -1;
         for (Tex& t : retiredBlurTex) freeTex(t);
         retiredBlurTex.clear();
         for (Tex& t : retiredBlurTexPrev) freeTex(t);
@@ -2527,18 +2540,54 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         retiredBlurTex.clear();
     }
 
+    BlurLevel& blurAt(size_t i) {
+        static BlurLevel dummy;
+        if (activeBlur < 0) return dummy;
+        std::vector<BlurLevel>& lv = blurSets[static_cast<size_t>(activeBlur)].lv;
+        if (i >= lv.size()) { dummy = BlurLevel(); return dummy; }
+        return lv[i];
+    }
+    // 取一套以 (w0,h0) 为第 0 级的链：命中复用，否则新建（超 kMaxBlurSets 淘汰最久未用）。
+    bool selectBlurSet(int w0, int h0) {
+        if (w0 <= 0 || h0 <= 0) return false;
+        for (size_t i = 0; i < blurSets.size(); i++) {
+            if (blurSets[i].w0 == w0 && blurSets[i].h0 == h0) {
+                blurSets[i].tick = ++blurTick;
+                activeBlur = static_cast<int>(i);
+                return true;
+            }
+        }
+        if (blurSets.size() >= kMaxBlurSets) {
+            size_t victim = 0;
+            for (size_t i = 1; i < blurSets.size(); i++)
+                if (blurSets[i].tick < blurSets[victim].tick) victim = i;
+            for (BlurLevel& b : blurSets[victim].lv) {
+                if (b.tex.image) retireBlurTex(b.tex);
+                b.w = b.h = 0;
+            }
+            blurSets.erase(blurSets.begin() + static_cast<long>(victim));
+        }
+        BlurSet s;
+        s.w0 = w0;
+        s.h0 = h0;
+        s.tick = ++blurTick;
+        s.lv.resize(static_cast<size_t>(kMaxBlurLevels));
+        blurSets.push_back(std::move(s));
+        activeBlur = static_cast<int>(blurSets.size()) - 1;
+        return true;
+    }
+
     bool ensureBlurLevel(size_t i, int bw, int bh) {
         if (i >= static_cast<size_t>(kMaxBlurLevels) || bw <= 0 || bh <= 0) return false;
-        if (blurLv.size() <= i) {
-            blurLv.reserve(static_cast<size_t>(kMaxBlurLevels));
-            blurLv.resize(i + 1);
-        }
-        BlurLevel& b = blurLv[i];
+        if (activeBlur < 0) return false;
+        BlurLevel& b = blurAt(i);
         if (b.tex.image && b.w == bw && b.h == bh) return true;
         if (b.tex.image) { retireBlurTex(b.tex); b.w = b.h = 0; }
         // 与层目标同一套格式/采样数（单采样：图元都是解析式覆盖率的 quad，层和
         // 降采样目标都没有 MSAA —— 与 GL 的 FBO 也一致）。多用 TRANSFER_DST：
         // 背景要被 vkCmdCopyImage / vkCmdResolveImage 写进来；再用 SAMPLED 被采样。
+        static const bool traceLvl = std::getenv("BINUI_BLUR_TRACE") != nullptr;
+        if (traceLvl) std::fprintf(stderr, "[vk][blurlevel] create %zu %dx%d\n", i, bw, bh);
         Tex& t = b.tex;
         if (!createImage2D(bw, bh, kColorFormat,
                            VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
@@ -2636,7 +2685,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     // 主目标 = 4x MSAA 时先 resolve 整帧（与 present 同一条命令）再拷这一小块：
     // GL 的 glBlitFramebuffer(MSAA → 纹理) 在硬件上做的正是同一个"平均 4 个样本"。
     void captureBackdrop(int layerIdx, int rx, int ry, int rw, int rh) {
-        BlurLevel& l0 = blurLv[0];
+        BlurLevel& l0 = blurAt(0);
         blurLevelToTransferDst(l0);
         if (layerIdx >= 0) {
             Tex& lt = layers[static_cast<size_t>(layerIdx)].tex;
@@ -2760,7 +2809,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             else beginMainPass(true);
         };
 
-        if (!ensureBlurLevel(0, rw, rh)) {
+        if (!selectBlurSet(rw, rh) || !ensureBlurLevel(0, rw, rh)) {
             resumeTarget();
             return false;
         }
@@ -2776,12 +2825,12 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         blurForceSingle = true;
         for (int i = 1; i <= levels && chainOk; i++) {
             const size_t pi = static_cast<size_t>(i - 1);
-            const int dw = std::max(1, blurLv[pi].w / 2);
-            const int dh = std::max(1, blurLv[pi].h / 2);
+            const int dw = std::max(1, blurAt(pi).w / 2);
+            const int dh = std::max(1, blurAt(pi).h / 2);
             if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) { chainOk = false; break; }
-            blurLevelToSampled(blurLv[pi]);          // 上一级 → 只读（在渲染作用域外转）
-            blurLevelToAttachment(blurLv[static_cast<size_t>(i)]);
-            beginBlurLevelPass(blurLv[static_cast<size_t>(i)]);
+            blurLevelToSampled(blurAt(pi));          // 上一级 → 只读（在渲染作用域外转）
+            blurLevelToAttachment(blurAt(static_cast<size_t>(i)));
+            beginBlurLevelPass(blurAt(static_cast<size_t>(i)));
             // 坐标是"小图局部"的：层框/窗口裁剪都不适用（GL 的 ignoreLayerClip 同理），
             // 批次 scissor 必须换成整级 —— 否则会被节点裁剪盒整块裁掉。
             clipL = 0;
@@ -2790,7 +2839,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             clipB = dh;
             ignoreLayerClip = true;
             emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
-                     0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu, &blurLv[pi].tex);
+                     0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu, &blurAt(pi).tex);
             flush();
             g_vk.vkCmdEndRendering(cmd);
             ignoreLayerClip = false;
@@ -2807,7 +2856,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         // 3) 合成：BuildImageBands 的圆角条带 + 双线性放大 + replace 混合。
         //    这里必须**换回原来的 scissor**（节点自己的裁剪），毛玻璃不能越出节点框。
         if (chainOk) {
-            blurLevelToSampled(blurLv[static_cast<size_t>(levels)]);
+            blurLevelToSampled(blurAt(static_cast<size_t>(levels)));
             blurReplace = true;   // gaussBlurLevel 退场时把混合还原了，合成趟要重新置上
             resumeTarget();
             refreshPipeline();   // replace 变体（按当前目标：主目标 4x / 层目标 1x）
@@ -2817,7 +2866,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
                 const binui::PaintImageBand& b = bands[q];
                 if (b.w <= 0.0f || b.h <= 0.0f) continue;
                 emitQuad(b.x, b.y, b.x + b.w, b.y + b.h, b.u0, b.v0, b.u1, b.v1,
-                         0xFFFFFFFFu, &blurLv[static_cast<size_t>(levels)].tex);
+                         0xFFFFFFFFu, &blurAt(static_cast<size_t>(levels)).tex);
             }
             flush();
         }
@@ -2972,10 +3021,10 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     bool gaussBlurLevel(int level, float blurPx) {
         if (level < 0 || level >= kMaxBlurLevels - 1) return false;   // 末号留给暂存
         const size_t li = static_cast<size_t>(level);
-        if (li >= blurLv.size()) return false;
-        const int lw = blurLv[li].w, lh = blurLv[li].h;
+        if (activeBlur < 0) return false;
+        const int lw = blurAt(li).w, lh = blurAt(li).h;
         const float sigmaPx = blurPx / static_cast<float>(1 << level);
-        if (!blurLv[li].tex.image || lw < 1 || lh < 1 || !(sigmaPx > 0.0f)) return false;
+        if (!blurAt(li).tex.image || lw < 1 || lh < 1 || !(sigmaPx > 0.0f)) return false;
         const size_t ti = static_cast<size_t>(kMaxBlurLevels - 1);
         if (!ensureBlurLevel(ti, lw, lh)) return false;
         uint32_t w[33];
@@ -2994,9 +3043,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             const size_t di = pass == 0 ? ti : li;
             const size_t fi = pass == 0 ? li : ti;
             // 布局切换必须在渲染作用域外：源 → 只读，目标 → 附件
-            blurLevelToSampled(blurLv[fi]);
-            blurLevelToAttachment(blurLv[di]);
-            beginBlurLevelPass(blurLv[di]);   // 清透明 + 小图视口 + 加法变体
+            blurLevelToSampled(blurAt(fi));
+            blurLevelToAttachment(blurAt(di));
+            beginBlurLevelPass(blurAt(di));   // 清透明 + 小图视口 + 加法变体
             clipL = 0; clipT = 0; clipR = lw; clipB = lh;
             ignoreLayerClip = true;
             for (int k = -r; k <= r; k++) {
@@ -3007,11 +3056,11 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
                 if (pass == 0)
                     emitQuad(0.0f, 0.0f, static_cast<float>(lw), static_cast<float>(lh),
                              o / static_cast<float>(lw), 0.0f,
-                             1.0f + o / static_cast<float>(lw), 1.0f, c, &blurLv[fi].tex);
+                             1.0f + o / static_cast<float>(lw), 1.0f, c, &blurAt(fi).tex);
                 else
                     emitQuad(0.0f, 0.0f, static_cast<float>(lw), static_cast<float>(lh),
                              0.0f, o / static_cast<float>(lh),
-                             1.0f, 1.0f + o / static_cast<float>(lh), c, &blurLv[fi].tex);
+                             1.0f, 1.0f + o / static_cast<float>(lh), c, &blurAt(fi).tex);
             }
             flush();
             g_vk.vkCmdEndRendering(cmd);
@@ -3021,7 +3070,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         blurForceSingle = false;
         ignoreLayerClip = ignWas;   // 裁剪区还给调用方（合成/颗粒趟还要用）
         clipL = sl; clipT = st; clipR = sr; clipB = sb;
-        blurLevelToSampled(blurLv[li]);
+        blurLevelToSampled(blurAt(li));
         return true;
     }
 
@@ -3049,16 +3098,16 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         blurForceSingle = true;
         for (int i = 1; i <= levels; i++) {
             const size_t pi = static_cast<size_t>(i - 1);
-            const int dw = std::max(1, blurLv[pi].w / 2);
-            const int dh = std::max(1, blurLv[pi].h / 2);
+            const int dw = std::max(1, blurAt(pi).w / 2);
+            const int dh = std::max(1, blurAt(pi).h / 2);
             if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) break;
-            blurLevelToSampled(blurLv[pi]);
-            blurLevelToAttachment(blurLv[static_cast<size_t>(i)]);
-            beginBlurLevelPass(blurLv[static_cast<size_t>(i)]);
+            blurLevelToSampled(blurAt(pi));
+            blurLevelToAttachment(blurAt(static_cast<size_t>(i)));
+            beginBlurLevelPass(blurAt(static_cast<size_t>(i)));
             clipL = 0; clipT = 0; clipR = dw; clipB = dh;
             ignoreLayerClip = true;
             emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
-                     0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu, &blurLv[pi].tex);
+                     0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu, &blurAt(pi).tex);
             flush();
             g_vk.vkCmdEndRendering(cmd);
             ignoreLayerClip = false;
@@ -3066,7 +3115,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         }
         blurReplace = false;
         blurForceSingle = false;
-        blurLevelToSampled(blurLv[static_cast<size_t>(finalLevel)]);
+        blurLevelToSampled(blurAt(static_cast<size_t>(finalLevel)));
         // v0.16.44：末级上跑横/纵分离高斯（失败就保持"只降采样"的老观感）
         gaussBlurLevel(finalLevel, blurPx);
         return finalLevel;
@@ -3085,7 +3134,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         emitQuad(static_cast<float>(x), static_cast<float>(y),
                  static_cast<float>(x + rw), static_cast<float>(y + rh),
                  0.0f, 0.0f, 1.0f, 1.0f, col,
-                 &blurLv[static_cast<size_t>(level)].tex);
+                 &blurAt(static_cast<size_t>(level)).tex);
         flush();
     }
 
@@ -3094,7 +3143,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     bool blurLayerContent(const LayerFrame& f) {
         int rx = 0, ry = 0, rw = 0, rh = 0;
         if (!layerRegion(f, rx, ry, rw, rh)) return false;
-        if (!ensureBlurLevel(0, rw, rh)) return false;
+        if (!selectBlurSet(rw, rh) || !ensureBlurLevel(0, rw, rh)) return false;
         static const bool traceBlur = std::getenv("BINUI_BLUR_TRACE") != nullptr;
         if (traceBlur)
             std::fprintf(stderr, "[vk][blur] 层框 %.2f,%.2f %.2fx%.2f 抓取 %d,%d %dx%d 级数 %d\n",
@@ -3103,8 +3152,8 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         {
             Tex& lt = layers[static_cast<size_t>(f.idx)].tex;
             setTexLayout(lt, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
-            blurLevelToTransferDst(blurLv[0]);
-            copyImageRegion(lt.image, rx, ry, blurLv[0].tex.image, rw, rh);
+            blurLevelToTransferDst(blurAt(0));
+            copyImageRegion(lt.image, rx, ry, blurAt(0).tex.image, rw, rh);
             setTexLayout(lt, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
         }
         const int finalLevel = buildChain(f.blur);
@@ -3125,12 +3174,12 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     void drawDropShadow(const LayerFrame& f, const BinUIFilterDropShadowEntry& sh) {
         int rx = 0, ry = 0, rw = 0, rh = 0;
         if (!layerRegion(f, rx, ry, rw, rh)) return;
-        if (!ensureBlurLevel(0, rw, rh)) return;
+        if (!selectBlurSet(rw, rh) || !ensureBlurLevel(0, rw, rh)) return;
         // 1) + 2)：在 level0 里造出"上色的轮廓"
         blurReplace = false;
         blurForceSingle = true;
-        blurLevelToAttachment(blurLv[0]);
-        beginBlurLevelPass(blurLv[0]);      // 清透明 + 小图视口 + 单采样变体
+        blurLevelToAttachment(blurAt(0));
+        beginBlurLevelPass(blurAt(0));      // 清透明 + 小图视口 + 单采样变体
         clipL = 0; clipT = 0; clipR = rw; clipB = rh;
         ignoreLayerClip = true;
         {

@@ -649,7 +649,7 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 #     所以本页要 0 不同像素。圆描边（a 例）单测时差 320 像素 / 通道 123，修后 0。
 #   layer-shadow —— 组透明度图层里的 box-shadow（历史上差 ~34）。三条触发条件缺一不可：
 #     卡片底半透明、阴影大模糊低 alpha、底下是渐变。修后 ≤8（预乘色的 8bit 舍入）。
-ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern pattern-clip svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow blur-quality round-in-layer text-shadow-multi svg-filter layer-stroke layer-shadow
+ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern pattern-clip svg-mask glass glass-multi-size grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow blur-quality round-in-layer text-shadow-multi svg-filter layer-stroke layer-shadow
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 

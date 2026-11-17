@@ -390,7 +390,19 @@ struct BinUIGLGdi::Impl {
         GLuint fbo = 0;
         int w = 0, h = 0;
     };
-    std::vector<BlurLevel> blurLv;
+    // v0.17.3：降采样链按尺寸池化。
+    // 以前只有"一套"链，第 0 级尺寸由第一个毛玻璃/模糊节点决定；同帧出现第二个不同尺寸
+    // 的节点就把整条链（8 级纹理 + FBO）删了重建。而"大玻璃卡 + 小玻璃按钮 + 模糊浮层"
+    // 三种尺寸同页很常见 —— 每帧几十次纹理创建/销毁，掉的是帧不是像素。
+    struct BlurSet {
+        int w0 = 0, h0 = 0;          // 第 0 级（抓取尺寸）
+        int tick = 0;                // 最近使用顺序（淘汰用）
+        std::vector<BlurLevel> lv;   // 0..5 降采样 + 7 暂存
+    };
+    std::vector<BlurSet> blurSets;
+    int activeBlur = -1;
+    int blurTick = 0;
+    static constexpr size_t kMaxBlurSets = 16;
 
     // v0.16.28：毛玻璃的颗粒（grain）—— 64×64 可平铺噪声，确定性 LCG 生成。
     // 采样用 NEAREST + REPEAT，并且按"一个噪声纹素 = 一个屏幕像素"打，
@@ -422,13 +434,60 @@ struct BinUIGLGdi::Impl {
     // 降采样趟把图元画进小 FBO 时，坐标是"小图局部"的，不能再用层框去裁
     bool ignoreLayerClip = false;
 
+    // 取一套以 (w0,h0) 为第 0 级的链：命中复用，否则新建（超过 kMaxBlurSets 淘汰最久未用）。
+    bool selectBlurSet(int w0, int h0) {
+        if (w0 <= 0 || h0 <= 0) return false;
+        for (size_t i = 0; i < blurSets.size(); i++) {
+            if (blurSets[i].w0 == w0 && blurSets[i].h0 == h0) {
+                blurSets[i].tick = ++blurTick;
+                activeBlur = static_cast<int>(i);
+                return true;
+            }
+        }
+        if (blurSets.size() >= kMaxBlurSets) {
+            size_t victim = 0;
+            for (size_t i = 1; i < blurSets.size(); i++)
+                if (blurSets[i].tick < blurSets[victim].tick) victim = i;
+            destroyBlurSet(victim);
+            blurSets.erase(blurSets.begin() + static_cast<long>(victim));
+        }
+        BlurSet s;
+        s.w0 = w0;
+        s.h0 = h0;
+        s.tick = ++blurTick;
+        s.lv.resize(8);
+        blurSets.push_back(std::move(s));
+        activeBlur = static_cast<int>(blurSets.size()) - 1;
+        return true;
+    }
+    BlurLevel& blurAt(size_t i) {
+        static BlurLevel dummy;
+        if (activeBlur < 0) return dummy;
+        std::vector<BlurLevel>& lv = blurSets[static_cast<size_t>(activeBlur)].lv;
+        if (i >= lv.size()) { dummy = BlurLevel(); return dummy; }
+        return lv[i];
+    }
+    void destroyBlurSet(size_t idx) {
+        if (idx >= blurSets.size()) return;
+        for (BlurLevel& b : blurSets[idx].lv) {
+            if (b.fbo) { glDeleteFramebuffersP(1, &b.fbo); b.fbo = 0; }
+            if (b.tex) { glDeleteTextures(1, &b.tex); b.tex = 0; }
+        }
+    }
+    void destroyAllBlurSets() {
+        for (size_t i = 0; i < blurSets.size(); i++) destroyBlurSet(i);
+        blurSets.clear();
+        activeBlur = -1;
+    }
+
     bool ensureBlurLevel(size_t i, int w, int h) {
-        if (i >= 8 || w <= 0 || h <= 0) return false;
-        if (blurLv.size() <= i) blurLv.resize(i + 1);
-        BlurLevel& b = blurLv[i];
+        if (i >= 8 || w <= 0 || h <= 0 || activeBlur < 0) return false;
+        BlurLevel& b = blurAt(i);
         if (b.tex && b.fbo && b.w == w && b.h == h) return true;
         if (b.fbo) { glDeleteFramebuffersP(1, &b.fbo); b.fbo = 0; }
         if (b.tex) { glDeleteTextures(1, &b.tex); b.tex = 0; }
+        static const bool traceLvl = std::getenv("BINUI_BLUR_TRACE") != nullptr;
+        if (traceLvl) std::fprintf(stderr, "[gl][blurlevel] create %zu %dx%d\n", i, w, h);
         b.tex = CreateTexture2D(w, h, nullptr, true);
         if (!b.tex) return false;
         glGenFramebuffersP(1, &b.fbo);
@@ -449,12 +508,12 @@ struct BinUIGLGdi::Impl {
 
     bool gaussBlurLevel(int level, float blurPx) {
         if (level < 0 || level >= 7) return false;          // 7 号留给暂存
-        if (static_cast<size_t>(level) >= blurLv.size()) return false;
-        // ★ 不要在这里抓 BlurLevel& 引用：下面的 ensureBlurLevel(7, ...) 会 resize blurLv，
-        // vector 扩容后引用就悬空了 —— 读到的 w/h 是已释放内存。下面一律先取标量。
-        const int lw = blurLv[static_cast<size_t>(level)].w;
-        const int lh = blurLv[static_cast<size_t>(level)].h;
-        const bool hasTex = blurLv[static_cast<size_t>(level)].tex != 0;
+        if (activeBlur < 0) return false;
+        // ★ 不要在这里抓 BlurLevel& 引用：下面的 ensureBlurLevel(7, ...) 可能重建链，
+        // 引用会失效 —— 读到的 w/h 是已释放内存。下面一律先取标量。
+        const int lw = blurAt(static_cast<size_t>(level)).w;
+        const int lh = blurAt(static_cast<size_t>(level)).h;
+        const bool hasTex = blurAt(static_cast<size_t>(level)).tex != 0;
         const float sigmaPx = blurPx / static_cast<float>(1 << level);
         if (!hasTex || lw < 1 || lh < 1 || !(sigmaPx > 0.0f)) return false;
         if (!ensureBlurLevel(7, lw, lh)) return false;
@@ -468,8 +527,8 @@ struct BinUIGLGdi::Impl {
         glBlendFunc(GL_ONE, GL_ONE);
         ignoreLayerClip = true;
         for (int pass = 0; pass < 2; pass++) {
-            BlurLevel& dst = blurLv[pass == 0 ? 7 : static_cast<size_t>(level)];
-            BlurLevel& from = blurLv[pass == 0 ? static_cast<size_t>(level) : 7];
+            BlurLevel& dst = blurAt(pass == 0 ? 7 : static_cast<size_t>(level));
+            BlurLevel& from = blurAt(pass == 0 ? static_cast<size_t>(level) : 7);
             bindFbo(dst.fbo);
             glViewport(0, 0, lw, lh);
             glUniform2fP(uniView, static_cast<float>(lw), static_cast<float>(lh));
@@ -520,15 +579,15 @@ struct BinUIGLGdi::Impl {
             glBlendFunc(GL_ONE, GL_ZERO);
             ignoreLayerClip = true;
             for (int i = 1; i <= levels; i++) {
-                const int dw = std::max(1, blurLv[static_cast<size_t>(i - 1)].w / 2);
-                const int dh = std::max(1, blurLv[static_cast<size_t>(i - 1)].h / 2);
+                const int dw = std::max(1, blurAt(static_cast<size_t>(i - 1)).w / 2);
+                const int dh = std::max(1, blurAt(static_cast<size_t>(i - 1)).h / 2);
                 if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) break;
-                bindFbo(blurLv[static_cast<size_t>(i)].fbo);
+                bindFbo(blurAt(static_cast<size_t>(i)).fbo);
                 glViewport(0, 0, dw, dh);
                 glUniform2fP(uniView, static_cast<float>(dw), static_cast<float>(dh));
                 glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
                 glClear(GL_COLOR_BUFFER_BIT);
-                curTex = blurLv[static_cast<size_t>(i - 1)].tex;
+                curTex = blurAt(static_cast<size_t>(i - 1)).tex;
                 emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
                          0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFFFu);
                 flushAll();
@@ -543,7 +602,7 @@ struct BinUIGLGdi::Impl {
         bindFbo(target);
         glViewport(0, 0, winW, winH);
         glUniform2fP(uniView, static_cast<float>(winW), static_cast<float>(winH));
-        curTex = blurLv[static_cast<size_t>(finalLevel)].tex;
+        curTex = blurAt(static_cast<size_t>(finalLevel)).tex;
         emitQuad(static_cast<float>(rx), static_cast<float>(ry),
                  static_cast<float>(rx + rw), static_cast<float>(ry + rh),
                  0.0f, 1.0f, 1.0f, 0.0f, col);
@@ -556,7 +615,7 @@ struct BinUIGLGdi::Impl {
     bool blurLayerContent(const LayerFrame& f, GLuint layerFbo, GLuint prevFbo) {
         int rx = 0, ry = 0, rw = 0, rh = 0;
         if (!layerRegion(f, rx, ry, rw, rh)) return false;
-        if (!ensureBlurLevel(0, rw, rh)) return false;
+        if (!selectBlurSet(rw, rh) || !ensureBlurLevel(0, rw, rh)) return false;
         static const bool traceBlur = std::getenv("BINUI_BLUR_TRACE") != nullptr;
         if (traceBlur)
             std::fprintf(stderr, "[gl][blur] 层框 %.2f,%.2f %.2fx%.2f 抓取 %d,%d %dx%d 级数 %d\n",
@@ -564,8 +623,8 @@ struct BinUIGLGdi::Impl {
         // 抓层内容 → level0（GL 的 FBO 行从下往上，世界 y 从上往下，翻转）
         glDisable(GL_SCISSOR_TEST);   // glBlitFramebuffer 受 scissor 裁剪
         glBindFramebufferP(GL_READ_FRAMEBUFFER, layerFbo);
-        glBindFramebufferP(GL_DRAW_FRAMEBUFFER, blurLv[0].fbo);
-        curFbo = blurLv[0].fbo;
+        glBindFramebufferP(GL_DRAW_FRAMEBUFFER, blurAt(0).fbo);
+        curFbo = blurAt(0).fbo;
         {
             const int by = winH - (ry + rh);
             glBlitFramebufferP(rx, by, rx + rw, by + rh, 0, 0, rw, rh,
@@ -590,9 +649,9 @@ struct BinUIGLGdi::Impl {
                         const BinUIFilterDropShadowEntry& sh) {
         int rx = 0, ry = 0, rw = 0, rh = 0;
         if (!layerRegion(f, rx, ry, rw, rh)) return;
-        if (!ensureBlurLevel(0, rw, rh)) return;
+        if (!selectBlurSet(rw, rh) || !ensureBlurLevel(0, rw, rh)) return;
         glDisable(GL_SCISSOR_TEST);
-        bindFbo(blurLv[0].fbo);
+        bindFbo(blurAt(0).fbo);
         glViewport(0, 0, rw, rh);
         glUniform2fP(uniView, static_cast<float>(rw), static_cast<float>(rh));
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
@@ -1283,11 +1342,7 @@ void flushAll() {
             if (kv.second) glDeleteTextures(1, &kv.second);
         images.clear();
         if (noiseTex) { glDeleteTextures(1, &noiseTex); noiseTex = 0; }
-        for (BlurLevel& bl : blurLv) {
-            if (bl.fbo) { glDeleteFramebuffersP(1, &bl.fbo); bl.fbo = 0; }
-            if (bl.tex) { glDeleteTextures(1, &bl.tex); bl.tex = 0; }
-        }
-        blurLv.clear();
+        destroyAllBlurSets();
         if (whiteTex) { glDeleteTextures(1, &whiteTex); whiteTex = 0; }
         if (offTex) { glDeleteTextures(1, &offTex); offTex = 0; }
         if (offFbo) { glDeleteFramebuffersP(1, &offFbo); offFbo = 0; }
@@ -1820,14 +1875,14 @@ bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
     const bool scissorWas = glIsEnabled(GL_SCISSOR_TEST) != 0;
 
     // 1) 抓背景：当前目标 → level0（GL 的 FBO 行从下往上，世界 y 从上往下，翻转）
-    if (!d.ensureBlurLevel(0, rw, rh)) {
+    if (!d.selectBlurSet(rw, rh) || !d.ensureBlurLevel(0, rw, rh)) {
         d.bindFbo(prevFbo);
         return false;
     }
     glDisable(GL_SCISSOR_TEST);   // glBlitFramebuffer 受 scissor 裁剪
     glBindFramebufferP(GL_READ_FRAMEBUFFER, prevFbo);
-    glBindFramebufferP(GL_DRAW_FRAMEBUFFER, d.blurLv[0].fbo);
-    d.curFbo = d.blurLv[0].fbo;
+    glBindFramebufferP(GL_DRAW_FRAMEBUFFER, d.blurAt(0).fbo);
+    d.curFbo = d.blurAt(0).fbo;
     {
         const int by = d.winH - ry1;
         glBlitFramebufferP(rx, by, rx1, by + rh, 0, 0, rw, rh,
@@ -1840,15 +1895,15 @@ bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
     d.ignoreLayerClip = true;
     bool chainOk = true;
     for (int i = 1; i <= levels && chainOk; i++) {
-        const int dw = std::max(1, d.blurLv[static_cast<size_t>(i - 1)].w / 2);
-        const int dh = std::max(1, d.blurLv[static_cast<size_t>(i - 1)].h / 2);
+        const int dw = std::max(1, d.blurAt(static_cast<size_t>(i - 1)).w / 2);
+        const int dh = std::max(1, d.blurAt(static_cast<size_t>(i - 1)).h / 2);
         if (!d.ensureBlurLevel(static_cast<size_t>(i), dw, dh)) { chainOk = false; break; }
-        d.bindFbo(d.blurLv[static_cast<size_t>(i)].fbo);
+        d.bindFbo(d.blurAt(static_cast<size_t>(i)).fbo);
         glViewport(0, 0, dw, dh);
         glUniform2fP(d.uniView, static_cast<float>(dw), static_cast<float>(dh));
         glClearColor(0.0f, 0.0f, 0.0f, 0.0f);
         glClear(GL_COLOR_BUFFER_BIT);
-        d.curTex = d.blurLv[static_cast<size_t>(i - 1)].tex;
+        d.curTex = d.blurAt(static_cast<size_t>(i - 1)).tex;
         // 目标像素中心对上一级：v 轴翻转（纹理行 0 = 目标底部）
         d.emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
                    0.0f, 1.0f, 1.0f, 0.0f, 0xFFFFFFFFu);
@@ -1872,7 +1927,7 @@ bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
         // 毛玻璃的合成必须是 replace —— 这里显式再设一次，别依赖"上一段代码留的状态"。
         glBlendFunc(GL_ONE, GL_ZERO);
         if (scissorWas) glEnable(GL_SCISSOR_TEST);   // 合成要遵守节点的裁剪
-        d.curTex = d.blurLv[static_cast<size_t>(levels)].tex;
+        d.curTex = d.blurAt(static_cast<size_t>(levels)).tex;
         binui::PaintImageBand bands[binui::kMaxImageBands];
         const int nb = binui::BuildImageBands(x, y, w, h, radius, bands);
         for (int q = 0; q < nb; q++) {

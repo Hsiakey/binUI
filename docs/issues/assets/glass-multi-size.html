@@ -1,0 +1,35 @@
+<html width="660" height="470" bg="#EEF2F7">
+  <!-- v0.17.3：降采样链按尺寸池化 —— 判据页。
+       一页里放**四种不同尺寸**的毛玻璃 + 两个不同尺寸的 filter:blur：
+       以前只有一套链（第 0 级尺寸由第一个节点决定），第二个不同尺寸的节点就把整条链
+       （8 级纹理 + FBO/视图）删了重建；一页里 4 种尺寸 = 每帧重建 6 次。
+       现在按 (第0级宽, 高) 留最多 4 套，命中复用，超出淘汰最久未用。
+       只进跨后端比对（三端像素必须一致）。 -->
+
+  <!-- 用一块渐变+条纹背板，这样"糊没糊"一眼可见 -->
+  <div style="position:absolute;left:0px;top:0px;width:660px;height:470px;background:linear-gradient(160deg,#0EA5E9,#7C3AED 55%,#F43F5E)"></div>
+  <div style="position:absolute;left:0px;top:0px;width:660px;height:470px">
+    <div style="position:absolute;left:0px;top:24px;width:660px;height:10px;background:#FFFFFF;opacity:0.85"></div>
+    <div style="position:absolute;left:0px;top:64px;width:660px;height:6px;background:#0F172A;opacity:0.7"></div>
+    <div style="position:absolute;left:0px;top:104px;width:660px;height:16px;background:#FFFFFF;opacity:0.6"></div>
+    <div style="position:absolute;left:60px;top:0px;width:12px;height:470px;background:#FFFFFF;opacity:0.7"></div>
+    <div style="position:absolute;left:220px;top:0px;width:8px;height:470px;background:#0F172A;opacity:0.6"></div>
+    <div style="position:absolute;left:420px;top:0px;width:20px;height:470px;background:#FFFFFF;opacity:0.5"></div>
+  </div>
+
+  <!-- 四种不同尺寸（每个都是一个独立第 0 级尺寸） -->
+  <div style="position:absolute;left:16px;top:150px;width:240px;height:150px;border-radius:18px;backdrop-filter:blur(18px);background:rgba(255,255,255,0.18)"></div>
+  <div style="position:absolute;left:272px;top:150px;width:150px;height:92px;border-radius:14px;backdrop-filter:blur(18px);background:rgba(255,255,255,0.18)"></div>
+  <div style="position:absolute;left:438px;top:150px;width:80px;height:64px;border-radius:12px;backdrop-filter:blur(18px);background:rgba(255,255,255,0.18)"></div>
+  <div style="position:absolute;left:536px;top:150px;width:108px;height:200px;border-radius:16px;backdrop-filter:blur(18px);background:rgba(255,255,255,0.18)"></div>
+
+  <!-- 两个不同尺寸的 filter:blur（与毛玻璃共用同一套降采样链） -->
+  <div style="position:absolute;left:16px;top:330px;width:200px;height:50px;border-radius:10px;background:#FFFFFF;filter:blur(6px)"></div>
+  <div style="position:absolute;left:240px;top:326px;width:96px;height:58px;border-radius:10px;background:#0F172A;filter:blur(10px)"></div>
+
+  <!-- 一颗颗粒（grain）玻璃，确认池化没有波及颗粒路径 -->
+  <div style="position:absolute;left:360px;top:368px;width:150px;height:76px;border-radius:14px;backdrop-filter:blur(14px) grain(0.6);background:rgba(255,255,255,0.16)"></div>
+
+  <span style="position:absolute;left:16px;top:16px;width:628px;height:20px;font-size:13px;color:#FFFFFF">v0.17.3：一页 4 种尺寸的毛玻璃 + 2 种尺寸的 filter:blur —— 降采样链按尺寸池化</span>
+  <span style="position:absolute;left:16px;top:452px;width:630px;height:16px;font-size:10px;color:#F8FAFC">三端像素必须一致；BINUI_BLUR_TRACE=1 可看到每次选链是 hit 还是 new</span>
+</html>

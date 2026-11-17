@@ -954,7 +954,17 @@ struct BinUID3D::Impl {
         ID3D11ShaderResourceView* srv = nullptr;
         int w = 0, h = 0;
     };
-    std::vector<BlurLevel> blurLv;
+    // v0.17.3：降采样链按尺寸池化（与 GL/VK 同一套语义）。以前只有一套链，第 0 级尺寸
+    // 由第一个毛玻璃节点决定，同帧第二个不同尺寸的节点就把整条链重建成新尺寸。
+    struct BlurSet {
+        int w0 = 0, h0 = 0;
+        int tick = 0;
+        std::vector<BlurLevel> lv;   // 0..5 降采样 + 7 暂存
+    };
+    std::vector<BlurSet> blurSets;
+    int activeBlur = -1;
+    int blurTick = 0;
+    static constexpr size_t kMaxBlurSets = 16;
     ID3D11Texture2D* capTex = nullptr;   // 窗口大小的单采样中转（MSAA 目标先解析到这里）
     // 降采样趟把图元画进小纹理时，坐标是"小图局部"的，不能再按层框裁
     bool ignoreLayerClip = false;
@@ -966,10 +976,43 @@ struct BinUID3D::Impl {
         b.w = b.h = 0;
     }
 
+    BlurLevel& blurAt(size_t i) {
+        static BlurLevel dummy;
+        if (activeBlur < 0) return dummy;
+        std::vector<BlurLevel>& lv = blurSets[static_cast<size_t>(activeBlur)].lv;
+        if (i >= lv.size()) { dummy = BlurLevel(); return dummy; }
+        return lv[i];
+    }
+    // 取一套以 (w0,h0) 为第 0 级的链：命中复用，否则新建（超 kMaxBlurSets 淘汰最久未用）。
+    bool selectBlurSet(int w0, int h0) {
+        if (w0 <= 0 || h0 <= 0) return false;
+        for (size_t i = 0; i < blurSets.size(); i++) {
+            if (blurSets[i].w0 == w0 && blurSets[i].h0 == h0) {
+                blurSets[i].tick = ++blurTick;
+                activeBlur = static_cast<int>(i);
+                return true;
+            }
+        }
+        if (blurSets.size() >= kMaxBlurSets) {
+            size_t victim = 0;
+            for (size_t i = 1; i < blurSets.size(); i++)
+                if (blurSets[i].tick < blurSets[victim].tick) victim = i;
+            for (BlurLevel& b : blurSets[victim].lv) releaseBlurLevel(b);
+            blurSets.erase(blurSets.begin() + static_cast<long>(victim));
+        }
+        BlurSet s;
+        s.w0 = w0;
+        s.h0 = h0;
+        s.tick = ++blurTick;
+        s.lv.resize(8);
+        blurSets.push_back(std::move(s));
+        activeBlur = static_cast<int>(blurSets.size()) - 1;
+        return true;
+    }
+
     bool ensureBlurLevel(size_t i, int w, int h) {
-        if (i >= 8 || w <= 0 || h <= 0) return false;
-        if (blurLv.size() <= i) blurLv.resize(i + 1);
-        BlurLevel& b = blurLv[i];
+        if (i >= 8 || w <= 0 || h <= 0 || activeBlur < 0) return false;
+        BlurLevel& b = blurAt(i);
         if (b.tex && b.w == w && b.h == h) return true;
         releaseBlurLevel(b);
         D3D11_TEXTURE2D_DESC td = {};
@@ -981,6 +1024,8 @@ struct BinUID3D::Impl {
         td.SampleDesc.Count = 1;
         td.Usage = D3D11_USAGE_DEFAULT;
         td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        static const bool traceLvl = std::getenv("BINUI_BLUR_TRACE") != nullptr;
+        if (traceLvl) std::fprintf(stderr, "[d3d][blurlevel] create %zu %dx%d\n", i, w, h);
         if (FAILED(device->CreateTexture2D(&td, nullptr, &b.tex))) { b.tex = nullptr; return false; }
         if (FAILED(device->CreateRenderTargetView(b.tex, nullptr, &b.rtv)) ||
             FAILED(device->CreateShaderResourceView(b.tex, nullptr, &b.srv))) {
@@ -1111,10 +1156,10 @@ struct BinUID3D::Impl {
     bool gaussBlurLevel(int level, float blurPx) {
         if (level < 0 || level >= 7) return false;   // 末号留给暂存
         const size_t li = static_cast<size_t>(level);
-        if (li >= blurLv.size()) return false;
-        const int lw = blurLv[li].w, lh = blurLv[li].h;
+        if (activeBlur < 0) return false;
+        const int lw = blurAt(li).w, lh = blurAt(li).h;
         const float sigmaPx = blurPx / static_cast<float>(1 << level);
-        if (!blurLv[li].tex || lw < 1 || lh < 1 || !(sigmaPx > 0.0f)) return false;
+        if (!blurAt(li).tex || lw < 1 || lh < 1 || !(sigmaPx > 0.0f)) return false;
         if (!ensureBlurLevel(7, lw, lh)) return false;
         uint32_t w[33];
         const int n = gaussTaps(sigmaPx, w, 33);
@@ -1128,8 +1173,8 @@ struct BinUID3D::Impl {
         const bool ignWas = ignoreLayerClip;
         const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         for (int pass = 0; pass < 2; pass++) {
-            BlurLevel& dst = blurLv[pass == 0 ? 7 : li];
-            BlurLevel& from = blurLv[pass == 0 ? li : 7];
+            BlurLevel& dst = blurAt(pass == 0 ? 7 : li);
+            BlurLevel& from = blurAt(pass == 0 ? li : 7);
             ID3D11RenderTargetView* drt = dst.rtv;
             ctx->OMSetRenderTargets(1, &drt, nullptr);
             const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -1208,10 +1253,10 @@ struct BinUID3D::Impl {
         const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         ctx->OMSetBlendState(blendReplace, bf, 0xFFFFFFFF);
         for (int i = 1; i <= levels; i++) {
-            const int dw = std::max(1, blurLv[static_cast<size_t>(i - 1)].w / 2);
-            const int dh = std::max(1, blurLv[static_cast<size_t>(i - 1)].h / 2);
+            const int dw = std::max(1, blurAt(static_cast<size_t>(i - 1)).w / 2);
+            const int dh = std::max(1, blurAt(static_cast<size_t>(i - 1)).h / 2);
             if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) break;
-            BlurLevel& L = blurLv[static_cast<size_t>(i)];
+            BlurLevel& L = blurAt(static_cast<size_t>(i));
             ID3D11RenderTargetView* lrt = L.rtv;
             ctx->OMSetRenderTargets(1, &lrt, nullptr);
             const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -1223,7 +1268,7 @@ struct BinUID3D::Impl {
             ctx->UpdateSubresource(cb, 0, nullptr, vs, 0, 0);
             ignoreLayerClip = true;
             scissor[0] = 0; scissor[1] = 0; scissor[2] = dw; scissor[3] = dh;
-            curSrv = blurLv[static_cast<size_t>(i - 1)].srv;
+            curSrv = blurAt(static_cast<size_t>(i - 1)).srv;
             curLinear = 1;
             emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
                      0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu);
@@ -1240,7 +1285,7 @@ struct BinUID3D::Impl {
 
     // 把某一级按正常 alpha 合成到当前目标（当前目标必须已经恢复好）
     void compositeLevel(int level, int x, int y, int rw, int rh, uint32_t col) {
-        curSrv = blurLv[static_cast<size_t>(level)].srv;
+        curSrv = blurAt(static_cast<size_t>(level)).srv;
         curLinear = 1;
         const int sc[4] = { scissor[0], scissor[1], scissor[2], scissor[3] };
         scissor[0] = x; scissor[1] = y; scissor[2] = x + rw; scissor[3] = y + rh;
@@ -1257,12 +1302,12 @@ struct BinUID3D::Impl {
     bool blurLayerContent(const LayerFrame& f) {
         int rx = 0, ry = 0, rw = 0, rh = 0;
         if (!layerRegion(f, rx, ry, rw, rh)) return false;
-        if (!ensureBlurLevel(0, rw, rh)) return false;
+        if (!selectBlurSet(rw, rh) || !ensureBlurLevel(0, rw, rh)) return false;
         static const bool traceBlur = std::getenv("BINUI_BLUR_TRACE") != nullptr;
         if (traceBlur)
             std::fprintf(stderr, "[d3d11][blur] 层框 %.2f,%.2f %.2fx%.2f 抓取 %d,%d %dx%d 级数 %d\n",
                          f.x, f.y, f.w, f.h, rx, ry, rw, rh, blurLevelsFor(f.blur));
-        // 1) 抓层内容 → level0（DST 是 blurLv[0]，源是层纹理：拷之前两边都得解绑）
+        // 1) 抓层内容 → level0（DST 是 blurAt(0)，源是层纹理：拷之前两边都得解绑）
         ID3D11RenderTargetView* nullRt[1] = { nullptr };
         ctx->OMSetRenderTargets(1, nullRt, nullptr);
         {
@@ -1270,7 +1315,7 @@ struct BinUID3D::Impl {
             ctx->PSSetShaderResources(0, 1, nullSrv);
             D3D11_BOX box = { static_cast<UINT>(rx), static_cast<UINT>(ry), 0,
                               static_cast<UINT>(rx + rw), static_cast<UINT>(ry + rh), 1 };
-            ctx->CopySubresourceRegion(blurLv[0].tex, 0, 0, 0, 0,
+            ctx->CopySubresourceRegion(blurAt(0).tex, 0, 0, 0, 0,
                                        layers[static_cast<size_t>(f.idx)].tex, 0, &box);
         }
         // 2) 降采样链 + 3) 回父目标合成
@@ -1287,9 +1332,9 @@ struct BinUID3D::Impl {
     void drawDropShadow(const LayerFrame& f, const BinUIFilterDropShadowEntry& sh) {
         int rx = 0, ry = 0, rw = 0, rh = 0;
         if (!layerRegion(f, rx, ry, rw, rh)) return;
-        if (!ensureBlurLevel(0, rw, rh)) return;
+        if (!selectBlurSet(rw, rh) || !ensureBlurLevel(0, rw, rh)) return;
         // 1) + 2)：阴影色铺满 level0，再用"保留混合"乘上层内容的 alpha
-        BlurLevel& L0 = blurLv[0];
+        BlurLevel& L0 = blurAt(0);
         ID3D11RenderTargetView* lrt = L0.rtv;
         ctx->OMSetRenderTargets(1, &lrt, nullptr);
         const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -1539,8 +1584,10 @@ struct BinUID3D::Impl {
         if (blendAdd) { blendAdd->Release(); blendAdd = nullptr; }
     if (samPointWrap) { samPointWrap->Release(); samPointWrap = nullptr; }
     if (noiseSrv) { noiseSrv->Release(); noiseSrv = nullptr; }
-    for (BlurLevel& bl : blurLv) releaseBlurLevel(bl);
-    blurLv.clear();
+    for (BlurSet& s : blurSets)
+        for (BlurLevel& bl : s.lv) releaseBlurLevel(bl);
+    blurSets.clear();
+    activeBlur = -1;
     if (capTex) { capTex->Release(); capTex = nullptr; }
     if (cb) { cb->Release(); cb = nullptr; }
         if (vb) { vb->Release(); vb = nullptr; }
@@ -2073,7 +2120,7 @@ bool BinUID3D::backdropBlur(float x, float y, float w, float h, float radius,
                               static_cast<float>(d.winH), 0, 1 };
     { UINT n = 1; d.ctx->RSGetViewports(&n, &prevVp); }
 
-    if (!d.ensureBlurLevel(0, rw, rh)) return false;
+    if (!d.selectBlurSet(rw, rh) || !d.ensureBlurLevel(0, rw, rh)) return false;
 
     // 1) 抓背景：MSAA 主目标先解析到单采样中转，再按区域 Copy
     ID3D11Texture2D* srcTex = curTex;
@@ -2093,7 +2140,7 @@ bool BinUID3D::backdropBlur(float x, float y, float w, float h, float radius,
         d.ctx->PSSetShaderResources(0, 1, nullSrv);         // 别让 SRV 绑着被拷
         D3D11_BOX box = { static_cast<UINT>(rx), static_cast<UINT>(ry), 0,
                           static_cast<UINT>(rx1), static_cast<UINT>(ry1), 1 };
-        d.ctx->CopySubresourceRegion(d.blurLv[0].tex, 0, 0, 0, 0, srcTex, 0, &box);
+        d.ctx->CopySubresourceRegion(d.blurAt(0).tex, 0, 0, 0, 0, srcTex, 0, &box);
     }
     { ID3D11RenderTargetView* back = curRtv;
       d.ctx->OMSetRenderTargets(1, &back, nullptr); }
@@ -2103,10 +2150,10 @@ bool BinUID3D::backdropBlur(float x, float y, float w, float h, float radius,
     d.ctx->OMSetBlendState(d.blendReplace, bf, 0xFFFFFFFF);
     bool chainOk = true;
     for (int i = 1; i <= levels && chainOk; i++) {
-        const int dw = std::max(1, d.blurLv[static_cast<size_t>(i - 1)].w / 2);
-        const int dh = std::max(1, d.blurLv[static_cast<size_t>(i - 1)].h / 2);
+        const int dw = std::max(1, d.blurAt(static_cast<size_t>(i - 1)).w / 2);
+        const int dh = std::max(1, d.blurAt(static_cast<size_t>(i - 1)).h / 2);
         if (!d.ensureBlurLevel(static_cast<size_t>(i), dw, dh)) { chainOk = false; break; }
-        Impl::BlurLevel& L = d.blurLv[static_cast<size_t>(i)];
+        Impl::BlurLevel& L = d.blurAt(static_cast<size_t>(i));
         ID3D11RenderTargetView* rt = L.rtv;
         d.ctx->OMSetRenderTargets(1, &rt, nullptr);
         const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -2120,7 +2167,7 @@ bool BinUID3D::backdropBlur(float x, float y, float w, float h, float radius,
         // ★ 关键：batches 的矩形取自 scissor（节点裁剪盒），小目标上会被整块裁掉
         const int savedSc[4] = { d.scissor[0], d.scissor[1], d.scissor[2], d.scissor[3] };
         d.scissor[0] = 0; d.scissor[1] = 0; d.scissor[2] = dw; d.scissor[3] = dh;
-        d.curSrv = d.blurLv[static_cast<size_t>(i - 1)].srv;
+        d.curSrv = d.blurAt(static_cast<size_t>(i - 1)).srv;
         d.curLinear = 1;
         d.emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
                    0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu);
@@ -2140,7 +2187,7 @@ bool BinUID3D::backdropBlur(float x, float y, float w, float h, float radius,
         float vs[2] = { static_cast<float>(d.winW), static_cast<float>(d.winH) };
         d.ctx->UpdateSubresource(d.cb, 0, nullptr, vs, 0, 0);
         d.ctx->OMSetBlendState(d.blendReplace, bf, 0xFFFFFFFF);
-        d.curSrv = d.blurLv[static_cast<size_t>(levels)].srv;
+        d.curSrv = d.blurAt(static_cast<size_t>(levels)).srv;
         d.curLinear = 1;
         binui::PaintImageBand bands[binui::kMaxImageBands];
         const int nb = binui::BuildImageBands(x, y, w, h, radius, bands);

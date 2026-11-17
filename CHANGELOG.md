@@ -5,6 +5,39 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.17.3] - 2026-11-17 【格式 v34】
+
+**毛玻璃 / `filter: blur` 的降采样链按尺寸池化。** 以前三个后端都只维护**一套**链，
+第 0 级尺寸由第一个毛玻璃节点决定；同帧出现第二个不同尺寸的节点就把整条链
+（8 级纹理 + 目标/视图）删了重建 —— 而"大玻璃卡 + 小玻璃按钮 + 模糊浮层"同页很常见，
+等于每帧几十次纹理创建/销毁。零格式改动、零像素变化。
+
+### 做法
+
+- 三端各加一个 `BlurSet` 池：key 是**第 0 级（抓取）尺寸**，命中直接复用，最多留
+  `kMaxBlurSets = 16` 套，超出淘汰最久未用（VK 的淘汰走既有的 `retiredBlurTex` 两代
+  延迟释放 —— 命令缓冲到 present 才提交，当场删图就是悬空引用）。
+- 所有建 level0 的地方先 `selectBlurSet(rw, rh)`；`ensureBlurLevel` 与 `gaussBlurLevel`
+  改成操作"当前活动套"。GL/D3D11 的临时链清理、VK 的纹理布局记账都跟着套走。
+- **踩到的坑**：VK 的 `blurBackdrop` 里那处 `ensureBlurLevel(0,...)` 带花括号（失败要
+  `resumeTarget()`），批量替换的正则只匹配了"单行 return"的写法，于是 VK 漏掉
+  `selectBlurSet` → `activeBlur` 一直是 -1 → 第一个玻璃节点直接返回 false，
+  `anim/glass` 里 11374 个像素没糊（GL/D3D11 正常）。教训：**跨三端改同一处调用约定时，
+  别用文本替换，逐个点确认**。
+
+### 验证
+
+- 新增判据页 `anim/glass-multi-size`（一页 4 种尺寸毛玻璃 + 2 种尺寸 `filter:blur` +
+  一个 grain 玻璃，背板是渐变加条纹，糊没糊一眼可见）：三端 **0 不同像素、最大通道差 1**；
+- **量测**（`BINUI_BLUR_TRACE=1` 数 `ensureBlurLevel` 里真正创建纹理的次数，`--bench 60`）：
+  该页 60 帧共 **31 次**创建（只有第一帧建 7 套链），改前是每帧 ~34 次（60 帧 2046 次）
+  —— **66 倍**；
+- `pixels-vk` 全部用例 0 个超容差像素（含既有的 `anim/glass`）、`pixels` 18/18 零差异、
+  `pixels-d3d11` 只剩既有的 `anim/affine-text` 6 像素。
+- 剩余边界：`gaussBlurLevel` 的 7 号暂存仍按"当前级别尺寸"复用，同一套链里不同级别的
+  节点交替时它会重建一次（`anim/glass` 实测仍有 ~4.7 次/帧，与池化前一致）。
+- 证据图：`docs/issues/assets/glass-multi-size.png`。
+
 ## [0.17.2] - 2026-11-17 【格式 v34】
 
 **`<pattern>` 的内容现在裁到自己的 tile 框（SVG 规范：tile 框外不画）。**
