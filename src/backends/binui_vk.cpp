@@ -1291,61 +1291,128 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         }
     }
 
-    // 首选 B8G8R8A8_UNORM（与渲染目标同格式，blit 是纯拷贝）；没有就退回驱动给的第一种
-    VkSurfaceFormatKHR pickSurfaceFormat() {
+    // ---- surface 能力缓存 ----
+    // 拖边框时交换链每帧重建，而重建前的**查询**（caps / formats / presentModes 三次枚举）
+    // 实测占 3.3~4.4 ms —— 比 vkCreateSwapchainKHR 本身还贵。这三样在一个 surface 上
+    // 是不变的（caps.currentExtent 除外，窗口尺寸由我们自己记着），所以只在建 surface
+    // 和重建失败时查一次，之后全部走缓存。
+    bool surfInfoValid = false;
+    VkSurfaceCapabilitiesKHR surfCaps{};
+    VkSurfaceFormatKHR surfFmt{};
+    std::vector<VkPresentModeKHR> surfModes;
+
+    bool ensureSurfaceInfo() {
+        if (surfInfoValid) return true;
+        if (!surface || !physical) return false;
+        if (g_vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &surfCaps) !=
+            VK_SUCCESS)
+            return false;
+        // 首选 B8G8R8A8_UNORM（与渲染目标同格式，blit 是纯拷贝）；没有就退回驱动给的第一种
+        surfFmt.format = kColorFormat;
+        surfFmt.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
         uint32_t n = 0;
         g_vk.vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &n, nullptr);
-        VkSurfaceFormatKHR out{};
-        out.format = kColorFormat;
-        out.colorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
-        if (n == 0) return out;
-        std::vector<VkSurfaceFormatKHR> fs(n);
-        g_vk.vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &n, fs.data());
-        for (const auto& f : fs) {
-            if (f.format == kColorFormat && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR)
-                return f;
+        if (n > 0) {
+            std::vector<VkSurfaceFormatKHR> fs(n);
+            g_vk.vkGetPhysicalDeviceSurfaceFormatsKHR(physical, surface, &n, fs.data());
+            bool found = false;
+            for (const auto& f : fs) {
+                if (f.format == kColorFormat && f.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                    surfFmt = f;
+                    found = true;
+                    break;
+                }
+            }
+            // n==1 且 format==UNDEFINED：驱动表示"任意格式"，保持首选
+            if (!found && !(n == 1 && fs[0].format == VK_FORMAT_UNDEFINED)) surfFmt = fs[0];
         }
-        if (n == 1 && fs[0].format == VK_FORMAT_UNDEFINED) return out;   // 任意格式
-        return fs[0];
+        n = 0;
+        surfModes.clear();
+        g_vk.vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &n, nullptr);
+        if (n > 0) {
+            surfModes.resize(n);
+            g_vk.vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &n, surfModes.data());
+        }
+        surfInfoValid = true;
+        return true;
     }
 
     // vsync=false 时优先 MAILBOX（不撕裂、不阻塞），否则 IMMEDIATE；都没有就 FIFO
-    VkPresentModeKHR pickPresentMode(bool vsync) {
-        uint32_t n = 0;
-        g_vk.vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &n, nullptr);
-        if (n == 0) return VK_PRESENT_MODE_FIFO_KHR;
-        std::vector<VkPresentModeKHR> ms(n);
-        g_vk.vkGetPhysicalDeviceSurfacePresentModesKHR(physical, surface, &n, ms.data());
+    // 走缓存里的 presentModes（见 ensureSurfaceInfo：每帧重建时不再枚举）
+    VkPresentModeKHR pickPresentMode(bool vsyncWanted) const {
+        if (surfModes.empty()) return VK_PRESENT_MODE_FIFO_KHR;
         auto has = [&](VkPresentModeKHR m) {
-            for (VkPresentModeKHR x : ms) if (x == m) return true;
+            for (VkPresentModeKHR x : surfModes)
+                if (x == m) return true;
             return false;
         };
-        if (vsync) return has(VK_PRESENT_MODE_FIFO_KHR) ? VK_PRESENT_MODE_FIFO_KHR : ms[0];
+        if (vsyncWanted)
+            return has(VK_PRESENT_MODE_FIFO_KHR) ? VK_PRESENT_MODE_FIFO_KHR : surfModes[0];
         if (has(VK_PRESENT_MODE_MAILBOX_KHR)) return VK_PRESENT_MODE_MAILBOX_KHR;
         if (has(VK_PRESENT_MODE_IMMEDIATE_KHR)) return VK_PRESENT_MODE_IMMEDIATE_KHR;
         return VK_PRESENT_MODE_FIFO_KHR;
     }
 
-    bool createSwapchain() {
+    // reuseOld：Vulkan 推荐的 resize 路径 —— 不先销毁旧链，而是把旧链交给驱动
+    // （ci.oldSwapchain），驱动可以复用底层交换链资源；创建成功后再由我们自己销毁旧链。
+    // 实测"先销毁再新建"每次 ~26 ms（拖边框每帧一次 = 直接掉到 30 fps），复用后见 docs/startup.md §5。
+    bool createSwapchain(bool reuseOld = false) {
         if (!windowMode || !surface) return false;
-        destroySwapchain();
+        const bool swapTrace = std::getenv("BINUI_RESIZE_TRACE") != nullptr;
+        const auto tE0 = swapTrace ? std::chrono::steady_clock::now()
+                                   : std::chrono::steady_clock::time_point{};
+        VkSwapchainKHR oldChain = VK_NULL_HANDLE;
+        std::vector<VkImageView> oldViews;
+        if (reuseOld && swapchain) {
+            oldChain = swapchain;
+            oldViews.swap(swapViews);
+            swapImages.clear();
+            swapchain = VK_NULL_HANDLE;
+            destroySlotSemaphores();   // 与交换链同生共死；且必须早于 createSlotSemaphores
+        } else {
+            destroySwapchain();
+        }
+        // 任何一条失败返回都要把旧链销毁掉，否则泄漏一个 swapchain 和它的图像
+        struct OldChainGuard {
+            VkDevice dev;
+            VkSwapchainKHR chain;
+            std::vector<VkImageView> views;
+            ~OldChainGuard() {
+                if (!chain) return;
+                for (VkImageView v : views)
+                    if (v) g_vk.vkDestroyImageView(dev, v, nullptr);
+                if (g_vk.vkDestroySwapchainKHR) g_vk.vkDestroySwapchainKHR(dev, chain, nullptr);
+            }
+        } oldGuard{device, oldChain, std::move(oldViews)};
 
-        VkSurfaceCapabilitiesKHR caps{};
-        if (g_vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &caps) !=
-            VK_SUCCESS) {
+        if (!ensureSurfaceInfo()) {
             std::fprintf(stderr, "[vk] 取不到 surface capabilities\n");
             return false;
         }
-        const VkSurfaceFormatKHR sf = pickSurfaceFormat();
-        // currentExtent 是 0xFFFFFFFF 时由应用决定（Win32 上通常直接给出客户区尺寸）
-        VkExtent2D ext = caps.currentExtent;
-        if (ext.width == 0xFFFFFFFFu || ext.height == 0xFFFFFFFFu) {
-            ext.width = static_cast<uint32_t>(std::max(1, w));
-            ext.height = static_cast<uint32_t>(std::max(1, h));
+        const VkSurfaceCapabilitiesKHR& caps = surfCaps;
+        const VkSurfaceFormatKHR& sf = surfFmt;
+        // 尺寸用"我们要的窗口尺寸"做起点 —— caps.currentExtent 是缓存里**唯一会变**的
+        // 字段，照着缓存建就是"按旧尺寸重建"，随后 present 前发现不一致又重建一次，
+        // 每帧空转（实测就是这样，一次 resize 里出现两条建链日志）。
+        VkExtent2D ext{};
+        ext.width = static_cast<uint32_t>(std::max(1, w));
+        ext.height = static_cast<uint32_t>(std::max(1, h));
+        // 缓存值与我们要的不一致时（换屏 / DPI / 驱动改写），实时确认一次再决定
+        if (caps.currentExtent.width != 0xFFFFFFFFu &&
+            (caps.currentExtent.width != ext.width ||
+             caps.currentExtent.height != ext.height) &&
+            surface && physical) {
+            VkSurfaceCapabilitiesKHR live{};
+            if (g_vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(physical, surface, &live) ==
+                VK_SUCCESS) {
+                surfCaps = live;
+                if (live.currentExtent.width != 0xFFFFFFFFu) ext = live.currentExtent;
+            }
         }
-        ext.width = std::max(caps.minImageExtent.width, std::min(caps.maxImageExtent.width, ext.width));
-        ext.height =
-            std::max(caps.minImageExtent.height, std::min(caps.maxImageExtent.height, ext.height));
+        ext.width = std::max(caps.minImageExtent.width,
+                             std::min(caps.maxImageExtent.width, ext.width));
+        ext.height = std::max(caps.minImageExtent.height,
+                              std::min(caps.maxImageExtent.height, ext.height));
         if (ext.width == 0 || ext.height == 0) return false;
 
         // 交换链图数：minImageCount+1。真正决定节拍的是下面的 present_wait（等这一帧
@@ -1386,10 +1453,16 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         ci.compositeAlpha = alpha;
         ci.presentMode = pickPresentMode(vsync);
         ci.clipped = VK_TRUE;
-        ci.oldSwapchain = VK_NULL_HANDLE;
+        ci.oldSwapchain = oldChain;
 
+        const bool swapTrace2 = std::getenv("BINUI_RESIZE_TRACE") != nullptr;
+        const auto tS0 = swapTrace2 ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
         const VkResult cr = g_vk.vkCreateSwapchainKHR(device, &ci, nullptr, &swapchain);
+        const auto tS1 = swapTrace2 ? std::chrono::steady_clock::now()
+                                    : std::chrono::steady_clock::time_point{};
         if (cr != VK_SUCCESS) {
+            surfInfoValid = false;   // 能力/格式可能真的变了（换屏、DPI、驱动重置）：下次数值重查
             std::fprintf(stderr, "[vk] vkCreateSwapchainKHR 失败: %s (%d)\n", VkResultText(cr),
                          (int)cr);
             swapchain = VK_NULL_HANDLE;
@@ -1419,13 +1492,22 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         if (std::getenv("BINUI_VK_TRACE"))
             std::fprintf(stderr, "[vk] 交换链 %ux%u，%u 张，%s，presentMode=%d\n", ext.width,
                          ext.height, imgN, VkFormatName(sf.format), (int)ci.presentMode);
+        if (swapTrace2) {
+            const auto tS2 = std::chrono::steady_clock::now();
+            const auto ms = [](auto a, auto b) {
+                return std::chrono::duration<double, std::milli>(b - a).count();
+            };
+            std::fprintf(stderr,
+                         "[vk][swap] %ux%u  queries=%.2f  CreateSwapchain=%.2f  views+sem=%.2f ms\n",
+                         ext.width, ext.height, ms(tE0, tS0), ms(tS0, tS1), ms(tS1, tS2));
+        }
         return true;
     }
 
     // resize 后交换链可能失效（0 尺寸 / 超出 caps），重建一次即可
     bool recreateSwapchain() {
         g_vk.vkDeviceWaitIdle(device);
-        return createSwapchain();
+        return createSwapchain(true);   // 复用旧链：驱动能省掉一大半分配/同步
     }
 
     static const char* VkFormatName(VkFormat f) {
@@ -3514,7 +3596,11 @@ int  BinUIVK::height() const { return impl_->h; }
 void BinUIVK::resize(int width, int height) {
     Impl& d = *impl_;
     if (width <= 0 || height <= 0 || (width == d.w && height == d.h)) return;
+    // BINUI_RESIZE_TRACE=1：拖边框时每帧都重建交换链，得先知道时间花在哪一段
+    static const bool trace = std::getenv("BINUI_RESIZE_TRACE") != nullptr;
+    const auto tA = trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     g_vk.vkDeviceWaitIdle(d.device);
+    const auto tB = trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     d.w = width;
     d.h = height;
     // 层目标是窗口大小的：尺寸一变就得全放掉，下次 pushLayer 按新尺寸重建
@@ -3522,12 +3608,22 @@ void BinUIVK::resize(int width, int height) {
     // 先重建交换链：readback buffer 要按"渲染目标与交换链的较大者"分配，
     // 反过来（先建目标后建交换链）会让 DPI 缩放时缓冲区偏小（P4 修的隐患）。
     if (d.windowMode && d.useSwapchain) {
-        if (!d.createSwapchain()) std::fprintf(stderr, "[vk] resize: 交换链重建失败\n");
+        if (!d.createSwapchain(true)) std::fprintf(stderr, "[vk] resize: 交换链重建失败\n");
     }
+    const auto tC = trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (!d.createTargets()) {
         d.ready = false;
         std::fprintf(stderr, "[vk] resize 后重建目标失败\n");
         return;
+    }
+    if (trace) {
+        const auto tD = std::chrono::steady_clock::now();
+        const auto ms = [](auto a, auto b) {
+            return std::chrono::duration<double, std::milli>(b - a).count();
+        };
+        std::fprintf(stderr,
+                     "[vk][resize] %dx%d  waitIdle=%.2f swapchain=%.2f targets=%.2f 合计=%.2f ms\n",
+                     width, height, ms(tA, tB), ms(tB, tC), ms(tC, tD), ms(tA, tD));
     }
     d.coversMonitor = d.windowMode ? d.clientCoversMonitor() : false;
 }
@@ -3716,22 +3812,39 @@ void BinUIVK::present() {
 
     // ---- 呈现前的 surface 复查（P4：DPI 变化 / 跨显示器移动 / 最小化）----
     // caps.currentExtent 由 surface 决定，客户区尺寸只是我们的"期望"；两者不一致说明
-    // 窗口刚换过显示器/DPI 或用户改过尺寸，交换链必须先重建才能继续。每帧查一次
-    // （vkGetPhysicalDeviceSurfaceCapabilitiesKHR 是纯 CPU 侧查询，代价可忽略）。
+    // 窗口刚换过显示器/DPI 或用户改过尺寸，交换链必须先重建才能继续。
+    //
+    // 这里**不能**每帧查 caps：实测 vkGetPhysicalDeviceSurfaceCapabilitiesKHR 约 0.7 ms，
+    // 120Hz 的帧预算只有 8.33 ms，光这一句就吃掉 8%。改成先比客户区（GetClientRect
+    // 约 0.01 ms）：一致就什么都不做，不一致才去查 caps 确认，然后重建。
     if (d.windowMode && d.useSwapchain) {
-        VkSurfaceCapabilitiesKHR caps{};
-        if (g_vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(d.physical, d.surface, &caps) ==
-            VK_SUCCESS) {
-            const VkExtent2D ce = caps.currentExtent;
-            if (ce.width == 0 || ce.height == 0) {
-                // 最小化：没有可呈现的像素，本帧丢掉但不报错（恢复时会重建）
-                d.submitNoPresent();
-                d.perfEndFrame(tPresent);
-                return;
-            }
-            if (ce.width != 0xFFFFFFFFu &&
-                (ce.width != d.swapExtent.width || ce.height != d.swapExtent.height)) {
-                if (!d.recreateSwapchain()) d.useSwapchain = false;
+        if (d.hwnd && IsIconic(d.hwnd)) {
+            // 最小化：没有可呈现的像素，本帧丢掉但不报错（恢复时会重建）
+            d.submitNoPresent();
+            d.perfEndFrame(tPresent);
+            return;
+        }
+        RECT crc{};
+        if (d.hwnd && GetClientRect(d.hwnd, &crc)) {
+            const int cw = crc.right - crc.left;
+            const int ch = crc.bottom - crc.top;
+            if (cw > 0 && ch > 0 &&
+                (cw != static_cast<int>(d.swapExtent.width) ||
+                 ch != static_cast<int>(d.swapExtent.height))) {
+                VkSurfaceCapabilitiesKHR caps{};
+                if (g_vk.vkGetPhysicalDeviceSurfaceCapabilitiesKHR(d.physical, d.surface, &caps) ==
+                    VK_SUCCESS) {
+                    const VkExtent2D ce = caps.currentExtent;
+                    if (ce.width == 0 || ce.height == 0) {
+                        d.submitNoPresent();
+                        d.perfEndFrame(tPresent);
+                        return;
+                    }
+                    if (ce.width != 0xFFFFFFFFu &&
+                        (ce.width != d.swapExtent.width || ce.height != d.swapExtent.height)) {
+                        if (!d.recreateSwapchain()) d.useSwapchain = false;
+                    }
+                }
             }
         }
     }

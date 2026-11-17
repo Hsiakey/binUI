@@ -1696,6 +1696,14 @@ void BinUID3D::resize(int width, int height) {
     impl_->winW = width;
     impl_->winH = height;
     if (impl_->swap) {
+        // ResizeBuffers 要求**没有任何对后备缓冲的引用**：我们持有它的 RTV，而且它可能
+        // 还绑在管线上。不先解绑/释放就是 DXGI_ERROR_INVALID_CALL (0x887A0001) ——
+        // 而且失败是"瞬间返回"，所以耗时看起来很好（0.09 ms），实际交换链永远停在旧
+        // 尺寸、画面被 DWM 拉伸成糊的。实测旧代码 60 次 resize 全部失败、一次没成功。
+        ID3D11RenderTargetView* none[1] = {nullptr};
+        impl_->ctx->OMSetRenderTargets(1, none, nullptr);
+        if (impl_->rtv) { impl_->rtv->Release(); impl_->rtv = nullptr; }
+        impl_->ctx->Flush();   // 把在飞的绘制踢完，解除 GPU 对后备缓冲的占用
         HRESULT hr = impl_->swap->ResizeBuffers(0, static_cast<UINT>(width), static_cast<UINT>(height),
                                                 DXGI_FORMAT_UNKNOWN, 0);
         if (FAILED(hr)) {
@@ -1705,8 +1713,28 @@ void BinUID3D::resize(int width, int height) {
                                             DXGI_FORMAT_UNKNOWN, 0);
         }
         impl_->createRenderTarget();
+        // BINUI_RESIZE_TRACE=1：确认交换链真的换了尺寸（失败时是"瞬间返回"，光看耗时看不出来）
+        static const bool rzTrace = std::getenv("BINUI_RESIZE_TRACE") != nullptr;
+        if (rzTrace && impl_->swap) {
+            ID3D11Texture2D* back = nullptr;
+            if (SUCCEEDED(impl_->swap->GetBuffer(0, IID_XTexture2D, (void**)&back)) && back) {
+                D3D11_TEXTURE2D_DESC bd{};
+                back->GetDesc(&bd);
+                std::fprintf(stderr, "[d3d11][resize] 后备缓冲 %ux%u（期望 %dx%d）\n", bd.Width,
+                             bd.Height, width, height);
+                back->Release();
+            }
+        }
     }
     impl_->createOffscreen(); // 离屏随窗口重建（内容丢弃，下帧全量重绘）
+    if (std::getenv("BINUI_RESIZE_TRACE") && impl_->offTex && impl_->msTex) {
+        D3D11_TEXTURE2D_DESC od{}, md{};
+        impl_->offTex->GetDesc(&od);
+        impl_->msTex->GetDesc(&md);
+        std::fprintf(stderr, "[d3d11][resize] offTex %ux%u  msTex %ux%u  msSamples=%d  winWxH=%dx%d\n",
+                     od.Width, od.Height, md.Width, md.Height, impl_->msSamples, impl_->winW,
+                     impl_->winH);
+    }
     impl_->coversMonitor = impl_->clientCoversMonitor();
     float v[2] = { static_cast<float>(width), static_cast<float>(height) };
     impl_->ctx->UpdateSubresource(impl_->cb, 0, nullptr, v, 0, 0);
@@ -1714,6 +1742,12 @@ void BinUID3D::resize(int width, int height) {
     impl_->scissor[1] = 0;
     impl_->scissor[2] = width;
     impl_->scissor[3] = height;
+    // **视口必须跟着换**：createState() 里只设过一次，以前 resize 不改它，于是窗口变小后
+    // 视口还是旧尺寸 —— NDC 被映射到旧大小的区域，画面整体被放大 1100/820≈1.34 倍并裁掉
+    // 右边和下边（看起来就像"resize 后内容不重排"，其实布局是对的，是视口没换）。
+    D3D11_VIEWPORT vp = {0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height),
+                         0.0f, 1.0f};
+    impl_->ctx->RSSetViewports(1, &vp);
 }
 
 void BinUID3D::beginFrame(const void* clipRect) {
@@ -1736,6 +1770,11 @@ void BinUID3D::beginFrame(const void* clipRect) {
 
     // 绘制目标 = 持久离屏帧缓冲
     impl_->ctx->OMSetRenderTargets(1, &impl_->msTarget, nullptr);
+    // 视口每帧对一次（resize 也会设，但层渲染/模糊临时通道会改它）：成本可忽略，
+    // 漏一次就会在 resize 后把整幅画面按旧尺寸放大并裁掉一部分。
+    D3D11_VIEWPORT vp = {0.0f, 0.0f, static_cast<float>(impl_->winW),
+                         static_cast<float>(impl_->winH), 0.0f, 1.0f};
+    impl_->ctx->RSSetViewports(1, &vp);
 
     // 不在此整帧 ClearRenderTargetView：该 API 不受 scissor 限制，会清空整个离屏，
     // 局部重绘时把脏区以外的持久像素抹白/抹透明（悬停后其余元素消失的根因）。

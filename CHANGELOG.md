@@ -5,6 +5,66 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.19.0] - 2026-11-17 【格式 v34】
+
+**拖边框 resize：VK 每次 26 ms、D3D11 的交换链从来没真换过（还连带着视口不换）。**
+
+本版不动渲染语义：`BINUI_VERSION` 仍 v34，三个 GPU 后端的离屏输出逐像素不变。
+
+### 一、先给"拖边框"一个能重复的尺子
+
+新增 `BINUI_RESIZE_BENCH=n`（共享外壳 `binui_app.h`）与 `make resize-bench`：每帧用
+`SetWindowPos` 把窗口宽度抖 ±40px，逼出"每个 `WM_SIZE` 都重建交换链/后备缓冲"这条最坏
+路径，画满 n 帧后**布局耗时**与**后端 `gfx.resize` 耗时**分开打印，然后正常退出。
+本机 1100×720、60 次：
+
+| 后端 | 修前 `gfx.resize` avg | 修后 avg | max |
+|---|---|---|---|
+| GDI/GL | 0.46 ms | 0.46 ms | 0.76 |
+| **Vulkan** | **26.67 ms** | **4.68 ms** | 17.31 |
+| **D3D11** | 0.09 ms（假的，见下） | 0.31 ms | 0.48 |
+
+### 二、D3D11：`ResizeBuffers` 每次都失败（`0x887A0001`），交换链永远停在旧尺寸
+
+失败是**瞬间返回**的，所以耗时看起来最漂亮（0.09 ms），实际什么都没做：画面被系统拉伸
+或裁切。根因是调用时我们还持有着后备缓冲的 RTV，而且它仍绑在管线上。修法：先
+`OMSetRenderTargets(0,…)` → 释放 RTV → `Flush()`（把在飞的绘制踢完）→ `ResizeBuffers`。
+修后实测后备缓冲确实变成新尺寸（`BINUI_RESIZE_TRACE=1` 打印 `后备缓冲 820x560（期望
+820x560）`）。
+
+### 三、D3D11：resize 后**视口没换**，画面被放大 1.34 倍并裁掉右/下
+
+`RSSetViewports()` 只在 `createState()` 里设过一次，`BinUID3D::resize()` 没有重置它。
+窗口变小后 NDC 仍被映射到旧尺寸，于是整幅画面按 `1100/820≈1.34` 放大、右/下被裁 ——
+看起来像"布局没重排"，实际布局是对的。**GDI / Vulkan 都没有这个毛病**（各自在 resize
+里换视口），所以只跑 `pixels-vk` 抓不到。修法：resize 里换视口，`beginFrame` 每帧再对一次
+（层渲染/模糊临时通道会改它）。
+
+### 四、Vulkan：resize 从 26.6 ms 降到 4.68 ms
+
+`createSwapchain()` 原来是"先销毁再新建"，且每次都重新枚举 surface caps / formats /
+presentModes。拆开量：查询 3.3~4.4 ms、`vkCreateSwapchainKHR` 3~5 ms、销毁旧链 ~4 ms。
+三处一起改：
+
+* 用 `ci.oldSwapchain = 旧链`（Vulkan 推荐的 resize 路径，驱动可复用底层资源），创建
+  成功后再自行销毁旧链；失败路径用 RAII 保证旧链一定被销毁，不漏；
+* surface 能力（caps / formats / presentModes）**缓存**，只在建 surface 与重建失败时重查；
+* 交换链尺寸改用"我们要的窗口尺寸"，不再照抄缓存里的 `caps.currentExtent`。
+  照抄缓存会按旧尺寸建链、随后 present 前发现不一致再建一次，一帧建两条链（实测踩到）。
+
+顺带：present 前那次**每帧**的 `vkGetPhysicalDeviceSurfaceCapabilitiesKHR` 实测 ~0.7 ms
+（120Hz 帧预算的 8%），改成先比 `GetClientRect`（~0.01 ms），只在真不一致时才查 caps。
+
+### 五、验收
+
+* `make resize-bench`（新增门禁）：跑三个后端，任何 `ResizeBuffers hr=` / `交换链重建失败`
+  / `重建目标失败` / `Present hr=` 直接失败；
+* 三个后端的窗口都改成 820×560 后截图互比：VK↔GL 80 px、VK↔D3D 80 px（都是同一行 1px
+  的滚动条位置），修前 VK↔D3D 是 **19.4%**；
+* 原有门禁：`pixels` 18/18、`pixels-vk` 0 差、`pixels-d3d11`（仅既有 `anim/affine-text`
+  6 px）、`partial`、`check_examples` 16/0、`check-guard`、`capi`。
+
+
 ## [0.18.0] - 2026-11-17 【格式 v34】
 
 **启动耗时：把"首帧之前"逐段量出来，并修好一把会骗人的尺子。**

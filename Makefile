@@ -771,6 +771,25 @@ endif
 # =============================================
 # cleanup
 # =============================================
+.PHONY: resize-bench
+# 拖边框 resize 压测（v0.19.0）：三个后端各跑一遍 BINUI_RESIZE_BENCH=60 —— 每帧把窗口
+# 宽度抖 ±40px，逼出"每个 WM_SIZE 都重建交换链/后备缓冲"这条最坏路径。判据：
+#   ① 不许出现后端报错（ResizeBuffers hr= / 交换链重建失败 / 重建目标失败 / Present hr=）；
+#   ② 打印出来的 gfx.resize 耗时要看一眼（本机基准 GL 0.4 / D3D11 0.4 / VK 4.5 ms，
+#      退化回几十 ms 说明又走了"先销毁再新建"的老路）。
+# 这条能抓住 v0.19.0 之前那两个 bug：D3D 的 ResizeBuffers 每次都返回 0x887A0001（瞬间
+# 失败，耗时看着很好），VK 每次 resize 26 ms。
+resize-bench: $(DEMO_DIR)/flexshow$(EXT) $(DEMO_DIR)/flexshow_vk$(EXT) $(DEMO_DIR)/flexshow_d3d11$(EXT)
+	@fail=0; for e in flexshow flexshow_vk flexshow_d3d11; do \
+	    echo "--- $$e ---"; \
+	    out=$$(BINUI_RESIZE_BENCH=60 $(DEMO_DIR)/$$e$(EXT) 2>&1); \
+	    echo "$$out" | grep -E '^\[resize-bench\]' || { echo "拿不到压测结果: $$e"; fail=1; continue; }; \
+	    if echo "$$out" | grep -qE 'ResizeBuffers hr=|交换链重建失败|重建目标失败|Present hr='; then \
+	        echo "$$out" | grep -E 'ResizeBuffers hr=|交换链重建失败|重建目标失败|Present hr=' | head -5; \
+	        echo "后端重建失败: $$e"; fail=1; \
+	    fi; \
+	done; exit $$fail
+
 .PHONY: clean
 clean:
 	rm -rf $(BUILD_DIR)

@@ -101,3 +101,66 @@ GL 就绪后再显示），总时长不变，只是把"白窗等待"换成"晚 5
 
 探针本身也做了两件事保证读数可信：时间戳在写日志**之前**取（日志开销不计入本段）；
 `BINUI_STARTUP_FILE` 路径用 `fopen(..., "ab") + fwrite + fclose`，不依赖 CRT 缓冲。
+
+## 5. 拖边框 resize：`BINUI_RESIZE_BENCH` 与 `make resize-bench`
+
+"启动慢"和"拖边框卡"是两件事，后者每到一次 `WM_SIZE` 就要**重排整棵树 + 后端重建
+交换链/后备缓冲**。三个后端共用同一份窗口外壳（`binui_app.h`），所以压测也放在外壳里：
+
+```powershell
+$env:BINUI_RESIZE_BENCH='60'          # 每帧把窗口宽度抖 ±40px，画满 60 帧后打印并退出
+.\build-mingw\bin\examples\flexshow_vk.exe
+# 或者一次跑三个后端并检查报错：make resize-bench
+```
+
+输出两段耗时（**分开算**，否则看不出是布局慢还是后端慢）：
+
+```
+[resize-bench] 60 次 resize（每帧 ±40px，1100x720 基准）
+[resize-bench]   布局(宿主回调) avg=0.03 max=0.04 ms
+[resize-bench]   后端 gfx.resize avg=4.68 max=17.31 ms
+```
+
+本机实测（1100×720 → ±40px，60 次）：
+
+| 后端 | `gfx.resize` avg | max | 说明 |
+|---|---|---|---|
+| GDI/GL | 0.46 ms | 0.76 | 只重建离屏 FBO |
+| Vulkan | **4.68 ms** | 17.31 | 重建交换链（v0.19.0 之前是 **26.6 ms**） |
+| D3D11 | 0.31 ms | 0.48 | ResizeBuffers + 离屏（v0.19.0 之前是"瞬间失败"） |
+
+### 5.1 v0.19.0 修掉的三个坑（都是量出来才看见的）
+
+1. **D3D11 的 `ResizeBuffers` 每次都失败**（`hr=0x887A0001` = `DXGI_ERROR_INVALID_CALL`）：
+   调用前我们还持有着后备缓冲的 RTV、并且它还绑在管线上。失败是**瞬间返回**的，所以
+   "耗时 0.09 ms"看起来漂亮，实际交换链永远停在旧尺寸 —— 画面被系统拉伸/裁切。
+   修法：先 `OMSetRenderTargets(0,…)` + 释放 RTV + `Flush()`，再 ResizeBuffers。
+2. **D3D11 的视口在 resize 后没换**（`RSSetViewports` 只在 `createState()` 里设过一次）：
+   窗口变小后视口还是旧尺寸，NDC 被映射到旧大小的区域，画面整体放大 `1100/820≈1.34`
+   倍并裁掉右边和下边 —— 看起来像"内容没重排"，其实布局是对的、视口是错的，而且
+   **GDI 与 Vulkan 后端都没有这个毛病**（它们各自在 resize 里换视口），所以只比
+   `pixels-vk` 是发现不了的。修法：resize 里换视口 + `beginFrame` 每帧再对一次。
+3. **Vulkan 每次 resize 26 ms**：`createSwapchain()` 里"先销毁再新建"（`oldSwapchain =
+   VK_NULL_HANDLE`），外加每次都重新枚举 surface caps / formats / presentModes ——
+   单独量出来：**查询 3.3~4.4 ms + CreateSwapchain 3~5 ms + 销毁旧链 ~4 ms**。
+   修法三件：
+   * `ci.oldSwapchain = 旧链`（Vulkan 推荐的 resize 路径，驱动能复用底层资源），
+     创建成功后再销毁旧链（失败路径用 RAII 保证也销毁，不漏一个 swapchain）；
+   * surface 能力**缓存**（caps/formats/presentModes 在一个 surface 上不变）；
+   * 交换链尺寸改成"要的窗口尺寸"而不是缓存里的 `caps.currentExtent` —— 用缓存值会
+     按旧尺寸建、随后 present 前发现不一致又建一次，一帧里建两条链（踩过）。
+   顺带把 present 前那次**每帧**的 `vkGetPhysicalDeviceSurfaceCapabilitiesKHR`（实测
+   ~0.7 ms，占 120Hz 帧预算的 8%）换成先比 `GetClientRect`，只在真不一致时才去查。
+
+验证：把三个后端的窗口都改成 820×560 后截图互比，`pixel_diff` 结果
+VK↔GL 80 px（只有一行 1 px 的滚动条位置）、VK↔D3D 80 px —— 三者完全一致。
+
+| 修前（D3D11） | 修后（D3D11） |
+|---|---|
+| ![修前](img/resize-820-d3d11-before.png) | ![修后](img/resize-820-d3d11.png) |
+
+修前那张就是上一条 bug 的现场：视口还是 1100×720，布局其实已经重排成 820×560，但被
+放大 1.34 倍后裁掉了右/下（状态栏整个看不见）。修后的 D3D11 与 Vulkan 逐像素一致
+（[VK 截图](img/resize-820-vk.png)、[GL 截图](img/resize-820-gl.png)）。
+
+

@@ -450,6 +450,7 @@ private:
     wchar_t pendingHigh_ = 0;
 
     void applyPendingResize(); // 应用挂起 resize：渲染器重排 + gfx 重建 + 全量重绘
+    void resizeBenchTick();    // BINUI_RESIZE_BENCH：每帧抖一次窗口尺寸，退出前打印两段耗时
     void renderOnce();         // 应用挂起 resize 后绘制一帧并呈现
     void startResize(int hit); // 手动 resize 拖拽循环（每轮同步渲染）
 };
@@ -1575,6 +1576,7 @@ inline int BinUIAppT<Gfx>::pump(int timeoutMs) {
     if (!running_) return 1;
 
     renderFrame();
+    resizeBenchTick();   // 没设 BINUI_RESIZE_BENCH 时是一次静态判断，零开销
     return running_ ? 0 : 1;
 }
 
@@ -1717,21 +1719,96 @@ inline bool BinUIAppT<Gfx>::clientCoversMonitor() const {
     return (cr.right - cr.left) >= mw && (cr.bottom - cr.top) >= mh;
 }
 
+// ============ 拖动 resize 压测（BINUI_RESIZE_BENCH=n）============
+//
+// "拖边框时卡"和"启动慢"是两件事：前者每到一次 WM_SIZE 就要重排整棵树 + 后端重建
+// 交换链/离屏目标。三个后端共用这份外壳，所以压测也放在外壳里做 A/B：
+// 每帧用 SetWindowPos 把窗口宽度抖动 ±40px，逼出"每个 WM_SIZE 都重建"这条最坏路径，
+// 画满 n 帧（默认 60）后打印两段耗时 —— 布局（宿主回调）与后端（gfx_.resize）分开算，
+// 这样能直接看出是谁慢。见 docs/startup.md §5。
+struct ResizeBenchStats {
+    int frames = 0;
+    int baseW = 0;
+    int baseH = 0;
+    double sumLayout = 0, maxLayout = 0;
+    double sumGfx = 0, maxGfx = 0;
+};
+inline ResizeBenchStats& ResizeBench() {
+    static ResizeBenchStats s;
+    return s;
+}
+// 0 = 关闭（一次 getenv 的静态判断后就是常数）
+inline int ResizeBenchFrames() {
+    static const int n = [] {
+        const char* e = std::getenv("BINUI_RESIZE_BENCH");
+        if (!e || !*e) return 0;
+        const int v = std::atoi(e);
+        return v > 0 ? v : 60;   // BINUI_RESIZE_BENCH=1 也按 60 帧
+    }();
+    return n;
+}
+
 template <class Gfx>
 inline void BinUIAppT<Gfx>::applyPendingResize() {
     if (pendingW_ <= 0 || pendingH_ <= 0) return;
     int w = pendingW_, h = pendingH_;
     pendingW_ = pendingH_ = 0;
+    // 拖边框排查：确认 WM_SIZE 挂起的尺寸真的走到了这里（BINUI_RESIZE_TRACE=1）
+    {
+        static const bool rt = std::getenv("BINUI_RESIZE_TRACE") != nullptr;
+        if (rt)
+            std::fprintf(stderr, "[app][resize] apply %dx%d（gfx ready=%d）\n", w, h,
+                         gfx_.isReady() ? 1 : 0);
+    }
     width_ = w;
     height_ = h;
+    const bool bench = ResizeBenchFrames() > 0;
+    const double tL0 = bench ? NowMs() : 0.0;
     if (resize_) resize_(w, h);
+    const double tL1 = bench ? NowMs() : 0.0;
     gfx_.resize(w, h);
+    if (bench) {
+        ResizeBenchStats& s = ResizeBench();
+        const double tG = NowMs() - tL1;
+        const double tL = tL1 - tL0;
+        s.sumLayout += tL; if (tL > s.maxLayout) s.maxLayout = tL;
+        s.sumGfx += tG;    if (tG > s.maxGfx)    s.maxGfx = tG;
+    }
     // 客户区铺满显示器 → 绕开直翻转（DWM 会把呈现提升成直翻转，远程/虚拟显示器上会停帧）
     fullscreenPresent_ = clientCoversMonitor();
     // 远程会话（RDP）本身也走读回贴屏：这条路径在虚拟显示器上是实测唯一稳定的。
     // 本机没有 RDP 会话时用 BINUI_FORCE_REMOTE=1 模拟（见 RemoteSession）。
     if (RemoteSession()) fullscreenPresent_ = true;
     invalidateAll();
+}
+
+template <class Gfx>
+inline void BinUIAppT<Gfx>::resizeBenchTick() {
+    const int total = ResizeBenchFrames();
+    if (total <= 0) return;
+    ResizeBenchStats& s = ResizeBench();
+    if (s.frames == 0) {
+        s.baseW = width_;
+        s.baseH = height_;
+    }
+    ++s.frames;
+    // 每帧换一次尺寸（±40px）：WM_SIZE 一路走到 applyPendingResize，交换链/离屏每帧重建
+    const int w = s.baseW + ((s.frames & 1) ? 40 : -40);
+    SetWindowPos(static_cast<HWND>(hwnd_), nullptr, 0, 0, w, s.baseH,
+                 SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+    if (s.frames >= total) {
+        const int n = s.frames;
+        std::fprintf(stderr,
+                     "[resize-bench] %d 次 resize（每帧 ±40px，%dx%d 基准）\n"
+                     "[resize-bench]   布局(宿主回调) avg=%.2f max=%.2f ms\n"
+                     "[resize-bench]   后端 gfx.resize avg=%.2f max=%.2f ms\n",
+                     n, s.baseW, s.baseH,
+                     n ? s.sumLayout / n : 0.0, s.maxLayout,
+                     n ? s.sumGfx / n : 0.0, s.maxGfx);
+        std::fflush(stderr);
+        s = ResizeBenchStats{};
+        requestExit();
+    }
 }
 
 template <class Gfx>
