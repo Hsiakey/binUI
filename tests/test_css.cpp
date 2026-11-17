@@ -1806,6 +1806,41 @@ static void TestIssueRegressions() {
         }
     }
 
+    // ---- 16.57：column 滚动列表里的行不收缩（v0.17.4）----
+    // flexshow 的"② flex:1 + overflow:auto"卡在窗口拉矮时，12 行条目被压到十几像素，
+    // 行里 16px 的文字却还是自己的字号 —— 溢出到相邻行，看上去像被纵向切掉一半；更怪的是
+    // 滚动条照样出现（滚动范围按声明的 32px 算）。根因不是排版偏差：CSS 里 flex 子项默认
+    // `flex-shrink: 1`，容器不够高就会收缩。这里钉住两条路径（编译期布局 + 运行期 setSize）：
+    //   ① 写了 `flex-shrink: 0` 的行在溢出时**不缩**；
+    //   ② 没写的行照 CSS 缩（对照组 —— 防止"把收缩整个关掉"这种糊涂修法）。
+    // `min-height` 也能达到同样效果（实测两种写法渲染逐字节相同），但"这一项不许缩"的
+    // 语义用 `flex-shrink: 0` 表达最直接。
+    {
+        const char* html = R"HTML(<html width="300" height="200"><body>
+  <div id="list" style="display:flex; flex-direction:column; height:40; overflow:auto">
+    <div id="a" style="width:100%; height:32; flex-shrink:0"></div>
+    <div id="b" style="width:100%; height:32"></div>
+  </div>
+</body></html>)HTML";
+        const auto res = binui::CompileBinUIEx(html);
+        BinUIRenderer r;
+        TEST("16.57: 滚动列表页可解析",
+             !res.layout.empty() && r.loadLayout(res.layout.data(), res.layout.size()));
+        auto heightOf = [&](const char* name) -> float {
+            const uint16_t nid = r.findNodeByName(name);
+            for (const auto& nd : r.getNodes())
+                if (nd.id == nid) return nd.height;
+            return -1.0f;
+        };
+        TEST("16.57: flex-shrink:0 的行溢出时不缩（保持 32）",
+             std::fabs(heightOf("a") - 32.0f) < 0.5f);
+        TEST("16.57: 没写 shrink 的行按 CSS 缩（对照组）", heightOf("b") < 32.0f);
+        // 运行期改窗口尺寸：同一条规则必须继续成立（重排走的是同一份 flex 布局）
+        r.setSize(300, 300);
+        TEST("16.57: setSize 之后 flex-shrink:0 的行仍不缩",
+             std::fabs(heightOf("a") - 32.0f) < 0.5f);
+    }
+
     // ---- 16.27：毛玻璃 backdrop-filter（v0.16.27，格式 v29 毛玻璃段） ----
     // 钉住五件事：
     //   1. backdrop-filter: blur(Npx) 落进毛玻璃段（renderer.backdropOf），带半径与合成圆角；
