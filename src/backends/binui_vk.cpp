@@ -1141,6 +1141,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
 
     bool createTargets() {
         destroyTargets();
+        if (std::getenv("BINUI_RESIZE_TRACE"))
+            std::fprintf(stderr, "[vk][targets] 重建 %dx%d（swap %ux%u）\n", w, h,
+                         swapExtent.width, swapExtent.height);
         auto fail = [](const char* step) {
             std::fprintf(stderr, "[vk] createTargets 失败于: %s\n", step);
             return false;
@@ -1607,7 +1610,21 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         bi.bmiHeader.biBitCount = 32;
         bi.bmiHeader.biCompression = BI_RGB;
         HDC dc = GetDC(hwnd);
-        SetDIBitsToDevice(dc, 0, 0, pw, ph, 0, 0, 0, ph, px, &bi, DIB_RGB_COLORS);
+        const int r = SetDIBitsToDevice(dc, 0, 0, pw, ph, 0, 0, 0, ph, px, &bi,
+                                        DIB_RGB_COLORS);
+        // BINUI_RESIZE_TRACE=1：GDI 贴屏失败时**必须**看见（失败就没画面，但不报错）
+        static const bool blitTrace = std::getenv("BINUI_RESIZE_TRACE") != nullptr;
+        if (blitTrace) {
+            static int blitN = 0;
+            if (blitN++ < 12) {
+                RECT cr = {};
+                GetClientRect(hwnd, &cr);
+                std::fprintf(stderr, "[vk][blit] %dx%d ret=%d err=%lu 客户区=%dx%d\n", pw, ph, r,
+                             (unsigned long)GetLastError(), static_cast<int>(cr.right),
+                             static_cast<int>(cr.bottom));
+                std::fflush(stderr);
+            }
+        }
         ReleaseDC(hwnd, dc);
         return true;
     }
@@ -3850,13 +3867,16 @@ void BinUIVK::present() {
     }
 
     // 呈现路线（设计 §5.5）：
-    //   A. 交换链可用且不需要绕开直翻转 → resolve → blit 到交换链图像 → vkQueuePresentKHR
-    //   B. 其余情况（透明窗口 / 客户区铺满显示器 / 远程会话 / 上层要求拖拽期走 GDI /
-    //      无交换链）→ resolve → 读回 buffer → SetDIBitsToDevice 或 UpdateLayeredWindow
+    //   A. 交换链可用 → resolve → blit 到交换链图像 → vkQueuePresentKHR
+    //   B. 其余情况（透明窗口 / 远程会话 / 上层要求拖拽期走 GDI / 无交换链）→ resolve →
+    //      读回 buffer → SetDIBitsToDevice 或 UpdateLayeredWindow
     // 两条路线用的是**同一张 resolve 图**，所以窗口模式与离屏模式的像素完全一致。
     // 远程会话（RDP）走 B 是实测结论：虚拟显示器上 A 会停帧（GL 0.9.1 同样处理）。
-    const bool gdiPath = !d.useSwapchain || d.transparent || d.forceGdi ||
-                         (d.windowMode && d.coversMonitor) || RemoteSession();
+    // **"客户区铺满显示器"不再进 B**：那条例外来自"避免 DWM 直翻转停帧"，但 VK 一旦建过
+    // 交换链，窗口就是 flipping 窗口，DWM 只合成交换链图像，GDI 贴屏的内容不上屏 ——
+    // 表现为 resize 到全屏尺寸后画面停在旧帧 + 黑边（v0.19.1 修，见 docs/startup.md §5.2）。
+    const bool gdiPath =
+        !d.useSwapchain || d.transparent || d.forceGdi || RemoteSession();
     d.lastPresentWasGdi = gdiPath;
 
     uint32_t imageIndex = 0;
@@ -3894,6 +3914,9 @@ void BinUIVK::present() {
         region.imageExtent = {static_cast<uint32_t>(d.w), static_cast<uint32_t>(d.h), 1};
         d.capW = d.w;
         d.capH = d.h;
+        static int gdiN = 0;
+        if (std::getenv("BINUI_RESIZE_TRACE") && gdiN++ < 8)
+            std::fprintf(stderr, "[vk][gdi] 读回 %dx%d（capW/H=%d,%d）\n", d.w, d.h, d.capW, d.capH);
         g_vk.vkCmdCopyImageToBuffer(d.cmd, d.resolveImage, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
                                     d.readback, 1, &region);
     } else {
@@ -4039,6 +4062,15 @@ void BinUIVK::present() {
 void BinUIVK::presentViaGdi() {
     Impl& d = *impl_;
     if (!d.ready) return;
+    // **交换链存在时不能用 GDI 贴屏。** Windows 上 VK 的 WSI 一旦为窗口建了交换链，这个窗口
+    // 就成了 flipping 窗口，DWM 只合成交换链里的图 —— GDI 往窗口 DC 画的东西根本不上屏。
+    // 实测（v0.19.x）：resize 到 2560×1440 铺满显示器后，读回 2560×1440、blit 返回全扫描线
+    // 成功，屏幕却一直是上一帧 + 黑边；GL（没有交换链）与 D3D11 同尺寸都正常。
+    // 所以"铺满显示器改走读回"这条守卫对 VK 只能在没有交换链时用（远程会话/透明窗等）。
+    if (d.useSwapchain && !d.transparent && !RemoteSession()) {
+        present();
+        return;
+    }
     d.forceGdi = true;
     present();
     d.forceGdi = false;

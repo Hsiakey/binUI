@@ -740,7 +740,7 @@ vk-window: tools
 	        fi; \
 	    done; \
 	done; \
-	echo "--- fullscreen guard (window covers monitor -> expect GDI readback) ---"; \
+	echo "--- fullscreen guard (window covers monitor) ---"; \
 	$(BIN_DIR)/vk_window$(EXT) docs/issues/assets/probe.html --frames 10 --fullscreen 2>&1 | grep -E "present=|saved|fullscreen" || fail=1; \
 	exit $$fail
 
