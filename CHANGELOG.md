@@ -5,6 +5,38 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.19.2] - 2026-11-18 【格式 v34】
+
+**记录一次"看起来该省、实测不省"的优化：VK 拖拽期不重建交换链。**（无行为变更）
+
+VK 的 `gfx.resize` 一直是 4.2 ms，GL 0.33 / D3D11 0.34。拆开量（`BINUI_RESIZE_TRACE=1`）：
+
+| VK resize 内部分段 | ms |
+|---|---|
+| `vkDeviceWaitIdle` | 0.02 |
+| surface 查询（caps / formats / presentModes，已缓存） | 0.02 |
+| **`vkCreateSwapchainKHR`（带 oldSwapchain 复用）** | **2.8~3.3** |
+| 旧链销毁 | ~0.2 |
+| **重建 MSAA 4× / resolve / readback 三张图** | **1.2~1.5** |
+
+GL / D3D11 便宜是因为它们**原地换尺寸**：GL 的 `glTexImage2D` / FBO 复用已有存储，
+DXGI 的 `ResizeBuffers` 是延迟分配，都不需要重新协商"呈现目标"。
+
+于是试了标准做法：拖拽期间不重建交换链，只重建渲染目标，present 时把新尺寸的图**缩放**
+blit 进旧链（松手后再精确重建一次）。`gfx.resize` 确实从 3.95 ms 降到 **1.58 ms** ——
+
+**但整帧没有变快**：`呈现` 从 11.4 ms 涨到 13.6 ms，整帧仍是 16.0 ms / 60 fps。
+省下的 3 ms 全跑到 present 上了（交换链尺寸与窗口不符时，DXGI 的呈现路径更贵）。
+所以这条优化**没有合入**，代码回到"每帧重建"，只把这个结论写在这里，省得下次再试一遍。
+
+顺带留下的诊断（`BINUI_RESIZE_TRACE=1`）：`[vk][targets] 重建 WxH（swap WxH）`、
+`[vk][gdi] 读回 WxH`、`[vk][blit] WxH ret=… 客户区=…`、`[vk][resize] waitIdle / swapchain / targets`。
+
+结论：**VK 拖拽 resize 的 4.2 ms 就是"每帧重建交换链"的价格，跑在 60 fps**（稳态 120 fps
+不受影响，因为只有 resize 帧才付这个钱）。要更快只能改呈现策略（例如拖拽期显示缩放版），
+实测不划算。
+
+
 ## [0.19.1] - 2026-11-18 【格式 v34】
 
 **VK：窗口拉到"铺满显示器"后画面停在上一帧、其余全黑（0.19.0 漏掉的第三种 resize）。**

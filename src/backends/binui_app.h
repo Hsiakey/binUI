@@ -438,8 +438,7 @@ private:
     // 睡到指定时刻（保留消息可唤醒；用高精度定时器，见实现里的注释）
     void waitForFrame(std::chrono::steady_clock::time_point t);
     void* frameTimer_ = nullptr;   // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 的定时器句柄
-    bool dirty_ = true;
-    // 上一拍是否真的画了一帧（renderOnce 里置位）。用来提前判断"这一拍还有活要干"：
+    bool dirty_ = true;    // 上一拍是否真的画了一帧（renderOnce 里置位）。用来提前判断"这一拍还有活要干"：
     // 动画的脏区要到 update_ 跑完才出现，而 pump 的等待发生在 update_ 之前。
     bool lastDrew_ = false;
     // 上一次 present 花了多少毫秒：>半个预算就说明它自己在等合成，不要再 DwmFlush

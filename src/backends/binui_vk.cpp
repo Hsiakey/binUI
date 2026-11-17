@@ -3625,6 +3625,10 @@ void BinUIVK::resize(int width, int height) {
     // 先重建交换链：readback buffer 要按"渲染目标与交换链的较大者"分配，
     // 反过来（先建目标后建交换链）会让 DPI 缩放时缓冲区偏小（P4 修的隐患）。
     if (d.windowMode && d.useSwapchain) {
+        // 这里曾经试过"拖拽期滞后重建交换链"（只重建目标、present 时缩放 blit 进旧链）。
+        // 实测**不划算**：省下的 3.0 ms vkCreateSwapchainKHR 全部跑到 present 上去了 ——
+        // 交换链尺寸与窗口不符时，呈现从 11.4 ms 涨到 13.6 ms，整帧 16.0 ms 一分没省。
+        // 所以老老实实每帧重建（拖拽 60fps，稳态 120fps 不受影响）。
         if (!d.createSwapchain(true)) std::fprintf(stderr, "[vk] resize: 交换链重建失败\n");
     }
     const auto tC = trace ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};

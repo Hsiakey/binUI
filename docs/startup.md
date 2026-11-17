@@ -125,9 +125,26 @@ $env:BINUI_RESIZE_BENCH='60'          # 每帧把窗口宽度抖 ±40px，画满
 
 | 后端 | `gfx.resize` avg | max | 说明 |
 |---|---|---|---|
-| GDI/GL | 0.46 ms | 0.76 | 只重建离屏 FBO |
-| Vulkan | **4.68 ms** | 17.31 | 重建交换链（v0.19.0 之前是 **26.6 ms**） |
-| D3D11 | 0.31 ms | 0.48 | ResizeBuffers + 离屏（v0.19.0 之前是"瞬间失败"） |
+| GDI/GL | 0.33–0.46 ms | 0.76 | 只重建离屏 FBO |
+| Vulkan | **4.2 ms** | 17.7 | 重建交换链（v0.19.0 之前是 **26.6 ms**） |
+| D3D11 | 0.25–0.34 ms | 0.69 | ResizeBuffers + 离屏（v0.19.0 之前是"瞬间失败"） |
+
+VK 这 4.2 ms 花在哪（`BINUI_RESIZE_TRACE=1` 实测）：
+
+| VK resize 分段 | ms |
+|---|---|
+| `vkDeviceWaitIdle` | 0.02 |
+| surface 查询（caps/formats/presentModes，已缓存） | 0.02 |
+| **`vkCreateSwapchainKHR`（带 oldSwapchain 复用）** | **2.8~3.3** |
+| 旧链销毁 | ~0.2 |
+| **重建 MSAA 4× / resolve / readback 三张图** | **1.2~1.5** |
+
+GL / D3D11 便宜是因为**原地换尺寸**：GL 的 `glTexImage2D`/FBO 复用已有存储，DXGI 的
+`ResizeBuffers` 是延迟分配，都不必重新协商"呈现目标"；Vulkan 每次都要重新建交换链。
+
+> **试过、不划算**：拖拽期不重建交换链（只重建渲染目标，present 时缩放 blit 进旧链，
+> 松手再精确重建）。`gfx.resize` 从 3.95 → 1.58 ms，但 `呈现` 从 11.4 → 13.6 ms，
+> 整帧仍是 16.0 ms / 60 fps —— 省的 3 ms 全跑到 present 上。所以没有合入（见 CHANGELOG 0.19.2）。
 
 ### 5.1 v0.19.0 修掉的三个坑（都是量出来才看见的）
 
