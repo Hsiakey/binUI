@@ -1645,6 +1645,86 @@ static void TestIssueRegressions() {
         }
     }
 
+    // ---- 16.55：描边几何走 CPU 覆盖率（v0.17.1）----
+    // 背景：描边以前直接发细长四边形，靠 GPU 的 4x MSAA 出 AA；但采样子像素位置由
+    // API 决定，GL 与 Vulkan 在斜线上覆盖率差一档（实测浅斜线整条差 62/255、圆描边
+    // 差 320 个像素），"三端逐像素相同"在斜线上根本不成立。改成 CPU 条带覆盖率高
+    // 三端必然一致（像素门禁用 layer-stroke 钉住）。这里钉住几何与契约：
+    //   1. 覆盖率加权面积 = 线长 x 线宽（不丢也不重）；
+    //   2. 条带保持 RGB、alpha 有效、尺寸为正；
+    //   3. 同一条线段重复调用逐位相同（无隐藏状态）；
+    //   4. 45 度与 -45 度加权面积一致（对称性 —— 采样位置问题就出在这里）；
+    //   5. 退化输入不产生条带；缓存 key 区分线宽与颜色。
+    {
+        using binui::PaintBand;
+        std::vector<PaintBand> lb(binui::kMaxPathBands);
+        std::vector<uint16_t> lcov;
+        auto build = [&](float x0, float y0, float x1, float y1, float w, uint32_t c) {
+            return binui::BuildLineBandsAA(x0, y0, x1, y1, w, c, lb.data(),
+                                           static_cast<int>(lb.size()), lcov);
+        };
+        auto warea = [&](int n) {
+            double s = 0;
+            for (int i = 0; i < n; i++) {
+                const double a = static_cast<double>((lb[i].color >> 24) & 0xFFu) / 255.0;
+                s += static_cast<double>(lb[i].w) * static_cast<double>(lb[i].h) * a;
+            }
+            return s;
+        };
+        const uint32_t col = 0xFFB45309u;
+        // 1) 水平线：长 100、宽 3 -> 300（AA 边缘按覆盖率加权，所以不是整像素数）
+        const int nH = build(10.0f, 50.0f, 110.0f, 50.0f, 3.0f, col);
+        TEST("16.55: 水平线的覆盖率加权面积 = 长 x 宽",
+             nH > 0 && std::fabs(warea(nH) - 300.0) < 3.0);
+        // 2) 45 度、长 141.42 -> 424.26
+        const int nD = build(10.0f, 10.0f, 110.0f, 110.0f, 3.0f, col);
+        TEST("16.55: 45 度线的覆盖率加权面积 = 长 x 宽",
+             nD > 0 && std::fabs(warea(nD) - 424.26) < 4.25);
+        // 3) 浅斜线（就是实测差 62/255 的那条）：长 121.66 -> 364.97
+        const int nS = build(20.0f, 100.0f, 140.0f, 120.0f, 3.0f, col);
+        TEST("16.55: 浅斜线的覆盖率加权面积 = 长 x 宽",
+             nS > 0 && std::fabs(warea(nS) - 364.97) < 3.65);
+        // 4) 颜色契约：RGB 保持、alpha 不超过输入、尺寸为正
+        {
+            bool ok = nS > 0;
+            for (int i = 0; i < nS && ok; i++) {
+                if ((lb[i].color & 0x00FFFFFFu) != (col & 0x00FFFFFFu)) ok = false;
+                if (((lb[i].color >> 24) & 0xFFu) > 0xFFu) ok = false;
+                if (!(lb[i].w > 0.0f) || !(lb[i].h > 0.0f)) ok = false;
+            }
+            TEST("16.55: 条带保持 RGB、alpha 有效、尺寸为正", ok);
+        }
+        // 5) 确定性：同一条线段两次算出来逐位相同
+        {
+            const std::vector<PaintBand> first(lb.begin(), lb.begin() + nS);
+            const int n2 = build(20.0f, 100.0f, 140.0f, 120.0f, 3.0f, col);
+            bool same = (n2 == nS);
+            for (int i = 0; i < n2 && same; i++) {
+                same = first[i].x == lb[i].x && first[i].y == lb[i].y &&
+                       first[i].w == lb[i].w && first[i].h == lb[i].h &&
+                       first[i].color == lb[i].color;
+            }
+            TEST("16.55: 同一条线段重复计算逐位相同", same);
+        }
+        // 6) 对称性：45 度与 -45 度加权面积一致
+        const int nM = build(10.0f, 110.0f, 110.0f, 10.0f, 3.0f, col);
+        TEST("16.55: 45 度与 -45 度面积一致",
+             nM > 0 && std::fabs(warea(nM) - warea(nD)) < 0.5);
+        // 7) 退化输入
+        TEST("16.55: 零长度线段没有条带",
+             build(50.0f, 50.0f, 50.0f, 50.0f, 3.0f, col) == 0);
+        TEST("16.55: 零宽度线段没有条带",
+             build(10.0f, 50.0f, 110.0f, 50.0f, 0.0f, col) == 0);
+        // 8) 缓存 key
+        const uint64_t k1 = binui::MakeLineBandKey(10.0f, 50.0f, 110.0f, 50.0f, 3.0f, col);
+        const uint64_t k2 = binui::MakeLineBandKey(10.0f, 50.0f, 110.0f, 50.0f, 3.0f, col);
+        const uint64_t k3 = binui::MakeLineBandKey(10.0f, 50.0f, 110.0f, 50.0f, 4.0f, col);
+        const uint64_t k4 =
+            binui::MakeLineBandKey(10.0f, 50.0f, 110.0f, 50.0f, 3.0f, 0xFFB4530Au);
+        TEST("16.55: 缓存 key 相同输入相同", k1 == k2 && k1 != 0);
+        TEST("16.55: 缓存 key 区分线宽与颜色", k1 != k3 && k1 != k4);
+    }
+
     // ---- 16.27：毛玻璃 backdrop-filter（v0.16.27，格式 v29 毛玻璃段） ----
     // 钉住五件事：
     //   1. backdrop-filter: blur(Npx) 落进毛玻璃段（renderer.backdropOf），带半径与合成圆角；

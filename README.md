@@ -1,7 +1,7 @@
 # binUI - 跨平台描述式 UI 核心
 
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.17.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.17.1-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
 [![Format v29](https://img.shields.io/badge/binUI%20format-v29-orange.svg)](include/binui_format.h)
@@ -149,7 +149,7 @@ mingw32-make SHELL=sh demos-vk     # 同一份 demo 源码编出 examples/*_vk.e
 mingw32-make SHELL=sh demos-d3d11  # 同一份 demo 源码编出 examples/*_d3d11.exe
 ```
 
-GPU 后端绘制原语（`fillRect`/`fillRounded`/`fillLine`/`strokeRounded`/`drawText`/`drawImageEx`）：纯色与圆角矩形为顶点四边形（九宫格模板），`fillLine` 用旋转四边形画**任意角度实心线段**（`x0,y0→x1,y1` + 线宽），文本走字形图集。`drawImageEx`（v0.16.15 起取代 `drawImage`）带**源图 UV 子矩形 + 染色**两个参数：圆角图片靠"横条 + UV"实现（后端不需要新的裁剪能力），`filter:brightness()` 靠顶点色乘（着色器本来就做"纹理 × 顶点色"）。**mip**：图片上传时建完整链（GL `glGenerateMipmap` / D3D11 `GenerateMips` / VK 的 CPU 2×2 链）；程序化纹理与视频帧走 `prepareImageRaw`，判据是"同一个 generation 第二次出现"——视频帧每帧换 generation 所以永远不建链（零开销），静态程序化纹理从第二帧起补链。GL 后端离屏帧缓冲为 **4× MSAA**（渲染到多采样渲染缓冲，`present()` 时 `glBlitFramebuffer` 解析到单采样离屏纹理），线条/圆角/圆的边缘全部抗锯齿；D3D 后端可直接用 `fillLine` 画线段。
+GPU 后端绘制原语（`fillRect`/`fillRounded`/`fillLine`/`strokeRounded`/`drawText`/`drawImageEx`）：纯色与圆角矩形为顶点四边形（九宫格模板），`fillLine` 画**任意角度实心线段**（`x0,y0→x1,y1` + 线宽）—— **v0.17.1 起走 CPU 覆盖率条带**：4× MSAA 的采样子像素位置在 GL 与 Vulkan 上互为镜像，斜线交给 GPU 光栅化覆盖率会差一档（实测浅斜线 62/255、圆描边 320 个像素），所以描边与填充一样在 CPU 上算覆盖率、三端逐像素相同；仿射下仍用四边形（条带过矩阵会露缝），成本靠条带缓存压回（svgdemo 0.078 → 0.136 ms/帧）。文本走字形图集。`drawImageEx`（v0.16.15 起取代 `drawImage`）带**源图 UV 子矩形 + 染色**两个参数：圆角图片靠"横条 + UV"实现（后端不需要新的裁剪能力），`filter:brightness()` 靠顶点色乘（着色器本来就做"纹理 × 顶点色"）。**mip**：图片上传时建完整链（GL `glGenerateMipmap` / D3D11 `GenerateMips` / VK 的 CPU 2×2 链）；程序化纹理与视频帧走 `prepareImageRaw`，判据是"同一个 generation 第二次出现"——视频帧每帧换 generation 所以永远不建链（零开销），静态程序化纹理从第二帧起补链。GL 后端离屏帧缓冲为 **4× MSAA**（渲染到多采样渲染缓冲，`present()` 时 `glBlitFramebuffer` 解析到单采样离屏纹理），线条/圆角/圆的边缘全部抗锯齿；D3D 后端可直接用 `fillLine` 画线段。
 
 **仿射状态（v0.16.18）：文字/图片也能跟着卡片转。** 以前旋转/斜切只作用在"底/边框"上（`fillRoundedXf` 自带矩阵），文字和图片必须按整像素对齐，只能保持竖直 —— 旋转卡片里的字就是"盒子转了、字没转"。现在多了一个**状态**而不是新原语：`IBinUIGfx::setAffine(xf)` 一开，**接下来所有原语的四边形**都过同一个 2×3 矩阵（三个 GPU 后端各改一处 `emitQuad`，复用已有的任意四边形+每角 UV 通路），`drawNodes` 在仿射节点里整段改用**节点局部坐标**，于是文字、图片、边框、阴影、渐变条带全部一起变换；`setAffine` 返回 `false` 的后端（GDI，没有任意四边形）退回"只转盒子"的老行为，像素一位不变。代价是字形是**位图旋转**（双线性采样），大角度下边缘略软 —— 真"矢量旋转"要 GPU 栅格化字形，那是 bin2d/binGPU 的事。
 

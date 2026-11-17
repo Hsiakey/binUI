@@ -32,6 +32,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <unordered_map>
 #include <vector>
 
 #include "binui_format.h"
@@ -2265,6 +2266,91 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
                             line, dot, poly);
         }
     }
+}
+
+// ============ v0.17.1：描边几何的 CPU 覆盖率 ============
+//
+// 为什么描边不能用 GPU 四边形（量出来的，不是猜的）：
+// 4× MSAA 的**采样子像素位置**由 API 与驱动决定，OpenGL 与 Vulkan 在同一块 GPU 上
+// 并不相同（x 方向互为镜像）。填充走的是 CPU 条带覆盖率（BuildPathFillBandsAA），
+// 所以三端必然一致；描边以前直接发细长四边形，于是差异只在"边缘斜着穿过像素"时出现：
+//   · 轴对齐线、任意宽度 → 0 差异（覆盖数与采样位置无关）
+//   · 45° 线 → 0 差异（采样位置镜像对称，覆盖数不变）
+//   · 9.5° 线（120×20）→ 整条差 62/255，正好一档 4× MSAA（25%）
+//   · `<circle>` 描边 → 圆是折线，整圈都差（实测 320 个像素、最大通道差 123）
+//   · 斜三角形填充 / 圆角矩形 / 小数坐标矩形 → 0 差异（都不经过 GPU 光栅化的斜边）
+// 所以描边几何一律在 CPU 上算覆盖率，三端调同一份代码 —— 采样位置不可设置
+// （OpenGL 没有对应 API），这是"三端逐像素相同"在斜线上唯一能兑现的办法。
+//
+// 代价：一段线从 1 个四边形变成 2~8 条条带（轴对齐线合并成 1 条，斜线按行拆）。
+// 仿射（rotate/scale）下的描边**仍走原来的四边形**：条带是轴对齐矩形，过矩阵后
+// 相邻条带之间会露出缝隙，质量反而更差；仿射路径另有像素门禁用例兜底。
+// 注意：**轴对齐也不能交给 GPU 四边形**。本来想给"dx==0 或 dy==0"留一条快路径
+// （四边与像素格平行，覆盖数像是精确值），实测翻车：竖线 stroke-width=3 落在 x=150、
+// 边缘恰好在 148.5 / 151.5 这两条**像素边界**上时，GL 与 VK 在 (148,68) / (151,68)
+// 差 55 —— 边缘正好压住采样点的归属，两个 API 判定不同。45° 同样不保险。
+// 所以不留快路径：所有非仿射描边一律走 CPU 覆盖率，成本靠下面的条带缓存压回去。
+
+// ---- 描边条带的跨帧缓存（v0.17.1）----
+// 为什么需要：CPU 覆盖率比原来的"一个 GPU 四边形"贵 3~5 倍（svgdemo 实测 0.078 →
+// 0.335 ms/帧）。但静态页面的描边几何每帧完全一样，key 一命中就整段重放，成本回到
+// "发 N 个条带"；动画页面每帧 miss，可动画本来每帧都要重算。
+// 缓存做成 thread_local 的全局表：后端 fillLine 是逐段调用、拿不到节点上下文，
+// 而 key 里已经含了几何与颜色 —— 变了自己就 miss，不需要失效通知。
+// 满了一律清空（不做 LRU：写淘汰逻辑的成本比"极端场景重算一帧"更高）。
+inline uint64_t MakeLineBandKey(float x0, float y0, float x1, float y1, float width,
+                                uint32_t color) {
+    uint64_t k = 0x9E3779B97F4A7C15ull;
+    auto mix = [&](uint64_t v) { k ^= v + 0x9E3779B97F4A7C15ull + (k << 6) + (k >> 2); };
+    const float fs[5] = { x0, y0, x1, y1, width };
+    for (int i = 0; i < 5; i++) {
+        uint32_t u = 0;
+        std::memcpy(&u, &fs[i], sizeof(u));
+        mix(u);
+    }
+    mix(color);
+    return k ? k : 1;
+}
+
+constexpr size_t kLineBandCacheCap = 4096;
+
+inline std::unordered_map<uint64_t, std::vector<PaintBand>>& LineBandCache() {
+    static thread_local std::unordered_map<uint64_t, std::vector<PaintBand>> cache;
+    return cache;
+}
+
+inline int BuildLineBandsAA(float x0, float y0, float x1, float y1, float width,
+                            uint32_t color, PaintBand* out, int cap,
+                            std::vector<uint16_t>& covAcc) {
+    if (!out || cap <= 0 || width <= 0.0f) return 0;
+    const float dx = x1 - x0, dy = y1 - y0;
+    const float len = std::sqrt(dx * dx + dy * dy);
+    if (len < 1e-6f) return 0;
+    const float nx = -dy / len * width * 0.5f;
+    const float ny = dx / len * width * 0.5f;
+    const float pts[8] = { x0 + nx, y0 + ny, x1 + nx, y1 + ny,
+                           x1 - nx, y1 - ny, x0 - nx, y0 - ny };
+    float minX = pts[0], maxX = pts[0], minY = pts[1], maxY = pts[1];
+    for (int i = 1; i < 4; i++) {
+        minX = std::min(minX, pts[i * 2]);
+        maxX = std::max(maxX, pts[i * 2]);
+        minY = std::min(minY, pts[i * 2 + 1]);
+        maxY = std::max(maxY, pts[i * 2 + 1]);
+    }
+    uint32_t first = 0;
+    const uint32_t cnt = 4;
+    const uint8_t closed = 1;
+    const PaintPath pg{ pts, &first, &cnt, &closed, 1 };
+    PathShade ps;
+    ps.color = color;          // 纯色：渐变已在 colorAt 里逐段取色，这里不再二次取样
+    bool truncated = false;
+    int n = BuildPathFillBandsAA(pg, false, minX, minY, maxX, maxY, ps, out, cap, covAcc,
+                                 &truncated);
+    if (n < 0) {               // 太宽（>kMaxPathAAWidth）：退回硬边，别丢几何
+        truncated = false;
+        n = BuildPathFillBands(pg, false, minX, minY, maxX, maxY, ps, out, cap, 1, &truncated);
+    }
+    return n > 0 ? n : 0;
 }
 
 // ============ v0.16.21：仿射矩阵工具（级联用） ============

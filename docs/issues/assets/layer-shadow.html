@@ -1,0 +1,83 @@
+<html width="660" height="470" bg="#EEF2F7">
+  <!-- 层内 box-shadow 判据页（docs/future.md 里那条"组透明度图层里的 box-shadow"差异）。
+       历史现象：带 box-shadow 的卡片放进 opacity 组时，VK 与 GL 在卡片边缘一圈差到 ~34
+       （alpha 相同、RGB 不同；主目标上的同款卡 0 差异）。
+       原始触发条件（不是随便一个阴影）严格三条，全在本页第一行复刻：
+         ① 卡片底**半透明** rgba(255,255,255,0.34) —— 阴影环从卡片后面透出来；
+         ② 阴影是**大模糊** rgba(12,18,28,0.22) —— 环多、alpha 低，逐点乘的舍入最容易翻；
+         ③ 底下是**渐变**背景 —— 同一个 alpha 差落在不同底色上会放大成不同 RGB。
+       只进跨后端比对（GL vs VK / D3D11 vs GL）。判据：0 不同像素。 -->
+
+  <!-- ① 原样复刻：渐变底 + 半透明卡 + 大模糊阴影，主目标（对照，历史上一直是 0 差异） -->
+  <div style="position:absolute;left:0px;top:0px;width:660px;height:130px;background:linear-gradient(135deg,#0EA5E9,#7C3AED 55%,#F43F5E)"></div>
+  <div style="position:absolute;left:24px;top:14px;width:150px;height:100px;border-radius:22px;background:rgba(255,255,255,0.34);box-shadow:0px 8px 28px rgba(12,18,28,0.22)"></div>
+  <!-- ② 原样复刻：同款在组透明度层里（历史上差 ~34 的就是这一块） -->
+  <div style="position:absolute;left:196px;top:0px;width:170px;height:130px;opacity:0.8">
+    <div style="position:absolute;left:0px;top:14px;width:150px;height:100px;border-radius:22px;background:rgba(255,255,255,0.34);box-shadow:0px 8px 28px rgba(12,18,28,0.22)"></div>
+  </div>
+  <!-- ③ 原样复刻 + 毛玻璃（原页第二条组合：backdrop-filter 与阴影同写，且整块在层里） -->
+  <div style="position:absolute;left:392px;top:0px;width:170px;height:130px;opacity:0.8">
+    <div style="position:absolute;left:0px;top:14px;width:150px;height:100px;border-radius:22px;backdrop-filter:blur(24px);background:rgba(255,255,255,0.34);box-shadow:0px 8px 28px rgba(12,18,28,0.22)"></div>
+  </div>
+  <!-- ④ 主目标上的毛玻璃 + 阴影（对照） -->
+  <div style="position:absolute;left:576px;top:14px;width:70px;height:100px;border-radius:22px;backdrop-filter:blur(24px);background:rgba(255,255,255,0.34);box-shadow:0px 8px 28px rgba(12,18,28,0.22)"></div>
+  <span style="position:absolute;left:24px;top:118px;width:620px;height:14px;font-size:10px;color:#F8FAFC">主目标半透明卡+大模糊阴影 / 层内同款 / 层内+毛玻璃 / 主目标毛玻璃</span>
+
+  <!-- ⑤ 方角 + 硬阴影（没有模板、没有 AA，只看阴影环本身） -->
+  <div style="position:absolute;left:16px;top:142px;width:110px;height:80px;opacity:0.5">
+    <div style="position:absolute;left:20px;top:16px;width:70px;height:46px;background:#2F6BF0;box-shadow:6px 6px 0px #000000"></div>
+  </div>
+  <!-- ⑥ 同款不套层（对照） -->
+  <div style="position:absolute;left:136px;top:142px;width:110px;height:80px">
+    <div style="position:absolute;left:20px;top:16px;width:70px;height:46px;background:#2F6BF0;box-shadow:6px 6px 0px #000000"></div>
+  </div>
+  <!-- ⑦ 圆角 + 模糊阴影：圆环叠加最容易露 -->
+  <div style="position:absolute;left:256px;top:142px;width:110px;height:80px;opacity:0.5">
+    <div style="position:absolute;left:20px;top:14px;width:70px;height:50px;background:#FFFFFF;border-radius:10px;box-shadow:0px 6px 14px #16202C"></div>
+  </div>
+  <!-- ⑧ 大圆角（近似胶囊）+ 大模糊 -->
+  <div style="position:absolute;left:376px;top:142px;width:110px;height:80px;opacity:0.7">
+    <div style="position:absolute;left:16px;top:14px;width:78px;height:50px;background:#F0B429;border-radius:25px;box-shadow:0px 4px 20px #7C2D12"></div>
+  </div>
+  <!-- ⑨ 多层阴影（三个环叠加） -->
+  <div style="position:absolute;left:496px;top:142px;width:150px;height:80px;opacity:0.6">
+    <div style="position:absolute;left:20px;top:12px;width:110px;height:52px;background:#FFFFFF;border-radius:8px;box-shadow:0px 2px 2px #94A3B8, 0px 6px 12px #475569, 0px 10px 20px #0F172A"></div>
+  </div>
+
+  <!-- ⑩ 负偏移 + 展开 -->
+  <div style="position:absolute;left:16px;top:236px;width:150px;height:100px;opacity:0.85">
+    <div style="position:absolute;left:30px;top:22px;width:90px;height:50px;background:#FFFFFF;border-radius:14px;box-shadow:-8px -8px 0px #14B8A6"></div>
+  </div>
+  <!-- ⑪ 渐变底 + 阴影（阴影取 alpha 轮廓） -->
+  <div style="position:absolute;left:176px;top:236px;width:150px;height:100px;opacity:0.5">
+    <div style="position:absolute;left:16px;top:18px;width:118px;height:60px;background:linear-gradient(135deg,#E11D48,#F0B429);border-radius:16px;box-shadow:0px 8px 18px #16202C"></div>
+  </div>
+  <!-- ⑫ 小数坐标 + 小半径 -->
+  <div style="position:absolute;left:336px;top:236px;width:150px;height:100px;opacity:0.9">
+    <div style="position:absolute;left:20.4px;top:16.7px;width:100px;height:60px;background:#FFFFFF;border-radius:6px;box-shadow:0px 3px 9px #334155"></div>
+  </div>
+  <!-- ⑬ 嵌套两层：外层 opacity 里再套一层 opacity，阴影在**内层**层里 -->
+  <div style="position:absolute;left:496px;top:236px;width:150px;height:100px;opacity:0.9">
+    <div style="position:absolute;left:0px;top:0px;width:150px;height:100px;background:#243040;border-radius:14px"></div>
+    <div style="position:absolute;left:22px;top:14px;width:106px;height:64px;opacity:0.7">
+      <div style="position:absolute;left:8px;top:8px;width:90px;height:46px;background:#FFFFFF;border-radius:10px;box-shadow:0px 5px 12px #000000"></div>
+    </div>
+  </div>
+
+  <!-- ⑭ 文字 + 阴影同在一个层 -->
+  <div style="position:absolute;left:16px;top:352px;width:200px;height:90px;opacity:0.55">
+    <div style="position:absolute;left:10px;top:8px;width:180px;height:74px;background:#FFFFFF;border-radius:12px;box-shadow:0px 6px 16px #16202C"></div>
+    <span style="position:absolute;left:26px;top:36px;width:160px;height:20px;font-size:14px;color:#16202C">层里带阴影的卡</span>
+  </div>
+  <!-- ⑮ 层里阴影 + 更低的 group alpha（0.2：舍入误差的相对量最大） -->
+  <div style="position:absolute;left:232px;top:352px;width:200px;height:90px;opacity:0.2">
+    <div style="position:absolute;left:10px;top:8px;width:180px;height:74px;background:#FFFFFF;border-radius:12px;box-shadow:0px 6px 16px #16202C"></div>
+  </div>
+  <!-- ⑯ 层里阴影 + 渐变底 + 半透明卡（三条触发条件同时压满） -->
+  <div style="position:absolute;left:448px;top:352px;width:198px;height:90px;opacity:0.6">
+    <div style="position:absolute;left:0px;top:0px;width:198px;height:90px;background:linear-gradient(90deg,#0EA5E9,#7C3AED)"></div>
+    <div style="position:absolute;left:12px;top:12px;width:174px;height:66px;border-radius:16px;background:rgba(255,255,255,0.34);box-shadow:0px 10px 34px rgba(12,18,28,0.22)"></div>
+  </div>
+
+  <span style="position:absolute;left:16px;top:446px;width:630px;height:18px;font-size:11px;color:#4A5A6E">v0.16.45 修掉"图层用错管线变体"之后，这条差异从 ~34 降到 ≤8（本页 GL/VK/D3D11 三端 0 不同像素）</span>
+</html>

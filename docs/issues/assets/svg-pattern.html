@@ -61,7 +61,7 @@
     <!-- 5) patternTransform 缩放：tile 网格放大 2 倍 -->
     <svg width="160" height="150" style="position:absolute; left:196; top:196">
         <defs>
-            <!-- 线条宽度用偶数：裁剪层里**奇数宽度**的描边在 VK 上每段端点会多 1px
+            <!-- 线条宽度用偶数：这是 v0.17.1 之前的历史规避（当时"裁剪层里的奇数宽度描边在 VK 上每段端点会多 1px"），真因是 4x MSAA 采样位置在 GL/VK 上互为镜像、斜向描边覆盖率差一档，已修。这里保持偶数宽度是因为它是 docs/pixels/ 的基准图来源，改宽度就得重出基准
                  （GL/D3D11 一致，VK 偏长；见 docs/future.md 的已知差异） -->
             <pattern id="scaled" width="8" height="8" patternUnits="userSpaceOnUse"
                      patternTransform="scale(2)">

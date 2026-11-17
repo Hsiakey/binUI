@@ -1602,6 +1602,35 @@ bool BinUIGLGdi::fillGradientQuad(float x, float y, float w, float h, float radi
 
 void BinUIGLGdi::fillLine(float x0, float y0, float x1, float y1, float width, uint32_t color) {
     if (!impl_->ready || width <= 0) return;
+    // v0.17.1：非仿射时走 CPU 覆盖率条带。4× MSAA 的采样子像素位置在 GL 与 VK 上
+    // 互为镜像，"边缘斜穿像素"的细长四边形覆盖率会差一档（实测浅斜线差 62/255）。
+    // 填充本来就是 CPU 条带，所以三端一致；描边必须跟它用同一条路。
+    // 仿射下仍用原四边形：条带是轴对齐矩形，过矩阵后相邻条带之间会露缝。
+    if (!impl_->affineOn) {
+        const uint64_t lkey = binui::MakeLineBandKey(x0, y0, x1, y1, width, color);
+        auto& lcache = binui::LineBandCache();
+        auto lit = lcache.find(lkey);
+        const std::vector<binui::PaintBand>* lbands = nullptr;
+        if (lit != lcache.end()) {
+            lbands = &lit->second;
+        } else {
+            static thread_local std::vector<binui::PaintBand> lineBands;
+            static thread_local std::vector<uint16_t> lineCov;
+            if (lineBands.size() < static_cast<size_t>(binui::kMaxPathBands))
+                lineBands.resize(binui::kMaxPathBands);
+            const int n = binui::BuildLineBandsAA(x0, y0, x1, y1, width, color,
+                                                  lineBands.data(),
+                                                  static_cast<int>(lineBands.size()), lineCov);
+            if (lcache.size() >= binui::kLineBandCacheCap) lcache.clear();
+            std::vector<binui::PaintBand>& slot = lcache[lkey];
+            slot.assign(lineBands.begin(), lineBands.begin() + n);
+            lbands = &slot;
+        }
+        for (size_t i = 0; i < lbands->size(); i++)
+            fillRect((*lbands)[i].x, (*lbands)[i].y, (*lbands)[i].w, (*lbands)[i].h,
+                     (*lbands)[i].color);
+        return;
+    }
     float dx = x1 - x0, dy = y1 - y0;
     float len = std::sqrt(dx * dx + dy * dy);
     if (len < 1e-4f) return;

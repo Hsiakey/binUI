@@ -633,13 +633,23 @@ VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # 这条用例就是"VK 图层用了 4× MSAA 主管线"的判据：修之前弧线每行差一个像素（17 px / 通道差
 # 200+），修之后 GL/VK/D3D11 三端 0 不同像素、最大通道差 0。覆盖 opacity 层、模糊层、
 # 小数坐标、嵌套两层，以及层里的圆/渐变/细线（确认修法没波及别的图元）。
-# nine-slice（v0.16.51 扩）：九宫格中段四种填充模式 stretch / repeat / round / space 全开，\r\n# 含 space 的"两端也留缝"与"中段比一块还窄时缩成一块"。\r\n# svg-mask（v0.16.53/54 扩）：遮罩内容用**渐变**填充（横向线性 / 竖向三色标 / 径向聚光），
+# nine-slice（v0.16.51 扩）：九宫格中段四种填充模式 stretch / repeat / round / space 全开，
+# 含 space 的"两端也留缝"与"中段比一块还窄时缩成一块"。
+# svg-mask（v0.16.53/54 扩）：遮罩内容用**渐变**填充（横向线性 / 竖向三色标 / 径向聚光），
 # 外加 mask-type 的 luminance / alpha 对照（同一份 #808080 内容差一倍）。
 # 渐变的色标 alpha 存的是亮度，保留趟直接按渐变色带画 —— 三端同一份代码，只进跨后端比对。
 # text-shadow-multi（v0.16.50）：多层文字阴影（霓虹 3 层 / 描边 4 层 / 双色偏移 / 继承 /
 # currentColor / 贴边大模糊 / 三个不同模糊半径同时活跃 = 三张阴影图集）。三端同一份图集代码，
 # 只进跨后端比对（GDI 侧另外烘位图，基准图由它生成）。
-ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow blur-quality round-in-layer text-shadow-multi svg-filter
+# layer-stroke / layer-shadow（v0.17.1）：docs/future.md「已知差异」里那两条未定位差异的判据。
+#   layer-stroke —— 裁剪层里**奇数宽度描边**（历史上 VK 每段末端多 1px）。范围拉满：w1/w2/w3/w5/w7、
+#     整数与小数 y、斜线、折线、圆、自定义路径裁剪、嵌套裁剪，外加同款"不裁剪"对照。
+#     顺带钉住真正的根因：`fillLine` 的细长四边形过 GPU 光栅化，4× MSAA 采样位置在 GL 与
+#     Vulkan 上互为镜像 → 浅斜线覆盖率差一档（62/255）。修法是描边改走 CPU 条带覆盖率，
+#     所以本页要 0 不同像素。圆描边（a 例）单测时差 320 像素 / 通道 123，修后 0。
+#   layer-shadow —— 组透明度图层里的 box-shadow（历史上差 ~34）。三条触发条件缺一不可：
+#     卡片底半透明、阴影大模糊低 alpha、底下是渐变。修后 ≤8（预乘色的 8bit 舍入）。
+ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern svg-mask glass grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow blur-quality round-in-layer text-shadow-multi svg-filter layer-stroke layer-shadow
 # 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
 VK_WINDOW_CASES := probe svgpath circle
 

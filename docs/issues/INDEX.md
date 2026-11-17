@@ -50,7 +50,8 @@ Windows 11 · MinGW-w64 gcc · Go 1.26（cgo）
 | `display-none2.html` / `-gl.png` | 03 | 内联 / class 两种 `display:none`，子块都跑到左上角 |
 | `probe.html` / `probe.png` | 04 | 三个按钮的 `text-align:left` 全部无效 |
 | `scrollbar-light.png` | 05 | 浅色主题下右侧那条黑杠 |
-| `gui-dark-chat.png` | 全部 | 完整界面（深色），说明这些限制在真实布局里的表现 |\n| `gdi-text-clip.html` / `-gl.png` / `-gdi.png` | 09 | 同一页 `<div>`（被裁）与 `<span>`（完整）的 GDI / GL 对照 |
+| `gui-dark-chat.png` | 全部 | 完整界面（深色），说明这些限制在真实布局里的表现 |
+| `gdi-text-clip.html` / `-gl.png` / `-gdi.png` | 09 | 同一页 `<div>`（被裁）与 `<span>`（完整）的 GDI / GL 对照 |
 
 > `assets/` 里的 HTML 都是 self-contained 的，可以直接
 > `build-mingw/bin/offscreen_render.exe <html> out.png` 跑 GDI 结果；
