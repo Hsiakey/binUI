@@ -1,0 +1,192 @@
+# binUI 迁移基线快照 —— 由 `make baseline` 生成，别手改
+# 校验：`make baseline-check`（报告）/ `make baseline-strict`（哈希必须完全相同）
+# px <后端> <用例> <W>x<H> <FNV-1a 64 over 原始 ARGB>
+# draw <用例> <原语流哈希>    qa <序号> <bin2d make quality 的原文>
+draw appshow e79151283d91b00e
+draw bench-grad b77138d661ed455e
+draw buttonshow 642b37f305bcae3b
+draw cubedemo 3a9abafbb89221a0
+draw features 9ec865912dbd911f
+draw flexshow f2a5cb742fa0a225
+draw fontshow 849c672e9f2be22a
+draw svgdemo 12e83961167fe4b6
+draw texturedemo d98e2ad5611e134f
+px d3d11 anim-affine-corners 1280x720 c48ddc7af131a334
+px d3d11 anim-affine-text 640x400 f0a2027c95df95fb
+px d3d11 anim-anim-midphase 1280x720 896c6c4f7438daa6
+px d3d11 anim-blur-quality 660x470 6af661619a96c99d
+px d3d11 anim-drop-shadow 660x470 126423aa3d95b776
+px d3d11 anim-filter-blur 660x470 57ceb79a57941392
+px d3d11 anim-fixed 660x470 a8dff5a590e33b70
+px d3d11 anim-flex-scroll-shrink 660x300 58460a36050e8edc
+px d3d11 anim-glass 660x470 e336604fa583d41b
+px d3d11 anim-glass-multi-size 660x470 1808f9abf71561a8
+px d3d11 anim-grad-quad 660x470 36d65a77e8393be5
+px d3d11 anim-img-filter 640x420 81b05ca37deb517e
+px d3d11 anim-layer-shadow 660x470 72537444cc66cd0d
+px d3d11 anim-layer-stroke 660x470 f516f511b419fba9
+px d3d11 anim-letter-spacing 660x300 7d12239923c61835
+px d3d11 anim-nine-slice 640x860 a87ccfcffb58a3d8
+px d3d11 anim-pattern-clip 660x470 d19ae087258ece30
+px d3d11 anim-round-in-layer 660x470 03e7a4b8cac3d3ed
+px d3d11 anim-roundtex-lru 1240x820 f6a4271d8207dd53
+px d3d11 anim-sticky 660x420 4d982e170137644f
+px d3d11 anim-svg-clip 640x420 3e2ea38a15f8b113
+px d3d11 anim-svg-filter 660x470 b77257d683c8690a
+px d3d11 anim-svg-marker 640x420 db78807a92e39bd8
+px d3d11 anim-svg-mask 660x1090 76098fa2ec2c1043
+px d3d11 anim-svg-pattern 660x820 0b49453e31d5f929
+px d3d11 anim-text-overflow 660x300 f70dfcbc6c46df2a
+px d3d11 anim-text-shadow-multi 640x470 bed7e074025490dc
+px d3d11 anim-text-subpixel 640x280 647f4611a11fcdd8
+px d3d11 circle 420x140 41585c2ab862b3d3
+px d3d11 demo-features 900x932 0a4489691e307c25
+px d3d11 demo-fontshow 900x760 24d6da5e7e2999ed
+px d3d11 demo-svgdemo 960x560 cc29004ab011d272
+px d3d11 demo-texturedemo 900x640 44afd377018657b1
+px d3d11 display-none2 760x300 618fc0a3ea26ddb6
+px d3d11 grad-angle 640x300 d0f4a32fe38c01ae
+px d3d11 image-mip 640x300 0ced4df30666434a
+px d3d11 image-round 640x400 3c21e66dda4a6e0f
+px d3d11 opacity 640x320 b5853e8cad3989ae
+px d3d11 probe 600x260 6b79c6ad1c350adf
+px d3d11 radius-matrix 1400x620 4b1e940ccc24038e
+px d3d11 shadow 640x400 3c21505dbfddd360
+px d3d11 svg-filter 660x470 b77257d683c8690a
+px d3d11 svgaa 420x260 2051262f766cdec7
+px d3d11 svgfinish 420x260 e3dfe80c5ee3d71b
+px d3d11 svggrad 420x260 1935ef505905157f
+px d3d11 svgjoin 420x260 be31a1f3291161eb
+px d3d11 svgpath 420x260 2255a3c0d708e004
+px d3d11 svgstroke 420x260 9e35a2785d438453
+px d3d11 text-shadow 640x400 2545b540a2e88d8e
+px d3d11 text-shadow-multi 640x470 bed7e074025490dc
+px gdi circle 420x140 33263f559f87c9b3
+px gdi display-none2 760x300 0efdffdb241a8b77
+px gdi grad-angle 640x300 a4f53af09ccafa94
+px gdi image-mip 640x300 7095478ff1ba217d
+px gdi image-round 640x400 4a91db03d298a5de
+px gdi opacity 640x320 c4e389fde8fad1ae
+px gdi probe 600x260 0e0950d6da83d842
+px gdi radius-matrix 1400x620 f2aa3998f3f9e9ac
+px gdi shadow 640x400 559a4e54af52ff0e
+px gdi svg-filter 660x470 e20f67b10089bbe4
+px gdi svgaa 420x260 05c41697181c3777
+px gdi svgfinish 420x260 24209ae9e1f5e58d
+px gdi svggrad 420x260 fd3721b7ee65b5c7
+px gdi svgjoin 420x260 6c0bd83233da20f5
+px gdi svgpath 420x260 c6881f74d0f9697d
+px gdi svgstroke 420x260 d5541f13fede26c0
+px gdi text-shadow 640x400 dc51e0dc0d58b9ae
+px gdi text-shadow-multi 640x470 b69bfbb0180ba0ce
+px gl anim-affine-corners 1280x720 744ae0675c96f0f2
+px gl anim-affine-text 640x400 fa539c96018ccbc5
+px gl anim-anim-midphase 1280x720 ebdf384c2bffd23e
+px gl anim-blur-quality 660x470 e3742e94d9b86449
+px gl anim-drop-shadow 660x470 d236c476b0134809
+px gl anim-filter-blur 660x470 e4ff04b8abe2a0f0
+px gl anim-fixed 660x470 a8dff5a590e33b70
+px gl anim-flex-scroll-shrink 660x300 58460a36050e8edc
+px gl anim-glass 660x470 5eec29d05df1d391
+px gl anim-glass-multi-size 660x470 f5510a6ace1b8bec
+px gl anim-grad-quad 660x470 b950d322117e450e
+px gl anim-img-filter 640x420 e5e06e6521b63b97
+px gl anim-layer-shadow 660x470 e9c9948da09fba55
+px gl anim-layer-stroke 660x470 f516f511b419fba9
+px gl anim-letter-spacing 660x300 7d12239923c61835
+px gl anim-nine-slice 640x860 51b9adaa64a68064
+px gl anim-pattern-clip 660x470 d19ae087258ece30
+px gl anim-round-in-layer 660x470 03e7a4b8cac3d3ed
+px gl anim-roundtex-lru 1240x820 f6a4271d8207dd53
+px gl anim-sticky 660x420 4d982e170137644f
+px gl anim-svg-clip 640x420 3e2ea38a15f8b113
+px gl anim-svg-filter 660x470 a9f6b52dc9d521cc
+px gl anim-svg-marker 640x420 db78807a92e39bd8
+px gl anim-svg-mask 660x1090 76098fa2ec2c1043
+px gl anim-svg-pattern 660x820 0b49453e31d5f929
+px gl anim-text-overflow 660x300 f70dfcbc6c46df2a
+px gl anim-text-shadow-multi 640x470 bed7e074025490dc
+px gl anim-text-subpixel 640x280 647f4611a11fcdd8
+px gl circle 420x140 41585c2ab862b3d3
+px gl demo-features 900x932 0846d20de2916837
+px gl demo-fontshow 900x760 24d6da5e7e2999ed
+px gl demo-svgdemo 960x560 154f2419cf4cce97
+px gl demo-texturedemo 900x640 36edb238118bacba
+px gl display-none2 760x300 618fc0a3ea26ddb6
+px gl grad-angle 640x300 38b63a2c571a9ba5
+px gl image-mip 640x300 0ced4df30666434a
+px gl image-round 640x400 829ade51c9eadcd4
+px gl opacity 640x320 b5853e8cad3989ae
+px gl probe 600x260 6b79c6ad1c350adf
+px gl radius-matrix 1400x620 4b1e940ccc24038e
+px gl shadow 640x400 13d8604ca80ec965
+px gl svg-filter 660x470 a9f6b52dc9d521cc
+px gl svgaa 420x260 2051262f766cdec7
+px gl svgfinish 420x260 e3dfe80c5ee3d71b
+px gl svggrad 420x260 1935ef505905157f
+px gl svgjoin 420x260 be31a1f3291161eb
+px gl svgpath 420x260 a293f865f4613d27
+px gl svgstroke 420x260 3fc7ef23b48a5eec
+px gl text-shadow 640x400 2545b540a2e88d8e
+px gl text-shadow-multi 640x470 bed7e074025490dc
+px vk anim-affine-corners 1280x720 c48ddc7af131a334
+px vk anim-affine-text 640x400 9bb9fa3ba28d208e
+px vk anim-anim-midphase 1280x720 896c6c4f7438daa6
+px vk anim-blur-quality 660x470 6af661619a96c99d
+px vk anim-drop-shadow 660x470 126423aa3d95b776
+px vk anim-filter-blur 660x470 57ceb79a57941392
+px vk anim-fixed 660x470 a8dff5a590e33b70
+px vk anim-flex-scroll-shrink 660x300 58460a36050e8edc
+px vk anim-glass 660x470 e336604fa583d41b
+px vk anim-glass-multi-size 660x470 1808f9abf71561a8
+px vk anim-grad-quad 660x470 36d65a77e8393be5
+px vk anim-img-filter 640x420 81b05ca37deb517e
+px vk anim-layer-shadow 660x470 72537444cc66cd0d
+px vk anim-layer-stroke 660x470 f516f511b419fba9
+px vk anim-letter-spacing 660x300 7d12239923c61835
+px vk anim-nine-slice 640x860 e1934148700f519d
+px vk anim-pattern-clip 660x470 d19ae087258ece30
+px vk anim-round-in-layer 660x470 03e7a4b8cac3d3ed
+px vk anim-roundtex-lru 1240x820 f6a4271d8207dd53
+px vk anim-sticky 660x420 4d982e170137644f
+px vk anim-svg-clip 640x420 3e2ea38a15f8b113
+px vk anim-svg-filter 660x470 b77257d683c8690a
+px vk anim-svg-marker 640x420 db78807a92e39bd8
+px vk anim-svg-mask 660x1090 76098fa2ec2c1043
+px vk anim-svg-pattern 660x820 0b49453e31d5f929
+px vk anim-text-overflow 660x300 f70dfcbc6c46df2a
+px vk anim-text-shadow-multi 640x470 bed7e074025490dc
+px vk anim-text-subpixel 640x280 647f4611a11fcdd8
+px vk circle 420x140 41585c2ab862b3d3
+px vk demo-features 900x932 0a4489691e307c25
+px vk demo-fontshow 900x760 24d6da5e7e2999ed
+px vk demo-svgdemo 960x560 cc29004ab011d272
+px vk demo-texturedemo 900x640 44afd377018657b1
+px vk display-none2 760x300 618fc0a3ea26ddb6
+px vk grad-angle 640x300 d0f4a32fe38c01ae
+px vk image-mip 640x300 14ddf80cc871efca
+px vk image-round 640x400 3c21e66dda4a6e0f
+px vk opacity 640x320 b5853e8cad3989ae
+px vk probe 600x260 6b79c6ad1c350adf
+px vk radius-matrix 1400x620 4b1e940ccc24038e
+px vk shadow 640x400 3c21505dbfddd360
+px vk svg-filter 660x470 b77257d683c8690a
+px vk svgaa 420x260 2051262f766cdec7
+px vk svgfinish 420x260 e3dfe80c5ee3d71b
+px vk svggrad 420x260 1935ef505905157f
+px vk svgjoin 420x260 be31a1f3291161eb
+px vk svgpath 420x260 2255a3c0d708e004
+px vk svgstroke 420x260 9e35a2785d438453
+px vk text-shadow 640x400 2545b540a2e88d8e
+px vk text-shadow-multi 640x470 bed7e074025490dc
+qa 00 [AA] 圆面积：覆盖率求和 5014.4，解析值 5026.5，误差 -0.24%
+qa 01 [AA] 45° 边缘位置：与解析线最大偏差 0.000 px（竖直 8 条子扫描线的量化上限 1/16 px）
+qa 02 [阶调] 不透明黑→白：64 个半级，相邻块最大跳变 8
+qa 03 [阶调] 低 alpha 渐变（抖动关）：9 个半级，最长同值游程 32 px
+qa 04 [阶调] 低 alpha 渐变（抖动开）：17 个半级，最长同值游程 12 px
+qa 05 [缩小 8x] 2px 棋盘 vs 理想盒式平均：0.3.0 31.8 级、0.4.0 0.0 级（0 最好）
+qa 06 [描边] 1px 水平线在 4 个亚像素偏移下的覆盖率总和：100.0 100.0 100.0 100.0 （理想 100）
+qa 07 [描边] 0.1/0.5/1/2 px 竖线的峰值覆盖率：26 128 255 255
+qa 08 [GPU 一致性] vulkan  细节场景 vs CPU：最大通道差 0，>1 的像素 0 / 98304
+qa 09 [GPU 一致性] d3d11   细节场景 vs CPU：最大通道差 0，>1 的像素 0 / 98304
+qa 10 [GPU 一致性] gl      细节场景 vs CPU：最大通道差 0，>1 的像素 0 / 98304

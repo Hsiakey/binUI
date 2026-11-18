@@ -196,6 +196,10 @@ add_binui_test(test_font tests/test_font.cpp)
 if(WIN32)
     add_executable(pixel_diff tools/pixel_diff.cpp)
     target_link_libraries(pixel_diff PRIVATE gdiplus gdi32 user32 ole32)
+
+    # baseline_snapshot：迁移基线快照（三端像素指纹 + 原语流哈希 + 画质数字）
+    add_executable(baseline_snapshot tools/baseline_snapshot.cpp)
+    target_link_libraries(baseline_snapshot PRIVATE gdiplus gdi32 user32 ole32)
 endif()
 
 add_executable(check_examples tools/check_examples.cpp)

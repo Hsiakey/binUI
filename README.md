@@ -145,9 +145,16 @@ mingw32-make SHELL=sh tools        # 含 vk_shot / vk_window / vk_stress
 mingw32-make SHELL=sh pixels-vk    # VK ↔ GL 逐像素回归
 mingw32-make SHELL=sh vk-window    # 窗口/交换链/GDI/透明/脏矩形/resize/全屏守卫
 mingw32-make SHELL=sh vk-stress    # 8 阶段鲁棒性压测（含泄漏复跑）
+mingw32-make SHELL=sh baseline-check  # 迁移基线快照：三端像素指纹 + 原语流哈希对一遍
 mingw32-make SHELL=sh demos-vk     # 同一份 demo 源码编出 examples/*_vk.exe
 mingw32-make SHELL=sh demos-d3d11  # 同一份 demo 源码编出 examples/*_d3d11.exe
 ```
+
+**迁移基线快照**（`make baseline` / `baseline-check` / `baseline-strict`，0.20.3 起）：
+`tests/baseline/manifest.txt` 里每个用例每一端一行 FNV-1a 64（原始 ARGB），外加
+`draw_bench --hash` 的原语流哈希与 bin2d 的画质数字。`pixel_diff` 只回答"在容差内吗"，
+快照回答**"哪一端、哪个用例动了"**—— 迁移路径光栅时靠它证明"动的正好是该动的那些"。
+判据与更新规则见 `tests/baseline/README.md`。
 
 GPU 后端绘制原语（`fillRect`/`fillRounded`/`fillLine`/`strokeRounded`/`drawText`/`drawImageEx`）：纯色与圆角矩形为顶点四边形（九宫格模板），`fillLine` 画**任意角度实心线段**（`x0,y0→x1,y1` + 线宽）—— **v0.17.1 起走 CPU 覆盖率条带**：4× MSAA 的采样子像素位置在 GL 与 Vulkan 上互为镜像，斜线交给 GPU 光栅化覆盖率会差一档（实测浅斜线 62/255、圆描边 320 个像素），所以描边与填充一样在 CPU 上算覆盖率、三端逐像素相同；仿射下仍用四边形（条带过矩阵会露缝），成本靠条带缓存压回（svgdemo 0.078 → 0.136 ms/帧）。文本走字形图集。`drawImageEx`（v0.16.15 起取代 `drawImage`）带**源图 UV 子矩形 + 染色**两个参数：圆角图片靠"横条 + UV"实现（后端不需要新的裁剪能力），`filter:brightness()` 靠顶点色乘（着色器本来就做"纹理 × 顶点色"）。**mip**：图片上传时建完整链（GL `glGenerateMipmap` / D3D11 `GenerateMips` / VK 的 CPU 2×2 链）；程序化纹理与视频帧走 `prepareImageRaw`，判据是"同一个 generation 第二次出现"——视频帧每帧换 generation 所以永远不建链（零开销），静态程序化纹理从第二帧起补链。GL 后端离屏帧缓冲为 **4× MSAA**（渲染到多采样渲染缓冲，`present()` 时 `glBlitFramebuffer` 解析到单采样离屏纹理），线条/圆角/圆的边缘全部抗锯齿；D3D 后端可直接用 `fillLine` 画线段。
 

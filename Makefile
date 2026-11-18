@@ -380,6 +380,7 @@ TOOL_BINS := \
     $(BIN_DIR)/window_capture$(EXT) \
     $(BIN_DIR)/enum_windows$(EXT) \
     $(BIN_DIR)/pixel_diff$(EXT) \
+    $(BIN_DIR)/baseline_snapshot$(EXT) \
     $(BIN_DIR)/check_examples$(EXT) \
     $(BIN_DIR)/vk_shot$(EXT) \
     $(BIN_DIR)/vk_window$(EXT) \
@@ -502,6 +503,11 @@ $(BIN_DIR)/d3d11_shot$(EXT): $(BUILD_DIR)/d3d11_shot.o $(BUILD_DIR)/binui_d3d11.
 		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
 $(BIN_DIR)/pixel_diff$(EXT): tools/pixel_diff.cpp
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $< -lgdiplus -lgdi32 -luser32 -lole32
+
+# 迁移基线快照（P1）：把三端像素、原语流哈希、bin2d 画质数字压成一份可提交的清单
+$(BIN_DIR)/baseline_snapshot$(EXT): tools/baseline_snapshot.cpp
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $< -lgdiplus -lgdi32 -luser32 -lole32
 
@@ -735,6 +741,77 @@ pixels-d3d11: tools
 	@echo "--- 强制读回 + GDI 贴屏 vs 交换链（阈值 0）---"
 	@$(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/probe.html $(PIXEL_D3D_OUT)/probe.gdi.png --gdi >/dev/null
 	@$(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/probe.png $(PIXEL_D3D_OUT)/probe.gdi.png 0
+
+# 注意（踩过）：recipe 的**命令文本**一律用 ASCII。mingw32-make 调 Git 的 sh 时，
+# 某些中文字符（实测「没构建设」「（）」）会让 sh 报 "unexpected EOF while looking for
+# matching `"`" —— 整行命令解析失败、目标直接不动，报错还指向 Makefile 行号，极难定位。
+# 中文只放在注释里；要在命令里输出中文，改成 ASCII（或者写进脚本文件再调用）。
+# =============================================
+# 迁移基线快照（P1，v0.20.3）
+#
+# 为什么要有它：`make pixels` / `pixels-vk` / `pixels-d3d11` 只回答"在容差内吗"，
+# 回答不了"哪一端、哪个用例动了"。迁移 `<path>` 到 bin2d 时，像素一定会动一点点，
+# 那时最需要的恰恰是"动的正好是路径相关的用例，别的一个都没动"。
+#
+# 做法：三端各把每个用例渲一遍到 build-mingw/baseline/render/<后端>/，由
+# tools/baseline_snapshot.cpp 压成一行一个 FNV-1a 64（原始 ARGB，PNG 编码器换了也不影响），
+# 连同 draw_bench 的原语流哈希、bin2d `make quality` 的数字，一起写进
+# tests/baseline/manifest.txt 并**提交进仓库**。每步迁移后对一遍。
+#
+# 判据（两级，别混）：
+#   · 硬门禁仍是 pixel_diff 的容差判据（`make pixels` 等），它管"能不能接受"；
+#   · 快照管"动了什么"：结构变化（用例增删 / 尺寸变）直接失败；哈希变化默认**只报告**，
+#     确认后跑 `make baseline` 重生成快照并在 CHANGELOG 写清为什么变；
+#     要求"这一步必须逐位相同"时用 `make baseline-strict`。
+#
+# 为什么 `draw_bench --hash` 要带 `--frames 1 --warm 0`：哈希是**跨帧累加**的，
+# 帧数不同哈希就不同（实测 --frames 1/2/5 三个值）。固定成"第一帧的原语流"最稳定。
+# =============================================
+BASELINE_DIR    := tests/baseline
+BASELINE_RAW    := $(BUILD_DIR)/baseline
+BASELINE_MANI   := $(BASELINE_DIR)/manifest.txt
+BASELINE_RENDER := $(BASELINE_RAW)/render
+BASELINE_DRAW   := $(BASELINE_RAW)/draw_bench.txt
+BASELINE_QA     := $(BASELINE_RAW)/quality.txt
+BASELINE_CASES  := $(PIXEL_CASES) $(addprefix demo-,$(VK_DEMO_CASES)) $(addprefix anim-,$(ANIM_CASES))
+# bench 用例：真实示例 + 渐变卡片压测（条带爆炸那一页）。
+# **animshow 不进快照**：它的原语流由动画时钟（wall clock）决定，同一份代码连跑两次
+# 哈希都不同（实测三次三个值），拿它当基线只会每次报"变了"。同理，任何"运行中会自己变"
+# 的页面都不该进哈希基线 —— 像素快照那边没这个问题（渲染工具是定帧的，实测两次全等）。
+BASELINE_DRAW_CASES := $(filter-out animshow,$(BENCH_CASES)) bench-grad
+
+.PHONY: baseline-render
+baseline-render: tools
+	@mkdir -p $(BASELINE_RENDER)/gdi $(BASELINE_RENDER)/gl $(BASELINE_RENDER)/vk $(BASELINE_RENDER)/d3d11
+	@fail=0; for c in $(BASELINE_CASES); do \
+	    src=docs/issues/assets/$$c.html; \
+	    case $$c in demo-*) src=examples/$${c#demo-}/main.html ;; anim-*) src=docs/issues/assets/$${c#anim-}.html ;; esac; \
+	    $(BIN_DIR)/gl_shot$(EXT) $$src $(BASELINE_RENDER)/gl/$$c.png >/dev/null 2>&1 || { echo "render failed [gl]: $$c"; fail=1; }; \
+	    $(BIN_DIR)/vk_shot$(EXT) $$src $(BASELINE_RENDER)/vk/$$c.png >/dev/null 2>&1 || { echo "render failed [vk]: $$c"; fail=1; }; \
+	    $(BIN_DIR)/d3d11_shot$(EXT) $$src $(BASELINE_RENDER)/d3d11/$$c.png >/dev/null 2>&1 || { echo "render failed [d3d11]: $$c"; fail=1; }; \
+	done; exit $$fail
+	@fail=0; for c in $(PIXEL_CASES); do \
+	    $(BIN_DIR)/offscreen_render$(EXT) docs/issues/assets/$$c.html $(BASELINE_RENDER)/gdi/$$c.png >/dev/null 2>&1 || { echo "render failed [gdi]: $$c"; fail=1; }; \
+	done; exit $$fail
+	@: > $(BASELINE_DRAW); for d in $(BASELINE_DRAW_CASES); do \
+	    src=examples/$$d/main.html; \
+	    if [ ! -f $$src ]; then src=$(BENCH_ASSET)/$$d.html; fi; \
+	    h=$$($(BIN_DIR)/draw_bench$(EXT) $$src --frames 1 --warm 0 --hash 2>/dev/null | tail -1); \
+	    echo "draw $$d $$h" >> $(BASELINE_DRAW); \
+	done
+	@if [ -x ../bin2D/build-mingw/out/bin2d-quality$(EXT) ]; then ../bin2D/build-mingw/out/bin2d-quality$(EXT) $(BASELINE_RAW)/quality >$(BASELINE_QA) 2>&1 || true; else echo "bin2d quality tool not built (run: make -C ../bin2D quality)" >$(BASELINE_QA); fi
+
+.PHONY: baseline
+baseline: baseline-render $(BIN_DIR)/baseline_snapshot$(EXT)
+	@$(BIN_DIR)/baseline_snapshot$(EXT) write $(BASELINE_MANI) $(BASELINE_RENDER) $(BASELINE_DRAW) $(BASELINE_QA)
+
+.PHONY: baseline-check
+baseline-check: baseline-render $(BIN_DIR)/baseline_snapshot$(EXT)
+	@$(BIN_DIR)/baseline_snapshot$(EXT) check $(BASELINE_MANI) $(BASELINE_RENDER) $(BASELINE_DRAW) $(BASELINE_QA)
+
+.PHONY: baseline-strict
+baseline-strict: baseline-render $(BIN_DIR)/baseline_snapshot$(EXT)
+	@$(BIN_DIR)/baseline_snapshot$(EXT) check $(BASELINE_MANI) $(BASELINE_RENDER) $(BASELINE_DRAW) $(BASELINE_QA) --strict
 
 .PHONY: vk-window
 # 窗口模式验收：拿真实窗口跑 N 帧，读回**交换链图像**与 GL 同尺寸输出比（阈值 0）。
