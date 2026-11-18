@@ -26,5 +26,5 @@
 
 - 测试：`make test` 或 `ctest` 结果，新增了哪些断言
 - 示例 UI：哪些例子重新编译过，warnings 是否为 0
-- 目视：截图或用 tools/offscreen_render 生成的 PNG
+- 目视：截图或用 tools/gl_shot 生成的 PNG
 -->
