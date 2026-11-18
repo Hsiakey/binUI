@@ -2010,21 +2010,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         const int key = stroke ? -r : r;
         const int t = RoundTemplateSize(r);
         std::vector<uint32_t> px(static_cast<size_t>(t) * t);
-        const float half = static_cast<float>(t) / 2.0f;
-        const float inset = half - static_cast<float>(r);
-        for (int i = 0; i < t; i++) {
-            for (int j = 0; j < t; j++) {
-                const float fx = std::fabs(static_cast<float>(j) + 0.5f - half) - inset;
-                const float fy = std::fabs(static_cast<float>(i) + 0.5f - half) - inset;
-                const float dx = fx > 0 ? fx : 0.0f;
-                const float dy = fy > 0 ? fy : 0.0f;
-                const float dist = std::sqrt(dx * dx + dy * dy) - static_cast<float>(r);
-                float cov = stroke ? std::min(0.5f - dist, dist + 1.5f) : 0.5f - dist;
-                cov = cov < 0.0f ? 0.0f : (cov > 1.0f ? 1.0f : cov);
-                const uint32_t lum = static_cast<uint32_t>(cov * 255.0f + 0.5f);
-                px[static_cast<size_t>(i) * t + j] = (lum << 24) | (lum << 16) | (lum << 8) | lum;
-            }
-        }
+        // 模板内容来自 bin2d（v0.23.0）：三端以前各写一份同样的解析式距离循环，
+        // 现在只有 bin2d 里那一份（`RasterizeRoundedTileCoverage`，0.7.0）。
+        if (BuildRoundedTileRGBA(r, stroke, px.data()) != t) return;
         auto old = rounds.find(key);
         if (old != rounds.end()) {
             freeTex(old->second.tex);

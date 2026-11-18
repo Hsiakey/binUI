@@ -2344,6 +2344,37 @@ static int CheckTiling(float w, float h, float r, int expectN, const char* tag) 
 }
 
 int run() {
+    // ---------- 模板内容（v0.23.0：来自 bin2d）----------
+    // 这条测的不是"形状像不像"（那是 bin2d 自己的活，它的测试里有"与旧实现逐字节相同"），
+    // 而是**契约**：边长与 RoundTemplateSize 一致、四个通道都等于覆盖率（模板纹理是灰度 +
+    // alpha），以及填充/描边两种口径都对。
+    {
+        const int r = 10;
+        const int t = RoundTemplateSize(r);
+        std::vector<uint32_t> px(static_cast<size_t>(t) * t, 0xDEADBEEFu);
+        CHECK(BuildRoundedTileRGBA(r, false, px.data()) == t, "模板内容：返回边长 = RoundTemplateSize");
+        auto at = [&](int x, int y) { return px[static_cast<size_t>(y) * t + x]; };
+        bool gray = true;
+        for (int i = 0; i < t * t; i++) {
+            const uint32_t v = px[static_cast<size_t>(i)];
+            const uint32_t lum = v & 0xFFu;
+            if (((v >> 24) & 0xFFu) != lum || ((v >> 16) & 0xFFu) != lum ||
+                ((v >> 8) & 0xFFu) != lum)
+                gray = false;
+        }
+        CHECK(gray, "模板内容：四个通道都等于覆盖率（灰度 + alpha）");
+        CHECK((at(t / 2, t / 2) & 0xFFu) == 255u, "模板内容：中心满覆盖");
+        CHECK((at(0, 0) & 0xFFu) == 0u, "模板内容：角上为 0");
+        CHECK((at(t / 2, 0) & 0xFFu) == 255u, "模板内容：直边中点满覆盖");
+        std::vector<uint32_t> sp(static_cast<size_t>(t) * t, 0);
+        CHECK(BuildRoundedTileRGBA(r, true, sp.data()) == t, "模板内容：描边版边长一致");
+        auto sat = [&](int x, int y) { return sp[static_cast<size_t>(y) * t + x]; };
+        CHECK((sat(t / 2, t / 2) & 0xFFu) == 0u, "模板内容：描边版内部为空");
+        CHECK((sat(t / 2, 0) & 0xFFu) == 255u, "模板内容：描边带在直边上满覆盖");
+        // 尺寸契约破了必须报失败（而不是把模板悄悄拉伸成错的大小）
+        CHECK(BuildRoundedTileRGBA(r, false, nullptr) == 0, "模板内容：空指针返回 0");
+    }
+
     // ---------- 模板尺寸 ----------
     CHECK(RoundTemplateSize(1) == 8, "r=1 时模板至少 8px");
     CHECK(RoundTemplateSize(50) == 104, "r=50 时模板 = 2r+4 = 104");

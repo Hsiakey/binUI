@@ -1254,6 +1254,16 @@ inline int RoundTemplateSize(int radius) {
     return std::max(8, r * 2 + 4);
 }
 
+// 圆角模板的**内容**（v0.23.0）：写 t×t 个 0xAArrggbb，四个通道都等于覆盖率
+// （三端模板纹理是灰度 + alpha，用同一个值填满四个通道）。返回 t（= RoundTemplateSize），
+// 0 = 失败（调用方退回 fillRect / 空模板）。
+//
+// 内容来自 bin2d（`bin2d::RasterizeRoundedTileCoverage`）：以前 GL / VK / D3D11 **各写一份**
+// 一模一样的解析式距离循环，任何一份改了（边长、内缩、"边界骑在像素中间还是贴在里侧"）
+// 三端圆角就差一圈像素 —— 与 P2 的填充/描边是同一类漂移，所以同样收口。实现在
+// src/backends/binui_paint.cpp（唯一依赖 bin2d 的翻译单元）。
+int BuildRoundedTileRGBA(int radius, bool stroke, uint32_t* out);
+
 // 把圆角矩形拆成九个轴对齐块（四角 + 四边中段 + 中心）。返回块数；
 // 0 = 半径无效，调用方应退回 fillRect。t 必须是 RoundTemplateSize(radius)。
 inline int BuildRoundedNineSlice(float x, float y, float w, float h, float radius, int t,

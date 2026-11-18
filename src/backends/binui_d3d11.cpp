@@ -533,32 +533,11 @@ struct BinUID3D::Impl {
         }
         memset(rasterBits, 0, static_cast<size_t>(t) * t * 4);
 
-        // 解析式逐像素覆盖率（1px 抗锯齿边缘），替代 GDI RoundRect（无 AA，转角锯齿明显）。
-        // 形状铺满整个模板 [0,t]：圆弧包围盒正好是 [0,r]，角片边长与弧长严格对应，
-        // 半径到短边一半时四角才能无缝拼成圆/胶囊。
-        {
-            uint32_t* px = static_cast<uint32_t*>(rasterBits);
-            const float half = static_cast<float>(t) / 2.0f;      // 形状半边长
-            const float inset = half - static_cast<float>(r);     // 直边段起点距中心
-            const float c0 = half;                                // 模板中心
-            for (int i = 0; i < t; i++) {
-                for (int j = 0; j < t; j++) {
-                    float fx = fabsf(j + 0.5f - c0) - inset;
-                    float fy = fabsf(i + 0.5f - c0) - inset;
-                    float dx = fx > 0 ? fx : 0.0f;
-                    float dy = fy > 0 ? fy : 0.0f;
-                    float dist = sqrtf(dx * dx + dy * dy) - static_cast<float>(r);
-                    // 填充 = 内部；描边 = 贴着外侧边界往里 1px 的实心带（详见 GL 后端同段注释：
-                    // 以前骑在边界上画，靠内半个像素只有 50%，白色焦点环会变成灰线）
-                    float cov = stroke ? std::min(0.5f - dist, dist + 1.5f) : 0.5f - dist;
-                    cov = cov < 0.0f ? 0.0f : (cov > 1.0f ? 1.0f : cov);
-                    uint8_t lum = static_cast<uint8_t>(cov * 255.0f + 0.5f);
-                    uint32_t v = (static_cast<uint32_t>(lum) << 24) |
-                                 (static_cast<uint32_t>(lum) << 16) |
-                                 (static_cast<uint32_t>(lum) << 8) | lum;
-                    px[i * t + j] = v;
-                }
-            }
+        // 模板内容来自 bin2d（v0.23.0）：三端以前各写一份同样的解析式距离循环，
+        // 现在只有 bin2d 里那一份（`RasterizeRoundedTileCoverage`，0.7.0）。
+        if (BuildRoundedTileRGBA(r, stroke, static_cast<uint32_t*>(rasterBits)) != t) {
+            std::fprintf(stderr, "[d3d11] roundFor: 圆角模板生成失败 (%dx%d)\n", t, t);
+            return emptyRound_;
         }
 
         RoundTex rt;

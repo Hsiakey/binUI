@@ -121,7 +121,18 @@ CHANGELOG 写明 + 硬门禁先绿）。
   `gate-migrate` 与 `bench-draw` 都不退化；SVG 示例（`svgdemo`）的 819 KB 顶点量**下降**。
 - **回滚条件**：任何一端出现 >0 像素差，或单帧退化 >20%。
 
-### P3：圆角 / 投影 / 九宫格
+### P3：圆角 / 投影 / 九宫格 —— 🔶 第一半已落地（0.23.0 + bin2d 0.7.0）
+
+**已落地（0.23.0）**：三个 GPU 后端的**圆角模板内容**收口到 bin2d
+（`RasterizeRoundedTileCoverage`）。GL / VK / D3D11 原本各写一份同样的解析式距离循环，
+现在只有一份。判据是"像素一位不动"：`baseline-strict` 188 项**完全一致**（含三端各 50 个
+用例的原始 ARGB 逐字节比对）、`pixels` 18/18 零差异、`pixels-vk` / `pixels-d3d11` 零差异、
+全量重编 0 警告。几何部分（`BuildRoundedNineSlice`）本来就在 `binui_paint.h` 里共用。
+
+**还没做**：GDI 端的圆角/投影/九宫格（`RoundRect` 无 AA、假投影是靠叠半透明圆角矩形、
+九宫格走 GDI 拉伸），以及 `fillRoundedXf` / `strokeRounded` 的多层同心环（"9 × 线宽层数"）
+是否也换掉。这一段会**改像素**（GDI 圆角从硬边变 AA），GDI 与 GL 在圆角用例上的差距
+（`radius-matrix` 0.67%、`probe` 2.19%、`image-round` 1.43%）就是它的判据。
 
 - `fillRounded` → `bin2d::FillRoundedRect`；假投影 → `bin2d::Shadow`；
   九宫格 → `bin2d::DrawNineSlice`（含 0.4.0 的缩小预滤波，图标缩小不再有摩尔纹）。

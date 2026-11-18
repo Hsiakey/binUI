@@ -207,4 +207,23 @@ int BuildPathStrokeBands(const PaintPath& path, float width, uint8_t cap, uint8_
     return EmitBands(cov, shade, out, maxBands, truncated, /*splitX=*/true);
 }
 
+// 圆角模板内容（v0.23.0）：覆盖率来自 bin2d，本文件只把它摊成"四通道都是覆盖率"的像素
+// （三个 GPU 后端的模板纹理都是灰度 + alpha，用同一个值填满四个通道）。
+//
+// 尺寸口径的兜底：`RoundTemplateSize`（binUI）与 `bin2d::RoundedTileSize` 必须一致 ——
+// 不一致就返回 0 让调用方退回 fillRect，而不是悄悄把模板拉伸成错的大小（那会让圆角
+// 边缘整体偏一圈像素，而且只在某些半径上出现，最难查）。
+int BuildRoundedTileRGBA(int radius, bool stroke, uint32_t* out) {
+    const int t = RoundTemplateSize(radius);
+    if (!out || t <= 0) return 0;
+    bin2d::CoverageRect& cov = ThreadCoverage();
+    if (!bin2d::RasterizeRoundedTileCoverage(radius, stroke, cov)) return 0;
+    if (cov.w != t || cov.h != t) return 0;
+    for (int i = 0; i < t * t; i++) {
+        const uint32_t lum = cov.v[static_cast<size_t>(i)];
+        out[i] = (lum << 24) | (lum << 16) | (lum << 8) | lum;
+    }
+    return t;
+}
+
 } // namespace binui

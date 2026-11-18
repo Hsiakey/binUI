@@ -5,6 +5,46 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.23.0] - 2026-11-19 【格式 v34】
+
+**P3 第一半：三个 GPU 后端的圆角模板收口到 bin2d**（`bin2d::RasterizeRoundedTileCoverage`，
+bin2d 0.7.0）。GL / VK / D3D11 原本**各写一份**一模一样的解析式距离循环（30 行 × 3 份）
+去生成"九宫格角片"那张灰度模板，现在只有 bin2d 里一份，binUI 只做"覆盖率 → 灰度 RGBA"。
+
+### 这一步的判据是"像素一位不动"
+
+| 门禁 | 结果 |
+|---|---|
+| `make baseline-strict`（188 项） | **完全一致**（像素 / 原语流 / 画质数字全同） |
+| `make pixels`（18 个 GDI 基准） | 18 个用例 **0 个不同像素** |
+| `make pixels-vk` / `pixels-d3d11` | 全部 **0 个不同像素**（`anim/affine-text` 6 px 为该用例既有差异） |
+| 全量重编（清了 .o 之后） | **0 警告** |
+
+`baseline-strict` 是这一刻最有说服力的那条：它把 GL/VK/D3D11 各 50 个用例的原始 ARGB
+逐字节比了一遍 —— 三个后端渲染出的圆角边缘一位都没变。所以这次删掉两份实现是**纯减法**。
+
+### Changed
+
+- 删掉 GL / D3D11 的 `roundFor` 里的解析式循环与 VK `buildRound` 里的同名循环，改为
+  `binui::BuildRoundedTileRGBA(radius, stroke, out)`（实现在 `src/backends/binui_paint.cpp`）。
+- `BuildRoundedTileRGBA` 会核对 `RoundTemplateSize(radius)` 与 bin2d 的 `RoundedTileSize`
+  是否一致 —— 不一致就返回 0 让调用方退回 `fillRect`，而不是悄悄把模板拉伸成错的大小
+  （那会让圆角边缘整体偏一圈像素，而且只在某些半径上出现）。
+- 顺手修掉 GL 后端 `drawDropShadow` 的 `unused parameter 'layerFbo'` 警告（它在本次改动
+  之前就存在，只是那个翻译单元很久没有重编，全量重编才露出来）。现在全量重编 0 警告。
+
+### 为什么"圆角模板"也算 bin2d 的活
+
+它和 P2/P2b 的填充、描边是同一类东西：**覆盖率**。宿主要的是"这个像素被盖住多少"，
+不是已经混好的像素 —— 三个后端各自把这张灰度图当纹理去 9 宫格拉伸（角片边长 = r、
+中段取正中 1px），几何部分（`BuildRoundedNineSlice`）早就在 `binui_paint.h` 里共用了，
+只有"模板内容"漂着三份。
+
+注意它**不是**多边形光栅化：bin2d 也提供 `RasterizeCoverage`，但拿它拼一个圆角路径会得到
+另一张图（折线圆弧 + 8 条子采样），三端像素就不再相同 —— 这条写在 bin2d 的头文件注释里。
+
+---
+
 ## [0.22.0] - 2026-11-19 【格式 v34】
 
 **P2b：`<path>` 的描边也换成 bin2d**（迁移的最后一块几何）。描边不再是"逐段 fillLine +
