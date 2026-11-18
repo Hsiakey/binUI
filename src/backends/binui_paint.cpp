@@ -167,4 +167,44 @@ int BuildPathFillBandsAA(const PaintPath& path, bool evenOdd, float clipX0, floa
     return EmitBands(cov, shade, out, cap, truncated, /*splitX=*/false);
 }
 
+// 描边（v0.22.0）：几何与覆盖率都来自 bin2d 的描边覆盖率（与它的 StrokePath 同源），
+// 本文件只把并集覆盖率拼成条带。
+//
+// 三处口径要记牢（都是"不这么写就会变样"的点）：
+//   1. subSamples = 4：与填充 AA 同一个数，也是迁移前老描边（逐段 BuildLineBandsAA）的数；
+//   2. splitX = true：描边跨行跨列都比填充长（一根横线一条带能横贯几百像素），渐变不按 x
+//      切段的话整根线会取一个颜色 —— 填充 AA 能关是因为渐变填充走的是硬边路径；
+//   3. BEVEL = miterLimit 1：bin2d 的斜接在 ratio > limit 时退化成斜面，而直角处
+//      ratio = √2 > 1 —— 这正是 SVG 规范里 bevel 的定义，所以不必让 bin2d 认识 bevel。
+int BuildPathStrokeBands(const PaintPath& path, float width, uint8_t cap, uint8_t join,
+                         uint8_t miterLimit, float clipX0, float clipY0, float clipX1,
+                         float clipY1, const PathShade& shade, PaintBand* out, int maxBands,
+                         bool* truncated) {
+    if (truncated) *truncated = false;
+    if (!path.Valid() || width <= 0.0f) return 0;
+    if (clipX1 <= clipX0 || clipY1 <= clipY0) return 0;
+
+    bin2d::StrokeCoverageRequest req;
+    req.xy = path.pts;
+    req.first = path.first;
+    req.count = path.count;
+    req.closed = path.closed;
+    req.contours = path.contours;
+    req.style.width = width;
+    req.style.roundCap = (cap == BINUI_CAP_ROUND);
+    req.style.squareCap = (cap == BINUI_CAP_SQUARE);
+    req.style.roundJoin = (join == BINUI_JOIN_ROUND);
+    if (join == BINUI_JOIN_BEVEL) {
+        req.style.miterLimit = 1.0f;
+    } else {
+        req.style.miterLimit = miterLimit > 0 ? static_cast<float>(miterLimit) : 4.0f;
+    }
+    req.subSamples = 4;
+    req.clip = bin2d::Rect(clipX0, clipY0, clipX1 - clipX0, clipY1 - clipY0);
+
+    bin2d::CoverageRect& cov = ThreadCoverage();
+    if (!bin2d::RasterizeStrokeCoverage(req, cov)) return 0;
+    return EmitBands(cov, shade, out, maxBands, truncated, /*splitX=*/true);
+}
+
 } // namespace binui

@@ -243,6 +243,7 @@ public:
             e.key = 0;
             e.accounted = 0;
             e.bands.clear();
+            e.strokeBands.clear();
         }
         return &e;
     }
@@ -255,12 +256,13 @@ public:
                    ? 0
                    : kMaxPathCacheBandsTotal - pathBandsTotal_;
     }
-    // 画完之后把这一节点实际缓存了多少条带记账（供 pathBandsBudget 用）
+    // 画完之后把这一节点实际缓存了多少条带记账（供 pathBandsBudget 用）。
+    // 填充 + 描边各一份列表（v0.22.0），都要算进全局预算。
     void commitPathBands(uint16_t nodeId) const {
         auto it = pathBands_.find(nodeId);
         if (it == pathBands_.end()) return;
         PathBandCacheEntry& e = it->second;
-        const size_t now = e.bands.size();
+        const size_t now = e.bands.size() + e.strokeBands.size();
         pathBandsTotal_ += now;
         if (pathBandsTotal_ >= e.accounted) pathBandsTotal_ -= e.accounted;
         else pathBandsTotal_ = 0;

@@ -1490,12 +1490,6 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                         [&](const binui::PaintBand* b, int n) {
                             for (int k = 0; k < n; k++)
                                 gfx.fillRect(b[k].x, b[k].y, b[k].w, b[k].h, b[k].color);
-                        },
-                        [&](float x0, float y0, float x1, float y1, float lw, uint32_t lc) {
-                            gfx.fillLine(x0, y0, x1, y1, lw, lc);
-                        },
-                        [&](float rx, float ry, float rw, float rh, float rr, uint32_t dc) {
-                            gfx.fillRounded(rx, ry, rw, rh, rr, dc);
                         });
                     // 缓存记账：这一节点这帧实际占了多少条带（全局预算 pathBandsBudget 用）
                     renderer.commitPathBands(node.id);
@@ -1627,14 +1621,6 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                                          for (int q = 0; q < n; q++)
                                              gfx.fillRect(b[q].x, b[q].y, b[q].w, b[q].h,
                                                           b[q].color);
-                                     },
-                                     [&](float x0, float y0, float x1, float y1, float lw2,
-                                         uint32_t lc) {
-                                         gfx.fillLine(x0, y0, x1, y1, lw2, lc);
-                                     },
-                                     [&](float rx, float ry, float rw, float rh, float rr,
-                                         uint32_t dcc) {
-                                         gfx.fillRounded(rx, ry, rw, rh, rr, dcc);
                                      });
             };
             // ① 保留趟：逐条（每条一个 alpha）
@@ -1682,14 +1668,6 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                                              for (int q = 0; q < n; q++)
                                                  gfx.fillRect(b[q].x, b[q].y, b[q].w, b[q].h,
                                                               b[q].color);
-                                         },
-                                         [&](float x0, float y0, float x1, float y1, float lw2,
-                                             uint32_t lc) {
-                                             gfx.fillLine(x0, y0, x1, y1, lw2, lc);
-                                         },
-                                         [&](float rx, float ry, float rw, float rh, float rr,
-                                             uint32_t dcc) {
-                                             gfx.fillRounded(rx, ry, rw, rh, rr, dcc);
                                          });
                 }
                 gfx.setEraseBlend(false);
@@ -1773,14 +1751,6 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                                          for (int q = 0; q < n; q++)
                                              gfx.fillRect(b[q].x, b[q].y, b[q].w, b[q].h,
                                                           b[q].color);
-                                     },
-                                     [&](float x0, float y0, float x1, float y1, float lw2,
-                                         uint32_t lc) {
-                                         gfx.fillLine(x0, y0, x1, y1, lw2, lc);
-                                     },
-                                     [&](float rx, float ry, float rw, float rh, float rr,
-                                         uint32_t dcc) {
-                                         gfx.fillRounded(rx, ry, rw, rh, rr, dcc);
                                      });
                 gfx.setEraseBlend(false);
             }

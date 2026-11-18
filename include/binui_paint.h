@@ -1444,23 +1444,19 @@ inline int BuildDashedRoundRing(float x, float y, float w, float h, float radius
 }
 
 // ============================================================
-// 路径填充（SVG <path>/<ellipse>）：折线 → 逐行扫描线 → 轴对齐条带
+// 路径填充（SVG <path>/<ellipse>）：折线 → 覆盖率 → 轴对齐条带
 //
-// 为什么只能这么做：三个后端都没有"填充任意多边形"的原语（GL/D3D 没有
-// stencil 与三角化接口，GDI 只有硬编码的三角形调用）。共用一个扫描线求交
-// 器，各端只负责 fillRect，三端像素才必然一致 —— 与上面的 BuildFillBands
-// 是同一个分工。
+// 光栅化在 bin2d（v0.21.0 起，`bin2d::RasterizeCoverage`）；这里只剩 binUI 特有的那半段
+// —— 覆盖率拼成条带。为什么必须经过覆盖率：三个后端都没有"填充任意多边形"的原语
+// （GL/D3D 没有 stencil 与三角化接口，GDI 只有硬编码的三角形调用），共用一个求交器、
+// 各端只负责 fillRect，三端像素才必然一致。
 //
-// 两个实现细节：
-//   · 相邻同宽同色的行要合并（pushRun 那套）。一个 24px 图标逐行画是 24 条，
-//     合并后通常只剩"两侧弧边几十条 + 实心区一条"，差一个数量级。
-//   · 撞条带上限时**按行步长降级**（1 → 2 → 4 → …），保证画完而不是画一半；
-//     调用方从返回值/truncated 判断要不要重试。
+// 条带上限的兜底是**放大缓冲重试**（不是降精度）：条带数按几何复杂度增长，估不准，
+// 与其写死一个上限后画一半，不如按需翻倍 —— 命中上限的形状很少，翻了就一直在。
 // ============================================================
-constexpr int kMaxPathBands = 4096;      // 单条路径的条带上限（v16 渐变要比纯色多）
-constexpr int kMaxPathCrossings = 1024;  // 单条扫描线的交点上限
-constexpr int kMaxRowSpans = 128;        // 单行条带上限
-constexpr int kMaxOpenRuns = 96;         // 跨行合并的"正在延伸的条带"表
+constexpr int kMaxPathBands = 4096;       // 单条路径的条带初始缓冲（不够就翻倍）
+constexpr int kMaxPathBandsHard = 65536;  // 硬上限：宁可画不全也不吃爆内存
+constexpr int kMaxOpenRuns = 96;          // 跨行合并的"正在延伸的条带"表
 
 // ---- v16 路径渐变（SVG <linearGradient>/<radialGradient>）------------------
 //
@@ -1669,83 +1665,42 @@ inline int BuildPathFillBands(const PaintPath& path, bool evenOdd,
                               rowStep, truncated);
 }
 
-// 折线描边：逐段画线，转角按 stroke-linejoin 补缺口（圆角补圆点 / 斜接与斜面填多边形）。
-// 三个后端的 fillLine / fillRounded / fillRect 签名一致，所以这里用回调模板，
-// 后端只传"怎么画一根线 / 一个圆 / 一堆条带"，几何只写一份。
+// ============ 路径描边（v0.22.0：覆盖率换成 bin2d 的描边覆盖率） ============
 //
-// ---- 描边回调契约 ----
-// line(x0,y0,x1,y1,w,c) → 后端画一根 w 粗的线（颜色逐段给：渐变描边靠这个）
-// dot(x,y,w,h,r,c)      → 后端画一个实心圆（圆角连接 / 圆头）
-// poly(xy, n, c)        → 后端填一个多边形（斜接/斜面缺口）
-// colorAt(x,y)          → 该点颜色（纯色时是常量，渐变描边时逐段取色）
+// 为什么描边也必须走 CPU 覆盖率（量出来的，不是猜的）：
+// 4× MSAA 的**采样子像素位置**由 API 与驱动决定，OpenGL 与 Vulkan 在同一块 GPU 上
+// 并不相同（x 方向互为镜像）。填充走的是 CPU 覆盖率条带，所以三端必然一致；描边以前
+// 直接发细长四边形，于是差异只在"边缘斜着穿过像素"时出现：
+//   · 轴对齐线、任意宽度 → 0 差异（覆盖数与采样位置无关）
+//   · 45° 线 → 0 差异（采样位置镜像对称，覆盖数不变）
+//   · 9.5° 线（120×20）→ 整条差 62/255，正好一档 4× MSAA（25%）
+//   · `<circle>` 描边 → 圆是折线，整圈都差（实测 320 个像素、最大通道差 123）
+// 所以描边几何一律算覆盖率，三端调同一份代码 —— 采样位置不可设置（OpenGL 没有对应
+// API），这是"三端逐像素相同"在斜线上唯一能兑现的办法。
+//
+// 为什么是**一张并集覆盖率**而不是"逐段各自混合"（v0.22.0 换掉的老做法）：
+// 逐段混合时相邻段在接缝处各混一次 → 半透明描边的每个接缝深一条；拐点补的圆/多边形
+// 也是各自混一次。现在交给 bin2d：每段四边形 + 拐点连接块 + 端帽逐块栅格化，同一像素
+// **取 max** 合成并集，最后只混一次（语义与 bin2d 的 `StrokePath` 同源，见其
+// `RasterizeStrokeCoverage`）。顺带解决两件事：
+//   · 拐点/端帽以前走的是后端的 fillRounded（= GPU 圆角矩形，4× MSAA）→ 三端本来就会
+//     在"圆 vs 24 边形"上分岔，现在统一由覆盖率给出；
+//   · 斜接/斜面缺口以前走硬边条带（无 AA），现在跟填充一样有 AA。
+//
+// 代价与兜底：一条路径的描边条带数比填充更随机（AA 边缘每行的 alpha 都不一样，跨行
+// 合并不上），所以缓冲按需翻倍，硬上限 kMaxPathBandsHard。
+//
+// 仿射（rotate/scale）下的描边仍然是"条带过矩阵"：条带是轴对齐矩形，过矩阵后相邻条带
+// 之间会露缝，质量反而更差 —— 这与填充走的是同一条路，仿射路径另有像素门禁用例兜底。
+//
 // cap = BinUIPathCap：BUTT（端点即路径端点）/ ROUND（两端半圆）/ SQUARE（两端各外延半线宽）
-// join = BinUIPathJoin；miterLimit 为 0 时按 SVG 默认 4
-// 返回画出的线段数（供调用方估算开销）
-template <class ColorAt, class LineFn, class DotFn, class PolyFn>
-inline int PaintPathStroke(const PaintPath& path, float width, uint8_t cap,
-                           uint8_t join, uint8_t miterLimit, ColorAt&& colorAt,
-                           LineFn&& line, DotFn&& dot, PolyFn&& poly) {
-    if (!path.Valid() || width <= 0.0f) return 0;
-    const float half = width * 0.5f;
-    const float limit = miterLimit > 0 ? static_cast<float>(miterLimit) : 4.0f;
-    int segs = 0;
-    for (int c = 0; c < path.contours; c++) {
-        const uint32_t first = path.first[c];
-        const uint32_t cnt = path.count[c];
-        if (cnt < 2) continue;
-        const bool closed = path.closed && path.closed[c];
-        const uint32_t segCount = closed ? cnt : cnt - 1;
-        for (uint32_t i = 0; i < segCount; i++) {
-            const uint32_t ia = first + i;
-            const uint32_t ib = first + (i + 1) % cnt;
-            // 原始端点（转角几何一律用它 —— 方头外延只影响画出来的那根线）
-            const float oax = path.pts[ia * 2], oay = path.pts[ia * 2 + 1];
-            const float obx = path.pts[ib * 2], oby = path.pts[ib * 2 + 1];
-            float ax = oax, ay = oay, bx = obx, by = oby;
-            if (!closed && cap == BINUI_CAP_SQUARE) {
-                // 方头 = 端点沿切线方向各外延半线宽（这就是 SVG square cap 的定义）
-                const float lx = obx - oax, ly = oby - oay;
-                const float ll = std::sqrt(lx * lx + ly * ly);
-                if (ll > 1e-6f) {
-                    const float ex = lx / ll * half, ey = ly / ll * half;
-                    if (i == 0) { ax -= ex; ay -= ey; }
-                    if (i + 1 == segCount) { bx += ex; by += ey; }
-                }
-            }
-            line(ax, ay, bx, by, width, colorAt((ax + bx) * 0.5f, (ay + by) * 0.5f));
-            segs++;
-            // 顶点 b 上还有没有下一段：闭合子路径的最后一段也有
-            const bool hasNext = (i + 1 < segCount) || closed;
-            if (hasNext) {
-                const uint32_t ic = first + (i + 2) % cnt;
-                const float cx = path.pts[ic * 2], cy = path.pts[ic * 2 + 1];
-                if (!PathNeedJoin(oax, oay, obx, oby, cx, cy)) continue;
-                if (join == BINUI_JOIN_MITER || join == BINUI_JOIN_BEVEL) {
-                    const PathJoinGeom g = PathJoinAt(oax, oay, obx, oby, cx, cy, half);
-                    if (!g.ok) continue;
-                    const uint32_t col = colorAt(obx, oby);
-                    if (join == BINUI_JOIN_MITER && g.ratio <= limit) {
-                        const float q[8] = { g.p1x, g.p1y, g.mx, g.my, g.p2x, g.p2y, obx, oby };
-                        poly(q, 4, col);
-                    } else {
-                        // 斜面，或斜接超过 miter-limit（规范：超限按 bevel 画）
-                        const float q[6] = { g.p1x, g.p1y, obx, oby, g.p2x, g.p2y };
-                        poly(q, 3, col);
-                    }
-                } else {
-                    dot(obx - half, oby - half, width, width, half, colorAt(obx, oby));
-                }
-            }
-        }
-        if (!closed && cap == BINUI_CAP_ROUND) {
-            const float ax = path.pts[first * 2], ay = path.pts[first * 2 + 1];
-            const float bx = path.pts[(first + cnt - 1) * 2], by = path.pts[(first + cnt - 1) * 2 + 1];
-            dot(ax - half, ay - half, width, width, half, colorAt(ax, ay));
-            dot(bx - half, by - half, width, width, half, colorAt(bx, by));
-        }
-    }
-    return segs;
-}
+// join = BinUIPathJoin：ROUND（拐点补圆）/ MITER（斜接，超 miterLimit 退化成斜面）/
+//        BEVEL（斜面 = miterLimit 取 1 的斜接，正是 SVG 规范里"退化成斜面"的定义）
+// miterLimit 为 0 时按 SVG 默认 4。返回画出的条带数。
+int BuildPathStrokeBands(const PaintPath& path, float width, uint8_t cap, uint8_t join,
+                         uint8_t miterLimit, float clipX0, float clipY0, float clipX1,
+                         float clipY1, const PathShade& shade, PaintBand* out, int maxBands,
+                         bool* truncated);
 
 // 渲染一个 BINUI_PATH 节点的全部几何：归一化点 → 设备折线 → 填充 + 描边。
 //
@@ -1762,10 +1717,11 @@ inline int PaintPathStroke(const PaintPath& path, float width, uint8_t cap,
 // 三端才必然一致。命中条件由调用方给出的 key 决定（节点盒尺寸、颜色、透明度、
 // 是否渐变都在 key 里），布局变化时由渲染器整表作废。
 struct PathBandCacheEntry {
-    uint64_t key = 0;               // 0 = 空（永不命中：编译期 key 从 1 起）
+    uint64_t key = 0;               // 0 = 还没算过；命中还要求对应列表非空（超预算就不存）
     uint64_t gen = 0;               // 渲染器布局代数（作废判断）
     size_t   accounted = 0;         // 已经计入渲染器全局预算的条带数（记账用）
-    std::vector<PaintBand> bands;
+    std::vector<PaintBand> bands;        // 填充条带
+    std::vector<PaintBand> strokeBands;  // 描边条带（v0.22.0：与填充同一个 key）
 };
 
 // 颜料集中成 PathPaintSpec：填充/描边各有"纯色 + 可选渐变"两组，v17 起描边也能带渐变。
@@ -1778,9 +1734,10 @@ struct PathPaintSpec {
 };
 
 struct PathRenderBuffers {
-    std::vector<PathPointF> pts;    // 设备坐标
-    std::vector<float> xy;          // PaintPath 需要的 x,y 交错布局
-    std::vector<PaintBand> bands;   // 填充条带（含降级重试时的容量）
+    std::vector<PathPointF> pts;       // 设备坐标
+    std::vector<float> xy;             // PaintPath 需要的 x,y 交错布局
+    std::vector<PaintBand> bands;      // 填充条带（含"撞上限就翻倍"的余量）
+    std::vector<PaintBand> strokeBands; // 描边条带（v0.22.0）
 };
 
 // 条带缓存的 key：形状盒尺寸 + 填充颜料 + 透明度 + 相关 flags（渐变指针也进去，
@@ -1803,7 +1760,7 @@ inline uint64_t MakePathBandKey(float x, float y, float w, float h,
     return k ? k : 1;   // 0 留给"空条目"
 }
 
-template <class FillBands, class LineFn, class DotFn>
+template <class FillBands>
 inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
                           const uint32_t* first, const uint32_t* count,
                           const uint8_t* closed, int contours,
@@ -1813,7 +1770,7 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
                           uint64_t cacheGen,
                           size_t cacheBudget,          // 本节点最多还能占多少条带（渲染器给）
                           PathRenderBuffers& buf,
-                          FillBands&& fillBands, LineFn&& line, DotFn&& dot) {
+                          FillBands&& fillBands) {
     if (!normPts || !first || !count || contours <= 0 || head.pointCount == 0) return;
     if (w <= 0.0f || h <= 0.0f) return;
 
@@ -1827,55 +1784,56 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
     }
     const PaintPath view{ buf.xy.data(), first, count, closed, contours };
 
+    // v19：先看缓存 —— 形状、尺寸、颜色、透明度、flags 都没变时直接重放上一次拼好的条带。
+    // 填充与描边共用一个 key（同一个节点、同一批输入），但各存一份列表：某一份超预算
+    // 就是不缓存那一份（下帧重算），不牵连另一份。少缓存只影响速度，不影响画面。
+    const uint64_t key = cache ? MakePathBandKey(x, y, w, h, spec, head.flags) : 0;
+    const bool hit = cache && key != 0 && cache->key == key && cache->gen == cacheGen;
+    if (cache && !hit) {
+        // 换了几何/颜料：整条作废（不做逐项失效 —— key 里已经含了全部输入）
+        cache->bands.clear();
+        cache->strokeBands.clear();
+        cache->key = key;
+        cache->gen = cacheGen;
+    }
+
     if (head.flags & PATH_FILL) {
-        // v19：先看缓存 —— 形状、尺寸、颜色、透明度都没变时直接重放上一次的条带。
-        // 命不中就算一遍并（在预算内）存下来；单节点超过 kMaxCachedBands 条、或者吃掉
-        // 渲染器剩下的全局预算（cacheBudget）就不缓存 —— 少缓存只影响速度，不影响画面。
-        const uint64_t key = cache ? MakePathBandKey(x, y, w, h, spec, head.flags) : 0;
-        if (cache && cache->key == key && cache->gen == cacheGen && !cache->bands.empty()) {
+        if (hit && !cache->bands.empty()) {
             fillBands(cache->bands.data(), static_cast<int>(cache->bands.size()));
         } else {
-            if (buf.bands.size() < static_cast<size_t>(kMaxPathBands))
-                buf.bands.resize(kMaxPathBands);
             const bool evenOdd = (head.flags & PATH_EVENODD) != 0;
             // v16：渐变填充（无渐变时退化成纯色取样器，与老路径完全一致）
             const PathShade shade =
                 MakePathShade((head.flags & PATH_FILL_GRAD) ? spec.fillGrad : nullptr,
                               spec.fillColor, spec.opacity, x, y, w, h);
+            // v19：shape-rendering=auto/optimizeQuality 时走覆盖率 AA，否则硬边。
+            // 条带撞上限就**放大缓冲重试**（不是降精度、也不是退回另一个分支）。
+            if (buf.bands.size() < static_cast<size_t>(kMaxPathBands))
+                buf.bands.resize(kMaxPathBands);
             int n = 0;
             bool truncated = false;
-            bool aaDone = false;
-            // v19：shape-rendering=auto/optimizeQuality 时走覆盖率 AA；
-            // 撞条带上限时退回硬边路径（v0.21.0 起没有宽度上限了）。
-            if (head.flags & PATH_AA) {
-                const int na = BuildPathFillBandsAA(view, evenOdd, x, y, x + w, y + h, shade,
-                                                    buf.bands.data(), kMaxPathBands, &truncated);
-                if (na >= 0 && !truncated) {
-                    n = na;
-                    aaDone = true;
-                }
-            }
-            if (!aaDone) {
+            for (;;) {
                 truncated = false;
-                // 撞上限：按行步长降级重来（1 → 2 → 4 → 8），保证画完而不是画一半
-                for (int step = 1; step <= 8; step *= 2) {
+                if (head.flags & PATH_AA) {
+                    n = BuildPathFillBandsAA(view, evenOdd, x, y, x + w, y + h, shade,
+                                             buf.bands.data(), static_cast<int>(buf.bands.size()),
+                                             &truncated);
+                } else {
                     n = BuildPathFillBands(view, evenOdd, x, y, x + w, y + h, shade,
-                                           buf.bands.data(), kMaxPathBands, step, &truncated);
-                    if (!truncated) break;
+                                           buf.bands.data(), static_cast<int>(buf.bands.size()), 1,
+                                           &truncated);
                 }
+                if (!truncated || buf.bands.size() >= static_cast<size_t>(kMaxPathBandsHard)) break;
+                buf.bands.resize(std::min<size_t>(buf.bands.size() * 2, kMaxPathBandsHard));
             }
             if (n > 0) fillBands(buf.bands.data(), n);
             if (cache) {
                 // 单节点 16384 条的安全上限 + 渲染器给的全局预算；任何一个不够就不缓存
                 // （不缓存只是每帧重算，不影响画对，所以这里是"宁可少缓存"）。
-                if (n > 0 && n <= kMaxCachedBands && static_cast<size_t>(n) <= cacheBudget) {
+                if (n > 0 && n <= kMaxCachedBands && static_cast<size_t>(n) <= cacheBudget)
                     cache->bands.assign(buf.bands.data(), buf.bands.data() + n);
-                    cache->key = key;
-                    cache->gen = cacheGen;
-                } else {
+                else
                     cache->bands.clear();
-                    cache->key = 0;
-                }
             }
         }
     }
@@ -1884,68 +1842,79 @@ inline void PaintPathNode(const BinUIPathEntry& head, const uint16_t* normPts,
         const float k = head.designH > 0.0f ? h / head.designH : 1.0f;
         const float sw = static_cast<float>(head.strokeW) * k;
         if (sw > 0.05f) {
-            // v17：渐变描边。色标按设备点取色（量化级与填充同一套），所以每一小段线的
-            // 颜色都对得上 —— 折线本来就是细分的，逐段取色就是逐像素取色。
-            const PathShade strokeShade =
-                MakePathShade((head.flags & PATH_STROKE_GRAD) ? spec.strokeGrad : nullptr,
-                              spec.strokeColor, spec.opacity, x, y, w, h);
-            auto colorAt = [&](float px, float py) { return strokeShade.At(px, py); };
-            // 斜接/斜面的缺口是多边形：复用填充那套条带，三端仍然只画 fillRect。
-            //
-            // 裁剪盒要**外扩**：节点盒只按"半线宽"外扩了几何盒（SVG 的 bbox 本来就不含描边），
-            // 而斜接尖角可以伸出 (ratio-1)·半线宽 —— 不外扩的话尖角会被自己节点的盒子切平，
-            // 看起来像被削过的斜面。外扩量取 miter-limit 允许的最大值；
-            // 父级裁剪仍然照常生效（SVG 的 viewport 语义）。
-            const float limit = head.reserve > 0 ? static_cast<float>(head.reserve) : 4.0f;
-            const float pad = limit * sw * 0.5f;
-            auto poly = [&](const float* xy, int n, uint32_t color) {
-                if (!xy || n < 3) return;
-                if (buf.bands.size() < static_cast<size_t>(kMaxPathBands))
-                    buf.bands.resize(kMaxPathBands);
-                const uint32_t zero = 0;
-                const uint32_t cnt = static_cast<uint32_t>(n);
-                const uint8_t one = 1;
-                const PaintPath pg{ xy, &zero, &cnt, &one, 1 };
-                PathShade ps;
-                ps.color = color;
-                bool tr = false;
-                const int bn = BuildPathFillBands(pg, false, x - pad, y - pad, x + w + pad,
-                                                  y + h + pad, ps, buf.bands.data(),
-                                                  kMaxPathBands, 1, &tr);
-                if (bn > 0) fillBands(buf.bands.data(), bn);
-            };
-            PaintPathStroke(view, sw, head.cap, head.join, head.reserve, colorAt,
-                            line, dot, poly);
+            if (hit && !cache->strokeBands.empty()) {
+                fillBands(cache->strokeBands.data(),
+                          static_cast<int>(cache->strokeBands.size()));
+            } else {
+                // v17：渐变描边按**像素**取色（量化级与填充同一套），所以一条斜线的
+                // 每根条带颜色都跟着渐变走，而不是"一段线一个颜色"。
+                const PathShade strokeShade =
+                    MakePathShade((head.flags & PATH_STROKE_GRAD) ? spec.strokeGrad : nullptr,
+                                  spec.strokeColor, spec.opacity, x, y, w, h);
+                // 裁剪盒要**外扩**：节点盒不含描边（SVG 的 bbox 本来就不含），斜接尖角还能
+                // 伸出 (ratio-1)·半线宽 —— 不外扩的话尖角会被自己节点的盒子切平，看起来
+                // 像被削过的斜面。外扩量取 miter-limit 允许的最大值；父级裁剪照常生效。
+                const uint8_t limitB = head.reserve > 0 ? head.reserve : 4;
+                const float limit = static_cast<float>(limitB > 1 ? limitB : 1);
+                const float pad = sw * 0.5f * limit + 1.0f;
+                if (buf.strokeBands.size() < static_cast<size_t>(kMaxPathBands))
+                    buf.strokeBands.resize(kMaxPathBands);
+                int n = 0;
+                bool truncated = false;
+                for (;;) {
+                    truncated = false;
+                    n = BuildPathStrokeBands(view, sw, head.cap, head.join, head.reserve,
+                                             x - pad, y - pad, x + w + pad, y + h + pad,
+                                             strokeShade, buf.strokeBands.data(),
+                                             static_cast<int>(buf.strokeBands.size()), &truncated);
+                    if (!truncated || buf.strokeBands.size() >= static_cast<size_t>(kMaxPathBandsHard))
+                        break;
+                    buf.strokeBands.resize(
+                        std::min<size_t>(buf.strokeBands.size() * 2, kMaxPathBandsHard));
+                }
+                if (n > 0) fillBands(buf.strokeBands.data(), n);
+                if (cache) {
+                    if (n > 0 && n <= kMaxCachedBands && static_cast<size_t>(n) <= cacheBudget)
+                        cache->strokeBands.assign(buf.strokeBands.data(),
+                                                  buf.strokeBands.data() + n);
+                    else
+                        cache->strokeBands.clear();
+                }
+            }
         }
     }
 }
 
-// ============ v0.17.1：描边几何的 CPU 覆盖率 ============
+// ============ v0.17.1：后端 fillLine 的 CPU 覆盖率条带 ============
 //
-// 为什么描边不能用 GPU 四边形（量出来的，不是猜的）：
+// 这套（`BuildLineBandsAA` + `LineBandCache`）现在**只服务后端原语 fillLine**
+// （边框、焦点环、虚线、分隔线……），路径描边已经改走 `BuildPathStrokeBands`
+//（= bin2d 的描边覆盖率，v0.22.0）。两者共用"CPU 算覆盖率 → 条带"的原因一样：
+//
+// 为什么单根线不能用 GPU 四边形（量出来的，不是猜的）：
 // 4× MSAA 的**采样子像素位置**由 API 与驱动决定，OpenGL 与 Vulkan 在同一块 GPU 上
-// 并不相同（x 方向互为镜像）。填充走的是 CPU 条带覆盖率（BuildPathFillBandsAA），
-// 所以三端必然一致；描边以前直接发细长四边形，于是差异只在"边缘斜着穿过像素"时出现：
+// 并不相同（x 方向互为镜像）。填充走的是 CPU 覆盖率条带，所以三端必然一致；线以前
+// 直接发细长四边形，于是差异只在"边缘斜着穿过像素"时出现：
 //   · 轴对齐线、任意宽度 → 0 差异（覆盖数与采样位置无关）
 //   · 45° 线 → 0 差异（采样位置镜像对称，覆盖数不变）
 //   · 9.5° 线（120×20）→ 整条差 62/255，正好一档 4× MSAA（25%）
 //   · `<circle>` 描边 → 圆是折线，整圈都差（实测 320 个像素、最大通道差 123）
 //   · 斜三角形填充 / 圆角矩形 / 小数坐标矩形 → 0 差异（都不经过 GPU 光栅化的斜边）
-// 所以描边几何一律在 CPU 上算覆盖率，三端调同一份代码 —— 采样位置不可设置
+// 所以线几何一律在 CPU 上算覆盖率，三端调同一份代码 —— 采样位置不可设置
 // （OpenGL 没有对应 API），这是"三端逐像素相同"在斜线上唯一能兑现的办法。
 //
 // 代价：一段线从 1 个四边形变成 2~8 条条带（轴对齐线合并成 1 条，斜线按行拆）。
-// 仿射（rotate/scale）下的描边**仍走原来的四边形**：条带是轴对齐矩形，过矩阵后
+// 仿射（rotate/scale）下 fillLine **仍走原来的四边形**：条带是轴对齐矩形，过矩阵后
 // 相邻条带之间会露出缝隙，质量反而更差；仿射路径另有像素门禁用例兜底。
 // 注意：**轴对齐也不能交给 GPU 四边形**。本来想给"dx==0 或 dy==0"留一条快路径
 // （四边与像素格平行，覆盖数像是精确值），实测翻车：竖线 stroke-width=3 落在 x=150、
 // 边缘恰好在 148.5 / 151.5 这两条**像素边界**上时，GL 与 VK 在 (148,68) / (151,68)
 // 差 55 —— 边缘正好压住采样点的归属，两个 API 判定不同。45° 同样不保险。
-// 所以不留快路径：所有非仿射描边一律走 CPU 覆盖率，成本靠下面的条带缓存压回去。
+// 所以不留快路径：所有非仿射线一律走 CPU 覆盖率，成本靠下面的条带缓存压回去。
 
-// ---- 描边条带的跨帧缓存（v0.17.1）----
+// ---- 线描边的跨帧缓存（v0.17.1）----
 // 为什么需要：CPU 覆盖率比原来的"一个 GPU 四边形"贵 3~5 倍（svgdemo 实测 0.078 →
-// 0.335 ms/帧）。但静态页面的描边几何每帧完全一样，key 一命中就整段重放，成本回到
+// 0.335 ms/帧）。但静态页面的线几何每帧完全一样，key 一命中就整段重放，成本回到
 // "发 N 个条带"；动画页面每帧 miss，可动画本来每帧都要重算。
 // 缓存做成 thread_local 的全局表：后端 fillLine 是逐段调用、拿不到节点上下文，
 // 而 key 里已经含了几何与颜色 —— 变了自己就 miss，不需要失效通知。

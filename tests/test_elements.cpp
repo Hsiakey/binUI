@@ -4030,7 +4030,8 @@ static void TestFill() {
         CHECK(nz <= 4, "填充：nonzero 整块合并成少量条带");
     }
 
-    // 撞 cap：必须 truncated，且降级（更大的 cap / 更粗步长）能画完
+    // 撞缓冲上限：必须置 truncated 且不越界；换更大的缓冲就能完整画完
+    // （v0.22.0 起没有"行步长降级"了 —— 兜底改成放大缓冲重试，见 PaintPathNode）
     {
         PathShape big;
         AppendEllipse(big, 200, 200, 200, 200, 0.01f);
@@ -4043,167 +4044,170 @@ static void TestFill() {
         PaintBand bigCap[256];
         bool trunc2 = false;
         const int n2 = BuildPathFillBands(dev.view(), false, 0, 0, 400, 400, 0xFF000000u,
-                                          bigCap, 256, 8, &trunc2);
-        std::printf("  [svgpath] 400px 圆：cap=16 截断=%d；cap=256 步长8 → %d 条 截断=%d\n",
+                                          bigCap, 256, 1, &trunc2);
+        std::printf("  [svgpath] 400px 圆：cap=16 截断=%d；cap=256 → %d 条 截断=%d\n",
                     (int)trunc, n2, (int)trunc2);
-        CHECK(!trunc2 && n2 <= 256, "填充：降级后能完整画完");
+        CHECK(!trunc2 && n2 <= 256, "填充：缓冲够大就能完整画完");
     }
 }
 
-// 收集描边回调：线段数 / 圆点数 / 多边形顶点（斜接与斜面靠它验证）
-struct StrokeRec {
-    int lines = 0, dots = 0;
-    struct Seg { float x0, y0, x1, y1; uint32_t color; };
-    Seg seg[64] = {};
-    int nseg = 0;
-    std::vector<std::vector<std::pair<float, float>>> polys;
-    void Reset() { lines = dots = 0; nseg = 0; polys.clear(); }
-    // 任意点是否落在收集到的某个多边形内（凸多边形，按顶点绕向逐边同号判定）
+// ============ v0.22.0：描边几何来自 bin2d 的**描边覆盖率** ============
+//
+// 这里断言的是"落成条带之后的实际覆盖"（像素级），不再断言中间几何（四边形/圆/三角形
+// 的顶点坐标）—— 几何已经搬进 bin2d（`RasterizeStrokeCoverage`），binUI 这边只剩
+// "并集覆盖率 → 条带"。像素级断言还多钉住两件事：
+//   · 并集语义：条带互不重叠（同一个像素只会被一条带写到）→ 半透明描边不会混两次；
+//   · 端帽/连接的**几何范围**：圆头到底伸出多少、斜接尖角到底有没有画出来。
+// 条带互不重叠，所以"覆盖该像素的那条带"的 alpha 就是该像素的覆盖率。
+
+static int BandAlpha(const PaintBand* bands, int n, float px, float py) {
+    for (int i = 0; i < n; i++)
+        if (px >= bands[i].x && px < bands[i].x + bands[i].w && py >= bands[i].y &&
+            py < bands[i].y + bands[i].h)
+            return static_cast<int>((bands[i].color >> 24) & 0xFFu);
+    return 0;
+}
+
+struct StrokeView {
+    std::vector<PaintBand> bands;   // 自己存一份：StrokePoly 的缓冲是共用的，不能只存指针
+    bool trunc = false;
+    int size() const { return static_cast<int>(bands.size()); }
     bool Covers(float px, float py) const {
-        for (const auto& p : polys) {
-            const size_t n = p.size();
-            if (n < 3) continue;
-            // 有向面积定绕向：正 = 逆时针（内侧叉积恒正），负 = 顺时针（恒负）
-            float area2 = 0.0f;
-            for (size_t i = 0; i < n; i++) {
-                const auto& a = p[i];
-                const auto& b = p[(i + 1) % n];
-                area2 += a.first * b.second - b.first * a.second;
-            }
-            const float want = area2 >= 0.0f ? 1.0f : -1.0f;
-            bool in = true;
-            for (size_t i = 0; i < n && in; i++) {
-                const auto& a = p[i];
-                const auto& b = p[(i + 1) % n];
-                const float cross = (b.first - a.first) * (py - a.second) -
-                                    (b.second - a.second) * (px - a.first);
-                if (cross * want < 0.0f) in = false;
-            }
-            if (in) return true;
-        }
-        return false;
+        return BandCovers(bands.data(), static_cast<int>(bands.size()), px, py);
+    }
+    int Alpha(float px, float py) const {
+        return BandAlpha(bands.data(), static_cast<int>(bands.size()), px, py);
     }
 };
 
-static int StrokeWith(const DevicePath& dev, float width, bool roundCap, uint8_t join,
-                      uint8_t miterLimit, StrokeRec& rec, uint32_t strokeColor = 0xFF000000u,
-                      uint8_t cap = 0) {
-    rec.Reset();
-    return PaintPathStroke(dev.view(), width, cap ? cap : static_cast<uint8_t>(roundCap ? BINUI_CAP_ROUND : BINUI_CAP_BUTT),
-        join, miterLimit,
-        [&](float, float) { return strokeColor; },
-        [&](float x0, float y0, float x1, float y1, float, uint32_t c) {
-            rec.lines++;
-            if (rec.nseg < 64) rec.seg[rec.nseg++] = { x0, y0, x1, y1, c };
-        },
-        [&](float, float, float, float, float, uint32_t) { rec.dots++; },
-        [&](const float* xy, int n, uint32_t) {
-            std::vector<std::pair<float, float>> p;
-            for (int i = 0; i < n; i++) p.push_back({ xy[i * 2], xy[i * 2 + 1] });
-            rec.polys.push_back(std::move(p));
-        });
+// contours 里每个元素是一条子路径的交错 x,y（与运行期同一布局）。
+// 坐标系 = 传进来的坐标（不做变换），裁剪盒给足（-40..320）。
+static StrokeView StrokePoly(const std::vector<std::vector<float>>& contours, bool closed,
+                             float width, uint8_t cap, uint8_t join, uint8_t miter) {
+    static thread_local std::vector<float> xy;
+    static thread_local std::vector<uint32_t> first;
+    static thread_local std::vector<uint32_t> count;
+    static thread_local std::vector<uint8_t> cls;
+    static thread_local std::vector<PaintBand> out;
+    xy.clear(); first.clear(); count.clear(); cls.clear();
+    for (const std::vector<float>& c : contours) {
+        first.push_back(static_cast<uint32_t>(xy.size() / 2));
+        count.push_back(static_cast<uint32_t>(c.size() / 2));
+        cls.push_back(closed ? 1 : 0);
+        xy.insert(xy.end(), c.begin(), c.end());
+    }
+    if (out.size() < static_cast<size_t>(kMaxPathBands)) out.resize(kMaxPathBands);
+    const PaintPath view{ xy.data(), first.data(), count.data(), cls.data(),
+                          static_cast<int>(contours.size()) };
+    PathShade shade;                 // 纯色（黑）—— 条带的 alpha 就是覆盖率
+    shade.color = 0xFF000000u;
+    bool trunc = false;
+    const int n = BuildPathStrokeBands(view, width, cap, join, miter, -40.0f, -40.0f, 320.0f,
+                                       320.0f, shade, out.data(),
+                                       static_cast<int>(out.size()), &trunc);
+    StrokeView sv;
+    sv.bands.assign(out.begin(), out.begin() + (n > 0 ? n : 0));
+    sv.trunc = trunc;
+    return sv;
 }
 
 static void TestStroke() {
-    PathShape sq;
-    std::string err;
-    ParsePathData("M0 0 H100 V100 H0 Z", 0.01f, sq, &err);
-    DevicePath dev = ToDevice(sq);
-    StrokeRec rec;
-    const int segs = StrokeWith(dev, 2.0f, false, BINUI_JOIN_ROUND, 0, rec);
-    CHECK(segs == 4 && rec.lines == 4, "描边：闭合路径段数 = 点数");
-    CHECK(rec.dots == 4, "描边：圆角连接在四个直角各补一个圆点");
-    CHECK(rec.polys.empty(), "描边：圆角连接不产生多边形");
+    // 直角折线 (0,0)→(100,0)→(100,100)，线宽 10（半宽 5）
+    const std::vector<std::vector<float>> bend = {{0, 0, 100, 0, 100, 100}};
 
-    PathShape open;
-    ParsePathData("M0 0 H100 V100", 0.01f, open, &err);
-    DevicePath odev = ToDevice(open);
-    const int osegs = StrokeWith(odev, 2.0f, false, BINUI_JOIN_ROUND, 0, rec);
-    CHECK(osegs == 2 && rec.lines == 2, "描边：开放路径段数 = 点数-1");
-    CHECK(rec.dots == 1, "描边：只在真实转角补点");
-
-    // ---- 斜接 / 斜面：直角转弯（0,0)→(100,0)→(100,100)，线宽 10（半宽 5）----
-    // 转角缺口是 (100,-5) (100,0) (105,0) 这个 5×5 方块的下三角。
-    const int nBevel = StrokeWith(odev, 10.0f, false, BINUI_JOIN_BEVEL, 0, rec);
-    CHECK(nBevel == 2 && rec.polys.size() == 1, "斜面：只补一个多边形");
-    CHECK(rec.polys.size() == 1 && rec.polys[0].size() == 3, "斜面：补的是三角形");
-    CHECK(rec.dots == 0, "斜面：不再补圆点");
-    if (rec.polys.size() == 1) {
-        const auto& p = rec.polys[0];
-        std::printf("  [svgpath] 斜面三角 = (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)\n",
-                    (double)p[0].first, (double)p[0].second, (double)p[1].first,
-                    (double)p[1].second, (double)p[2].first, (double)p[2].second);
-        CHECK_NEAR(p[0].first, 100.0f, 0.01f, "斜面：p1 在入射段外侧");
-        CHECK_NEAR(p[0].second, -5.0f, 0.01f, "斜面：p1 偏移半线宽");
-        CHECK(rec.Covers(102.0f, -1.0f), "斜面：缺口靠外的三角区被覆盖");
-        CHECK(!rec.Covers(104.0f, -4.0f), "斜面：尖角（斜接）区域不覆盖");
+    // ---- ① 线宽与法向偏移：上下各半宽 5，线外 1px 不覆盖 ----
+    {
+        const StrokeView r = StrokePoly(bend, false, 10.0f, BINUI_CAP_BUTT, BINUI_JOIN_ROUND, 0);
+        CHECK(!r.trunc && r.size() > 0, "描边：算得出条带（不截断）");
+        CHECK(r.Alpha(50, -5) == 255 && r.Alpha(50, 4) == 255, "描边：线宽 = 10（上下各半宽 5）");
+        CHECK(!r.Covers(50, -6) && !r.Covers(50, 5), "描边：线外 1px 不覆盖");
+        std::printf("  [svgpath] 描边：%d 条带，(50,-5)=%d (50,4)=%d (50,5)=%d\n", r.size(),
+                    r.Alpha(50, -5), r.Alpha(50, 4), r.Alpha(50, 5));
     }
 
-    const int nMiter = StrokeWith(odev, 10.0f, false, BINUI_JOIN_MITER, 0, rec);
-    CHECK(nMiter == 2 && rec.polys.size() == 1, "斜接：补一个多边形");
-    CHECK(rec.polys.size() == 1 && rec.polys[0].size() == 4, "斜接：补的是四边形");
-    CHECK(rec.Covers(104.0f, -4.0f), "斜接：尖角区域被覆盖（斜面盖不到的那块）");
-    if (rec.polys.size() == 1) {
-        const auto& p = rec.polys[0];
-        std::printf("  [svgpath] 斜接四边形 = (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f) (%.1f,%.1f)\n",
-                    (double)p[0].first, (double)p[0].second, (double)p[1].first,
-                    (double)p[1].second, (double)p[2].first, (double)p[2].second,
-                    (double)p[3].first, (double)p[3].second);
-        CHECK_NEAR(p[1].first, 105.0f, 0.01f, "斜接点 x = 顶点 + 半线宽");
-        CHECK_NEAR(p[1].second, -5.0f, 0.01f, "斜接点 y = 顶点 - 半线宽（直角 1/sin45° = √2）");
+    // ---- ② 圆角连接：拐点补圆（外侧盖到、斜接尖角处不盖）----
+    {
+        const StrokeView r = StrokePoly(bend, false, 10.0f, BINUI_CAP_BUTT, BINUI_JOIN_ROUND, 0);
+        CHECK(r.Covers(102, -2), "描边：圆角连接在拐点外侧补圆");
+        CHECK(!r.Covers(104, -4), "描边：圆角连接不产生斜接尖角");
+        CHECK(r.Covers(101, 4), "描边：拐点内侧不缺楔形缝（内外都填满）");
     }
 
-    // miter-limit：直角比值 √2 ≈ 1.414，限制给 1 时必须退回斜面
-    const int nLim = StrokeWith(odev, 10.0f, false, BINUI_JOIN_MITER, 1, rec);
-    CHECK(nLim == 2 && rec.polys.size() == 1 && rec.polys[0].size() == 3,
-          "斜接：超过 miter-limit 退回斜面（规范要求）");
+    // ---- ③ 斜接：补上外尖角；斜面/超限都不补 ----
+    {
+        const StrokeView m = StrokePoly(bend, false, 10.0f, BINUI_CAP_BUTT, BINUI_JOIN_MITER, 0);
+        CHECK(m.Covers(104, -4), "描边：斜接补上外尖角（圆角与斜面盖不到的那块）");
+        const StrokeView b = StrokePoly(bend, false, 10.0f, BINUI_CAP_BUTT, BINUI_JOIN_BEVEL, 0);
+        CHECK(!b.Covers(104, -4), "描边：斜面不补尖角");
+        CHECK(b.Covers(102, -1), "描边：斜面仍然填满拐点外侧的三角缺口");
+        const StrokeView lim =
+            StrokePoly(bend, false, 10.0f, BINUI_CAP_BUTT, BINUI_JOIN_MITER, 1);
+        CHECK(!lim.Covers(104, -4), "描边：直角比值 √2 超 miter-limit 1 → 退回斜面");
+    }
 
-    // 尖角：几乎原路折返 → 斜接长度爆炸（1/sin(θ/2) 远大于 4），默认 limit 必须退回斜面。
-    // 注意"几乎直线"反而是 length≈1 的正常斜接，别拿它当尖角。
-    PathShape sharp;
-    ParsePathData("M0 0 L100 0 L4 4", 0.01f, sharp, &err);
-    DevicePath sharpDev = ToDevice(sharp);
-    const int nSharp = StrokeWith(sharpDev, 10.0f, false, BINUI_JOIN_MITER, 0, rec);
-    CHECK(nSharp == 2 && rec.polys.size() == 1 && rec.polys[0].size() == 3,
-          "斜接：尖角超过默认 miter-limit 4 退回斜面");
-    // 换成 limit 上限（255）就该真的画尖角
-    StrokeWith(sharpDev, 10.0f, false, BINUI_JOIN_MITER, 255, rec);
-    CHECK(rec.polys.size() == 1 && rec.polys[0].size() == 4, "斜接：limit 放大后画真尖角");
-    // 几乎直线的折点（转角 < 15°）：连缺口都不补 —— 折线是从曲线细分出来的，
-    // 这种微折点每个都补会让 draw call 翻倍，而缺口只有零点几像素。
-    PathShape nearly;
-    ParsePathData("M0 0 L100 0 L200 4", 0.01f, nearly, &err);
-    DevicePath nearlyDev = ToDevice(nearly);
-    StrokeWith(nearlyDev, 10.0f, false, BINUI_JOIN_MITER, 0, rec);
-    CHECK(rec.polys.empty() && rec.dots == 0, "斜接：转角 < 15° 的微折点不补缺口");
+    // ---- ④ 尖角（几乎折返）：默认 miter-limit 4 不画尖刺，放到 255 才画 ----
+    {
+        const std::vector<std::vector<float>> sharp = {{0, 0, 100, 0, 4, 4}};
+        const StrokeView dflt =
+            StrokePoly(sharp, false, 10.0f, BINUI_CAP_BUTT, BINUI_JOIN_MITER, 0);
+        const StrokeView wide =
+            StrokePoly(sharp, false, 10.0f, BINUI_CAP_BUTT, BINUI_JOIN_MITER, 255);
+        CHECK(!dflt.Covers(150, -4), "描边：尖角超默认 miter-limit 4 → 不画尖刺");
+        CHECK(wide.Covers(150, -4), "描边：miter-limit 放大到 255 才画出那段尖刺");
+    }
 
-    // 共线（没有转角）：不该补任何东西
-    PathShape flat;
-    ParsePathData("M0 0 H50 H100", 0.01f, flat, &err);
-    DevicePath flatDev = ToDevice(flat);
-    StrokeWith(flatDev, 10.0f, false, BINUI_JOIN_MITER, 0, rec);
-    CHECK(rec.polys.empty() && rec.dots == 0, "共线：不补缺口");
+    // ---- ⑤ 线帽：butt 就是端点；square 外延半线宽且是方的；round 只多出圆头 ----
+    {
+        const std::vector<std::vector<float>> seg = {{0, 0, 100, 0}};
+        const StrokeView bt = StrokePoly(seg, false, 10.0f, BINUI_CAP_BUTT, BINUI_JOIN_ROUND, 0);
+        CHECK(bt.Alpha(0, 0) == 255 && !bt.Covers(-1, 0) && !bt.Covers(100, 0),
+              "线帽 butt：端点就是路径端点");
+        const StrokeView sq =
+            StrokePoly(seg, false, 10.0f, BINUI_CAP_SQUARE, BINUI_JOIN_ROUND, 0);
+        CHECK(sq.Covers(-5, 0) && sq.Covers(104, 0), "线帽 square：两端各沿切线外延半线宽");
+        CHECK(!sq.Covers(-6, 0) && sq.Alpha(-5, -5) == 255, "线帽 square：外延部分是方的");
+        const StrokeView rd = StrokePoly(seg, false, 10.0f, BINUI_CAP_ROUND, BINUI_JOIN_ROUND, 0);
+        const int capFar = rd.Alpha(104, 0);
+        CHECK(capFar > 0 && capFar < 255, "线帽 round：端外只多出亚像素覆盖率");
+        CHECK(rd.Alpha(104, 4) == 0, "线帽 round：圆头不带方角");
+        CHECK(!rd.Covers(105, 0), "线帽 round：不外延到半线宽之外");
+        std::printf("  [svgpath] 圆头端点外 1px 覆盖率 %d/255；方头方角处 %d/255\n", capFar,
+                    sq.Alpha(-5, -5));
+    }
 
-    // ---- stroke-linecap="square"：两端各沿切线外延半线宽 ----
-    // 开放路径 (0,0)→(100,0)，线宽 10：butt 是 0..100，square 应该是 -5..105
-    PathShape seg1;
-    ParsePathData("M0 0 H100", 0.01f, seg1, &err);
-    DevicePath seg1Dev = ToDevice(seg1);
-    StrokeWith(seg1Dev, 10.0f, false, BINUI_JOIN_ROUND, 0, rec, 0xFF000000u, BINUI_CAP_BUTT);
-    CHECK(rec.lines == 1 && rec.seg[0].x0 == 0.0f && rec.seg[0].x1 == 100.0f,
-          "线帽 butt：端点就是路径端点");
-    StrokeWith(seg1Dev, 10.0f, false, BINUI_JOIN_ROUND, 0, rec, 0xFF000000u, BINUI_CAP_SQUARE);
-    std::printf("  [svgpath] 方头端点：(%.1f,%.1f) → (%.1f,%.1f)\n",
-                (double)rec.seg[0].x0, (double)rec.seg[0].y0,
-                (double)rec.seg[0].x1, (double)rec.seg[0].y1);
-    CHECK_NEAR(rec.seg[0].x0, -5.0f, 0.01f, "线帽 square：起点外延半线宽");
-    CHECK_NEAR(rec.seg[0].x1, 105.0f, 0.01f, "线帽 square：终点外延半线宽");
-    CHECK(rec.dots == 0, "线帽 square：不补圆点");
-    // 圆头仍然只在两端补圆
-    StrokeWith(seg1Dev, 10.0f, true, BINUI_JOIN_ROUND, 0, rec, 0xFF000000u, BINUI_CAP_ROUND);
-    CHECK(rec.dots == 2, "线帽 round：两端各补一个圆");
+    // ---- ⑥ 闭合子路径：四边都画、内部不填、首尾那个角也要补 ----
+    {
+        const std::vector<std::vector<float>> sq2 = {{20, 20, 80, 20, 80, 80, 20, 80}};
+        const StrokeView c = StrokePoly(sq2, true, 10.0f, BINUI_CAP_BUTT, BINUI_JOIN_MITER, 0);
+        CHECK(c.Alpha(20, 20) == 255 && c.Alpha(50, 20) == 255 && c.Alpha(50, 50) == 0,
+              "描边：闭合路径四边都画，内部不填");
+        CHECK(c.Covers(16, 16), "描边：闭合路径首尾相接的那个角也被补");
+    }
+
+    // ---- ⑦ 并集：条带互不重叠（同一个像素只会被一条带写到）----
+    // 这是"半透明描边接缝不会深一条"的可测形式：接缝处一旦混两次，覆盖率就会被叠加。
+    {
+        const StrokeView u = StrokePoly(bend, false, 6.0f, BINUI_CAP_ROUND, BINUI_JOIN_ROUND, 0);
+        const int kSpan = 400, kOff = 40;
+        static thread_local std::vector<uint8_t> seen;
+        seen.assign(static_cast<size_t>(kSpan) * kSpan, 0);
+        bool overlap = false;
+        for (int i = 0; i < u.size() && !overlap; i++) {
+            const PaintBand& b = u.bands[static_cast<size_t>(i)];
+            for (int y = static_cast<int>(b.y); y < static_cast<int>(b.y + b.h) && !overlap; y++)
+                for (int x = static_cast<int>(b.x); x < static_cast<int>(b.x + b.w); x++) {
+                    if (x < -kOff || y < -kOff || x >= kSpan - kOff || y >= kSpan - kOff) continue;
+                    uint8_t& f = seen[static_cast<size_t>(y + kOff) * kSpan +
+                                      static_cast<size_t>(x + kOff)];
+                    if (f) { overlap = true; break; }
+                    f = 1;
+                }
+        }
+        CHECK(!overlap, "描边：条带互不重叠（一张并集覆盖率 → 每个像素只混一次）");
+        const int rim = u.Alpha(-3, 0);
+        CHECK(rim > 0 && rim < 255, "描边：圆头外侧是亚像素覆盖率（不是硬边方块）");
+    }
 }
-
 
 // 编译 → 加载 → 路径段往返：<path>/<ellipse> 必须编成 BINUI_PATH 节点，
 // 节点盒 = 几何包围盒，路径段里的折线能被渲染器取到（这是 B 阶段"端到端通"的证据）。
@@ -4746,40 +4750,52 @@ static void TestGradientBands() {
         CHECK(!s1.Active() && s1.At(50, 50) == 0xFF445566u, "渐变单色标：按纯色");
     }
 
-    // 渐变描边：每段线按自己的中点取色（v17）—— 折线是细分出来的，逐段取色就是逐像素
+    // 渐变描边（v0.22.0）：颜色不再是"一段线一个色"，而是按**像素**取色 —— 与填充同一套
+    // 量化级（每 ~2 设备像素一级），所以一条长线的渐变是连续的台阶，不是几段跳变。
     {
-        // 用折线（不是单段）：单段只会在中点取一次色，看不出渐变
         PathShape line2;
         ParsePathData("M0 0 L10 4 L20 0 L30 4 L40 0 L50 4 L60 0 L70 4 L80 0 L90 4 L100 0",
                       0.01f, line2, &err);
         DevicePath ldev = ToDevice(line2);
         BinUIPathGradient g = linGrad(0, 0, 1, 0);
         const PathShade sh = MakePathShade(&g, 0xFFFFFFFFu, 1.0f, 0, 0, 100, 100);
-        auto strokeRec = [&](const PathShade& s2, uint32_t solid) {
-            std::vector<uint32_t> cols;
-            PaintPathStroke(ldev.view(), 4.0f, BINUI_CAP_BUTT, BINUI_JOIN_ROUND, 0,
-                            [&](float px, float py) { return s2.At(px, py); },
-                            [&](float, float, float, float, float, uint32_t c) { cols.push_back(c); },
-                            [&](float, float, float, float, float, uint32_t) {},
-                            [&](const float*, int, uint32_t) {});
-            (void)solid;
-            return cols;
+        struct Sampled { float x; uint32_t color; };
+        auto strokeBands = [&](const PathShade& s2) {
+            static thread_local std::vector<PaintBand> bb;
+            if (bb.size() < static_cast<size_t>(kMaxPathBands)) bb.resize(kMaxPathBands);
+            bool tr = false;
+            const int n = BuildPathStrokeBands(ldev.view(), 4.0f, BINUI_CAP_BUTT,
+                                               BINUI_JOIN_ROUND, 0, -40.0f, -40.0f, 200.0f,
+                                               200.0f, s2, bb.data(),
+                                               static_cast<int>(bb.size()), &tr);
+            std::vector<Sampled> out;
+            for (int i = 0; i < n; i++)
+                out.push_back({ bb[i].x + bb[i].w * 0.5f, bb[i].color });
+            std::sort(out.begin(), out.end(),
+                      [](const Sampled& a, const Sampled& b) { return a.x < b.x; });
+            return out;
         };
         PathShade solidShade;
         solidShade.color = 0xFF00FF00u;
-        const auto solidCols = strokeRec(solidShade, 0xFF00FF00u);
-        const auto gradCols = strokeRec(sh, 0);
-        std::printf("  [svgpath] 渐变描边：%zu 段，纯色首段=%08X，渐变首段=%08X 末段=%08X\n",
-                    gradCols.size(), solidCols.empty() ? 0u : solidCols.front(),
-                    gradCols.empty() ? 0u : gradCols.front(),
-                    gradCols.empty() ? 0u : gradCols.back());
-        CHECK(!solidCols.empty() && solidCols.size() == gradCols.size(), "渐变描边：段数与纯色一致");
-        CHECK(!solidCols.empty() && solidCols[0] == 0xFF00FF00u && solidCols.back() == 0xFF00FF00u,
-              "渐变描边：纯色时段段同色");
-        CHECK(!gradCols.empty(), "渐变描边：有线段颜色");
-        CHECK(!gradCols.empty() && ((gradCols.front() >> 16) & 0xFF) > 200,
-              "渐变描边：起点接近红");
-        CHECK(!gradCols.empty() && (gradCols.back() & 0xFF) > 200, "渐变描边：终点接近蓝");
+        const auto solid = strokeBands(solidShade);
+        const auto grad = strokeBands(sh);
+        std::vector<uint32_t> rgb;
+        for (const Sampled& s : grad) rgb.push_back(s.color & 0x00FFFFFFu);
+        std::sort(rgb.begin(), rgb.end());
+        rgb.erase(std::unique(rgb.begin(), rgb.end()), rgb.end());
+        std::printf("  [svgpath] 渐变描边：纯色 %zu 条；渐变 %zu 条 / %zu 种颜色，"
+                    "左端=%08X 右端=%08X\n", solid.size(), grad.size(), rgb.size(),
+                    grad.empty() ? 0u : grad.front().color,
+                    grad.empty() ? 0u : grad.back().color);
+        CHECK(!solid.empty(), "渐变描边：纯色也算得出条带");
+        bool sameRgb = true;
+        for (const Sampled& s : solid)
+            if ((s.color & 0x00FFFFFFu) != 0x0000FF00u) sameRgb = false;
+        CHECK(sameRgb, "渐变描边：纯色时每条带同色（只有 alpha 随覆盖率变）");
+        CHECK(grad.size() >= solid.size(), "渐变描边：渐变按 x 切段，条带数不少于纯色");
+        CHECK(!grad.empty() && rgb.size() > 20, "渐变描边：颜色按像素级递增（> 20 种）");
+        CHECK(!grad.empty() && ((grad.front().color >> 16) & 0xFFu) > 200, "渐变描边：起点接近红");
+        CHECK(!grad.empty() && (grad.back().color & 0xFFu) > 200, "渐变描边：终点接近蓝");
     }
 
     // 节点 opacity：渐变每条带的 alpha 都要折进去（纯色是调用方先折好的）
@@ -4980,9 +4996,7 @@ static void TestPathBandCache() {
         return PaintPathNode(head, nd.pts.data(), nd.contourFirst.data(), cnt.data(),
                              nd.contourClosed.data(), (int)nd.contourFirst.size(),
                              0, 0, 100, 100, spec, c, 1, (size_t)65536, buf,
-                             [&](const PaintBand* b, int n) { nBands = n; seenColor = b[0].color; },
-                             [](float, float, float, float, float, uint32_t) {},
-                             [](float, float, float, float, float, uint32_t) {});
+                             [&](const PaintBand* b, int n) { nBands = n; seenColor = b[0].color; });
     };
 
     draw(&cache, 0xFFFF0000u);
@@ -5006,6 +5020,36 @@ static void TestPathBandCache() {
     draw(nullptr, 0xFF0000FFu);   // 不缓存时也必须能正常画
     CHECK(seenColor == 0xFF0000FFu, "缓存：传 nullptr 时不缓存但照常绘制");
 
+    // 描边条带也有自己的一份缓存（v0.22.0）：填充不参与，命中照样重放
+    {
+        BinUIPathEntry sh = head;
+        sh.flags = PATH_STROKE;
+        sh.strokeW = 6;
+        sh.cap = BINUI_CAP_ROUND;
+        sh.join = BINUI_JOIN_ROUND;
+        PathBandCacheEntry sc;
+        PathRenderBuffers sbuf;
+        PathPaintSpec sspec;
+        sspec.strokeColor = 0xFF00CCFFu;
+        int nst = 0;
+        uint32_t firstStroke = 0;
+        auto drawStroke = [&](PathBandCacheEntry* c) {
+            PaintPathNode(sh, nd.pts.data(), nd.contourFirst.data(), cnt.data(),
+                          nd.contourClosed.data(), (int)nd.contourFirst.size(),
+                          0, 0, 100, 100, sspec, c, 1, (size_t)65536, sbuf,
+                          [&](const PaintBand* b, int n) { nst = n; firstStroke = b[0].color; });
+        };
+        drawStroke(&sc);
+        CHECK(nst > 0 && sc.key != 0 && !sc.strokeBands.empty(),
+              "缓存：描边条带写进缓存（与填充各一份）");
+        CHECK(sc.bands.empty(), "缓存：只画描边的节点不占填充列表");
+        const int nst1 = nst;
+        sc.strokeBands[0].color = 0xFF112233u;   // 篡改 → 命中缓存就会画出这个色
+        drawStroke(&sc);
+        CHECK(nst == nst1 && firstStroke == 0xFF112233u,
+              "缓存：描边同 key 第二次直接重放（没有重算）");
+    }
+
     // 条带太多（> kMaxCachedBands）不缓存：换成一个会被截断的大图形
     {
         PathShape big;
@@ -5027,9 +5071,7 @@ static void TestPathBandCache() {
             PaintPathNode(h2, nd2.pts.data(), nd2.contourFirst.data(), cnt2.data(),
                           nd2.contourClosed.data(), (int)nd2.contourFirst.size(),
                           0, 0, 400, 400, s2, &c2, 1, (size_t)65536, b2,
-                          [&](const PaintBand*, int n) { nb = n; },
-                          [](float, float, float, float, float, uint32_t) {},
-                          [](float, float, float, float, float, uint32_t) {});
+                          [&](const PaintBand*, int n) { nb = n; });
             std::printf("  [svgpath] 缓存：400px 圆 %d 条带，缓存条目 key=%llu（0 = 未缓存）\n",
                         nb, (unsigned long long)c2.key);
             CHECK(nb > 0, "缓存：大图形仍然正常绘制");
@@ -5046,11 +5088,10 @@ static void TestPathBandCache() {
                 PaintPathNode(h2, nd2.pts.data(), nd2.contourFirst.data(), cnt2.data(),
                               nd2.contourClosed.data(), (int)nd2.contourFirst.size(),
                               0, 0, 400, 400, s2, &c3, 1, (size_t)0, b3,
-                              [&](const PaintBand*, int n) { nb3 = n; },
-                              [](float, float, float, float, float, uint32_t) {},
-                              [](float, float, float, float, float, uint32_t) {});
+                              [&](const PaintBand*, int n) { nb3 = n; });
                 CHECK(nb3 == nb, "缓存：预算为 0 时条带照样算出来");
-                CHECK(c3.key == 0, "缓存：全局预算为 0 时不写缓存（省内存）");
+                CHECK(c3.bands.empty() && c3.strokeBands.empty(),
+                      "缓存：全局预算为 0 时不写缓存（省内存）");
             }
         }
     }

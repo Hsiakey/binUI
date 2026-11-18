@@ -97,16 +97,21 @@ CHANGELOG 写明 + 硬门禁先绿）。
 （GL/VK/D3D11；GDI 侧本来就没有这些基准图），合计 **168 项像素指纹 + 9 项原语流哈希 +
 11 行画质数字**。`animshow` 不进原语流哈希：它的原语流由动画时钟决定，自己就会变。
 
-### P2：`<path>` 的填充换到 bin2d —— ✅ 填充已完成（binUI 0.21.0 + bin2d 0.5.0）；描边留到 P2b
+### P2：`<path>` 的填充 + 描边换到 bin2d —— ✅ 已完成（填充 0.21.0 / bin2d 0.5.0，描边 0.22.0 / bin2d 0.6.0）
 
-**已落地（0.21.0）**：填充走 `bin2d::RasterizeCoverage`（bin2d 0.5.0 新导出的覆盖率查询，
+**填充（0.21.0）**：走 `bin2d::RasterizeCoverage`（bin2d 0.5.0 新导出的覆盖率查询，
 与 `FillPath` 同一个光栅器），binUI 只保留"覆盖率 → 条带"。删掉约 380 行老扫描线
 （`PaintScanEdge` / `BuildPaintScanEdges` / `ActivateScanEdges` / 4 条子采样 + 1024 定点
 累加器 / rowStep 降级 / 4096px 兜底）。实测 18 个 GDI 基准 0 个不同像素、三端 0 个不同像素、
 快照只动 35 项且全是路径用例。细节见 `CHANGELOG.md` 0.21.0。
 
-**还没做**：描边（`PaintPathStroke` 仍走"逐段 fillLine + 连接多边形"，用的是后端原语而不是
-光栅化）。它要等 bin2d 给出描边的覆盖率（`StrokePath` 已有，但那是"直接落像素"的版本）。
+**描边（0.22.0）**：走 `bin2d::RasterizeStrokeCoverage`（bin2d 0.6.0）—— 每段四边形 + 拐点
+连接块 + 端帽**逐块栅格化、同一像素取 max**（并集），binUI 侧只剩"并集覆盖率 → 条带"。
+删掉 ~80 行 `PaintPathStroke`（逐段 fillLine + 拐点圆/多边形回调），并顺手修掉两处老问题：
+接缝逐段混合两次（半透明描边每个接缝深一条）、拐点/端帽走后端 `fillRounded`（4× MSAA
+采样位置在 GL/VK 上互为镜像 → 三端本来就分岔）。GDI 端也从"整数 HPEN + Ellipse"换成同一份
+条带，于是**四端第一次真正用同一条路画描边**：GDI 与 GL 在 `svgjoin` / `svgstroke` 上
+从 1284 / 1016 个不同像素降到 **0**。细节见 `CHANGELOG.md` 0.22.0。
 
 原计划（保留作对照）：
 - **改**：`binui_draw_nodes.h` 里 `<path>` 的绘制分支 → 构造 `bin2d::Path` + `FillPath/StrokePath`。
