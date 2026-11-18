@@ -558,6 +558,22 @@ $(BIN_DIR)/path_bench$(EXT): $(BUILD_DIR)/path_bench.o $(LIB_A)
 bench-path: $(BIN_DIR)/path_bench$(EXT)
 	@$(BIN_DIR)/path_bench$(EXT) 50
 
+# ---- 迁移开工条件：bin2d 的 FillPath 与现实现（条带 + fillRect）同口径对拍 ----
+# 见 docs/migrate-to-bin2d.md：这条数字不达标就不动 binUI 的路径光栅。
+BIN2D_DIR := ../bin2D
+BIN2D_LIB := $(wildcard $(BIN2D_DIR)/build-mingw/libbin2d.a)
+
+.PHONY: gate-migrate
+gate-migrate:
+ifneq ($(BIN2D_LIB),)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -I$(BIN2D_DIR)/include $(RTLINK) \
+	    -o $(BIN_DIR)/migrate_gate$(EXT) tools/migrate_gate.cpp $(BIN2D_LIB)
+	@$(BIN_DIR)/migrate_gate$(EXT) 200
+else
+	@echo "[binUI] gate-migrate 跳过：没有 $(BIN2D_DIR)/build-mingw/libbin2d.a"
+endif
+
 .PHONY: bench-gl
 bench-gl: $(BIN_DIR)/gl_shot$(EXT)
 	@echo "--- real GL backend: emit vs submit+present ---"
