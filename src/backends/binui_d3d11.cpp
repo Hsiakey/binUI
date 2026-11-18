@@ -1893,12 +1893,11 @@ void BinUID3D::fillLine(float x0, float y0, float x1, float y1, float width, uin
             lbands = &lit->second;
         } else {
             static thread_local std::vector<binui::PaintBand> lineBands;
-            static thread_local std::vector<uint16_t> lineCov;
             if (lineBands.size() < static_cast<size_t>(binui::kMaxPathBands))
                 lineBands.resize(binui::kMaxPathBands);
             const int n = binui::BuildLineBandsAA(x0, y0, x1, y1, width, color,
                                                   lineBands.data(),
-                                                  static_cast<int>(lineBands.size()), lineCov);
+                                                  static_cast<int>(lineBands.size()));
             if (lcache.size() >= binui::kLineBandCacheCap) lcache.clear();
             std::vector<binui::PaintBand>& slot = lcache[lkey];
             slot.assign(lineBands.begin(), lineBands.begin() + n);

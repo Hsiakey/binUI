@@ -5108,7 +5108,6 @@ static void TestPathAA() {
     PathShade shade;
     shade.color = 0xFFFF0000u;
     PaintBand bands[kMaxPathBands];
-    std::vector<uint16_t> covAcc;
     bool trunc = false;
 
     auto areaOf = [&](int n) {
@@ -5121,7 +5120,7 @@ static void TestPathAA() {
     int partial = 0;
 
     const int n = BuildPathFillBandsAA(dev.view(), false, 0, 0, 100, 100, shade, bands,
-                                       kMaxPathBands, covAcc, &trunc);
+                                       kMaxPathBands, &trunc);
     CHECK(n > 0 && !trunc, "AA：三角形能画完");
     for (int i = 0; i < n; i++)
         if (((bands[i].color >> 24) & 0xFF) < 255) partial++;
@@ -5140,10 +5139,13 @@ static void TestPathAA() {
     CHECK(partial == 0, "硬边：没有半透明像素");
     CHECK_NEAR(areaOf(nh), 5000.0, 200.0, "硬边：面积误差在行取整范围内");
 
-    // 太宽（> kMaxPathAAWidth）时必须报 -1，让调用方退回硬边
-    const int tooWide = BuildPathFillBandsAA(dev.view(), false, 0, 0, 5000, 100, shade, bands,
-                                             kMaxPathBands, covAcc, &trunc);
-    CHECK(tooWide == -1, "AA：超出宽度上限时返回 -1（调用方退回硬边）");
+    // v0.21.0（P2 迁移）：光栅化交给 bin2d 之后**没有宽度上限了** ——
+    // 老的 kMaxPathAAWidth（4096px）与"退回硬边"的兜底随老扫描线一起删掉了。
+    // 这条断言因此从"太宽必须报 -1"改成"多宽都能按 AA 画完"，钉住这个能力。
+    trunc = false;
+    const int veryWide = BuildPathFillBandsAA(dev.view(), false, 0, 0, 5000, 100, shade, bands,
+                                              kMaxPathBands, &trunc);
+    CHECK(veryWide > 0 && !trunc, "AA：5000px 宽也不再退回硬边（宽度上限已删）");
 }
 
 static void TestPathHitTest() {

@@ -181,8 +181,7 @@ int main(int argc, char** argv) {
     const bin2d::Path cardB2d = ToBin2d(cardXY, 0.0f, 0.0f);
 
     std::vector<binui::PaintBand> bands(8192);
-    std::vector<uint16_t> cov(2048);
-    bin2d::Surface dst(kW, kH);
+        bin2d::Surface dst(kW, kH);
 
     // ---- A1：只建条带（几何成本）----
     auto bandsOnly = [&]() {
@@ -191,14 +190,12 @@ int main(int argc, char** argv) {
         const binui::PaintPath cp = cardDev.view();
         total += binui::BuildPathFillBandsAA(cp, false, 0.0f, 0.0f, static_cast<float>(kW),
                                              static_cast<float>(kH), binui::PathShade{},
-                                             bands.data(), static_cast<int>(bands.size()), cov,
-                                             &trunc);
+                                             bands.data(), static_cast<int>(bands.size()), &trunc);
         for (int i = 0; i < icons; ++i) {
             const float x = ox[static_cast<size_t>(i)], y = oy[static_cast<size_t>(i)];
             total += binui::BuildPathFillBandsAA(dev[static_cast<size_t>(i)].view(), false, x, y,
                                                  x + kIcon, y + kIcon, binui::PathShade{},
-                                                 bands.data(), static_cast<int>(bands.size()),
-                                                 cov, &trunc);
+                                                 bands.data(), static_cast<int>(bands.size()), &trunc);
         }
         return total;
     };
@@ -209,15 +206,13 @@ int main(int argc, char** argv) {
         const binui::PaintPath cp = cardDev.view();
         int n = binui::BuildPathFillBandsAA(cp, false, 0.0f, 0.0f, static_cast<float>(kW),
                                             static_cast<float>(kH), binui::PathShade{},
-                                            bands.data(), static_cast<int>(bands.size()), cov,
-                                            &trunc);
+                                            bands.data(), static_cast<int>(bands.size()), &trunc);
         for (int i = 0; i < n; ++i) FillBand(dst, bands[static_cast<size_t>(i)]);
         for (int i = 0; i < icons; ++i) {
             const float x = ox[static_cast<size_t>(i)], y = oy[static_cast<size_t>(i)];
             n = binui::BuildPathFillBandsAA(dev[static_cast<size_t>(i)].view(), false, x, y,
                                             x + kIcon, y + kIcon, binui::PathShade{},
-                                            bands.data(), static_cast<int>(bands.size()), cov,
-                                            &trunc);
+                                            bands.data(), static_cast<int>(bands.size()), &trunc);
             for (int k = 0; k < n; ++k) FillBand(dst, bands[static_cast<size_t>(k)]);
         }
     };

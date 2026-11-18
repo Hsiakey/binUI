@@ -200,6 +200,9 @@ GPU 后端缩放处理（D3D11 / OpenGL 同构）：
 ## 快速开始
 
 ```bash
+# 先构建 bin2d（P2 起是硬依赖：<path> 的填充光栅化在 bin2d 里）
+make -C ../bin2D lib
+
 # 先拉第三方源码（只做一次）
 sh scripts/fetch-deps.sh
 

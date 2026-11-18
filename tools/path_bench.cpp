@@ -83,7 +83,6 @@ int main(int argc, char** argv) {
     if (icons < 1) icons = 1;
 
     std::vector<PaintBand> bands(static_cast<size_t>(kMaxPathBands));
-    std::vector<uint16_t> cov;
 
     struct Shape { const char* name; DevPath (*make)(float); };
     const float sizes[] = { 24.0f, 48.0f, 120.0f, 300.0f };
@@ -110,14 +109,14 @@ int main(int argc, char** argv) {
             }
             const int nbAA = BuildPathFillBandsAA(pp, false, 0.0f, 0.0f, sz, sz, PathShade{},
                                                   bands.data(), static_cast<int>(bands.size()),
-                                                  cov, &trunc);
+                                                  &trunc);
             if (nbAA > 0) {
                 for (int rep = 0; rep < 5; rep++) {
                     const double t0 = NowUs();
                     for (int it = 0; it < 20; it++)
                         BuildPathFillBandsAA(pp, false, 0.0f, 0.0f, sz, sz, PathShade{},
                                              bands.data(), static_cast<int>(bands.size()),
-                                             cov, &trunc);
+                                             &trunc);
                     bestAA = std::min(bestAA, (NowUs() - t0) / 20.0);
                 }
             } else {

@@ -1658,10 +1658,9 @@ static void TestIssueRegressions() {
     {
         using binui::PaintBand;
         std::vector<PaintBand> lb(binui::kMaxPathBands);
-        std::vector<uint16_t> lcov;
         auto build = [&](float x0, float y0, float x1, float y1, float w, uint32_t c) {
             return binui::BuildLineBandsAA(x0, y0, x1, y1, w, c, lb.data(),
-                                           static_cast<int>(lb.size()), lcov);
+                                           static_cast<int>(lb.size()));
         };
         auto warea = [&](int n) {
             double s = 0;

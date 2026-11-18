@@ -97,11 +97,20 @@ CHANGELOG 写明 + 硬门禁先绿）。
 （GL/VK/D3D11；GDI 侧本来就没有这些基准图），合计 **168 项像素指纹 + 9 项原语流哈希 +
 11 行画质数字**。`animshow` 不进原语流哈希：它的原语流由动画时钟决定，自己就会变。
 
-### P2：`<path>` 的填充/描边换到 bin2d（本次迁移的主体，下一步开工点）
+### P2：`<path>` 的填充换到 bin2d —— ✅ 填充已完成（binUI 0.21.0 + bin2d 0.5.0）；描边留到 P2b
 
-- **改**：`binui_draw_nodes.h` 里 `<path>` 的绘制分支 → 构造 `bin2d::Path`（解析阶段
-  已经有一份折线，直接拷点）+ `bin2d::FillPath/StrokePath`；变换走 `bin2d::Transform`。
-- **删**：`include/binui_path.h` 的扫描线填充（1183 行里的填充/AA/掩码部分）。
+**已落地（0.21.0）**：填充走 `bin2d::RasterizeCoverage`（bin2d 0.5.0 新导出的覆盖率查询，
+与 `FillPath` 同一个光栅器），binUI 只保留"覆盖率 → 条带"。删掉约 380 行老扫描线
+（`PaintScanEdge` / `BuildPaintScanEdges` / `ActivateScanEdges` / 4 条子采样 + 1024 定点
+累加器 / rowStep 降级 / 4096px 兜底）。实测 18 个 GDI 基准 0 个不同像素、三端 0 个不同像素、
+快照只动 35 项且全是路径用例。细节见 `CHANGELOG.md` 0.21.0。
+
+**还没做**：描边（`PaintPathStroke` 仍走"逐段 fillLine + 连接多边形"，用的是后端原语而不是
+光栅化）。它要等 bin2d 给出描边的覆盖率（`StrokePath` 已有，但那是"直接落像素"的版本）。
+
+原计划（保留作对照）：
+- **改**：`binui_draw_nodes.h` 里 `<path>` 的绘制分支 → 构造 `bin2d::Path` + `FillPath/StrokePath`。
+- **删**：`include/binui_path.h` 的扫描线填充。
 - **留**："节点 → 路径"的那层壳（`BinUIPath*` 结构体是 ABI，不能动）。
 - **验收**：三端像素 0 diff（图标/图表/圆角全在同一张基准里）；
   `gate-migrate` 与 `bench-draw` 都不退化；SVG 示例（`svgdemo`）的 819 KB 顶点量**下降**。
@@ -153,7 +162,7 @@ CHANGELOG 写明 + 硬门禁先绿）。
 |---|---|---|
 | P0 | bin2d 扫描线性能轮（实际做的是"整像素段差分 + 行尾前缀和"） | ✅ `gate-migrate` **0.98×**，125 项断言全过，像素值不变 |
 | P1 | 三端像素/哈希基线快照 | ✅ `tests/baseline/manifest.txt` 归档，`make baseline-check` 一键重跑 |
-| P2 | `<path>` 填充/描边迁移 + 删旧扫描线 | 三端 0 diff、顶点量下降 |
+| P2 | `<path>` 填充换到 bin2d + 删旧扫描线 | ✅ 填充完成：18 个 GDI 基准 0 diff、三端 0 diff、快照只动 35 项路径用例；描边留 P2b |
 | P3 | 圆角/投影/九宫格 | 三端 0 diff、三端圆角模板删除 |
 | P4 | 图层语义收口 | 组透明度像素不变、三份离屏实现退休 |
 | P5 | 纹理池/预滤波收敛 | 只剩一套 mip |

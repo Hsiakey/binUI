@@ -41,8 +41,16 @@ LIB_OBJS := \
     $(BUILD_DIR)/renderer/binui_renderer.o \
     $(BUILD_DIR)/font/binui_font_renderer.o \
     $(BUILD_DIR)/common/binui_link.o \
+    $(BUILD_DIR)/binui_paint.o \
     $(BUILD_DIR)/binui_charts.o
 LIB_A    := $(BUILD_DIR)/libbinui.a
+
+# bin2d（P2 迁移）：<path> 的填充光栅化在 bin2d 里做（`bin2d::RasterizeCoverage`），
+# 见 src/backends/binui_paint.cpp 与 docs/migrate-to-bin2d.md。所以 bin2d 成了**硬依赖**：
+# 没构建过就明确报错，而不是静默少一堆符号。先 `make -C ../bin2D lib`。
+BIN2D_DIR := ../bin2D
+BIN2D_A   := $(BIN2D_DIR)/build-mingw/libbin2d.a
+LIBS_A    := $(LIB_A) $(BIN2D_A)
 
 # 通用源规则（-Isrc：核心源里用 "backends/xxx.h" 这种相对 src/ 的路径引用后端头）
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
@@ -78,8 +86,18 @@ $(BUILD_DIR)/examples/app_win32.o: $(SRC_DIR)/platform/app_win32.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
 
-$(LIB_A): $(LIB_OBJS)
-	ar rcs $@ $^
+# 路径填充：覆盖率 → 条带。**唯一**需要 bin2d 头/库的目标（P2）
+$(BUILD_DIR)/binui_paint.o: $(SRC_DIR)/backends/binui_paint.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include -c $< -o $@
+
+$(BIN2D_A):
+	@echo "[binui] 缺 bin2d 静态库：$(BIN2D_A)"
+	@echo "[binui] 路径填充已经改用 bin2d 的覆盖率（P2 迁移），先跑：make -C ../bin2D lib"
+	@exit 1
+
+$(LIB_A): $(LIB_OBJS) $(BIN2D_A)
+	ar rcs $@ $(filter %.o,$^)
 
 # =============================================
 # 组件二进制：.bum.html -> .bum（产物落 build 目录，不污染源码树）
@@ -90,9 +108,9 @@ COMPONENT_BUMS := \
 
 # 静态链接：构建脚本经常在 sh/PowerShell 等不同环境里调用它，
 # 动态 MinGW 运行时（libstdc++-6.dll 等）在某些 PATH 下找不到（sh 下表现为退出码 127）
-$(BIN_DIR)/binui_compile$(EXT): tools/binui_compile.cpp $(LIB_A)
+$(BIN_DIR)/binui_compile$(EXT): tools/binui_compile.cpp $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIBS_A)
 
 $(BUILD_DIR)/assets/components/%.bum: $(EXA_DIR)/features/%.bum.html $(BIN_DIR)/binui_compile$(EXT)
 	@mkdir -p $(dir $@)
@@ -121,21 +139,21 @@ TEST_BINS := \
     $(TEST_DIR)/test_font$(EXT)
 
 # test_css：CSS 属性 / 选择器 / 伪元素 / 编译器告警（只依赖核心库）
-$(TEST_DIR)/test_css$(EXT): tests/test_css.cpp $(LIB_A)
+$(TEST_DIR)/test_css$(EXT): tests/test_css.cpp $(LIBS_A)
 	@mkdir -p $(TEST_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIBS_A)
 
 # test_elements：二进制格式 / 元素树 / 布局 / 命中 / 交互 / 动画 / 绘制几何 / 热重载
 # 工作目录须为仓库根（用到 tests/fixtures/ 与 build-mingw/tmp/）
-$(TEST_DIR)/test_elements$(EXT): tests/test_elements.cpp $(LIB_A)
+$(TEST_DIR)/test_elements$(EXT): tests/test_elements.cpp $(LIBS_A)
 	@mkdir -p $(TEST_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -I$(EXA_DIR) -o $@ $< $(LIB_A)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -I$(EXA_DIR) -o $@ $< $(LIBS_A)
 
 # test_font：字体服务（FreeType + HarfBuzz）+ 输入法（IME）的 UTF-16 光标桥接
-$(TEST_DIR)/test_font$(EXT): tests/test_font.cpp $(LIB_A)
+$(TEST_DIR)/test_font$(EXT): tests/test_font.cpp $(LIBS_A)
 	@mkdir -p $(TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Ithird_party/freetype/include -Ithird_party/harfbuzz/src \
-	    -o $@ $< $(LIB_A) -Lthird_party/freetype/build -lfreetype \
+	    -o $@ $< $(LIBS_A) -Lthird_party/freetype/build -lfreetype \
 	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
 .PHONY: test
@@ -168,9 +186,9 @@ test: $(TEST_DIR)/test_capi$(EXT)
 # 注意：这里必须直接写 $(BUILD_DIR)/libbinui_c.a，不能写 $(BINUI_C_A) ——
 # 那个变量是后面用 := 定义的，GNU Make 在读到这一行时就展开成了空，
 # 于是 test_capi 永远只依赖 .cpp，库更新后不重链，跑的是旧二进制。
-$(TEST_DIR)/test_capi$(EXT): tests/test_capi.cpp $(BUILD_DIR)/libbinui_c.a $(LIB_A)
+$(TEST_DIR)/test_capi$(EXT): tests/test_capi.cpp $(BUILD_DIR)/libbinui_c.a $(LIBS_A)
 	@mkdir -p $(TEST_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(BUILD_DIR)/libbinui_c.a $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(BUILD_DIR)/libbinui_c.a $(LIBS_A) $(WINLIBS) $(GL_LIBS)
 
 # 9 组使用示例（一组一个 exe，一组只演示一件事）：功能 / 动画 / 应用壳 / 字体与输入法 /
 # 按钮样式 / 自适应布局 / 2D 渲染 / 3D 渲染 / 纹理。产物在 $(DEMO_DIR)，与测试彻底分开。
@@ -205,56 +223,56 @@ $(BUILD_DIR)/examples/%.o: $(EXA_DIR)/%.cpp
 
 # UI 源文件也算依赖：不然改完 main.html，exe 不用重链，构建期那次 cp 不会重跑，
 # 跑起来还是旧界面（只有 --ui 指到源码树才看到新界面）。
-$(DEMO_DIR)/features$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
+$(DEMO_DIR)/features$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/features/main.o $(LIBS_A) $(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
 	@mkdir -p $(DEMO_DIR)/features
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/features/main.o $(LIBS_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/features/main.html $(DEMO_DIR)/features/main.html
 	cp -f $(EXA_DIR)/features/button.bum.html $(DEMO_DIR)/features/button.bum.html
 	cp -f $(BUILD_DIR)/assets/components/card.bum $(DEMO_DIR)/features/card.bum
 	cp -f $(BUILD_DIR)/assets/components/dock.bum $(DEMO_DIR)/features/dock.bum
 
-$(DEMO_DIR)/animshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A) $(EXA_DIR)/animshow/main.html
+$(DEMO_DIR)/animshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/animshow/main.o $(LIBS_A) $(EXA_DIR)/animshow/main.html
 	@mkdir -p $(DEMO_DIR)/animshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/animshow/main.o $(LIBS_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/animshow/main.html $(DEMO_DIR)/animshow/main.html
 
-$(DEMO_DIR)/appshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/appshow/main.o $(LIB_A) $(EXA_DIR)/appshow/main.html $(EXA_DIR)/appshow/appshow-navitem.bum.html $(EXA_DIR)/appshow/appshow-card.bum.html $(EXA_DIR)/appshow/appshow-dialog.bum.html $(EXA_DIR)/appshow/appshow-bubble.bum.html
+$(DEMO_DIR)/appshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/appshow/main.o $(LIBS_A) $(EXA_DIR)/appshow/main.html $(EXA_DIR)/appshow/appshow-navitem.bum.html $(EXA_DIR)/appshow/appshow-card.bum.html $(EXA_DIR)/appshow/appshow-dialog.bum.html $(EXA_DIR)/appshow/appshow-bubble.bum.html
 	@mkdir -p $(DEMO_DIR)/appshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/appshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/appshow/main.o $(LIBS_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/appshow/main.html $(DEMO_DIR)/appshow/main.html
 	cp -f $(EXA_DIR)/appshow/appshow-navitem.bum.html $(DEMO_DIR)/appshow/appshow-navitem.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-card.bum.html $(DEMO_DIR)/appshow/appshow-card.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-dialog.bum.html $(DEMO_DIR)/appshow/appshow-dialog.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-bubble.bum.html $(DEMO_DIR)/appshow/appshow-bubble.bum.html
 
-$(DEMO_DIR)/fontshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A) $(EXA_DIR)/fontshow/main.html
+$(DEMO_DIR)/fontshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/fontshow/main.o $(LIBS_A) $(EXA_DIR)/fontshow/main.html
 	@mkdir -p $(DEMO_DIR)/fontshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/fontshow/main.o $(LIBS_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/fontshow/main.html $(DEMO_DIR)/fontshow/main.html
 
-$(DEMO_DIR)/flexshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/flexshow/main.o $(LIB_A) $(EXA_DIR)/flexshow/main.html
+$(DEMO_DIR)/flexshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/flexshow/main.o $(LIBS_A) $(EXA_DIR)/flexshow/main.html
 	@mkdir -p $(DEMO_DIR)/flexshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/flexshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/flexshow/main.o $(LIBS_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/flexshow/main.html $(DEMO_DIR)/flexshow/main.html
 
-$(DEMO_DIR)/svgdemo$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A) $(EXA_DIR)/svgdemo/main.html
+$(DEMO_DIR)/svgdemo$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIBS_A) $(EXA_DIR)/svgdemo/main.html
 	@mkdir -p $(DEMO_DIR)/svgdemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIBS_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/svgdemo/main.html $(DEMO_DIR)/svgdemo/main.html
 
-$(DEMO_DIR)/cubedemo$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIB_A) $(EXA_DIR)/cubedemo/main.html
+$(DEMO_DIR)/cubedemo$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIBS_A) $(EXA_DIR)/cubedemo/main.html
 	@mkdir -p $(DEMO_DIR)/cubedemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIBS_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/cubedemo/main.html $(DEMO_DIR)/cubedemo/main.html
 
-$(DEMO_DIR)/texturedemo$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A) $(EXA_DIR)/texturedemo/main.html
+$(DEMO_DIR)/texturedemo$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIBS_A) $(EXA_DIR)/texturedemo/main.html
 	@mkdir -p $(DEMO_DIR)/texturedemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIBS_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/texturedemo/main.html $(DEMO_DIR)/texturedemo/main.html
 
-$(DEMO_DIR)/buttonshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIB_A) $(EXA_DIR)/buttonshow/main.html
+$(DEMO_DIR)/buttonshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIBS_A) $(EXA_DIR)/buttonshow/main.html
 	@mkdir -p $(DEMO_DIR)/buttonshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIBS_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/buttonshow/main.html $(DEMO_DIR)/buttonshow/main.html
 
 # =============================================
@@ -266,9 +284,9 @@ $(DEMO_DIR)/buttonshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/butt
 VK_DEMOS := svgdemo fontshow animshow buttonshow flexshow cubedemo texturedemo
 
 define VK_DEMO_RULE
-$(DEMO_DIR)/$(1)_vk$(EXT): $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/$(1)/main_vk.o $(LIB_A) $(EXA_DIR)/$(1)/main.html
+$(DEMO_DIR)/$(1)_vk$(EXT): $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/$(1)/main_vk.o $(LIBS_A) $(EXA_DIR)/$(1)/main.html
 	@mkdir -p $(DEMO_DIR)/$(1)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $$@ $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/$(1)/main_vk.o $(LIB_A) \
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $$@ $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/$(1)/main_vk.o $(LIBS_A) \
 	    $(WINLIBS) -ldwmapi -limm32 \
 	    -Lthird_party/freetype/build -lfreetype \
 	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
@@ -286,10 +304,10 @@ $(BUILD_DIR)/examples/features/main_vk.o: examples/features/main.cpp
 	@mkdir -p $(BUILD_DIR)/examples/features
 	$(CXX) $(CXXFLAGS) -DBINUI_GPU_VK -I$(INC_DIR) -Isrc $(VK_INC) -c examples/features/main.cpp -o $@
 # features 有外挂组件（.bum），单独写规则：宏里那条只拷 main.html
-$(DEMO_DIR)/features_vk$(EXT): $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/features/main_vk.o $(LIB_A) \
+$(DEMO_DIR)/features_vk$(EXT): $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/features/main_vk.o $(LIBS_A) \
 		$(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
 	@mkdir -p $(DEMO_DIR)/features
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/features/main_vk.o $(LIB_A) \
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/features/main_vk.o $(LIBS_A) \
 	    $(WINLIBS) -ldwmapi -limm32 \
 	    -Lthird_party/freetype/build -lfreetype \
 	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
@@ -311,9 +329,9 @@ demos-vk: $(DEMO_VK_BINS)
 D3D11_DEMOS := svgdemo fontshow animshow buttonshow flexshow cubedemo texturedemo features
 
 define D3D11_DEMO_RULE
-$(DEMO_DIR)/$(1)_d3d11$(EXT): $(BUILD_DIR)/binui_d3d11.o $(BUILD_DIR)/examples/$(1)/main_d3d11.o $(LIB_A) $(EXA_DIR)/$(1)/main.html
+$(DEMO_DIR)/$(1)_d3d11$(EXT): $(BUILD_DIR)/binui_d3d11.o $(BUILD_DIR)/examples/$(1)/main_d3d11.o $(LIBS_A) $(EXA_DIR)/$(1)/main.html
 	@mkdir -p $(DEMO_DIR)/$(1)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $$@ $(BUILD_DIR)/binui_d3d11.o $(BUILD_DIR)/examples/$(1)/main_d3d11.o $(LIB_A) \
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $$@ $(BUILD_DIR)/binui_d3d11.o $(BUILD_DIR)/examples/$(1)/main_d3d11.o $(LIBS_A) \
 	    $(WINLIBS) $(D3D11_LIBS) -limm32 \
 	    -Lthird_party/freetype/build -lfreetype \
 	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
@@ -354,7 +372,7 @@ $(BINUI_C_A): $(BUILD_DIR)/binui_c.o $(BUILD_DIR)/binui_gl.o
 
 # RTLINK 同样要带上：Windows 上 libstdc++-6.dll / libgcc_s_seh-1.dll 不能指望宿主有，
 # freetype/harfbuzz 也走静态库 —— 产物除系统 DLL 外自包含
-$(BINUI_C_DLL): $(BUILD_DIR)/binui_c_dll.o $(BUILD_DIR)/binui_gl.o $(LIB_A)
+$(BINUI_C_DLL): $(BUILD_DIR)/binui_c_dll.o $(BUILD_DIR)/binui_gl.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(LDFLAGS) $(RTLINK) -shared -o $@ $^ $(WINLIBS) $(GL_LIBS) \
 	    -Wl,--out-implib=$(BIN_DIR)/libbinui_c.dll.a
@@ -366,7 +384,7 @@ capi: $(BINUI_C_A) $(BINUI_C_DLL)
 .PHONY: examples
 examples: $(DEMO_BINS) $(STD_LIB_STAMP)
 
-all: $(LIB_A) $(TEST_BINS) $(DEMO_BINS) $(STD_LIB_STAMP) $(BINUI_C_A) $(BINUI_C_DLL)
+all: $(LIBS_A) $(TEST_BINS) $(DEMO_BINS) $(STD_LIB_STAMP) $(BINUI_C_A) $(BINUI_C_DLL)
 
 # 调试工具（可选，不入 all）：离屏渲染 / 窗口抓取 / 窗口枚举
 TOOL_BINS := \
@@ -393,18 +411,18 @@ $(BIN_DIR)/binui_export$(EXT): tools/binui_export.cpp
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $<
 
 # 示例 UI 零警告检查（CMake 也会注册成 ctest 用例）
-$(BIN_DIR)/check_examples$(EXT): tools/check_examples.cpp $(LIB_A)
+$(BIN_DIR)/check_examples$(EXT): tools/check_examples.cpp $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIB_A) $(GL_LIBS)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIBS_A) $(GL_LIBS)
 
 # "电篱笆"版的零警告检查：每个 C++ 堆块末尾挂一个不可访问页，越界写/读已释放内存
 # 立刻崩并打印分配栈。本机 mingw 没有 libasan、也没权限开 page heap，这是替代品 ——
 # v0.16.46 就是靠它定位到编译器里一处悬空引用（栈引用被 push_back 扩容搞失效）。
 # 慢两个数量级，所以单独成目标，不进 all。
-$(BIN_DIR)/check_examples_guard$(EXT): tools/check_examples.cpp tools/guard_alloc.cpp $(LIB_A)
+$(BIN_DIR)/check_examples_guard$(EXT): tools/check_examples.cpp tools/guard_alloc.cpp $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ tools/check_examples.cpp \
-	    tools/guard_alloc.cpp $(LIB_A) $(GL_LIBS)
+	    tools/guard_alloc.cpp $(LIBS_A) $(GL_LIBS)
 
 .PHONY: check-guard
 check-guard: $(BIN_DIR)/check_examples_guard$(EXT)
@@ -417,10 +435,10 @@ check-guard: $(BIN_DIR)/check_examples_guard$(EXT)
 #   所以离屏工具改成"先编 .o（带 -MMD）再链接"。
 $(BUILD_DIR)/offscreen_render.o: tools/offscreen_render.cpp
 	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -I$(EXA_DIR) -Isrc -c $< -o $@
-$(BIN_DIR)/offscreen_render$(EXT): $(BUILD_DIR)/offscreen_render.o $(BUILD_DIR)/examples/app_win32.o $(LIB_A)
+$(BIN_DIR)/offscreen_render$(EXT): $(BUILD_DIR)/offscreen_render.o $(BUILD_DIR)/examples/app_win32.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/offscreen_render.o $(BUILD_DIR)/examples/app_win32.o \
-	    $(LIB_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
+	    $(LIBS_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
 
 $(BIN_DIR)/window_capture$(EXT): tools/window_capture.cpp
 	@mkdir -p $(BIN_DIR)
@@ -430,10 +448,10 @@ $(BIN_DIR)/enum_windows$(EXT): tools/enum_windows.cpp
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $< -luser32
 
 # GL 后端的离屏抓图：GL 窗口抓不到图（PrintWindow 全黑），这个直接读回离屏像素
-$(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl.o $(LIB_A)
+$(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -o $@ $< \
-	    $(BUILD_DIR)/binui_gl.o $(LIB_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
+	    $(BUILD_DIR)/binui_gl.o $(LIBS_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
 
 # partial_shot：局部重绘一致性检查（hover 脏矩形 vs 整帧）。走 .o + -MMD，
 # 免得改了 binui_draw_nodes.h / binui_paint.h 之后工具还跑旧行为（这个仓库在
@@ -442,7 +460,7 @@ $(BUILD_DIR)/partial_shot.o: tools/partial_shot.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
 
-$(BIN_DIR)/partial_shot$(EXT): $(BUILD_DIR)/partial_shot.o $(BUILD_DIR)/binui_gl.o $(LIB_A)
+$(BIN_DIR)/partial_shot$(EXT): $(BUILD_DIR)/partial_shot.o $(BUILD_DIR)/binui_gl.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^ \
 	    -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
@@ -455,7 +473,7 @@ $(BUILD_DIR)/draw_bench.o: tools/draw_bench.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
 
-$(BIN_DIR)/draw_bench$(EXT): $(BUILD_DIR)/draw_bench.o $(LIB_A)
+$(BIN_DIR)/draw_bench$(EXT): $(BUILD_DIR)/draw_bench.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^
 
@@ -464,9 +482,9 @@ $(BIN_DIR)/draw_bench$(EXT): $(BUILD_DIR)/draw_bench.o $(LIB_A)
 #   不重编"——直接链了旧 .o，验出来的行为是旧的（本轮就在 BINUI_DRAW_PROF 上踩到）。
 $(BUILD_DIR)/vk_shot.o: tools/vk_shot.cpp
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
-$(BIN_DIR)/vk_shot$(EXT): $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIB_A)
+$(BIN_DIR)/vk_shot$(EXT): $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIBS_A) \
 		-luser32 -lgdi32 -lgdiplus -lole32 \
 		-Lthird_party/freetype/build -lfreetype \
 		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
@@ -474,9 +492,9 @@ $(BIN_DIR)/vk_shot$(EXT): $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIB_A
 # 真实窗口 + 交换链的验收工具（P2b）：跑 N 帧，把**交换链图像**读回写 PNG
 $(BUILD_DIR)/vk_window.o: tools/vk_window.cpp
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
-$(BIN_DIR)/vk_window$(EXT): $(BUILD_DIR)/vk_window.o $(BUILD_DIR)/binui_vk.o $(LIB_A)
+$(BIN_DIR)/vk_window$(EXT): $(BUILD_DIR)/vk_window.o $(BUILD_DIR)/binui_vk.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_window.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_window.o $(BUILD_DIR)/binui_vk.o $(LIBS_A) \
 		-luser32 -lgdi32 -lgdiplus -lole32 \
 		-Lthird_party/freetype/build -lfreetype \
 		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
@@ -484,9 +502,9 @@ $(BIN_DIR)/vk_window$(EXT): $(BUILD_DIR)/vk_window.o $(BUILD_DIR)/binui_vk.o $(L
 # 鲁棒性压测工具（P4）：resize 抖动 / 最小化 / 透明切换 / GDI 切换 / init-shutdown 循环 / 双实例
 $(BUILD_DIR)/vk_stress.o: tools/vk_stress.cpp
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
-$(BIN_DIR)/vk_stress$(EXT): $(BUILD_DIR)/vk_stress.o $(BUILD_DIR)/binui_vk.o $(LIB_A)
+$(BIN_DIR)/vk_stress$(EXT): $(BUILD_DIR)/vk_stress.o $(BUILD_DIR)/binui_vk.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_stress.o $(BUILD_DIR)/binui_vk.o $(LIB_A) \
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_stress.o $(BUILD_DIR)/binui_vk.o $(LIBS_A) \
 		-luser32 -lgdi32 -lgdiplus -lole32 -lpsapi \
 		-Lthird_party/freetype/build -lfreetype \
 		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
@@ -495,9 +513,9 @@ $(BIN_DIR)/vk_stress$(EXT): $(BUILD_DIR)/vk_stress.o $(BUILD_DIR)/binui_vk.o $(L
 # 不走屏幕截屏，所以窗口被遮挡也能抓到真实像素（flip-model 交换链的 PrintWindow 是白屏）。
 $(BUILD_DIR)/d3d11_shot.o: tools/d3d11_shot.cpp
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
-$(BIN_DIR)/d3d11_shot$(EXT): $(BUILD_DIR)/d3d11_shot.o $(BUILD_DIR)/binui_d3d11.o $(LIB_A)
+$(BIN_DIR)/d3d11_shot$(EXT): $(BUILD_DIR)/d3d11_shot.o $(BUILD_DIR)/binui_d3d11.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/d3d11_shot.o $(BUILD_DIR)/binui_d3d11.o $(LIB_A) \
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/d3d11_shot.o $(BUILD_DIR)/binui_d3d11.o $(LIBS_A) \
 		-luser32 -lgdi32 -lgdiplus -lole32 $(D3D11_LIBS) \
 		-Lthird_party/freetype/build -lfreetype \
 		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
@@ -555,7 +573,7 @@ $(BUILD_DIR)/path_bench.o: tools/path_bench.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
 
-$(BIN_DIR)/path_bench$(EXT): $(BUILD_DIR)/path_bench.o $(LIB_A)
+$(BIN_DIR)/path_bench$(EXT): $(BUILD_DIR)/path_bench.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^
 
@@ -566,19 +584,13 @@ bench-path: $(BIN_DIR)/path_bench$(EXT)
 
 # ---- 迁移开工条件：bin2d 的 FillPath 与现实现（条带 + fillRect）同口径对拍 ----
 # 见 docs/migrate-to-bin2d.md：这条数字不达标就不动 binUI 的路径光栅。
-BIN2D_DIR := ../bin2D
-BIN2D_LIB := $(wildcard $(BIN2D_DIR)/build-mingw/libbin2d.a)
-
+# BIN2D_DIR / BIN2D_A 已在文件上方定义（P2 起 bin2d 是硬依赖）。
 .PHONY: gate-migrate
-gate-migrate:
-ifneq ($(BIN2D_LIB),)
+gate-migrate: $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -I$(BIN2D_DIR)/include $(RTLINK) \
-	    -o $(BIN_DIR)/migrate_gate$(EXT) tools/migrate_gate.cpp $(BIN2D_LIB)
+	    -o $(BIN_DIR)/migrate_gate$(EXT) tools/migrate_gate.cpp $(LIBS_A)
 	@$(BIN_DIR)/migrate_gate$(EXT) 200
-else
-	@echo "[binUI] gate-migrate 跳过：没有 $(BIN2D_DIR)/build-mingw/libbin2d.a"
-endif
 
 .PHONY: bench-gl
 bench-gl: $(BIN_DIR)/gl_shot$(EXT)
@@ -856,7 +868,7 @@ vk-stress: tools
 
 else
 
-all: $(LIB_A) $(TEST_BINS)
+all: $(LIBS_A) $(TEST_BINS)
 	@echo "binUI: non-Windows platform, demos skipped (lib + tests built)"
 
 endif

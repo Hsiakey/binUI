@@ -46,7 +46,18 @@ add_subdirectory(third_party/harfbuzz EXCLUDE_FROM_ALL)
 # =============================================
 # 核心库 binui（纯 C++ + 字体服务，可移植到任意平台）
 # =============================================
+# bin2d（P2 迁移）：<path> 的填充光栅化在 bin2d 里做，见 src/backends/binui_paint.cpp。
+# 所以 bin2d 是硬依赖：先 `make -C ../bin2D lib`（或用 CMake 构建 bin2D）。
+set(BIN2D_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../bin2D")
+set(BIN2D_LIB "${BIN2D_ROOT}/build-mingw/libbin2d.a")
+
 add_library(binui STATIC
+target_include_directories(binui PUBLIC "${BIN2D_ROOT}/include")
+if(EXISTS "${BIN2D_LIB}")
+    target_link_libraries(binui PUBLIC "${BIN2D_LIB}")
+else()
+    message(WARNING "bin2d 静态库不存在：${BIN2D_LIB}（先 make -C ../bin2D lib）")
+endif()
     src/compiler/binui_compiler.cpp
     src/renderer/binui_renderer.cpp
     src/font/binui_font_renderer.cpp

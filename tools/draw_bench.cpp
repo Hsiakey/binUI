@@ -113,11 +113,10 @@ struct CountGfx : IBinUIGfx {
             nb = it->second.size();
         } else {
             static thread_local std::vector<binui::PaintBand> lbands;
-            static thread_local std::vector<uint16_t> lcov;
             if (lbands.size() < static_cast<size_t>(binui::kMaxPathBands))
                 lbands.resize(binui::kMaxPathBands);
             const int n2 = binui::BuildLineBandsAA(x0, y0, x1, y1, width, c, lbands.data(),
-                                                   static_cast<int>(lbands.size()), lcov);
+                                                   static_cast<int>(lbands.size()));
             if (n2 > 0) {
                 if (cache.size() >= binui::kLineBandCacheCap) cache.clear();
                 std::vector<binui::PaintBand>& slot = cache[key];
