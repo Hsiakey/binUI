@@ -5,6 +5,60 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.24.0] - 2026-11-19 【格式 v34】
+
+**移除 GDI 渲染后端**。`src/platform/app_win32.*`（Win32 外壳 + `drawNodesGDI`，约 2600 行）
+与 `tools/offscreen_render` 一并删除；像素基准图改由 **GL** 出（`gl_shot`，隐藏窗口 +
+离屏 FBO）。三个 GPU 后端之间的逐像素约束不变。
+
+### 为什么删（先量，再删）
+
+它是 `docs/pixels/` 基准图的生成者。把它的基准图和 GL 渲的同一批页面逐像素比一遍，
+差距大得没法当参照（阈值 8，即"肉眼能看出"的差异）：
+
+| 用例 | 旧 GDI 基准 vs GL | 用例 | 旧 GDI 基准 vs GL |
+|---|---|---|---|
+| `opacity` | **25.00%** | `image-round` | 6.05% |
+| `text-shadow-multi` | 15.57% | `svgjoin` | 5.36% |
+| `svg-filter` | 14.02% | `svgstroke` | 4.77% |
+| `text-shadow` | 13.95% | `svggrad` / `svgpath` | 4.29% / 4.26% |
+| `image-mip` | 8.12% | `probe`／`display-none2`／`circle` | 2.57% / 2.29% / 1.92% |
+| `svgfinish` / `svgaa` | 6.99% / 6.86% | `radius-matrix`／`grad-angle`／`shadow` | 0.88% / 0.72% / 0.40% |
+
+也就是说：**基准图量的不是"真实渲染长什么样"，而是"最省的那条近似路径长什么样"**。
+`pixels` 一直是绿的，只是因为 gold 与它同源；`pixels-vk`/`pixels-d3d11` 比的又是 GL，
+所以 GDI 从来没进过"三端一致"这条判据。它缺 alpha 合成、缺字形图集、缺 AA 填充，
+每补一项都是照着 GPU 端再实现一遍 —— 而它唯一的独有价值（无 GPU 也能出图）已经由
+`presentViaGdi` + GL 离屏覆盖。
+
+### 现在谁出基准图 / 门禁怎么变
+
+- `docs/pixels/*.png`（18 张）**全部由 `gl_shot` 重新生成**，`make pixels` 变成
+  "GL 自回归"，`pixels-update` 也走 `gl_shot`。
+- `pixels-vk` / `pixels-d3d11`（与 GL 逐像素比）不变，仍是"三端一致"的硬门禁。
+- `baseline_snapshot` 的后端列表收成 `gl / vk / d3d11`：快照 188 → **170 项**
+  （少 18 条 `px gdi`）。`make baseline-render` 现在先 `rm -rf` 渲染目录 ——
+  删掉一个后端之后，旧的 `gdi/` 产物本来会被下一次 `make baseline` 悄悄扫进来
+  （这次就踩了：第一次重生成仍是 188 项）。
+- `CMakeLists.txt` 删掉 `app_shell` 库与已经没人调用的 `add_binui_demo()`。
+
+### 保留的 GDI 用法（不是渲染）
+
+`IBinUIGfx::presentViaGdi()`（读回离屏像素 → `SetDIBitsToDevice`）保留：拖拽 resize、
+远程会话、全屏直翻转时的**呈现**路径，规避 NVIDIA 驱动在 "resize + SwapBuffers" 下崩溃。
+它不参与渲染，因此不影响任何像素判据。
+
+### 验证
+
+| 门禁 | 结果 |
+|---|---|
+| `make pixels`（新 GL 基准） | 18/18 **0 个不同像素** |
+| `make pixels-vk` / `pixels-d3d11` | 全部 **0 个不同像素**（`anim/affine-text` 6 px 为既有差异） |
+| `make baseline-strict`（170 项） | **完全一致** |
+| `make test` | 全绿 |
+
+---
+
 ## [0.23.0] - 2026-11-19 【格式 v34】
 
 **P3 第一半：三个 GPU 后端的圆角模板收口到 bin2d**（`bin2d::RasterizeRoundedTileCoverage`，

@@ -82,10 +82,6 @@ $(BUILD_DIR)/binui_d3d11.o: $(SRC_DIR)/backends/binui_d3d11.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
 
-$(BUILD_DIR)/examples/app_win32.o: $(SRC_DIR)/platform/app_win32.cpp
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
-
 # 路径填充：覆盖率 → 条带。**唯一**需要 bin2d 头/库的目标（P2）
 $(BUILD_DIR)/binui_paint.o: $(SRC_DIR)/backends/binui_paint.cpp
 	@mkdir -p $(dir $@)
@@ -390,7 +386,6 @@ all: $(LIBS_A) $(TEST_BINS) $(DEMO_BINS) $(STD_LIB_STAMP) $(BINUI_C_A) $(BINUI_C
 TOOL_BINS := \
     $(BIN_DIR)/binui_compile$(EXT) \
     $(BIN_DIR)/binui_export$(EXT) \
-    $(BIN_DIR)/offscreen_render$(EXT) \
     $(BIN_DIR)/gl_shot$(EXT) \
     $(BIN_DIR)/partial_shot$(EXT) \
     $(BIN_DIR)/draw_bench$(EXT) \
@@ -430,16 +425,8 @@ check-guard: $(BIN_DIR)/check_examples_guard$(EXT)
 
 # ★ 这条规则（以及下面 gl_shot/d3d11_shot 直接编译 .cpp 的几条）**没有头依赖**：
 #   改了 include/binui_paint.h、src/backends/binui_draw_nodes.h 这类共享头之后，
-#   这些 exe 不会重编，验出来的还是旧行为（本仓库在 §7.6.4 踩过一次，0.16.13 又踩了一次：
-#   改了渐变条带生成，offscreen_render 却跑的是旧二进制，白折腾半轮）。
+#   这些 exe 不会重编，验出来的还是旧行为（本仓库在 §7.6.4 踩过一次，0.16.13 又踩了一次）。
 #   所以离屏工具改成"先编 .o（带 -MMD）再链接"。
-$(BUILD_DIR)/offscreen_render.o: tools/offscreen_render.cpp
-	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -I$(EXA_DIR) -Isrc -c $< -o $@
-$(BIN_DIR)/offscreen_render$(EXT): $(BUILD_DIR)/offscreen_render.o $(BUILD_DIR)/examples/app_win32.o $(LIBS_A)
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/offscreen_render.o $(BUILD_DIR)/examples/app_win32.o \
-	    $(LIBS_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
-
 $(BIN_DIR)/window_capture$(EXT): tools/window_capture.cpp
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $< -lgdiplus -lgdi32 -luser32
@@ -605,8 +592,14 @@ bench-gl: $(BIN_DIR)/gl_shot$(EXT)
 #
 # 为什么不在 CI 里：GitHub 的 Windows runner 是软件光栅化，AA 边缘与真实 GPU 不一致，
 # 同一份代码会稳定地差出百分之几；基准图只在**本机**有意义。
+#
+# 基准图由谁渲染（v0.24.0 起）：**GL 后端**（`gl_shot`，隐藏窗口 + 离屏 FBO）。
+# 以前是 GDI 后端（`offscreen_render` → `drawNodesGDI`）—— GDI 渲染后端已在 0.24.0 移除，
+# 见 CHANGELOG。现在的像素权威是 GL：`pixels` = GL 自回归，`pixels-vk` / `pixels-d3d11`
+# = 另两个后端与 GL 逐像素比。CPU 侧的"像素权威"只剩 bin2d（路径/圆角的覆盖率）。
+#
 # 用法：
-#   mingw32-make SHELL=sh pixels           # 渲染 + 与 docs/pixels 基准图比对
+#   mingw32-make SHELL=sh pixels           # GL 渲染 + 与 docs/pixels 基准图比对
 #   mingw32-make SHELL=sh pixels-update    # 改完绘制/布局后重新生成基准图
 # =============================================
 PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad svgjoin svgstroke svgfinish svgaa opacity grad-angle shadow image-round image-mip text-shadow text-shadow-multi svg-filter
@@ -620,7 +613,7 @@ pixels: tools
 	@fail=0; \
 	for c in $(PIXEL_CASES); do \
 	    echo "--- $$c ---"; \
-	    $(BIN_DIR)/offscreen_render$(EXT) docs/issues/assets/$$c.html $(PIXEL_OUT)/$$c.png >/dev/null 2>&1 || { echo "渲染失败: $$c"; fail=1; continue; }; \
+	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_OUT)/$$c.png >/dev/null 2>&1 || { echo "渲染失败: $$c"; fail=1; continue; }; \
 	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_GOLD)/$$c.png $(PIXEL_OUT)/$$c.png $(PIXEL_TOL) $(PIXEL_OUT)/$$c.diff.png || fail=1; \
 	done; \
 	exit $$fail
@@ -628,7 +621,7 @@ pixels: tools
 pixels-update: tools
 	@mkdir -p $(PIXEL_GOLD)
 	@for c in $(PIXEL_CASES); do \
-	    $(BIN_DIR)/offscreen_render$(EXT) docs/issues/assets/$$c.html $(PIXEL_GOLD)/$$c.png >/dev/null 2>&1 || exit 1; \
+	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_GOLD)/$$c.png >/dev/null 2>&1 || exit 1; \
 	    echo "更新基准: $(PIXEL_GOLD)/$$c.png"; \
 	done
 
@@ -794,16 +787,14 @@ BASELINE_DRAW_CASES := $(filter-out animshow,$(BENCH_CASES)) bench-grad
 
 .PHONY: baseline-render
 baseline-render: tools
-	@mkdir -p $(BASELINE_RENDER)/gdi $(BASELINE_RENDER)/gl $(BASELINE_RENDER)/vk $(BASELINE_RENDER)/d3d11
+	@rm -rf $(BASELINE_RENDER)
+	@mkdir -p $(BASELINE_RENDER)/gl $(BASELINE_RENDER)/vk $(BASELINE_RENDER)/d3d11
 	@fail=0; for c in $(BASELINE_CASES); do \
 	    src=docs/issues/assets/$$c.html; \
 	    case $$c in demo-*) src=examples/$${c#demo-}/main.html ;; anim-*) src=docs/issues/assets/$${c#anim-}.html ;; esac; \
 	    $(BIN_DIR)/gl_shot$(EXT) $$src $(BASELINE_RENDER)/gl/$$c.png >/dev/null 2>&1 || { echo "render failed [gl]: $$c"; fail=1; }; \
 	    $(BIN_DIR)/vk_shot$(EXT) $$src $(BASELINE_RENDER)/vk/$$c.png >/dev/null 2>&1 || { echo "render failed [vk]: $$c"; fail=1; }; \
 	    $(BIN_DIR)/d3d11_shot$(EXT) $$src $(BASELINE_RENDER)/d3d11/$$c.png >/dev/null 2>&1 || { echo "render failed [d3d11]: $$c"; fail=1; }; \
-	done; exit $$fail
-	@fail=0; for c in $(PIXEL_CASES); do \
-	    $(BIN_DIR)/offscreen_render$(EXT) docs/issues/assets/$$c.html $(BASELINE_RENDER)/gdi/$$c.png >/dev/null 2>&1 || { echo "render failed [gdi]: $$c"; fail=1; }; \
 	done; exit $$fail
 	@: > $(BASELINE_DRAW); for d in $(BASELINE_DRAW_CASES); do \
 	    src=examples/$$d/main.html; \

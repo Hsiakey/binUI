@@ -113,7 +113,10 @@ struct Entry {
 std::vector<Entry> Collect(const std::string& root, const std::string& drawTxt,
                            const std::string& qualityTxt, int* error) {
     std::vector<Entry> out;
-    static const char* kBackends[] = {"gdi", "gl", "vk", "d3d11"};
+    // 后端列表 = 当前真正存在的渲染器（v0.24.0 起 GDI 渲染后端已移除）。
+    // 注意：只认这几个名字，不扫目录 —— 目录里残留的旧后端（比如删掉 gdi 之后
+    // build-mingw/baseline/render/gdi/ 里那批 PNG）不该混进快照。
+    static const char* kBackends[] = {"gl", "vk", "d3d11"};
     for (const char* be : kBackends) {
         const std::string dir = root + "/" + be;
         WIN32_FIND_DATAA fd;

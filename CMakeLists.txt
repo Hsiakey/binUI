@@ -78,12 +78,6 @@ add_executable(binui_export tools/binui_export.cpp)
 # Win32 演示外壳 + 示例
 # =============================================
 if(WIN32)
-    add_library(app_shell STATIC
-        src/platform/app_win32.cpp
-    )
-    target_include_directories(app_shell PUBLIC ${CMAKE_SOURCE_DIR}/src)
-    target_link_libraries(app_shell PUBLIC binui user32 gdi32 gdiplus ole32)
-
     # OpenGL 渲染后端（WGL + GL 3.3 core）：无边框窗口 + 字形图集 + 顶点四边形
     add_library(gl_shell STATIC src/backends/binui_gl.cpp)
     target_include_directories(gl_shell PUBLIC ${CMAKE_SOURCE_DIR}/src)
@@ -98,24 +92,6 @@ if(WIN32)
     target_compile_definitions(binui_c_shared PRIVATE BINUI_C_BUILD_DLL)
     target_link_libraries(binui_c_shared PRIVATE binui gl_shell)
     set_target_properties(binui_c_shared PROPERTIES OUTPUT_NAME binui_c)
-
-    function(add_binui_demo name src_dir ui_file)
-        add_executable(${name} ${src_dir}/main.cpp)
-        target_link_libraries(${name} PRIVATE app_shell binui)
-        # 与 Makefile 同一套产物布局：示例统一落 bin/examples/
-        set_target_properties(${name} PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
-        if(MSVC)
-            set_target_properties(${name} PROPERTIES WINDOWS_EXPORT_ALL_SYMBOLS ON)
-        endif()
-        # 构建后把 UI 源码复制到可执行文件旁的子目录，演示程序无需路径参数即可运行
-        add_custom_command(TARGET ${name} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${name}>/${name}"
-            COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_SOURCE_DIR}/${src_dir}/${ui_file}"
-                "$<TARGET_FILE_DIR:${name}>/${name}/${ui_file}"
-        )
-    endfunction()
 
     # 6 个示例 = 6 组：功能 / 动画 / 字体 / 2D 渲染 / 3D 渲染 / 纹理
     # .bum 由 binui_compile 在构建期从 .bum.html 生成，不进源码树

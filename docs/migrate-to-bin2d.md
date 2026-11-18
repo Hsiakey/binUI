@@ -129,14 +129,14 @@ CHANGELOG 写明 + 硬门禁先绿）。
 用例的原始 ARGB 逐字节比对）、`pixels` 18/18 零差异、`pixels-vk` / `pixels-d3d11` 零差异、
 全量重编 0 警告。几何部分（`BuildRoundedNineSlice`）本来就在 `binui_paint.h` 里共用。
 
-**还没做**：GDI 端的圆角/投影/九宫格（`RoundRect` 无 AA、假投影是靠叠半透明圆角矩形、
-九宫格走 GDI 拉伸），以及 `fillRoundedXf` / `strokeRounded` 的多层同心环（"9 × 线宽层数"）
-是否也换掉。这一段会**改像素**（GDI 圆角从硬边变 AA），GDI 与 GL 在圆角用例上的差距
-（`radius-matrix` 0.67%、`probe` 2.19%、`image-round` 1.43%）就是它的判据。
+**还没做**：GDI 端的圆角/投影/九宫格 —— **已取消**：GDI 渲染后端整体移除（0.24.0），
+所以"把 GDI 的圆角换成 bin2d 的 AA 覆盖率"这件事没有对象了。像素基准图改由 GL 出，
+三端一致的判据不变。
 
-- `fillRounded` → `bin2d::FillRoundedRect`；假投影 → `bin2d::Shadow`；
-  九宫格 → `bin2d::DrawNineSlice`（含 0.4.0 的缩小预滤波，图标缩小不再有摩尔纹）。
-- **删**：三端各自的圆角模板与描边层叠实现（`strokeRounded` 的"9 × 线宽层数"）。
+- ~~`fillRounded` → `bin2d::FillRoundedRect`；假投影 → `bin2d::Shadow`；
+  九宫格 → `bin2d::DrawNineSlice`~~
+- ~~**删**：三端各自的圆角模板与描边层叠实现~~（圆角模板已在 0.23.0 收口到 bin2d；
+  `strokeRounded` 的"9 × 线宽层数"仍在，它的三条实现现在都只消费 bin2d 的模板）
 - **验收**：三端 0 diff + 圆角/投影的像素基准不新增差异；九宫格的坐标错一类 bug 由
   bin2d 的测试兜住（`test_raster` 已覆盖）。
 

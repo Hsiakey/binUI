@@ -42,8 +42,8 @@
 
 > 绑定演示图为什么是离屏渲染：OpenGL 窗口的内容抓不到（`PrintWindow` 对双缓冲 GL
 > 窗口返回全黑，`BitBlt` 只能抓被遮挡后合成到桌面的部分）。所以大部分演示图走
-> `tools/offscreen_render` 的 GDI 路径 —— 同一份 HTML、同一套布局引擎，界面一样，
-> 但 `<canvas>` 里由应用自己画的内容不会出现。
+> `tools/gl_shot`（隐藏窗口 + 离屏 FBO，**GL 后端真实渲染**）—— 同一份 HTML、同一套布局
+> 引擎，界面一样，但 `<canvas>` 里由应用自己画的内容不会出现。
 >
 > 因此 **svgdemo / cubedemo / texturedemo 三张改用 GL 真机截屏**：它们的画布内容是应用在
 > `drawFn` 里逐帧画的（立方体、频谱、程序化纹理），离屏渲染只能得到空画布。截屏用
@@ -52,14 +52,13 @@
 改完示例 UI 后重出这些图（`make tools` 之后，一张一条命令）：
 
 ```sh
-B=build-mingw/bin/offscreen_render.exe
+B=build-mingw/bin/gl_shot.exe
 $B examples/flexshow/main.html docs/img/flexshow.png
 $B examples/buttonshow/main.html docs/img/buttonshow.png
 $B examples/features/main.html docs/img/features.png
 $B examples/animshow/main.html docs/img/animshow.png
 $B examples/fontshow/main.html docs/img/fontshow.png
 $B components/preview.html docs/img/std-components.png
-$B --default docs/img/default-layout.png
 # svgdemo / cubedemo / texturedemo 需要启动示例后真机截屏（见上面说明）
 ```
 
