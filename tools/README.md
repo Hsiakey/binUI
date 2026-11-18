@@ -46,32 +46,33 @@ make tools && build-mingw/bin/check_examples.exe examples
 # 输出：OK/WARN/FAIL + 末尾 "N 个示例 UI 检查完毕，M 处问题"
 ```
 
-## offscreen_render —— 离屏渲染真实布局到 PNG
+## gl_shot —— 用 GL 后端把真实布局渲染成 PNG
 
-把 UI 源文件真正编译 + 布局 + 用 GDI 后端画出来存成 PNG，**不需要开窗口**，适合
-CI 截图回归和"改完样式看一眼"。
+把 UI 源文件真正编译 + 布局 + **用 GL 后端（隐藏窗口 + 离屏 FBO）**画出来存成 PNG，
+不需要可见窗口。**像素基准图（`docs/pixels/`）与迁移基线（`tests/baseline/`）都由它生成**。
+
+> 0.24.0 起它取代了旧的 `offscreen_render`（GDI 渲染后端已移除）。原因：GDI 基准
+> 与 GL 渲染逐像素比，18 个用例里最大差到 **25%**（`opacity`，因为 GDI 没有离屏图层
+> 合成），拿它当"真实渲染"的参照是错的。现在基准图就是真实渲染路径的像素。
 
 ```bash
-# 构建（MinGW；把 PATH 里的工具链放在最前）
-g++ -std=c++17 -O2 -Iinclude -Isrc \
-    tools/offscreen_render.cpp src/platform/app_win32.cpp \
-    build-mingw/libbinui.a -lgdiplus -lgdi32 -luser32 -lole32 \
-    -Lthird_party/freetype/build -lfreetype \
-    -Lthird_party/harfbuzz/build-static/src -lharfbuzz \
-    -o build-mingw/bin/offscreen_render.exe
+# 构建（走仓库 Makefile；别手搓命令行，头依赖会漏）
+make tools
 
-# 用法
-# 内置默认布局（GenerateDefaultBinUI，无 UI 文件时的兜底界面）
-build-mingw/bin/offscreen_render --default docs/img/default-layout.png
+# 普通用法：<ui 文件> <输出 png> [宽] [高]
+build-mingw/bin/gl_shot.exe examples/features/main.html /tmp/a.png
+build-mingw/bin/gl_shot.exe docs/issues/assets/svgstroke.html /tmp/b.png
 
-# 普通用法
-build-mingw/bin/offscreen_render examples/features/main.html /tmp/a.png
-build-mingw/bin/offscreen_render build-mingw/bin/examples/features/main.html /tmp/b.png   # 验证 bin/ 下的资源布局
-build-mingw/bin/offscreen_render tests/fixtures/vision.binui.xml /tmp/c.png --setText log1="hello"
+# 像素门禁（GL 自回归 + 另两端与 GL 逐像素比）
+mingw32-make SHELL=sh pixels           # GL 渲染 vs docs/pixels 基准
+mingw32-make SHELL=sh pixels-update    # 改完绘制后重新生成基准
+mingw32-make SHELL=sh pixels-vk        # Vulkan vs GL
+mingw32-make SHELL=sh pixels-d3d11     # D3D11 vs GL
 ```
 
-注意：离屏渲染只呈现**静态状态**——`::before/::after`、结构伪类、基础样式都能看到，
-但 `:hover`/`:focus`/`:checked` 这类运行时状态需要真实交互才生效（渲染器当前状态决定）。
+注意：`<canvas>` 里由**应用自己**逐帧画的内容（立方体、频谱、程序化纹理）不会出现在
+离屏结果里 —— 工具只跑节点树，不跑宿主的 canvas 回调。这类页面要真机截屏
+（`tools/window_capture` 或 `build-mingw/tmp/drive.ps1 -Action shot`）。
 
 ## window_capture —— 抓取指定窗口内容为 PNG
 
@@ -80,8 +81,9 @@ g++ -std=c++17 -O2 tools/window_capture.cpp -lgdiplus -lgdi32 -luser32 -o build-
 build-mingw/bin/window_capture "功能演示" /tmp/shot-features.png    # 参数是窗口标题子串
 ```
 
-用 `PrintWindow` 抓，**对 OpenGL/D3D 窗口通常返回空白**（GPU 内容不在 GDI 表面里），
-抓 GDI 后端窗口（如 `offscreen_render` 的结果）才可靠。
+用 `PrintWindow` 抓，**对 OpenGL/D3D 窗口通常返回空白**（GPU 内容不在 GDI 表面里）。
+要那种内容就用 `build-mingw/tmp/drive.ps1 -Action shot`（桌面合成层截图），或干脆用
+`gl_shot` 走离屏渲染（不需要开窗口）。
 
 ## enum_windows —— 列出可见窗口标题
 

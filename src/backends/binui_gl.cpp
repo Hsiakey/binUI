@@ -1,6 +1,6 @@
 // binui_gl.cpp - OpenGL GPU 渲染后端实现
 // 架构与 binui_d3d11.cpp 完全同构：字形图集（FreeType 光栅化一次）+ 圆角九宫格模板 +
-// 顶点批次；drawNodesGL 与 drawNodesGDI/D3D 语义一致地遍历节点树，全部绘制为 GPU 四边形；
+// 顶点批次；drawNodesGL 与 D3D 后端语义一致地遍历节点树，全部绘制为 GPU 四边形；
 // BinUIAppGL 提供无边框窗口与事件循环（VSync 按需呈现）。
 // OpenGL 3.3 core（WGL 创建上下文 + GLSL 330），着色器数学与 D3D11 HLSL 版一致：
 // 预乘 alpha 混合、纹理 × 顶点色、NDC 映射 viewSize。

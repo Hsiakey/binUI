@@ -2,7 +2,7 @@
 // 0.20.0 起从 binui_gl-gdi.* 改名：绘制全部是 GPU 四边形，GDI 只剩三处**呈现**回退
 // （透明窗 UpdateLayeredWindow、拖拽 resize 读回 + SetDIBitsToDevice、远程会话贴屏），
 // 字形光栅化早已是 FreeType/HarfBuzz，跟 GDI 无关，旧名会让人误以为它是 GDI 后端
-// （纯 GDI 后端在 src/platform/app_win32.*，那是遗留实现）。
+// （GDI 渲染后端已于 0.24.0 移除，只剩这些呈现回退）。
 // 与 binui_d3d11.h 完全同构（API/语义一致），仅交换链与着色语言不同：
 // WGL + OpenGL 3.3 core（GLSL）替代 D3D11 + HLSL。
 // 窗口为 WS_POPUP 无边框，所有 UI 内容由 GPU 绘制：
@@ -121,7 +121,7 @@ private:
     Impl* impl_;
 };
 
-// 把 BinUIRenderer 节点树绘制到 GL 场景（与 drawNodesGDI/D3D 语义一致）
+// 把 BinUIRenderer 节点树绘制到 GL 场景（与 D3D 后端语义一致）
 // canvas：<canvas> 节点的绘制回调（已裁剪到画布矩形），nullptr = 忽略
 using CanvasDrawFn = std::function<void(BinUIGL& gfx, uint16_t nodeId,
                                         float x, float y, float w, float h)>;

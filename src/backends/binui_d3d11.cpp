@@ -1,6 +1,6 @@
 // binui_d3d11.cpp - D3D11 GPU 渲染后端实现
 // 架构：BinUID3D 维护字形图集（FreeType 光栅化一次）+ 圆角九宫格模板 + 顶点批次，
-// drawNodesD3D 与 drawNodesGDI 语义一致地遍历节点树，全部绘制为 GPU 四边形，
+// drawNodesD3D 与 GL 后端语义一致地遍历节点树，全部绘制为 GPU 四边形，
 // BinUIAppD3D 提供无边框窗口与事件循环（VSync 按需呈现）。
 // 文字排版/光栅化/图集来自共享的 backends/binui_glyph_atlas.h（与 GL / Vulkan 同一份），
 // 本后端只负责"位图 → D3D11 纹理"和三端一致的顶点发射。
