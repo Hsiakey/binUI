@@ -802,7 +802,9 @@ baseline-render: tools
 	    h=$$($(BIN_DIR)/draw_bench$(EXT) $$src --frames 1 --warm 0 --hash 2>/dev/null | tail -1); \
 	    echo "draw $$d $$h" >> $(BASELINE_DRAW); \
 	done
-	@if [ -x ../bin2D/build-mingw/out/bin2d-quality$(EXT) ]; then ../bin2D/build-mingw/out/bin2d-quality$(EXT) $(BASELINE_RAW)/quality >$(BASELINE_QA) 2>&1 || true; else echo "bin2d quality tool not built (run: make -C ../bin2D quality)" >$(BASELINE_QA); fi
+	# 只收 stdout：bin2d 的 quality 工具把计时行写到 stderr（0.9.1 起），而台账要逐字比较 ——
+	# 把 ms/µs 收进来，这台机器每次跑都会红一次。stdout 是确定性内容，可以逐字记账。
+	@if [ -x ../bin2D/build-mingw/out/bin2d-quality$(EXT) ]; then ../bin2D/build-mingw/out/bin2d-quality$(EXT) $(BASELINE_RAW)/quality >$(BASELINE_QA) 2>/dev/null || true; else echo "bin2d quality tool not built (run: make -C ../bin2D quality)" >$(BASELINE_QA); fi
 
 .PHONY: baseline
 baseline: baseline-render $(BIN_DIR)/baseline_snapshot$(EXT)
