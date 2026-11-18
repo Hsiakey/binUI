@@ -789,7 +789,7 @@ struct BinUID3D::Impl {
     // ---------- 场景 ----------
     // 本帧顶点写入口（v20）：缓冲一次扩容到 kMaxVerts，之后每帧只复位 vcount、
     // 按指针偏移写。以前是 verts.insert(verts.end(), v, v+6)，每条图元都要做容量
-    // 检查 + size 递增，和 GL/Vulkan 后端同一个坑（详见 binui_gl-gdi.cpp 的注释）。
+    // 检查 + size 递增，和 GL/Vulkan 后端同一个坑（详见 binui_gl.cpp 的注释）。
     D3DVertex* vertRoom(size_t n) {
         if (vcount + n > verts.size()) {
             size_t cap = verts.size() ? verts.size() : kMaxVerts;

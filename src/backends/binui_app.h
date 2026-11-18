@@ -1,6 +1,6 @@
 // binui_app.h - 无边框窗口 + 事件循环（与后端无关，模板化在 Gfx 上）
 //
-// 这份代码原来长在 binui_gl-gdi.cpp 里，叫 BinUIAppGLGdi。P5 要做 GPU=gl|vk 时发现：
+// 这份代码原来长在 binui_gl.cpp 里，叫 BinUIAppGL。P5 要做 GPU=gl|vk 时发现：
 // 整个外壳只用到后端的 8 个方法（init/shutdown/resize/beginFrame/present/presentViaGdi/
 // setTransparent/isReady），跟 GL 一点关系都没有 —— 那就模板化，让 GL 与 Vulkan 共用
 // 同一份窗口/输入/IME/拖拽/节流逻辑，两个后端不会在"拖边框"这种边角上分叉。
@@ -10,7 +10,7 @@
 //   · static const wchar_t* appClassName()  —— 窗口类名（同进程两个后端并存时不冲突）
 //
 // 用法（两个后端完全一样）：
-//   BinUIAppVK app(960, 660);          // 或 BinUIAppGLGdi
+//   BinUIAppVK app(960, 660);          // 或 BinUIAppGL
 //   app.setDrawFn([&](Gfx& g, const void* clip) { drawUi(g, renderer, clip); });
 //   app.run();
 //
@@ -44,7 +44,7 @@ namespace binui {
 // 是否远程会话（RDP / 虚拟显示器）：这种环境下 swapchain 直翻转会停帧
 // （GL 0.9.1 与 Vulkan 后端都实测过），**三个后端**据此默认走读回 + GDI 贴屏。
 // BINUI_FORCE_REMOTE=1 可在本机模拟（本机没有 RDP 会话，否则这条分支无法验收）。
-// 放在命名空间而不是模板静态里：后端（binui_gl-gdi / binui_vk / binui_d3d11）要调它。
+// 放在命名空间而不是模板静态里：后端（binui_gl / binui_vk / binui_d3d11）要调它。
 inline bool RemoteSession() {
     static const bool remote = [] {
         const char* e = std::getenv("BINUI_FORCE_REMOTE");
@@ -239,7 +239,7 @@ inline bool caretBlinkOn();
 inline bool isTitlebarDrag(const BinUIRenderer& renderer, float x, float y);
 
 // 无边框（WS_POPUP）应用外壳：GPU 后端 + 事件循环。
-// Gfx 必须是实现了 IBinUIGfx 且带 appClassName() 的后端（BinUIGLGdi / BinUIVK）。
+// Gfx 必须是实现了 IBinUIGfx 且带 appClassName() 的后端（BinUIGL / BinUIVK）。
 template <class Gfx>
 class BinUIAppT {
 public:
@@ -380,7 +380,7 @@ private:
 
     int width_ = 0, height_ = 0;
     bool vsync_ = true;
-    bool gdiPresent_ = false; // resize 拖拽期：present 走 GDI（读回离屏 → StretchDIBits），不提交交换链
+    bool gdiPresent_ = false; // resize 拖拽期：present 走 GDI（读回离屏 → SetDIBitsToDevice），不提交交换链
     // 客户区盖满整块显示器时也要走 GDI 贴屏：全屏直翻转会让驱动/远程显示器拿不到新帧
     //（应用还在 100fps 画，屏幕上却是旧画面）。由 applyPendingResize 重算。
     bool fullscreenPresent_ = false;
@@ -455,7 +455,7 @@ private:
 };
 
 // ============================================================
-// 以下：辅助函数与实现（P5 从 binui_gl-gdi.cpp 整块搬来，模板化在 Gfx 上）
+// 以下：辅助函数与实现（P5 从 binui_gl.cpp 整块搬来，模板化在 Gfx 上）
 // ============================================================
 
 template <class Gfx>

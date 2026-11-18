@@ -1,6 +1,8 @@
-// binui_gl-gdi.h - Windows WGL + GDI 变体的 OpenGL 渲染后端：直接绘制 binUI 场景树
-// （WGL 建上下文 + SwapBuffers 呈现，resize 拖拽期走 GDI StretchDIBits 规避 NVIDIA
-// 驱动"窗口 resize + SwapBuffers"崩溃；图片解码/字形光栅化走 GDI+ / GDI）。
+// binui_gl.h - Windows WGL 的 OpenGL 3.3 渲染后端：直接绘制 binUI 场景树
+// 0.20.0 起从 binui_gl-gdi.* 改名：绘制全部是 GPU 四边形，GDI 只剩三处**呈现**回退
+// （透明窗 UpdateLayeredWindow、拖拽 resize 读回 + SetDIBitsToDevice、远程会话贴屏），
+// 字形光栅化早已是 FreeType/HarfBuzz，跟 GDI 无关，旧名会让人误以为它是 GDI 后端
+// （纯 GDI 后端在 src/platform/app_win32.*，那是遗留实现）。
 // 与 binui_d3d11.h 完全同构（API/语义一致），仅交换链与着色语言不同：
 // WGL + OpenGL 3.3 core（GLSL）替代 D3D11 + HLSL。
 // 窗口为 WS_POPUP 无边框，所有 UI 内容由 GPU 绘制：
@@ -23,12 +25,12 @@
 namespace binui {
 
 // GPU 场景渲染器：立即模式原语 + 帧呈现（对布局/命中测试零依赖）
-class BinUIGLGdi : public IBinUIGfx {
+class BinUIGL : public IBinUIGfx {
 public:
-    BinUIGLGdi();
-    ~BinUIGLGdi();
-    BinUIGLGdi(const BinUIGLGdi&) = delete;
-    BinUIGLGdi& operator=(const BinUIGLGdi&) = delete;
+    BinUIGL();
+    ~BinUIGL();
+    BinUIGL(const BinUIGL&) = delete;
+    BinUIGL& operator=(const BinUIGL&) = delete;
 
     // 创建 OpenGL 上下文 + 离屏帧缓冲（hwnd 为无边框窗口句柄）
     bool init(void* hwnd, int width, int height, bool vsync = true);
@@ -47,7 +49,7 @@ public:
     // present() 在 vsync 开着的普通窗口路径上会阻塞到下一个垂直同步（SwapBuffers +
     // wglSwapIntervalEXT(1)），所以外壳可以让它当节拍器、自己不再掐帧。
     bool presentPacesFrames() const;
-    // 提交场景但不 SwapBuffers：读回离屏像素 → StretchDIBits 到窗口 DC。
+    // 提交场景但不 SwapBuffers：读回离屏像素 → SetDIBitsToDevice 到窗口 DC。
     // 用于 resize 拖拽期间——NVIDIA 驱动在"窗口 resize + SwapBuffers"下会崩
     //（nvoglv64 DrvPresentBuffers），走 GDI 呈现绕开驱动 present 路径。
     void presentViaGdi();
@@ -112,7 +114,7 @@ public:
     void setFontName(const char* name);
 
     // 窗口类名（无边框外壳用；同一进程里 GL 与 VK 两个外壳并存时不冲突）
-    static const wchar_t* appClassName() { return L"BinUIAppGLGdiWindow"; }
+    static const wchar_t* appClassName() { return L"BinUIAppGLWindow"; }
 
 private:
     struct Impl;
@@ -121,13 +123,18 @@ private:
 
 // 把 BinUIRenderer 节点树绘制到 GL 场景（与 drawNodesGDI/D3D 语义一致）
 // canvas：<canvas> 节点的绘制回调（已裁剪到画布矩形），nullptr = 忽略
-using CanvasDrawFn = std::function<void(BinUIGLGdi& gfx, uint16_t nodeId,
+using CanvasDrawFn = std::function<void(BinUIGL& gfx, uint16_t nodeId,
                                         float x, float y, float w, float h)>;
-void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* clipRect,
+void drawNodesGL(BinUIGL& gfx, const BinUIRenderer& renderer, const void* clipRect,
                  const CanvasDrawFn& canvas = {});
 
 // 窗口 + 事件循环外壳：与 Vulkan 后端共用同一份实现（src/backends/binui_app.h）。
 // 两个后端只差一个模板参数，输入/IME/拖拽/节流逻辑不会分叉。
-using BinUIAppGLGdi = BinUIAppT<BinUIGLGdi>;
+using BinUIAppGL = BinUIAppT<BinUIGL>;
+
+// 旧名（0.20.0 之前）：仅为源码兼容保留，新代码用 BinUIGL / BinUIAppGL。
+// drawNodesGLGdi 没有别名 —— 它带默认参数，包装一层得不偿失，CHANGELOG 里标了改名。
+using BinUIGLGdi    = BinUIGL;
+using BinUIAppGLGdi = BinUIAppGL;
 
 } // namespace binui

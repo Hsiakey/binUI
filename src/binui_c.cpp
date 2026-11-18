@@ -21,7 +21,7 @@
 #include "binui_paths.h"
 #include "binui_renderer.h"
 #include "backends/binui_draw_nodes.h"   // drawNodesBinUI（后端无关遍历）
-#include "backends/binui_gl-gdi.h"
+#include "backends/binui_gl.h"
 
 namespace {
 
@@ -49,7 +49,7 @@ struct QueuedEvent {
 
 struct App {
     binui::BinUIRenderer renderer;
-    std::unique_ptr<binui::BinUIAppGLGdi> shell;
+    std::unique_ptr<binui::BinUIAppGL> shell;
     std::deque<QueuedEvent> queue;
     std::string eventText;   // poll 期间 text 指向这里（下一次 poll 前有效）
     std::string assetDir;    // 图片 / 外挂组件基准目录（末尾带分隔符）
@@ -208,12 +208,12 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
     const bool transparent = !child && ((flags & BINUI_OPEN_TRANSPARENT) != 0 ||
                                         (wd.present && wd.transparent()));
 
-    a->shell.reset(new binui::BinUIAppGLGdi(w, h, (flags & BINUI_OPEN_NO_VSYNC) == 0));
+    a->shell.reset(new binui::BinUIAppGL(w, h, (flags & BINUI_OPEN_NO_VSYNC) == 0));
     a->shell->setWindowOptions(resizable, child ? 0.0f : (wd.present ? wd.aspect : 0.0f),
                                transparent, title.c_str());
 
     binui::BinUIRenderer& r = a->renderer;
-    binui::BinUIAppGLGdi& sh = *a->shell;
+    binui::BinUIAppGL& sh = *a->shell;
 
     // ---- 绘制 ----
     sh.setDrawFn([a](binui::IBinUIGfx& gfx, const void* clip) {
@@ -510,7 +510,7 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
 
 extern "C" {
 
-const char* BINUI_C_CALL binui_version(void) { return "0.19.2"; }
+const char* BINUI_C_CALL binui_version(void) { return "0.20.0"; }
 
 int32_t BINUI_C_CALL binui_abi_version(void) { return BINUI_C_ABI_VERSION; }
 

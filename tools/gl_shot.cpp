@@ -5,7 +5,7 @@
 // 而 GDI 有自己的字体链接，"GL 后端画出来到底什么样"一直没人验证过。
 //
 // 做法：建一个**不显示**的窗口 → 建 GL 上下文 → 渲染一帧 → presentViaGdi 把离屏
-// 像素读回并 StretchDIBits 到窗口 DC → 从 DC BitBlt 出来存 PNG。
+// 像素读回并 SetDIBitsToDevice 到窗口 DC → 从 DC BitBlt 出来存 PNG。
 // 走出来的是 GL 后端真实的像素，跟窗口可见性无关。
 //
 // 用法: gl_shot <ui file> <out.png> [width] [height]
@@ -23,7 +23,7 @@
 #include "binui_compiler.h"
 #include "binui_renderer.h"
 #include "binui_paths.h"
-#include "backends/binui_gl-gdi.h"
+#include "backends/binui_gl.h"
 
 using namespace Gdiplus;
 
@@ -87,7 +87,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    binui::BinUIGLGdi gfx;
+    binui::BinUIGL gfx;
     if (!gfx.init(hwnd, W, H, false)) {
         std::fprintf(stderr, "gl_shot: GL 上下文创建失败（这台机器没有可用的 OpenGL 3.3？）\n");
         DestroyWindow(hwnd);
@@ -95,7 +95,7 @@ int main(int argc, char** argv) {
     }
 
     gfx.beginFrame(nullptr);
-    binui::drawNodesGLGdi(gfx, renderer, nullptr);
+    binui::drawNodesGL(gfx, renderer, nullptr);
 
     if (benchFrames > 0) {
         // 不进交换链：`flushFrame()` 只做 flushAll（顶点上传 + 绘制调用），不做 MSAA resolve
@@ -104,14 +104,14 @@ int main(int argc, char** argv) {
         // 先跑 5 帧预热（条带缓存/图集/圆角模板/纹理上传都在头几帧里建）
         for (int i = 0; i < 5; i++) {
             gfx.beginFrame(nullptr);
-            binui::drawNodesGLGdi(gfx, renderer, nullptr);
+            binui::drawNodesGL(gfx, renderer, nullptr);
             gfx.flushFrame();
         }
         std::vector<double> drawMs, presentMs;
         for (int i = 0; i < benchFrames; i++) {
             const auto t0 = std::chrono::steady_clock::now();
             gfx.beginFrame(nullptr);
-            binui::drawNodesGLGdi(gfx, renderer, nullptr);
+            binui::drawNodesGL(gfx, renderer, nullptr);
             const auto t1 = std::chrono::steady_clock::now();
             gfx.flushFrame();
             const auto t2 = std::chrono::steady_clock::now();
@@ -129,10 +129,10 @@ int main(int argc, char** argv) {
         DestroyWindow(hwnd);
         return 0;
     }
-    // 必须让窗口可见：GDI 对**隐藏**窗口的 StretchDIBits 直接丢弃（不报错），
+    // 必须让窗口可见：GDI 对**隐藏**窗口的 SetDIBitsToDevice 直接丢弃（不报错），
     // 读回路径会得到一片空白。这跟"能不能画"无关，纯粹是 GDI 的呈现优化。
     ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-    gfx.presentViaGdi();   // 读回离屏像素 → StretchDIBits 到窗口 DC
+    gfx.presentViaGdi();   // 读回离屏像素 → SetDIBitsToDevice 到窗口 DC
 
     // 从窗口 DC 抓像素（此时像素已经在 DC 上，与窗口是否可见无关）
     HDC dc = GetDC(hwnd);

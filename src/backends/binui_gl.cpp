@@ -1,11 +1,11 @@
 // binui_gl.cpp - OpenGL GPU 渲染后端实现
 // 架构与 binui_d3d11.cpp 完全同构：字形图集（FreeType 光栅化一次）+ 圆角九宫格模板 +
-// 顶点批次；drawNodesGLGdi 与 drawNodesGDI/D3D 语义一致地遍历节点树，全部绘制为 GPU 四边形；
-// BinUIAppGLGdi 提供无边框窗口与事件循环（VSync 按需呈现）。
+// 顶点批次；drawNodesGL 与 drawNodesGDI/D3D 语义一致地遍历节点树，全部绘制为 GPU 四边形；
+// BinUIAppGL 提供无边框窗口与事件循环（VSync 按需呈现）。
 // OpenGL 3.3 core（WGL 创建上下文 + GLSL 330），着色器数学与 D3D11 HLSL 版一致：
 // 预乘 alpha 混合、纹理 × 顶点色、NDC 映射 viewSize。
 // 文字渲染委托 binui_font_renderer（FreeType + HarfBuzz），与平台解耦。
-#include "backends/binui_gl-gdi.h"
+#include "backends/binui_gl.h"
 #include "binui_paths.h"   // binui::ex::StartupNowMs / StartupMark（BINUI_STARTUP 启动分段）
 
 #ifndef _WIN32
@@ -265,7 +265,7 @@ struct GLGlyphTexHost : binui::IGlyphTexHost {
 
 } // namespace
 
-struct BinUIGLGdi::Impl {
+struct BinUIGL::Impl {
     HWND hwnd = nullptr;
     HDC hdc = nullptr;
     HGLRC ctx = nullptr;
@@ -1364,12 +1364,12 @@ void flushAll() {
 };
 
 // ============================================================
-// BinUIGLGdi
+// BinUIGL
 // ============================================================
-BinUIGLGdi::BinUIGLGdi() : impl_(new Impl()) {}
-BinUIGLGdi::~BinUIGLGdi() { delete impl_; }
+BinUIGL::BinUIGL() : impl_(new Impl()) {}
+BinUIGL::~BinUIGL() { delete impl_; }
 
-bool BinUIGLGdi::init(void* hwnd, int width, int height, bool vsync) {
+bool BinUIGL::init(void* hwnd, int width, int height, bool vsync) {
     impl_->hwnd = static_cast<HWND>(hwnd);
     impl_->winW = width;
     impl_->winH = height;
@@ -1403,16 +1403,16 @@ bool BinUIGLGdi::init(void* hwnd, int width, int height, bool vsync) {
     return true;
 }
 
-void BinUIGLGdi::shutdown() { impl_->shutdown(); }
-bool BinUIGLGdi::isReady() const { return impl_->ready; }
-int BinUIGLGdi::width() const { return impl_->winW; }
-int BinUIGLGdi::height() const { return impl_->winH; }
-void BinUIGLGdi::setVsync(bool on) {
+void BinUIGL::shutdown() { impl_->shutdown(); }
+bool BinUIGL::isReady() const { return impl_->ready; }
+int BinUIGL::width() const { return impl_->winW; }
+int BinUIGL::height() const { return impl_->winH; }
+void BinUIGL::setVsync(bool on) {
     impl_->vsync = on;
     if (impl_->ready && wglSwapIntervalEXT) wglSwapIntervalEXT(on ? 1 : 0);
 }
 
-void BinUIGLGdi::resize(int width, int height) {
+void BinUIGL::resize(int width, int height) {
     if (!impl_->ready || (width == impl_->winW && height == impl_->winH)) return;
     impl_->winW = width;
     impl_->winH = height;
@@ -1425,7 +1425,7 @@ void BinUIGLGdi::resize(int width, int height) {
     impl_->scissor[3] = height;
 }
 
-void BinUIGLGdi::beginFrame(const void* clipRect) {
+void BinUIGL::beginFrame(const void* clipRect) {
     if (!impl_->ready) return;
     if (!impl_->makeCurrent()) return;   // 多实例：逐帧切回自己的上下文
     // 只复位计数，不 clear()：缓冲已经预分配到 kMaxVerts，clear() 每次会把
@@ -1460,7 +1460,7 @@ void BinUIGLGdi::beginFrame(const void* clipRect) {
     glScissor(0, 0, impl_->winW, impl_->winH);
 }
 
-void BinUIGLGdi::present() {
+void BinUIGL::present() {
     if (!impl_->ready) return;
     if (!impl_->makeCurrent()) return;
     impl_->flushAll(); // 画到 MSAA 帧缓冲
@@ -1549,14 +1549,14 @@ void BinUIGLGdi::present() {
 // present() 会不会自己阻塞到垂直同步：只有"真走 SwapBuffers 且 swap interval = 1"才算。
 // 透明窗口走 UpdateLayeredWindow（不阻塞）、没拿到 wglSwapIntervalEXT 时也不阻塞 ——
 // 这两种情况必须返回 false，否则外壳不掐帧就会满速空转。
-bool BinUIGLGdi::presentPacesFrames() const {
+bool BinUIGL::presentPacesFrames() const {
     return impl_->ready && impl_->vsync && !impl_->transparent && wglSwapIntervalEXT != nullptr;
 }
 
 // v0.16.33：只提交不呈现 —— 基准工具用来把 "flushAll（顶点上传 + 绘制调用）" 与
 // "MSAA resolve + SwapBuffers" 分开量。SwapBuffers 在窗口可见时会被合成器节流
 // （实测 8.2 ms/帧，正好半个刷新周期），混在一起就量不出 CPU 成本了。
-void BinUIGLGdi::flushFrame() {
+void BinUIGL::flushFrame() {
     if (!impl_->ready) return;
     if (!impl_->makeCurrent()) return;
     impl_->flushAll();
@@ -1568,7 +1568,7 @@ void BinUIGLGdi::flushFrame() {
                      impl_->frameVerts / 6);
 }
 
-void BinUIGLGdi::presentViaGdi() {
+void BinUIGL::presentViaGdi() {
     if (!impl_->ready) return;
     const bool perfOn = Perf().on;
     const double c0 = perfOn ? NowMs() : 0.0;
@@ -1641,19 +1641,19 @@ void BinUIGLGdi::presentViaGdi() {
     }
 }
 
-void BinUIGLGdi::setTransparent(bool t) {
+void BinUIGL::setTransparent(bool t) {
     impl_->transparent = t;
 }
 
 // ---------- 原语 ----------
-void BinUIGLGdi::fillRect(float x, float y, float w, float h, uint32_t color) {
+void BinUIGL::fillRect(float x, float y, float w, float h, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
     impl_->curTex = impl_->whiteTex;
     Premult(color);
     impl_->emitQuad(x, y, x + w, y + h, 0, 0, 1, 1, color);
 }
 
-bool BinUIGLGdi::fillGradientQuad(float x, float y, float w, float h, float radius,
+bool BinUIGL::fillGradientQuad(float x, float y, float w, float h, float radius,
                                   float angleDeg, uint32_t from, uint32_t to) {
     if (!impl_ || !impl_->ready || w <= 0.0f || h <= 0.0f) return false;
     Impl& d = *impl_;
@@ -1676,7 +1676,7 @@ bool BinUIGLGdi::fillGradientQuad(float x, float y, float w, float h, float radi
     return true;
 }
 
-void BinUIGLGdi::fillLine(float x0, float y0, float x1, float y1, float width, uint32_t color) {
+void BinUIGL::fillLine(float x0, float y0, float x1, float y1, float width, uint32_t color) {
     if (!impl_->ready || width <= 0) return;
     // v0.17.1：非仿射时走 CPU 覆盖率条带。4× MSAA 的采样子像素位置在 GL 与 VK 上
     // 互为镜像，"边缘斜穿像素"的细长四边形覆盖率会差一档（实测浅斜线差 62/255）。
@@ -1721,7 +1721,7 @@ void BinUIGLGdi::fillLine(float x0, float y0, float x1, float y1, float width, u
 // 仿射圆角矩形（v20）：把局部坐标系里的九宫格每片按 xf 变换后发射。
 // 与 fillRounded / strokeRounded 用**同一套**模板与九宫格几何，所以"不旋的时候"
 // 与轴对齐版本逐像素一致（静态路径根本没走这里，这里只服务旋转/非等比缩放）。
-void BinUIGLGdi::fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
+void BinUIGL::fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
                                uint32_t color, const float xf[6]) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
     const float rf = std::min(radius, std::min(w, h) * 0.5f);
@@ -1787,7 +1787,7 @@ void BinUIGLGdi::fillRoundedXf(float w, float h, float radius, bool stroke, floa
     }
 }
 
-void BinUIGLGdi::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
+void BinUIGL::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
     // 半径钳到短边一半：再大就是圆/胶囊，多出来的部分没有几何意义。
     // v0.11.7：半径的**几何**用浮点（缩放动画里半径要跟 w/h 一起连续变化），
@@ -1814,7 +1814,7 @@ void BinUIGLGdi::fillRounded(float x, float y, float w, float h, float radius, u
     impl_->curTex = impl_->whiteTex;
 }
 
-void BinUIGLGdi::strokeRounded(float x, float y, float w, float h, float radius,
+void BinUIGL::strokeRounded(float x, float y, float w, float h, float radius,
                             float thickness, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
     // v0.11.8：几何半径用浮点（缩放动画要连续），模板按最近整数取
@@ -1847,11 +1847,11 @@ void BinUIGLGdi::strokeRounded(float x, float y, float w, float h, float radius,
     impl_->curTex = impl_->whiteTex;
 }
 
-void BinUIGLGdi::setLetterSpacing(float px) {
+void BinUIGL::setLetterSpacing(float px) {
     // v0.16.40：字间距只影响排版，字形位图不变（整形缓存的 key 里带它）
     impl_->atlas.setLetterSpacing(px);
 }
-void BinUIGLGdi::setTextSubpixel(bool on) {
+void BinUIGL::setTextSubpixel(bool on) {
     // 图集纹理本身已经是 LINEAR（见 GLGlyphTexHost::createTex），这里只切"要不要取整"
     if (impl_) impl_->atlas.snapText = !on;
 }
@@ -1865,7 +1865,7 @@ void BinUIGLGdi::setTextSubpixel(bool on) {
 //   级数 = 让 2^levels >= blurPx 的最小值（1..6）；每级 2×2 盒式模糊（双线性取
 //   目标像素中心 = 上一级 2×2 的平均），链起来逼近高斯；
 //   合成用 BuildImageBands 的圆角条带 + replace 混合（背景被糊掉，不是叠一层模糊）。
-bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
+bool BinUIGL::backdropBlur(float x, float y, float w, float h, float radius,
                               float blurPx, float grain) {
     if (!impl_ || !impl_->ready || !impl_->makeCurrent()) return false;
     Impl& d = *impl_;
@@ -1991,7 +1991,7 @@ bool BinUIGLGdi::backdropBlur(float x, float y, float w, float h, float radius,
     return chainOk;
 }
 
-bool BinUIGLGdi::setAffine(const float* xf) {
+bool BinUIGL::setAffine(const float* xf) {
     if (!impl_) return false;
     if (!xf || !(xf[0] != 1.0f || xf[1] != 0.0f || xf[2] != 0.0f ||
                  xf[3] != 0.0f || xf[4] != 1.0f || xf[5] != 0.0f)) {
@@ -2004,7 +2004,7 @@ bool BinUIGLGdi::setAffine(const float* xf) {
 }
 
 // v27 裁剪擦除：切换混合前先 flush（批次是延迟提交的，状态必须跟着批次走）
-bool BinUIGLGdi::setEraseBlend(bool on) {
+bool BinUIGL::setEraseBlend(bool on) {
     if (!impl_ || !impl_->ready) return false;
     impl_->flushAll();
     // GL 1.1 头里没有 glBlendFuncSeparate；两种状态下 color/alpha 因子相同，一个够了
@@ -2014,7 +2014,7 @@ bool BinUIGLGdi::setEraseBlend(bool on) {
 }
 
 // v28 遮罩保留趟：dst *= srcA（掩码内保留、掩码外先不动 —— 由补集趟清零）
-bool BinUIGLGdi::setKeepBlend(bool on) {
+bool BinUIGL::setKeepBlend(bool on) {
     if (!impl_ || !impl_->ready) return false;
     impl_->flushAll();
     if (on) glBlendFunc(GL_ZERO, GL_SRC_ALPHA);
@@ -2024,13 +2024,13 @@ bool BinUIGLGdi::setKeepBlend(bool on) {
 
 
 
-void BinUIGLGdi::setTextShadows(const BinUITextShadow* layers, int count) {
+void BinUIGL::setTextShadows(const BinUITextShadow* layers, int count) {
     if (impl_) impl_->atlas.setTextShadows(layers, count);
 }
 
 // v26 图片滤镜：矩阵只影响"下一次上传"的像素，并按哈希进纹理缓存键 ——
 // 同一张图配两种滤镜 = 两份纹理；没有滤镜时 imgFilterKey = 0，键退化为 imageIndex。
-void BinUIGLGdi::setImageFilter(const BinUIImageFilter* f) {
+void BinUIGL::setImageFilter(const BinUIImageFilter* f) {
     if (!impl_) return;
     impl_->imgFilterKey = binui::ImageFilterKey(f);
     if (!impl_->imgFilterKey) return;
@@ -2038,32 +2038,32 @@ void BinUIGLGdi::setImageFilter(const BinUIImageFilter* f) {
     for (int i = 0; i < 3; i++) impl_->imgFilter.o[i] = f->offset[i];
 }
 
-bool BinUIGLGdi::pushLayer(float x, float y, float w, float h, float alpha) {
+bool BinUIGL::pushLayer(float x, float y, float w, float h, float alpha) {
     return impl_ ? impl_->pushLayer(x, y, w, h, alpha) : false;
 }
 
 // v0.16.43：带效果（blur / drop-shadow）的离屏图层。框已由调用方按外扩算好并取整。
-bool BinUIGLGdi::pushLayerEx(float x, float y, float w, float h, const LayerFx& fx) {
+bool BinUIGL::pushLayerEx(float x, float y, float w, float h, const LayerFx& fx) {
     if (!impl_ || (fx.shadowCount > 0 && !fx.shadows)) return false;
     return impl_->pushLayer(x, y, w, h, fx.alpha, fx.blurPx, fx.shadows, fx.shadowCount);
 }
 
-void BinUIGLGdi::popLayer() {
+void BinUIGL::popLayer() {
     if (impl_) impl_->popLayer();
 }
 
-float BinUIGLGdi::textWidth(float size, int weight, const std::string& utf8, bool italic) {
+float BinUIGL::textWidth(float size, int weight, const std::string& utf8, bool italic) {
     if (!impl_->ready) return 0;
     return impl_->atlas.textWidth(size, weight, utf8, italic);
 }
 
-void BinUIGLGdi::fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic) {
+void BinUIGL::fontMetrics(float size, int weight, int& ascent, int& lineHeight, bool italic) {
     impl_->atlas.fontMetrics(size, weight, ascent, lineHeight, italic);
 }
 
 // 文本排版/光栅化/图集全在 binui::GlyphAtlas 里（与 Vulkan 后端同一份代码），
 // 这里只把回调给出的字形四边形丢进本后端的顶点批次。
-void BinUIGLGdi::drawText(float x, float y, float size, int weight,
+void BinUIGL::drawText(float x, float y, float size, int weight,
                        const std::string& utf8, uint32_t color,
                        bool centerH, bool centerV, bool italic) {
     if (!impl_->ready || utf8.empty()) return;
@@ -2078,7 +2078,7 @@ void BinUIGLGdi::drawText(float x, float y, float size, int weight,
     impl_->curTex = impl_->whiteTex;
 }
 
-void BinUIGLGdi::drawTextWrapped(float x, float y, float maxW, float size, int weight,
+void BinUIGL::drawTextWrapped(float x, float y, float maxW, float size, int weight,
                               const std::string& utf8, uint32_t color, int align, bool italic) {
     if (!impl_->ready || utf8.empty()) return;
     impl_->curTex = impl_->whiteTex;
@@ -2091,19 +2091,19 @@ void BinUIGLGdi::drawTextWrapped(float x, float y, float maxW, float size, int w
                                  });
     impl_->curTex = impl_->whiteTex;
 }
-bool BinUIGLGdi::prepareImage(uint16_t index, const uint8_t* data, size_t size, uint32_t generation) {
+bool BinUIGL::prepareImage(uint16_t index, const uint8_t* data, size_t size, uint32_t generation) {
     if (!impl_->ready) return false;
     return impl_->uploadImage(index, data, size, generation);
 }
 
-bool BinUIGLGdi::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba, uint32_t generation) {
+bool BinUIGL::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba, uint32_t generation) {
     if (!impl_->ready) return false;
     return impl_->uploadImageRaw(index, w, h, rgba, generation);
 }
 
 // v25 九宫格：切分数学在 binui_gfx.h 的 BuildNineSlice（三端共用），这里只负责
 // 按算出的小块发九个四边形。源图尺寸缺失就退回整图拉伸（不至于什么都不画）。
-void BinUIGLGdi::drawImageNine(uint16_t index, float x, float y, float w, float h,
+void BinUIGL::drawImageNine(uint16_t index, float x, float y, float w, float h,
                               float slice, int repX, int repY, uint32_t tint) {
     if (!impl_ || !impl_->ready) return;
     auto it = impl_->imageDims.find(impl_->imgKey(index));
@@ -2117,7 +2117,7 @@ void BinUIGLGdi::drawImageNine(uint16_t index, float x, float y, float w, float 
                     q[i][4], q[i][5], q[i][6], q[i][7], tint);
 }
 
-void BinUIGLGdi::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
+void BinUIGL::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
                              float x, float y, float w, float h, uint32_t tint) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
     auto it = impl_->images.find(impl_->imgKey(index));
@@ -2127,7 +2127,7 @@ void BinUIGLGdi::drawImageEx(uint16_t index, float u0, float v0, float u1, float
     impl_->curTex = impl_->whiteTex;
 }
 
-int BinUIGLGdi::pushClip(float x, float y, float w, float h) {
+int BinUIGL::pushClip(float x, float y, float w, float h) {
     if (!impl_->ready) return impl_->scissorDepth;
     int depth = impl_->scissorDepth++;
     int l = std::max(impl_->scissor[0], static_cast<int>(x));
@@ -2141,7 +2141,7 @@ int BinUIGLGdi::pushClip(float x, float y, float w, float h) {
     return depth;
 }
 
-void BinUIGLGdi::popClipTo(int depth) {
+void BinUIGL::popClipTo(int depth) {
     impl_->scissorDepth = depth;
     if (impl_->scissorDepth == 0) {
         impl_->scissor[0] = 0;
@@ -2151,7 +2151,7 @@ void BinUIGLGdi::popClipTo(int depth) {
     }
 }
 
-void BinUIGLGdi::setFontName(const char* name) {
+void BinUIGL::setFontName(const char* name) {
     impl_->atlas.setFontName(name);
 }
 
@@ -2160,12 +2160,12 @@ namespace binui {
 // v19：节点树遍历已抽到 binui_draw_nodes.h（后端无关）。这里只剩一个薄壳，
 // 保持既有调用点（demo / tools）不变；CanvasDrawFn 收到的是具体后端类型，
 // 进共享遍历前转成 IBinUIGfx&。
-void drawNodesGLGdi(BinUIGLGdi& gfx, const BinUIRenderer& renderer, const void* clipRect,
+void drawNodesGL(BinUIGL& gfx, const BinUIRenderer& renderer, const void* clipRect,
                     const CanvasDrawFn& canvas) {
     CanvasFn shared;
     if (canvas) {
         shared = [&canvas](IBinUIGfx& g, uint16_t id, float x, float y, float w, float h) {
-            canvas(static_cast<BinUIGLGdi&>(g), id, x, y, w, h);
+            canvas(static_cast<BinUIGL&>(g), id, x, y, w, h);
         };
     }
     drawNodesBinUI(gfx, renderer, clipRect, shared);

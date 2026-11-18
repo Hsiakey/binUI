@@ -35,12 +35,12 @@
 |---|---|---|---|
 | GDI | [`src/platform/app_win32.cpp`](../src/platform/app_win32.cpp) | 1384 | `drawNodesGDI` @635 → 约 749 行，7 个 case |
 | D3D11 | [`src/backends/binui_d3d11.cpp`](../src/backends/binui_d3d11.cpp) | 2600 | `drawNodesD3D` @1656，**530 行**，9 个 case |
-| OpenGL | [`src/backends/binui_gl-gdi.cpp`](../src/backends/binui_gl-gdi.cpp) | 3455 | `drawNodesGLGdi` @1882，**694 行**，9 个 case |
+| OpenGL | [`src/backends/binui_gl.cpp`](../src/backends/binui_gl.cpp) | 3455 | `drawNodesGL` @1882，**694 行**，9 个 case |
 
 两份 GPU 遍历的 case 标签完全一致（`LABEL/BUTTON/INPUT/LIST/IMAGE/VIDEO/SVG/CANVAS/PATH`），
 调用的原语次数也基本一致（`fillRect` 12 vs 9、`drawText` 4 vs 4、`pushClip` 7 vs 6……）。
 
-而两个 gfx 类的**公开方法签名逐条相同**（[`binui_gl-gdi.h`](../src/backends/binui_gl-gdi.h) 32~78 行 vs
+而两个 gfx 类的**公开方法签名逐条相同**（[`binui_gl.h`](../src/backends/binui_gl.h) 32~78 行 vs
 [`binui_d3d11.h`](../src/backends/binui_d3d11.h) 28~70 行）：
 
 ```cpp
@@ -89,7 +89,7 @@ binUI 刚踩过的坑（0.9.1 修的）：客户区**正好铺满整块显示器
 **另一个硬约束**：[VK_KHR_win32_surface 的 Issue 2](https://docs.vulkan.org/refpages/latest/refpages/source/VK_KHR_win32_surface.html)
 明确写"同一个 HWND 被多个图形 API 使用 = 未定义行为"，并且**创建过 DXGI flip-model 交换链的窗口可能再也
 建不出 `VkSwapchainKHR`**（反之亦然）。所以 Vulkan 后端必须"一个窗口一个呈现 API"，不能像现在 GL 那样
-在同一条窗口上随时在 `SwapBuffers` 与 `StretchDIBits` 之间切（binUI 现在这么做只是因为 GL 的 `SetPixelFormat`
+在同一条窗口上随时在 `SwapBuffers` 与 `SetDIBitsToDevice` 之间切（binUI 现在这么做只是因为 GL 的 `SetPixelFormat`
 与 D3D/ Vulkan 的冲突还没被触发，属于**已知的技术债**，写进 §8 风险）。
 
 ---
@@ -112,7 +112,7 @@ binUI 的透明窗口在 GL 端是：离屏 premultiplied 读回 → `UpdateLaye
 
 ## 5. 原语映射表（7 个原语 + 5 个机制）
 
-| 原语/机制 | GL 现状（`binui_gl-gdi.cpp`） | Vulkan 做法 | 新增复杂度 |
+| 原语/机制 | GL 现状（`binui_gl.cpp`） | Vulkan 做法 | 新增复杂度 |
 |---|---|---|---|
 | `fillRect` | `pushQuad` 进顶点批次（`verts`/`batches`），`flushAll` 一次画 | 同一套顶点数据 → `vkCmdDraw`；顶点缓冲按帧 `vkCmdUpdateBuffer`/映射内存环 | 低（批次逻辑可直译） |
 | `fillRounded` / `strokeRounded` | 九宫格模板 + 1 张白纹理 + 顶点色 | 同（同一张图集槽位） | 低 |
@@ -125,7 +125,7 @@ binUI 的透明窗口在 GL 端是：离屏 premultiplied 读回 → `UpdateLaye
 | 持久累积帧 + 脏矩形 | `beginFrame(clipRect)` → scissor + `glClear` | 同一张 MSAA image 上 `LOAD_OP_LOAD` + `vkCmdClearAttachments` 局部清（**不能用 `vkCmdClearColorImage`，它忽略 scissor**） | 低（架构不变） |
 | 交换链 / resize | 没有（默认帧缓冲，`resize()` 只有 12 行） | `vkCreateSwapchainKHR` + 格式/模式/alpha 协商 + `oldSwapchain` 复用 + `OUT_OF_DATE/SUBOPTIMAL` 处理 + frames-in-flight 同步 | **高**（GL 里是 0） |
 | 透明窗口 | `glReadPixels` → `UpdateLayeredWindow` | 同构读回（§4 路线 ①） | 中 |
-| present 旁路 | `presentViaGdi`（读回 → `StretchDIBits`） | 同构 | 中 |
+| present 旁路 | `presentViaGdi`（读回 → `SetDIBitsToDevice`） | 同构 | 中 |
 
 ---
 

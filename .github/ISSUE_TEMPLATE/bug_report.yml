@@ -51,7 +51,7 @@ body:
     attributes:
       label: 绘制后端
       options:
-        - OpenGL 3.3 (binui_gl-gdi)
+        - OpenGL 3.3 (binui_gl)
         - D3D11
         - GDI
         - 仅核心（无后端）

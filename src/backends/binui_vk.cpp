@@ -676,7 +676,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     static constexpr int kMaxLayers = 4;
 
     // ---- v29 毛玻璃：降采样链（每级 1/2，按需分配；区域尺寸不变就复用）----
-    // 与 GL 后端同一套池子语义（binui_gl-gdi.cpp 的 BlurLevel / ensureBlurLevel）：
+    // 与 GL 后端同一套池子语义（binui_gl.cpp 的 BlurLevel / ensureBlurLevel）：
     // 下标 = 级别，图尺寸 = 该级的 dw×dh，尺寸变了就重建。VK 与 GL 的两处必要差异：
     //   · 主目标是 4x MSAA，vkCmdCopyImage 不能从多重采样图取像素 → 先 resolve 再拷；
     //   · VK 的纹理行 0 是"区域顶部"（GL 的 FBO 行 0 是底部），所以 GL 一路翻 V、

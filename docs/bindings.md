@@ -309,7 +309,7 @@ CreateWindowExW(0, cls, title, WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN | WS_VISIBL
 context 是线程级的，谁最后 `init` 谁一直占着——不切回去，两块的绘制会全画到后建的那块
 身上，先建的显示纯黑。引擎已在 `beginFrame()` / `present()` 里做
 `wglMakeCurrent`（且先 `wglGetCurrentContext` 比对，已是自己就跳过），所以宿主不用管；
-但如果你自己直接驱动 `BinUIGLGdi`，注意这一条。
+但如果你自己直接驱动 `BinUIGL`，注意这一条。
 
 ## 没有跨过去的部分（明确不支持，不是 bug）
 
@@ -318,8 +318,8 @@ context 是线程级的，谁最后 `init` 谁一直占着——不切回去，�
 | `<canvas>` 绘制回调 | 需要跨语言回调，与约束 2 冲突；宿主自己在窗口上画，或改用 `set_image_rgba` 推像素 |
 | `<video>` 播放 | 解码模块 `BINUI_ENABLE_VIDEO=ON` 才编进去，另行挂载；帧可以走 `binui_set_image_raw` |
 | 子窗口的逐像素透明 | `WS_EX_LAYERED` 对子窗口无效；要透明只能用顶层窗（`binui_app_open` + `OPEN_TRANSPARENT`） |
-| D3D11 后端的子窗口 | GL-GDI 外壳已有 `openChild`；D3D11 侧照抄（swapchain 的 `OutputWindow` 填子 HWND）还没做 |
-| 非 Windows 平台 | 核心库跨平台，**外壳不是**：GL-GDI 是 Win32 实现。要跨平台先补平台层 |
+| D3D11 后端的子窗口 | GL 外壳已有 `openChild`；D3D11 侧照抄（swapchain 的 `OutputWindow` 填子 HWND）还没做 |
+| 非 Windows 平台 | 核心库跨平台，**外壳不是**：GL 是 Win32 实现。要跨平台先补平台层 |
 
 ## 新增一门语言要做的
 

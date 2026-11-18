@@ -17,7 +17,7 @@
 #elif defined(BINUI_GPU_D3D11)
 #include "backends/binui_d3d11.h"
 #else
-#include "backends/binui_gl-gdi.h"
+#include "backends/binui_gl.h"
 #endif
 
 namespace binui {
@@ -29,8 +29,8 @@ using UiApp     = BinUIAppT<BinUIVK>;
 using UiBackend = BinUID3D;
 using UiApp     = BinUIAppT<BinUID3D>;
 #else
-using UiBackend = BinUIGLGdi;
-using UiApp     = BinUIAppT<BinUIGLGdi>;
+using UiBackend = BinUIGL;
+using UiApp     = BinUIAppT<BinUIGL>;
 #endif
 
 // <canvas> 绘制回调：参数是**接口**（IBinUIGfx），不是具体后端 —— 这样 demo 的绘制代码

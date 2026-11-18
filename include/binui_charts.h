@@ -11,7 +11,7 @@
 
 namespace binui {
 
-class BinUIGLGdi; // 前置声明：draw() 需要后端，避免强依赖
+class BinUIGL; // 前置声明：draw() 需要后端，避免强依赖
 
 // 图表基类：定位容器 + 动画时钟 + 失效回调
 class BinUIChart {
@@ -27,8 +27,8 @@ public:
 
     // 应用 updateFn 每帧调用：推进动画；返回本帧是否有变化（需要重绘）
     virtual bool tick(float dt) = 0;
-    // 应用 drawFn 在 drawNodesGLGdi 之后调用：图表直接向后端绘制（折线等非矩形元素）
-    virtual void draw(BinUIGLGdi& gfx) { (void)gfx; }
+    // 应用 drawFn 在 drawNodesGL 之后调用：图表直接向后端绘制（折线等非矩形元素）
+    virtual void draw(BinUIGL& gfx) { (void)gfx; }
 
 protected:
     // 缓动插值：from -> to，按 (now - t0)/duration_ 推进；p 越界时 done 置 true
@@ -76,7 +76,7 @@ public:
     void setData(const std::vector<float>& v) { setData(v.data(), (int)v.size()); }
     void setLineWidth(float w) { lineWidth_ = w; }
     bool tick(float dt) override;
-    void draw(BinUIGLGdi& gfx) override;
+    void draw(BinUIGL& gfx) override;
 
 private:
     void ensure(int n);

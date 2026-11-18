@@ -3,7 +3,7 @@
 // ①–④ 是字体能力，全在布局层（CSS），外壳只负责载入、转发输入、按动画重绘。
 //
 // ⑤ 是输入法，这部分有硬要求（都是踩过的坑，改之前先看
-// src/backends/binui_gl-gdi.cpp 里 WM_IME_* 那段的注释）：
+// src/backends/binui_gl.cpp 里 WM_IME_* 那段的注释）：
 //   · 字符来自 WM_IME_COMPOSITION 的 GCS_RESULTSTR（UTF-16），不是 WM_IME_CHAR
 //     —— 后者的 wParam 是单字节 ANSI，按宽字符插就是「å å å」
 //   · 组字期间的回车/空格/退格归输入法，宿主不要插一脚

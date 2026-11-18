@@ -1,7 +1,7 @@
 # binUI - 跨平台描述式 UI 核心
 
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.19.2-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.20.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
 [![Format v29](https://img.shields.io/badge/binUI%20format-v29-orange.svg)](include/binui_format.h)
@@ -29,7 +29,7 @@ src/
   compiler/         XML、HTML5 → binUI（含 CSS 解析、级联、伪类与伪元素展开）
   renderer/         解析、节点状态、命中测试、事件、动画、滚动、文本编辑
   font/             FreeType + HarfBuzz 字体服务（灰度字形图集 + COLR emoji）
-  backends/         binui_gl-gdi.*（OpenGL 3.3）/ binui_d3d11.*（D3D11）/ binui_vk.*（Vulkan）
+  backends/         binui_gl.*（OpenGL 3.3）/ binui_d3d11.*（D3D11）/ binui_vk.*（Vulkan）
   platform/         app_win32.*：Win32 窗口外壳 + GDI 绘制（**遗留/OLD**：只做后备呈现与像素基准，见「后端支持级别」）
   binui_charts.cpp  高层图表 API 实现
   binui_video_*.cpp 视频模块（FFmpeg 实现 / 无依赖桩）
@@ -68,7 +68,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `src/platform/app_win32.*` | Win32 窗口外壳 + GDI 绘制后端（**遗留/OLD**：只做后备呈现与像素基准图；新特性只做 GL/VK/D3D11） |
 | `include/binui_paths.h` | 跨平台路径解析：exe 真实路径（`GetModuleFileName`/`/proc/self/exe`）+ UI 查找顺序 + 图片资源加载（`--ui` / `$BINUI_UI`） |
 | `include/binui_hot_reload.h` | UI 热重载（`--watch`）：保存即重编译换树，保留窗口尺寸/滚动/焦点/输入内容 |
-| `src/backends/binui_gl-gdi.h/.cpp` | GPU 绘制后端：OpenGL 3.3 + 字形图集 + 顶点四边形（无边框窗口） |
+| `src/backends/binui_gl.h/.cpp` | GPU 绘制后端：OpenGL 3.3 + 字形图集 + 顶点四边形（无边框窗口） |
 | `include/binui_c.h` | **C ABI**：定长 POD + 不透明句柄 + 轮询事件，给 Python/Go/Rust 等宿主语言的唯一入口（实现在 `src/binui_c.cpp`） |
 | `bindings/` | 语言绑定：`python/`（ctypes）、`go/`（cgo）、`rust/`（手写 extern "C"） |
 | `examples/features` | **功能**：伪类/扩展绘制/HTML 语义/组件化三形态/数据驱动 setText |
@@ -116,7 +116,7 @@ CMake 会直接 `add_subdirectory` 编译为静态库（MSVC/MinGW 均可）；M
 |------|------|------|------|-------|
 | GDI（`app_win32`）**遗留（OLD）** | 标准标题栏 | GDI 局部重绘 + 脏矩形 | `DrawTextW`（UTF-8→UTF-16） | 单色字形 |
 | D3D11（`binui_d3d11`，0.11.0 起并入共享代码） | WS_POPUP 无边框（外壳与 GL/Vulkan 共用 `binui_app.h`）；透明窗/全屏直翻转/拖拽期走读回 + GDI 贴屏 | GPU 四边形（图集/九宫格模板/**持久离屏帧缓冲**+脏矩形局部重绘），VSync 按需呈现；节点树遍历与 GL/Vulkan **同一份** `binui_draw_nodes.h` | FreeType 字形图集（灰度 8bit；≤16px 轻 hinting + gamma + 像素对齐） | 彩色（FreeType COLR/CPAL 层合成） |
-| OpenGL（`binui_gl-gdi`） | WS_POPUP 无边框 | 同 D3D11 架构：GL 3.3 core + 顶点四边形/图集/九宫格/FBO，VSync（wglSwapIntervalEXT）；resize 拖拽期走 GDI `StretchDIBits` 呈现（规避 NVIDIA 驱动 SwapBuffers 崩溃） | 同 D3D11（共享 `binui_font_renderer`） | 同 D3D11 |
+| OpenGL（`binui_gl`） | WS_POPUP 无边框 | 同 D3D11 架构：GL 3.3 core + 顶点四边形/图集/九宫格/FBO，VSync（wglSwapIntervalEXT）；拖拽 resize 期走「读回 + GDI `SetDIBitsToDevice` 贴屏」（规避 NVIDIA 驱动 SwapBuffers 崩溃），透明窗走「读回 + `UpdateLayeredWindow`」 | 同 D3D11（共享 `binui_font_renderer`） | 同 D3D11 |
 | **Vulkan**（`binui_vk`，0.10.0 起） | WS_POPUP 无边框，`VK_KHR_swapchain` 呈现；透明窗/全屏直翻转/拖拽期自动走读回 + GDI 贴屏 | 同架构：Vulkan 1.0 + 顶点四边形/图集/九宫格 + **持久 4× MSAA 累积帧**（脏矩形局部清屏；0.16.12 起有 1.3 就整条走 **dynamic rendering**，组透明度的离屏图层靠它）；只 `LoadLibrary("vulkan-1.dll")`，不链 `vulkan-1.lib`、不需要 SDK | **与 GL 共用同一份** `binui_glyph_atlas.h`（逐像素同源） | 同 GL |
 
 ### 后端支持级别（v0.16.17 起）
@@ -181,7 +181,7 @@ D3D11 后端要点：
 
 GPU 后端缩放处理（D3D11 / OpenGL 同构）：
 - 手动拖边缩放时 `WM_SIZE` 只记录尺寸，合并为每帧应用一次（`applyPendingResize`），交换链/FBO 每帧至多重建一次，避免高频重建导致的花屏/卡顿。
-- 拖拽循环（`startResize`）：窗口每帧实时跟随鼠标缩放（`SetWindowPos`），并每帧按新尺寸渲染离屏 + **`presentViaGdi` 呈现**（读回离屏像素 → `StretchDIBits` 到窗口 DC），拖拽中内容实时重绘、清晰跟手。**拖拽期间绝不 `SwapBuffers`**——实测 NVIDIA 驱动（nvoglv64 `DrvPresentBuffers`）在"窗口 resize + SwapBuffers"组合下稳定崩溃（角点圆周拖拽半圈内必崩，呈现路径跳到损坏的堆地址；vsync 开关/上下文 detach/节流呈现均无法规避），GDI 呈现完全绕开驱动 present 路径。松手时仍以 GDI 呈现一次最终清晰帧，surface 稳定后恢复正常 `SwapBuffers`（透明分层窗口本身走 `UpdateLayeredWindow`、不 SwapBuffers，不受影响）。
+- 拖拽循环（`startResize`）：窗口每帧实时跟随鼠标缩放（`SetWindowPos`），并每帧按新尺寸渲染离屏 + **`presentViaGdi` 呈现**（读回离屏像素 → `SetDIBitsToDevice` 到窗口 DC），拖拽中内容实时重绘、清晰跟手。**拖拽期间绝不 `SwapBuffers`**——实测 NVIDIA 驱动（nvoglv64 `DrvPresentBuffers`）在"窗口 resize + SwapBuffers"组合下稳定崩溃（角点圆周拖拽半圈内必崩，呈现路径跳到损坏的堆地址；vsync 开关/上下文 detach/节流呈现均无法规避），GDI 呈现完全绕开驱动 present 路径。松手时仍以 GDI 呈现一次最终清晰帧，surface 稳定后恢复正常 `SwapBuffers`（透明分层窗口本身走 `UpdateLayeredWindow`、不 SwapBuffers，不受影响）。
 - **客户区铺满整块显示器（borderless 全屏 / 最大化）时也走 `presentViaGdi`**：这种尺寸下 DWM 会把
   `SwapBuffers` 提升成直翻转，实测（NVIDIA + 远程桌面/虚拟显示器）应用仍在 ~100fps 绘制、屏幕却停在
   旧帧——表现为"最大化后动画停了、画面割裂，切回普通尺寸就恢复"。`clientCoversMonitor()` 判定
@@ -449,13 +449,13 @@ HTML5 编译规则：
 **标记（v0.16.23）**：`<marker>` + `marker-start` / `marker-mid` / `marker-end`（含 CSS 简写 `marker`）—— `viewBox`、`refX`/`refY`、`markerWidth`/`markerHeight`、`markerUnits`（`strokeWidth` / `userSpaceOnUse`）、`orient`（`auto` / `auto-start-reverse` / 固定角度）都支持，内容支持 path/polygon/polyline/line/rect/circle/ellipse。**实现是编译期展开**：每个实例按"顶点 + 切线方向"换算成引用路径的**子节点**（纯填充的路径），所以运行期和三个后端一行没改；`fill:none` 的箭头线不会被 marker 的填充污染，带 marker 的 `<line>` 会自动升级成路径（`BINUI_LINE` 只有两个端点）。
 **描边**：`stroke-linejoin` = round / miter / bevel（`stroke-miterlimit` 默认 4），`stroke-linecap` = butt / round / square；**`stroke="url(#…)"` 渐变描边**（每段线按自己的中点取色，与填充渐变共用同一套坐标折算）；尖角图标不再是圆角。**精确命中**：有填充的路径按"点在路径内"判定（环的洞、星形凹口不再误命中），描边-only 的路径仍按包围盒。**渐变**（v16）：`fill="url(#id)"` 引用 `<linearGradient>`（任意角度，`x1/y1/x2/y2`）或 `<radialGradient>`（椭圆：包围盒非正方时两轴半径不同，符合规范），支持 2–8 个色标（`offset` / `stop-color` / `stop-opacity` / `style` 写法）、`spreadMethod="pad|repeat|reflect"`、`gradientTransform`、`gradientUnits="objectBoundingBox"`（默认）与 `"userSpaceOnUse"`、`href` 继承另一个渐变的色标、`currentColor` 色标 —— 渐变在编译期折成**归一化坐标**，运行期逐条带给扫描线条带取色（无需着色器/纹理，三端像素一致）；内部存储是`uint16` 归一化折线（曲线在编译期按 0.1px 容差细分），所以缩放/重排不会走形，极限放大能看到折线。
   **不支持**（各自有明确编译告警，不再静默）：径向渐变的焦点 `fx/fy`、`userSpaceOnUse` 下的百分比（按用户单位折算并告警，要 viewport 比例请写具体用户单位）、`>8` 个色标（截断并告警）；`stroke-linejoin` 支持 round（默认）/ miter / bevel（miter 受 `stroke-miterlimit` 限制，超限按规范退回 bevel；缺口是多边形，三端走同一套条带填充）。`<text>`（编成普通标签，`y` 当基线近似）与 `<image href>`（进资源表）已支持，`<tspan>` 仍不支持。`<defs>`/`<symbol>` 当模板、`<use href=\"#id\">` 克隆引用已支持（注意：组件内联用的是 `<use src=\"x.bum\">`，两者不冲突）；`stroke-dasharray` 已支持（编译期按弧长切成实线段，曲线虚线也对）；`<circle>`/`<rect>` 没描边时走轻量映射，**写了 `stroke` 或渐变填充会自动编成路径**。
-- `<canvas>` 命令式绘制面：定位矩形节点（`BINUI_CANVAS`），默认透明；应用在 `drawFn` 里给 `drawNodesGLGdi`（或 `drawNodesD3D`）传一个 `CanvasDrawFn` 回调（`nodeId, x, y, w, h`），后端绘制到该节点时**已裁剪到画布矩形**地调用回调——把"HTML 管布局、代码管数据"落到画布上，适合频谱/波形等每帧重绘的动态内容。
+- `<canvas>` 命令式绘制面：定位矩形节点（`BINUI_CANVAS`），默认透明；应用在 `drawFn` 里给 `drawNodesGL`（或 `drawNodesD3D`）传一个 `CanvasDrawFn` 回调（`nodeId, x, y, w, h`），后端绘制到该节点时**已裁剪到画布矩形**地调用回调——把"HTML 管布局、代码管数据"落到画布上，适合频谱/波形等每帧重绘的动态内容。
 - `<video>` 视频播放（v9）：编译为 `BINUI_VIDEO` 节点 + 视频描述段；属性 `src`（相对 UI 文件目录）、`autoplay`、`loop`、`muted`、`controls`（浏览器式控制条）、`volume="0..1"`。播放状态机（play/pause/seek/回绕/ENDED 事件）在渲染器内实现，**解码像素由可选模块推送**——见「视频播放」章节；未启用模块时仅绘制底色，控制条交互照常。
 - 滚动容器：`overflow:auto/scroll` 产生固定视口（不再自动扩展高度），运行时支持 `scrollTo`/`scrollBy`/滚轮（`scrollAt`）/滚动条拖动，命中测试与绘制均按滚动偏移并裁剪视口，`SCROLL` 事件通知变化。**`overflow:hidden` 只裁剪不滚动**（v13 起与 `auto/scroll` 区分：不出滚动条、不响应滚轮，`renderer.isUserScrollable()` 为 false）。**裁剪子元素只由这三类容器触发**（判定口径见 `renderer.clippingAncestors()`）：普通 div（包括组件自己的根 div）按 CSS 语义**不**裁剪，子元素放大/溢出会画出去 —— 以前三个后端无脑按每个祖先矩形裁，组件按钮 `:hover` 放大 1.04 会被与它等大的组件根 div 切回原状，看着像“被困在盒子里放大”。
 - **元素缩放（v21，CSS `resize`）**：`resize: both`（四边 + 四角）/ `horizontal` / `vertical` / `left|right|top|bottom` / `top-left|top-right|bottom-left|bottom-right`（也接受 `left-resize` 这种拼法）。**拖拽在引擎里**：贴边 ±4px、四角 12×12 的热区（最上层优先、禁用节点与视口外不算），按下后按屏幕位移改节点矩形（拖哪条边哪条动、对边不动，最小 8px），松开不产生 `CLICK`；`cursorAt()` 返回 4 种系统 resize 光标（`SizeWE/SizeNS/SizeNWSE/SizeNESW`），外壳 `app.setCursorFn` 一行接上（8 个示例与 C ABI 都接了）。宿主只做两件事：`takeResizeDirty()` 取"旧 ∪ 新"（子树包围盒）脏矩形做局部重绘、读回节点矩形（运行期锁死尺寸用 `setResizeMask(id, 0)`）。**拖完自动局部重排这棵子树**（见下一条）；属性落在扩展绘制段的 `resizeMask`（`BinUIPaintNode` 44 → 48 字节，`BINUI_VERSION` 升到 21）。**光标形状以前在任何 C++ 示例里都不生效**（`setCursorFn` 从没接过，输入框不变 I 型、按钮没有手型）——这一版顺手在 9 个示例里都接了。
 - **局部重排（v21）**：`setNodeBounds` 只改一个盒子、不动内容（宿主自己排版时用）；要"内容跟着盒子排"用新接口：`relayoutSubtree(id)`（盒子没变，只按当前盒子重排子树）、`resizeNodeBounds(id,x,y,w,h)`（改矩形 + 钉住尺寸 + 重排，缩放拖拽内部就是它）、`clearBoundsOverride(id)`（解除钉住，下次重排回到声明尺寸）。算法与窗口 resize 的 `relayout()` 完全同一套（百分比 / `width:100%` / 流式光标 / flex 主次轴 / min·max / 线段端点），只是**从任意节点起算、且不把起点钉回窗口尺寸**（`relayoutFrom(startIdx)`）。三个要点：钉住的尺寸在流式光标推进**之前**生效（否则后面的兄弟按旧高度落位）；节点在流式/flex 父容器里时**重排父容器**（兄弟一起让位）；绝对定位的子节点仍不动，流式/百分比/自动宽的子节点跟着走。`ui_scale="proportional"` 的窗口里局部重排是 no-op（那种模式整棵树按窗口比例缩放，没有内容盒重排的概念）。
 - **文字换行（v21，自然排版）**：LABEL 一行放不下就按盒子宽度折行，节点高度跟着行数走 —— `autoTextHeight()`（`heightAuto` 且作者没写 `height` 的 LABEL/LIST/BUTTON）被 `setText` 与**重排**共用，宽度一变就重算行数；绘制侧 `drawTextWrapped` 用同一份估算折行、块高按 `line-height` 居中。**flex 子项不套用**（高度由父容器分配，文字高度只是 flex-basis 的参考）。GDI 后备后端同步把折行阈值从"超宽 20%"改成"放不下就折"，三端一致；因此 `docs/pixels` 里 `svgaa` / `svgfinish` 两张基准图更新（原来被裁掉的说明文字现在折行）。`<br>` 的硬换行行为不变。
-- 键盘导航（`renderer.handleKey`，见 [`docs/keyboard_focus.md`](docs/keyboard_focus.md)）：**WASD 移动焦点**（`moveKeyboardFocus`：同行/列最近者优先，其次加权距离；跳过隐藏/禁用节点），Tab/Shift+Tab 按文档顺序循环；**方向键滚页面**（离焦点最近的滚动容器，没有则滚视口内面积最大的那个），PageUp/PageDown 翻页、Home/End 到顶/到底；输入框上按 Enter **进入编辑**、再按 Enter/Esc 退出回到焦点控制（Tab 退出并跳到下一个控件），其余节点 Enter/Space 派发 `CLICK`；没有焦点时空格向下翻页。焦点环分三态：**输入元素待编辑 = 虚线**（只有输入框才用虚线标记"按 Enter 才能编辑"）、**按钮等普通焦点 = 实线**（两者均 2 秒无操作自动消失，鼠标点击不画）、**编辑中 = 实线加粗强调蓝**（常亮，退出编辑回到虚线；只有键盘 Enter 进入的编辑才画，鼠标点进输入框直接编辑、不画环）；线型 + 颜色双编码，不靠颜色也能分。编辑态方向键仍操作光标、WASD 不抢键（字母归输入法）。**中文输入法会把字母键变成 `VK_PROCESSKEY` 自己组字**，所以 GL/GDI 外壳提供 `setImeActiveFn`：非编辑态把 IME 上下文摘下来（WASD 才收得到）、进输入框再挂回去；8 个示例与 C ABI 都接了，不接则中文输入法下 WASD 无效（方向键照常）。组字中按 Esc 只取消候选、不会退掉编辑态。
+- 键盘导航（`renderer.handleKey`，见 [`docs/keyboard_focus.md`](docs/keyboard_focus.md)）：**WASD 移动焦点**（`moveKeyboardFocus`：同行/列最近者优先，其次加权距离；跳过隐藏/禁用节点），Tab/Shift+Tab 按文档顺序循环；**方向键滚页面**（离焦点最近的滚动容器，没有则滚视口内面积最大的那个），PageUp/PageDown 翻页、Home/End 到顶/到底；输入框上按 Enter **进入编辑**、再按 Enter/Esc 退出回到焦点控制（Tab 退出并跳到下一个控件），其余节点 Enter/Space 派发 `CLICK`；没有焦点时空格向下翻页。焦点环分三态：**输入元素待编辑 = 虚线**（只有输入框才用虚线标记"按 Enter 才能编辑"）、**按钮等普通焦点 = 实线**（两者均 2 秒无操作自动消失，鼠标点击不画）、**编辑中 = 实线加粗强调蓝**（常亮，退出编辑回到虚线；只有键盘 Enter 进入的编辑才画，鼠标点进输入框直接编辑、不画环）；线型 + 颜色双编码，不靠颜色也能分。编辑态方向键仍操作光标、WASD 不抢键（字母归输入法）。**中文输入法会把字母键变成 `VK_PROCESSKEY` 自己组字**，所以窗口外壳（`BinUIAppT`，GL/VK/D3D11 共用）提供 `setImeActiveFn`：非编辑态把 IME 上下文摘下来（WASD 才收得到）、进输入框再挂回去；8 个示例与 C ABI 都接了，不接则中文输入法下 WASD 无效（方向键照常）。组字中按 Esc 只取消候选、不会退掉编辑态。
 - 局部重绘：主循环改为事件驱动（无消息时零轮询，空闲 CPU≈0%）；应用侧维护脏矩形（悬停/按下/滚轮/拖动/打字/光标闪烁只标记受影响节点），`WM_PAINT` 用 `ps.rcPaint` 裁剪持久离屏缓冲，仅重绘相交节点并只 `BitBlt` 脏区。**失效矩形要用 `renderer.invalidRect()`**：它返回"布局矩形 ∪ 动画缩放/平移后的包围盒 + pad"，只按布局矩形失效时 `transform:scale()` 放开的那一圈（边框/底色/焦点环）不会被重绘，看起来就是"边框被削掉一半"。
 - 交互状态：渲染器维护指针 hover/按下/焦点/勾选状态（`setHover`/`press`/`release`/`cancelPress`/`setKeyboardFocus`/`setNodeChecked`），`release` 在原节点上才触发 `CLICK`（按下/拖出/松开的完整语义），`HOVER`/`PRESS` 事件可选监听；作者写了 CSS 状态样式时按作者的来（见上「运行时伪类」），没写时按钮悬停变亮、按下变暗（Win32 后端）。状态样式可用 `renderer.stateStyle(id, BINUI_ST_HOVER)` 查询编译产物、`activeStateStyle(id)` 查询当前生效项。
 - 文本框编辑：点击 `input` 自动聚焦，键盘则是 WASD 选中后按 Enter 进入编辑、再按 Enter/Esc 退出回到焦点控制；渲染器维护光标/选区（UTF-8 安全），支持插入/退格/删除/方向键/Home/End/Shift 选区；`blur` 提交并触发 `INPUT` 事件，`FOCUS` 事件通知焦点变化。Win32 后端负责键盘消息（含 IME/代理对）与光标闪烁/选区绘制（`placeCaretAtClick` 点击定位光标）。**中文输入还要求宿主接 `setImeCaretFn`**（`imeCaretFromRenderer(renderer, app.gfx(), x, y, h)` 一行接上，C++ 宿主与 C ABI 都是这么做的）：不接的话输入法拿不到光标位置，组字窗会落到窗口外 —— 现象是"打拼音屏幕上什么都没有"，但选词照样能上屏；另外候选框只在每次组字开始重挂一次 IME 上下文之后才会跟着光标走（见 `applyImePlacement` 的注释）。已知限制：组字期间的那次鼠标点击会被输入法吃掉（它先把拼音提交上屏，窗口收不到 `WM_LBUTTONDOWN`），要点第二次才生效。
@@ -481,8 +481,8 @@ bars.setData(values, 12);                     // 值 0..1，下次 tick 自动�
 line.setData(vals, 24);
 
 app.setUpdateFn([&](float){ bars.tick(0); line.tick(0); });      // 每帧推进
-app.setDrawFn([&](BinUIGLGdi& g, const void* clip){                 // 折线走 draw()
-    drawNodesGLGdi(g, renderer, clip);
+app.setDrawFn([&](BinUIGL& g, const void* clip){                 // 折线走 draw()
+    drawNodesGL(g, renderer, clip);
     line.draw(g);                              // 顶点 tween 后画真实线段
 });
 ```

@@ -56,7 +56,7 @@ $(BUILD_DIR)/font/%.o: $(SRC_DIR)/font/%.cpp
 
 # 后端（src/backends/）与 Win32 外壳（src/platform/）：对象路径保持在 build-mingw 根下，
 # 演示程序的链接规则不用跟着改
-$(BUILD_DIR)/binui_gl-gdi.o: $(SRC_DIR)/backends/binui_gl-gdi.cpp
+$(BUILD_DIR)/binui_gl.o: $(SRC_DIR)/backends/binui_gl.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
 
@@ -205,56 +205,56 @@ $(BUILD_DIR)/examples/%.o: $(EXA_DIR)/%.cpp
 
 # UI 源文件也算依赖：不然改完 main.html，exe 不用重链，构建期那次 cp 不会重跑，
 # 跑起来还是旧界面（只有 --ui 指到源码树才看到新界面）。
-$(DEMO_DIR)/features$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
+$(DEMO_DIR)/features$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
 	@mkdir -p $(DEMO_DIR)/features
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/features/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/features/main.html $(DEMO_DIR)/features/main.html
 	cp -f $(EXA_DIR)/features/button.bum.html $(DEMO_DIR)/features/button.bum.html
 	cp -f $(BUILD_DIR)/assets/components/card.bum $(DEMO_DIR)/features/card.bum
 	cp -f $(BUILD_DIR)/assets/components/dock.bum $(DEMO_DIR)/features/dock.bum
 
-$(DEMO_DIR)/animshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A) $(EXA_DIR)/animshow/main.html
+$(DEMO_DIR)/animshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A) $(EXA_DIR)/animshow/main.html
 	@mkdir -p $(DEMO_DIR)/animshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/animshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/animshow/main.html $(DEMO_DIR)/animshow/main.html
 
-$(DEMO_DIR)/appshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/appshow/main.o $(LIB_A) $(EXA_DIR)/appshow/main.html $(EXA_DIR)/appshow/appshow-navitem.bum.html $(EXA_DIR)/appshow/appshow-card.bum.html $(EXA_DIR)/appshow/appshow-dialog.bum.html $(EXA_DIR)/appshow/appshow-bubble.bum.html
+$(DEMO_DIR)/appshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/appshow/main.o $(LIB_A) $(EXA_DIR)/appshow/main.html $(EXA_DIR)/appshow/appshow-navitem.bum.html $(EXA_DIR)/appshow/appshow-card.bum.html $(EXA_DIR)/appshow/appshow-dialog.bum.html $(EXA_DIR)/appshow/appshow-bubble.bum.html
 	@mkdir -p $(DEMO_DIR)/appshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/appshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/appshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/appshow/main.html $(DEMO_DIR)/appshow/main.html
 	cp -f $(EXA_DIR)/appshow/appshow-navitem.bum.html $(DEMO_DIR)/appshow/appshow-navitem.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-card.bum.html $(DEMO_DIR)/appshow/appshow-card.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-dialog.bum.html $(DEMO_DIR)/appshow/appshow-dialog.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-bubble.bum.html $(DEMO_DIR)/appshow/appshow-bubble.bum.html
 
-$(DEMO_DIR)/fontshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A) $(EXA_DIR)/fontshow/main.html
+$(DEMO_DIR)/fontshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A) $(EXA_DIR)/fontshow/main.html
 	@mkdir -p $(DEMO_DIR)/fontshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/fontshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/fontshow/main.html $(DEMO_DIR)/fontshow/main.html
 
-$(DEMO_DIR)/flexshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/flexshow/main.o $(LIB_A) $(EXA_DIR)/flexshow/main.html
+$(DEMO_DIR)/flexshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/flexshow/main.o $(LIB_A) $(EXA_DIR)/flexshow/main.html
 	@mkdir -p $(DEMO_DIR)/flexshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/flexshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/flexshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/flexshow/main.html $(DEMO_DIR)/flexshow/main.html
 
-$(DEMO_DIR)/svgdemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A) $(EXA_DIR)/svgdemo/main.html
+$(DEMO_DIR)/svgdemo$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A) $(EXA_DIR)/svgdemo/main.html
 	@mkdir -p $(DEMO_DIR)/svgdemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/svgdemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/svgdemo/main.html $(DEMO_DIR)/svgdemo/main.html
 
-$(DEMO_DIR)/cubedemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIB_A) $(EXA_DIR)/cubedemo/main.html
+$(DEMO_DIR)/cubedemo$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIB_A) $(EXA_DIR)/cubedemo/main.html
 	@mkdir -p $(DEMO_DIR)/cubedemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/cubedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/cubedemo/main.html $(DEMO_DIR)/cubedemo/main.html
 
-$(DEMO_DIR)/texturedemo$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A) $(EXA_DIR)/texturedemo/main.html
+$(DEMO_DIR)/texturedemo$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A) $(EXA_DIR)/texturedemo/main.html
 	@mkdir -p $(DEMO_DIR)/texturedemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/texturedemo/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/texturedemo/main.html $(DEMO_DIR)/texturedemo/main.html
 
-$(DEMO_DIR)/buttonshow$(EXT): $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIB_A) $(EXA_DIR)/buttonshow/main.html
+$(DEMO_DIR)/buttonshow$(EXT): $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIB_A) $(EXA_DIR)/buttonshow/main.html
 	@mkdir -p $(DEMO_DIR)/buttonshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl-gdi.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/examples/buttonshow/main.o $(LIB_A) $(WINLIBS) $(GL_LIBS)
 	cp -f $(EXA_DIR)/buttonshow/main.html $(DEMO_DIR)/buttonshow/main.html
 
 # =============================================
@@ -349,12 +349,12 @@ $(BUILD_DIR)/binui_c_dll.o: $(SRC_DIR)/binui_c.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -DBINUI_C_BUILD_DLL -I$(INC_DIR) -Isrc -c $< -o $@
 
-$(BINUI_C_A): $(BUILD_DIR)/binui_c.o $(BUILD_DIR)/binui_gl-gdi.o
+$(BINUI_C_A): $(BUILD_DIR)/binui_c.o $(BUILD_DIR)/binui_gl.o
 	ar rcs $@ $^
 
 # RTLINK 同样要带上：Windows 上 libstdc++-6.dll / libgcc_s_seh-1.dll 不能指望宿主有，
 # freetype/harfbuzz 也走静态库 —— 产物除系统 DLL 外自包含
-$(BINUI_C_DLL): $(BUILD_DIR)/binui_c_dll.o $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A)
+$(BINUI_C_DLL): $(BUILD_DIR)/binui_c_dll.o $(BUILD_DIR)/binui_gl.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(LDFLAGS) $(RTLINK) -shared -o $@ $^ $(WINLIBS) $(GL_LIBS) \
 	    -Wl,--out-implib=$(BIN_DIR)/libbinui_c.dll.a
@@ -429,10 +429,10 @@ $(BIN_DIR)/enum_windows$(EXT): tools/enum_windows.cpp
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $< -luser32
 
 # GL 后端的离屏抓图：GL 窗口抓不到图（PrintWindow 全黑），这个直接读回离屏像素
-$(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A)
+$(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -o $@ $< \
-	    $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
+	    $(BUILD_DIR)/binui_gl.o $(LIB_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
 
 # partial_shot：局部重绘一致性检查（hover 脏矩形 vs 整帧）。走 .o + -MMD，
 # 免得改了 binui_draw_nodes.h / binui_paint.h 之后工具还跑旧行为（这个仓库在
@@ -441,7 +441,7 @@ $(BUILD_DIR)/partial_shot.o: tools/partial_shot.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
 
-$(BIN_DIR)/partial_shot$(EXT): $(BUILD_DIR)/partial_shot.o $(BUILD_DIR)/binui_gl-gdi.o $(LIB_A)
+$(BIN_DIR)/partial_shot$(EXT): $(BUILD_DIR)/partial_shot.o $(BUILD_DIR)/binui_gl.o $(LIB_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^ \
 	    -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)

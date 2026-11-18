@@ -32,7 +32,7 @@
 #include "binui_compiler.h"
 #include "binui_renderer.h"
 #include "binui_paths.h"
-#include "backends/binui_gl-gdi.h"
+#include "backends/binui_gl.h"
 
 using namespace Gdiplus;
 
@@ -150,7 +150,7 @@ int main(int argc, char** argv) {
                                 0, 0, W, H, nullptr, nullptr, GetModuleHandleW(nullptr), nullptr);
     if (!hwnd) return 2;
 
-    binui::BinUIGLGdi gfx;
+    binui::BinUIGL gfx;
     if (!gfx.init(hwnd, W, H, false)) {
         std::fprintf(stderr, "partial_shot: GL 上下文创建失败（这台机器没有 OpenGL 3.3？）\n");
         DestroyWindow(hwnd);
@@ -161,7 +161,7 @@ int main(int argc, char** argv) {
 
     // ---- 第 1 帧：整屏（窗口刚出现时的那一帧）----
     gfx.beginFrame(nullptr);
-    binui::drawNodesGLGdi(gfx, renderer, nullptr);
+    binui::drawNodesGL(gfx, renderer, nullptr);
     gfx.presentViaGdi();
 
     // ---- hover + 推进过渡 ----
@@ -183,7 +183,7 @@ int main(int argc, char** argv) {
         if (clip[3] > H) clip[3] = H;
     }
     gfx.beginFrame(clip);
-    binui::drawNodesGLGdi(gfx, renderer, clip);
+    binui::drawNodesGL(gfx, renderer, clip);
     gfx.presentViaGdi();
 
     std::vector<uint8_t> partial;
@@ -194,7 +194,7 @@ int main(int argc, char** argv) {
     if (check) {
         // ---- 第 3 帧：同样 hover 状态下整帧重画，作为"标准答案"----
         gfx.beginFrame(nullptr);
-        binui::drawNodesGLGdi(gfx, renderer, nullptr);
+        binui::drawNodesGL(gfx, renderer, nullptr);
         gfx.presentViaGdi();
         std::vector<uint8_t> full;
         GrabClient(dc, W, H, full);

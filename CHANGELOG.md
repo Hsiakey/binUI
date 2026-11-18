@@ -5,6 +5,41 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.20.0] - 2026-11-18 【格式 v34】
+
+**GL 后端改名：`binui_gl-gdi.*` → `binui_gl.*`。** 旧名从 0.6 时代留下来，那时真有一个 GDI
+绘制/呈现后端挂在这个文件里；现在文件里**绘制全是 GPU 四边形**（GL 3.3 core + 顶点批次 +
+字形图集 + 九宫格/FBO），字形光栅化是 FreeType + HarfBuzz，GDI 只剩三处**呈现**回退：
+透明窗 `UpdateLayeredWindow`、拖拽 resize 的读回 + `SetDIBitsToDevice`、远程会话贴屏。
+纯 GDI 后端一直是**另一份**实现（`src/platform/app_win32.*`：`BinUIApp` + `drawNodesGDI`，
+遗留），所以 `gl-gdi` 这个复合名会让人误以为它是 GDI 后端。
+
+改名清单（源码级；C ABI 不变，绑定不受影响）：
+
+| 旧 | 新 |
+|---|---|
+| `src/backends/binui_gl-gdi.{h,cpp}` | `src/backends/binui_gl.{h,cpp}` |
+| `BinUIGLGdi` | `BinUIGL` |
+| `BinUIAppGLGdi` | `BinUIAppGL` |
+| `drawNodesGLGdi` | `drawNodesGL` |
+| 窗口类名 `L"BinUIAppGLGdiWindow"` | `L"BinUIAppGLWindow"` |
+| `placeCaretAtClickGLGdi` | `placeCaretAtClickGL` |
+
+- `BinUIGLGdi` / `BinUIAppGLGdi` 留了 `using` 别名（源码兼容一版，新代码用新名）；
+  `drawNodesGLGdi` 不留别名——带默认参数，包装一层不值，直接改名。
+- 构建侧：对象 `binui_gl.o`（Makefile 各 demo 链接规则 / CMake `gl_shell`）、`gl_shot`、
+  `partial_shot`、`binui_ui.h` 的后端选择、`binui_charts.h` 的前置声明与
+  `LineChart::draw(BinUIGL&)`。
+- 文档侧：README（目录树 / 后端表 / 拖拽 present 说明顺带更正为 `SetDIBitsToDevice`）、
+  CONTRIBUTING、`docs/bindings.md`、`docs/future.md`、`docs/svg.md`、`docs/vulkan*.md`、
+  `docs/startup.md`（resize 表里 `GDI/GL` → `GL`）、`docs/keyboard_focus.md`（原来写
+  "IME 开关只有 GL/GDI 外壳有"，实际三端共用 `BinUIAppT`，一并改正）、issue 模板、
+  `tools/gl_shot.cpp` 注释。
+- `CHANGELOG.md` 与 `docs/issues/*` 里的**历史条目保持原样**（当时的文件名就是那个）。
+
+理由一句话：名字要能预测"改哪里"。想改 GL 呈现的人不该先去 `app_win32.cpp` 里找 GDI 代码。
+
+
 ## [0.19.2] - 2026-11-18 【格式 v34】
 
 **记录一次"看起来该省、实测不省"的优化：VK 拖拽期不重建交换链。**（无行为变更）

@@ -113,7 +113,7 @@ textWidth/fontMetrics` —— 前四个是窗口/呈现层的事，后三个只�
 
 ### 3.2 共享遍历（新建 `src/backends/binui_draw_nodes.cpp`）
 
-把 `drawNodesGLGdi`（[`binui_gl-gdi.cpp:1882`](../src/backends/binui_gl-gdi.cpp)，694 行）与
+把 `drawNodesGL`（[`binui_gl.cpp:1882`](../src/backends/binui_gl.cpp)，694 行）与
 `drawNodesD3D`（[`binui_d3d11.cpp:1656`](../src/backends/binui_d3d11.cpp)，530 行）合并成一份：
 
 ```cpp
@@ -124,7 +124,7 @@ void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const void* c
 两者当初差额 164 行主要是各后端自己的注释与少量保底分支，合并时**以 GL 版为准**（它多 `PATH`/`CANVAS`
 细节），逐段比对再定稿。迁移分三步，每步都能编能测：
 
-1. 加接口 + `BinUIGLGdi : public IBinUIGfx`（`override` 全加），内核遍历改成调接口版；
+1. 加接口 + `BinUIGL : public IBinUIGfx`（`override` 全加），内核遍历改成调接口版；
 2. `BinUID3D : public IBinUIGfx` 同样接上，删掉它那份遍历；
 3. 删掉 GL 那份遍历，`binui_draw_nodes.cpp` 成为唯一实现。
 
@@ -132,9 +132,9 @@ void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const void* c
 
 - 新增 [`src/backends/binui_gfx.h`](../src/backends/binui_gfx.h)：`IBinUIGfx` 接口全文 + `CanvasFn`。
 - 新增 [`src/backends/binui_draw_nodes.h`](../src/backends/binui_draw_nodes.h)：后端无关遍历 `drawNodesBinUI`
-  （从 GL 的 694 行原样搬出，只把 `BinUIGLGdi&` 换成 `IBinUIGfx&`、`ScaleAlpha` 换成共享的 `GfxScaleAlpha`）。
+  （从 GL 的 694 行原样搬出，只把 `BinUIGL&` 换成 `IBinUIGfx&`、`ScaleAlpha` 换成共享的 `GfxScaleAlpha`）。
   放头文件里是为了**不动 Makefile**（后端对象是按目标逐个链接的，加 .cpp 要改十几条规则）。
-- `BinUIGLGdi : public IBinUIGfx`；GL 侧只留一个薄壳 `drawNodesGLGdi`（把具体回调适配成 `CanvasFn`），
+- `BinUIGL : public IBinUIGfx`；GL 侧只留一个薄壳 `drawNodesGL`（把具体回调适配成 `CanvasFn`），
   demo/tools 一行没改。
 - **像素中性验证**：`make pixels` 10/10 零差异；10 个用例的 `gl_shot` 出图与改前**逐像素 0 差异**；
   四套测试全绿；`check_examples` 11/11。
@@ -350,9 +350,9 @@ BINUI_PERF=1 build-mingw/bin/examples/svgdemo_vk.exe                        # �
 |---|---|
 | 普通窗口 | resolve → 交换链 image → `vkQueuePresentKHR` |
 | 交换链不支持 `TRANSFER_DST` | resolve → 持久单采样离屏 → `vkCmdBlitImage` → 交换链 |
-| 客户区盖满显示器（IF 风险）/ 透明窗口 / 拖拽 resize 期 | **读回**：`vkCmdCopyImageToBuffer` + fence 等待 → `StretchDIBits` 或 `UpdateLayeredWindow` |
+| 客户区盖满显示器（IF 风险）/ 透明窗口 / 拖拽 resize 期 | **读回**：`vkCmdCopyImageToBuffer` + fence 等待 → `SetDIBitsToDevice` 或 `UpdateLayeredWindow` |
 
-IF 守卫复用现有 `clientCoversMonitor()` 判定（[`binui_gl-gdi.cpp`](../src/backends/binui_gl-gdi.cpp) 0.9.1 新增），
+IF 守卫复用现有 `clientCoversMonitor()` 判定（[`binui_gl.cpp`](../src/backends/binui_gl.cpp) 0.9.1 新增），
 逻辑照搬，规则相同：铺满整屏就切读回。
 
 ### 5.6 透明窗口
@@ -609,17 +609,17 @@ mingw32-make pixels GPU=vk               # 10 个用例，输出三方 diff 表�
 
 #### 7.1.1 关键决定：把"窗口外壳"也抽成共享模板，而不是给 Vulkan 再写一份
 
-`BinUIAppGLGdi` 原来整块长在 `binui_gl-gdi.cpp` 里（**1134 行**）。做 `GPU=vk` 时发现它只调用后端的
+`BinUIAppGL` 原来整块长在 `binui_gl.cpp` 里（**1134 行**）。做 `GPU=vk` 时发现它只调用后端的
 8 个方法：`init / shutdown / resize / beginFrame / present / presentViaGdi / setTransparent / isReady`
 —— 跟 GL 一点关系都没有。所以：
 
 - 新文件 `src/backends/binui_app.h`：`template <class Gfx> class BinUIAppT`（整块搬过来，机械替换），
   连同 `FramePerf`/`Perf()`/`NowMs()`/`caretBlinkOn()`/`isTitlebarDrag()`/`imeCaretFromRenderer()`/
   `placeCaretAtClick()` 一起变成共享代码；
-- `BinUIAppGLGdi = BinUIAppT<BinUIGLGdi>`、`BinUIAppVK = BinUIAppT<BinUIVK>`；
+- `BinUIAppGL = BinUIAppT<BinUIGL>`、`BinUIAppVK = BinUIAppT<BinUIVK>`；
 - 后端只需要多提供一个 `static const wchar_t* appClassName()`（同进程两个后端并存时窗口类不冲突）。
 - 新文件 `src/backends/binui_ui.h`：示例/工具的统一入口，`UiBackend` / `UiApp` / `drawUi()`，
-  由 `-DBINUI_GPU_VK` 选后端；8 个示例改成这套名字（`BinUIAppGLGdi` → `UiApp` 等），
+  由 `-DBINUI_GPU_VK` 选后端；8 个示例改成这套名字（`BinUIAppGL` → `UiApp` 等），
   逻辑一行没动。
 
 结果：时间轴/输入/IME/无边框拖拽/帧节流/脏矩形/直翻转守卫这些"边角逻辑"两个后端**只有一份**，
@@ -813,7 +813,7 @@ P6 的 `BINUI_VK_PERF` 拆分说 `svgdemo` 960×560 每帧 1.447 ms 里 **1.244 
 | 外壳 | 删掉 `BinUIAppD3D`（含 `wndProc`/`staticResize`/事件分发）；`using BinUIAppD3D = BinUIAppT<BinUID3D>` |
 | 输入辅助 | 删掉 `placeCaretAtClickD3D` / `caretBlinkOn` / `isTitlebarDrag`；用 `binui_app.h` 的共享模板 |
 | 呈现 | 新增 `presentViaGdi()` + `Impl::presentReadback()`（透明窗 / 全屏直翻转守卫 / 拖拽期），与 GL/Vulkan 同一套触发条件 |
-| 入口 | `binui_ui.h` 加 `BINUI_GPU_D3D11` 分支；`drawUi()` 三个后端统一调 `drawNodesBinUI`（GL 原来的 `drawNodesGLGdi` 就是这个 wrapper，行为不变） |
+| 入口 | `binui_ui.h` 加 `BINUI_GPU_D3D11` 分支；`drawUi()` 三个后端统一调 `drawNodesBinUI`（GL 原来的 `drawNodesGL` 就是这个 wrapper，行为不变） |
 | 构建 | `Makefile`：`binui_d3d11.o` 规则 + `D3D11_LIBS`（d3d11/dxgi/d3dcompiler/dwmapi）+ `make demos-d3d11` → `examples/*_d3d11.exe`（8 个） |
 
 净效果：`binui_d3d11.cpp` **2804 → 1615 行**（-42%），`binui_d3d11.h` 192 → 106 行。
@@ -1367,7 +1367,7 @@ id=65（pulse 圆）  w: 49.7, 48.5, 48, 47.9, 47.8, 47.5, 47.4, 47.2
 
 | 后端 | 模板纹理 | 位置 |
 |---|---|---|
-| GL | `CreateTexture2D(t, t, bits, **true**)` → LINEAR | `binui_gl-gdi.cpp` |
+| GL | `CreateTexture2D(t, t, bits, **true**)` → LINEAR | `binui_gl.cpp` |
 | D3D11 | `curLinear = 1` → 线性采样器 | `binui_d3d11.cpp` |
 | **Vulkan** | `createTexImage(rt.tex, t, t, **false**)` → **NEAREST** | `binui_vk.cpp` |
 

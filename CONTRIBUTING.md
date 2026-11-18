@@ -11,7 +11,7 @@ include/                # 公共头（格式 / 编译器 / 渲染器 / 字体 / 
 src/compiler/           # XML、HTML5 → binUI 编译器（含 CSS 解析与级联）
 src/renderer/           # binUI 解析、节点状态、命中测试、事件、动画、滚动、文本编辑
 src/font/               # FreeType + HarfBuzz 字体服务（字形图集）
-src/backends/           # 绘制后端：binui_gl-gdi.*（OpenGL 3.3）/ binui_vk.*（Vulkan）/ binui_d3d11.*（D3D11）
+src/backends/           # 绘制后端：binui_gl.*（OpenGL 3.3）/ binui_vk.*（Vulkan）/ binui_d3d11.*（D3D11）
 src/platform/           # app_win32.*：Win32 窗口外壳 + GDI 绘制（遗留/OLD：只做后备呈现与像素基准）
 src/binui_c.cpp         # C ABI 实现（对外声明在 include/binui_c.h）
 components/             # 标准组件库（纯 HTML+CSS，<use src="…"> 编译期内联）
@@ -61,7 +61,7 @@ mingw32-make SHELL=sh test
 ## 改代码的硬规矩
 
 1. **核心库不依赖平台 API**。`src/compiler`、`src/renderer`、`src/font`、`include/*`（除后端头）里
-   不许出现 `windows.h`、`<GL/…>`、`<d3d11.h>`；平台相关的都放在 `src/backends/binui_gl-gdi.*`、
+   不许出现 `windows.h`、`<GL/…>`、`<d3d11.h>`；平台相关的都放在 `src/backends/binui_gl.*`、
    `src/backends/binui_d3d11.*`、`src/platform/app_win32.*`。
    **新特性只做 GL / Vulkan / D3D11 三端**：GDI（`src/platform/app_win32.*` 的 `drawNodesGDI`）是
    遗留（OLD）后端，只保证不崩/不阻塞/能出像素基准图，不再新增能力、也不修观感类问题

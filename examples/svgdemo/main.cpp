@@ -1,6 +1,6 @@
 // svgdemo/main.cpp - binUI <svg> / <canvas> 标签演示（OpenGL 3.3 无边框窗口）
 // <svg>：HTML 里声明 rect/circle/line/polyline/polygon，编译器转成普通节点（可 tween/可过渡）
-// <canvas>：HTML 空绘制面，drawNodesGLGdi 遇该节点时回调应用（已裁剪到画布矩形），命令式绘制
+// <canvas>：HTML 空绘制面，drawNodesGL 遇该节点时回调应用（已裁剪到画布矩形），命令式绘制
 #include <cstdio>
 #include <cmath>
 #include <algorithm>

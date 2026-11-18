@@ -3,7 +3,7 @@
 # 字体渲染：FreeType + HarfBuzz（third_party 源码，静态链接）
 cmake_minimum_required(VERSION 3.16)
 project(binui
-    VERSION 0.19.2
+    VERSION 0.20.0
     DESCRIPTION "Cross-platform declarative UI core (binUI compiler + renderer)"
     LANGUAGES C CXX
 )
@@ -74,7 +74,7 @@ if(WIN32)
     target_link_libraries(app_shell PUBLIC binui user32 gdi32 gdiplus ole32)
 
     # OpenGL 渲染后端（WGL + GL 3.3 core）：无边框窗口 + 字形图集 + 顶点四边形
-    add_library(gl_shell STATIC src/backends/binui_gl-gdi.cpp)
+    add_library(gl_shell STATIC src/backends/binui_gl.cpp)
     target_include_directories(gl_shell PUBLIC ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(gl_shell PUBLIC binui opengl32 gdiplus dwmapi imm32)
 

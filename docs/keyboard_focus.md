@@ -161,9 +161,8 @@ app.setImeActiveFn([&] { return renderer.isEditing(); });
 - 方向键滚动是"最近滚动容器"而不是"整页滚动"：binUI 布局常常是一整屏卡片，把滚动交给
   焦点所在的卡片更符合预期；整页滚动的布局（根容器 `overflow:auto`）同样成立。
 - 没有 `tabindex` / `focus-within`：可聚焦集合 = `BINUI_INTERACTIVE` 且可见、未禁用的节点。
-- IME 开关只有 GL/GDI 外壳有（`BinUIAppGLGdi::setImeActiveFn`）：D3D11 外壳本来就没有
-  IME 处理（它那边 WASD 不会被输入法吃，但中文输入也不可用）；旧演示外壳 `BinUIApp`
-  两者都没有，新代码别再用它。
+- IME 开关在窗口外壳里（`BinUIAppT::setImeActiveFn`，GL/VK/D3D11 共用一份
+  `binui_app.h`，0.16.x 起三端都有）；旧演示外壳 `BinUIApp` 没有，新代码别再用它。
 
 ## 未来开发计划：层级焦点导航（下潜 / 上浮，**未实现**）
 

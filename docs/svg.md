@@ -26,7 +26,7 @@
 
 三个绘制后端可用的原语只有：
 `fillRect` / `fillRounded` / `fillLine` / `strokeRounded` / `drawImage` / `pushClip`
-（GDI 见 `app_win32.cpp:609-634`、GL 见 `src/backends/binui_gl-gdi.cpp:1541-1794`、
+（GDI 见 `app_win32.cpp:609-634`、GL 见 `src/backends/binui_gl.cpp:1541-1794`、
 D3D 见 `src/backends/binui_d3d11.cpp:1280-1565`）。
 **没有任何一端能填任意多边形**——全仓库唯一的 `Polygon()` 是播放按钮那个硬编码三角形
 （`app_win32.cpp:1240`），GL/D3D 连 stencil 都没开。
@@ -74,7 +74,7 @@ D3D 见 `src/backends/binui_d3d11.cpp:1280-1565`）。
   （`binui_renderer.cpp:1078/1081`）。这一条很重要——`BINUI_LINE` 的端点约定在
   `binui_renderer.cpp:1112-1123` 和 `973-983` 各要一支特判，别再复制。
 - 边框 / 焦点环 / z 排序 / 脏矩形 / 动画偏移与缩放全部落在三端 switch **之后**的统一代码里
-  （`app_win32.cpp:1270-1316`、`gl-gdi.cpp:2376-2419`、`d3d11.cpp:2158-2196`），不用动。
+  （`app_win32.cpp:1270-1316`、`gl.cpp:2376-2419`、`d3d11.cpp:2158-2196`），不用动。
 
 ### 3.2 路径段（v15）：存折线，不存命令
 
@@ -179,7 +179,7 @@ struct BinUIPathEntry {      // 32 字节
 | 端 | 文件 | switch | 备注 |
 |---|---|---|---|
 | GDI | `src/platform/app_win32.cpp` | `:898` | 填充走 `FillPaintBands`（`:609`，自带 alpha 混合） |
-| GL | `src/backends/binui_gl-gdi.cpp` | `:2120` | `fillRect` 是 `emitQuad`（`:1208`） |
+| GL | `src/backends/binui_gl.cpp` | `:2120` | `fillRect` 是 `emitQuad`（`:1208`） |
 | D3D11 | `src/backends/binui_d3d11.cpp` | `:1886` | `fillRect` 是 `emitQuad`（`:1024`） |
 
 三端 case 里只写一行 `PaintPathNode(gfx, node, path, 1.0f)`（模板在 `binui_paint.h`），
