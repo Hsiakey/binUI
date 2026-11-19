@@ -69,15 +69,18 @@ binUI 只剩一条路：`binUI ──► bin2d（+bin3d）──► binGPU ─�
 差的 12~16 倍是真钱。所以在把"GPU 执行模式"做进 binGPU 之前，0.33.0 作为**过渡基线**
 留着（它会自己后面被第一步+第二步取代）。**它不是一个我要维护的第二条永久路径。**
 
-## 5. 进展（0.34.0，2026-11-20）
-
-第 1 步的**决策面**已经落地，绘制面还没：
+## 5. 进展（0.34.2，2026-11-20）
 
 | 步 | 状态 | 具体做了什么 |
 |---|---|---|
-| 1. binGPU 长出 2D 图元 + GPU/CPU 两种执行体 | **进行中** | `bingpu_render_plan()`（0.8.0）给 backend/exec/msaa；`bingpu_pace_*`（0.9.0）收"什么时候画"；`bingpu_cmd_draw_rounded_rect(s)`（0.10.0）收**圆角矩形的九宫格几何**（AA 数学仍在 bin2d 的覆盖率模板）。执行体那一轴还是空的：binGPU 的 CPU 后端是参考实现，实测比 bin2d 的光栅慢 14×，所以"CPU 执行模式"应该由 bin2d 的光栅来当 |
-| 2. bin2d `Canvas` 把执行交给 binGPU | **起步** | ① `GpuCompositor::beginTarget/drawRect/drawRoundedRect(s)/endTarget`（0.16.0）能直接往设备目标画图元，四个后端各验一遍「设备像素 == 模板覆盖率」（逐像素精确）。② **`DisplayList`（0.17.0）**：绘制语义先记成列表，再交给执行体 —— `execute(Canvas&)` 走光栅、`execute(GpuCompositor&, …)` 走 binGPU；矩形 + 1:1 贴图的页面在 Vulkan/D3D11/GL 上**差 0**，64 个四边形只用 19 次提交。**但 `Canvas` 本身还是纯 CPU 光栅**，binUI 还没改成"先记列表再执行"那股流程 |
+| 1. binGPU 长出 2D 图元 + GPU/CPU 两种执行体 | **进行中** | `bingpu_render_plan()`（0.8.0）给 backend/exec/msaa；`bingpu_pace_*`（0.9.0）收"什么时候画"；`bingpu_cmd_draw_rounded_rect(s)`（0.10.0）收**圆角矩形的九宫格几何**；`bingpu_cmd_draw_rounded_rect_grad`（0.11.0）收**四角带色的九宫格**（AA 数学仍在 bin2d 的覆盖率模板）。执行体那一轴还是空的：binGPU 的 CPU 后端是参考实现，实测比 bin2d 的光栅慢 14×，所以"CPU 执行模式"应该由 bin2d 的光栅来当 |
+| 2. bin2d `Canvas` 把执行交给 binGPU | **起步** | ① `GpuCompositor::beginTarget/drawRect/drawRoundedRect(s)/drawRoundedStroke/drawRoundedGradient/endTarget` 能直接往设备目标画图元，四个后端各验一遍「设备像素 == 模板覆盖率」（逐像素精确）。② **`DisplayList`（0.17.0 → 0.19.0）**：绘制语义先记成列表，再交给执行体 —— `execute(Canvas&)` 走光栅、`execute(GpuCompositor&, …)` 走 binGPU。0.19.0 之后列表覆盖 **矩形 / 圆角 / 圆角描边 / 线性渐变 / 圆角渐变 / 染色贴图 / 矩形裁剪**，也就是 buttonshow 那种页面里的全部原语；矩形 + 1:1 贴图的页面在 Vulkan/D3D11/GL 上**差 0**，等 alpha 的渐变纯色区**差 1**。**但 `Canvas` 本身还是纯 CPU 光栅**，binUI 还没改成"先记列表再执行"那股流程 |
 | 3. 删掉 binui_vk / binui_gl / binui_d3d11 与 BinUIAuto | 未开始 | 三份实现仍在；`BinUIAuto` 仍然是选后端的那层薄壳。仍然卡在第 1/2 步 |
+
+**卡点只剩一个了**：把 binUI 换成"先记列表 → 交给执行体"会让圆角弧边整体挪
+（`docs/pixels` 用的是解析 SDF、`tests/pixels-bin2d` 用的是扫描线，两者差 48 个电平）。
+原语缺口那条已经补齐 —— buttonshow 的边框（`strokeRounded`）与底色渐变
+（`fillRoundedGradient`）现在都在列表里。
 
 这一轮唯一动的是**节拍**：它原本也在错的那一层（外壳自己算网格 + 滞回 + 猜 present
 有没有在等垂直同步），现在按同一套"判据在设备层"的道理挪进了 binGPU。
