@@ -91,6 +91,37 @@ void BlitBgraStraightInto(bin2d::Surface& dst, int x, int y, int w, int h,
     }
 }
 
+// 预乘 BGRA（字形图集用）→ 预乘 Surface：只换字节序，**不再乘一次 alpha**。
+//
+// 0.31.1 修的真 bug：字形位图从 binui_glyph_atlas.h 出来时已经是**预乘白色**
+// （`p[0]=p[1]=p[2]=p[3]=覆盖率`，见那边的 rasterGray 注释），而这里曾经走
+// `BlitBgraStraightInto`（按直通再预乘一次）。于是每个纹素变成
+// `rgb = a²/255, alpha = a`—— 覆盖率在 RGB 上被平方了。
+//
+// 症状很具体：白字压在浅底上时，字缘比底色**更暗**（白底上核心只有 191 而不是
+// 255），一眼就是"白色文本带一圈灰边"；同时整体墨量偏少，小字号拉丁看起来发虚，
+// 与笔画密的汉字放一起就显得"有的粗有的细"。三份 GPU 后端直接把字节传上纹理，
+// 所以只有 bin2d 后端有这个问题 —— 也正是它能被逐像素比对照出来的原因。
+void BlitBgraPremulInto(bin2d::Surface& dst, int x, int y, int w, int h,
+                        const uint8_t* bgra, int srcPitch) {
+    for (int row = 0; row < h; ++row) {
+        const int dy = y + row;
+        if (dy < 0 || dy >= dst.height()) continue;
+        const uint8_t* s = bgra + static_cast<size_t>(row) * static_cast<size_t>(srcPitch);
+        uint8_t* d = dst.row(dy);
+        for (int col = 0; col < w; ++col) {
+            const int dx = x + col;
+            if (dx < 0 || dx >= dst.width()) continue;
+            const uint8_t* sp = s + static_cast<size_t>(col) * 4;
+            uint8_t* dp = d + static_cast<size_t>(dx) * 4;
+            dp[0] = sp[2];   // B G R A → R G B A（分量照抄，alpha 已预乘过）
+            dp[1] = sp[1];
+            dp[2] = sp[0];
+            dp[3] = sp[3];
+        }
+    }
+}
+
 // 预乘直通 RGBA（prepareImageRaw 的输入，见 binui_gfx.h 注释）→ 预乘 Surface
 void BlitRgbaStraightInto(bin2d::Surface& dst, int x, int y, int w, int h,
                           const uint8_t* rgba) {
@@ -149,7 +180,8 @@ struct GlyphHost2D : public IGlyphTexHost {
     void updateTex(void* tex, int x, int y, int w, int h, const uint8_t* bgra) override {
         if (!tex || !bgra || w <= 0 || h <= 0) return;
         auto* img = static_cast<bin2d::Image*>(tex);
-        BlitBgraStraightInto(img->surface(), x, y, w, h, bgra, w * 4);
+        // 字形位图是**预乘**的（覆盖率同时写在 RGB 和 alpha 上），别再预乘一次
+        BlitBgraPremulInto(img->surface(), x, y, w, h, bgra, w * 4);
     }
 
     void destroyTex(void* tex) override {

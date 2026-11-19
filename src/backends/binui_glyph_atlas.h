@@ -214,7 +214,6 @@ struct GlyphRun {
     float ascent = 0;                 // 基线偏移
     std::vector<GlyphRunQuad> quads;  // 相对 (0, baseline) 的位置
     uint64_t lastUse = 0;             // LRU 时钟
-    int scriptFace = -1;              // 这段文字用的字面（0.30.1，见 PrepareScriptFace）
 };
 
 // ============================================================
@@ -394,11 +393,9 @@ public:
         auto it = runs_.find(key);
         if (it != runs_.end() && it->second.gen == atlasGen_) {
             it->second.lastUse = ++runClock_;
-            scriptFace_ = it->second.scriptFace;   // 命中也要恢复字面，否则调用方的状态是上一段的
             return it->second.advance;
         }
         const std::vector<uint32_t> cps = Utf8ToCodepoints(utf8);
-        PrepareScriptFace(cps);
         float w = 0;
         size_t i = 0;
         while (i < cps.size()) {
@@ -436,9 +433,6 @@ public:
         if (!host_ || utf8.empty()) return;
         uint32_t premult = color;
         PremultColor(premult);
-        // 这段文字统一字面（混排粗细一致，0.30.1）：必须在 textWidth 之前算好，
-        // 否则中心对齐用的宽度与随后画出来的宽度会来自两个不同字族。
-        PrepareScriptFace(Utf8ToCodepoints(utf8));
 
         if (centerH) x -= textWidth(size, weight, utf8, italic) / 2;
         int ascent = 0, lineH = 0;
@@ -534,7 +528,6 @@ public:
 
         built.advance = cx - originX;
         built.lastUse = ++runClock_;
-        built.scriptFace = scriptFace_;
         // 缓存上限（主题/字号一多会一路涨）：超了按 LRU 淘汰
         if (runs_.size() >= kMaxRuns && !built.quads.empty()) {
             auto victim = runs_.begin();
@@ -573,7 +566,6 @@ public:
         fontMetrics(size, weight, ascent, lineH, italic);
 
         const std::vector<uint32_t> cps = Utf8ToCodepoints(utf8);
-        PrepareScriptFace(cps);   // 整段统一字面（折行前后不变，否则一半粗一半细）
         float ly = y;
         size_t pos = 0;
         while (pos < cps.size()) {
@@ -1206,48 +1198,8 @@ private:
     // 字体服务返回 -1 = 所有候选都没有 → 用 0 号面（豆腐块是几何，跟哪个字体无关）。
     int faceIdxForCp(uint32_t cp) {
         if (!fontReady_) return 0;
-        // 混排粗细一致（0.30.1）：同一段文字里，只要出现中日韩，就让拉丁字母也落到
-        // 那个中日韩字面上。
-        //
-        // 为什么必须这么做：Windows 的常规字体栈是「Segoe UI → 微软雅黑」，于是
-        // 同一行 "① 流式+折行+flex" 里，汉字来自雅黑、拉丁来自 Segoe UI ——
-        // 同字号下雅黑的竖干约 1.3px、Segoe UI 只有 1px，肉眼就是"有的粗有的细"。
-        // 这不是渲染 bug（GL/VK/D3D11 三端完全一致，可复现），是**字族配对**问题。
-        // 判据放在 run 级（PrepareScriptFace）而不是全局：纯英文段落仍然用
-        // Segoe UI（Windows 应用的标准观感），只有混排/中文段落才统一到雅黑。
-        if (scriptFace_ >= 0 && IsLatinLikeCp(cp) && font_.faceHasGlyph(scriptFace_, cp))
-            return scriptFace_;
         const int idx = font_.faceIndexFor(cp);
         return idx < 0 ? 0 : idx;
-    }
-
-    // 中日韩（含假名/全角/CJK 标点/扩展区）。用于"这段文字是不是中文段落"。
-    static bool IsCjkCp(uint32_t cp) {
-        return (cp >= 0x2E80 && cp <= 0x9FFF) ||    // CJK 部首 + 假名 + 统一表意
-               (cp >= 0xAC00 && cp <= 0xD7AF) ||    // 韩文音节
-               (cp >= 0xF900 && cp <= 0xFAFF) ||    // CJK 兼容表意
-               (cp >= 0xFE30 && cp <= 0xFE4F) ||    // CJK 兼容形式
-               (cp >= 0xFF00 && cp <= 0xFFEF) ||    // 全角/半角形式
-               (cp >= 0x20000 && cp <= 0x3FFFF);    // 扩展 B 及以后
-    }
-    // 会从"主字体"取形的段落：ASCII 字母数字与常见拉丁标点。
-    static bool IsLatinLikeCp(uint32_t cp) {
-        if (cp < 0x80) return cp >= 0x20 && cp != 0x7F;
-        return (cp >= 0x00A0 && cp <= 0x024F);      // 拉丁补充 / 扩展 A/B
-    }
-
-    // 每段文字进来先调一次：这段里有中日韩就记下那个字面，拉丁跟着它走。
-    // 绘制与测量**必须**走同一个判断，否则量出来的宽度与实际画的宽度不一致，
-    // 折行会错位（这也是把它放在 faceIdxForCp 上游、而不是只改绘制的原因）。
-    void PrepareScriptFace(const std::vector<uint32_t>& cps) {
-        scriptFace_ = -1;
-        if (!fontReady_) return;
-        for (uint32_t cp : cps) {
-            if (!IsCjkCp(cp)) continue;
-            const int i = font_.faceIndexFor(cp);
-            if (i >= 0) scriptFace_ = i;
-            return;
-        }
     }
 
     // 设计上就不可见的码点：不画豆腐块（否则一串 emoji 里会凭空多出方框）
@@ -1289,8 +1241,6 @@ private:
     binui_font::FontEngine font_;
     bool fontReady_ = false;
     std::string asciiFont_ = "Segoe UI";
-    // 这段文字统一用的字面（-1 = 不统一，各码点各问各的）；见 PrepareScriptFace
-    int scriptFace_ = -1;
     std::unordered_map<uint64_t, std::vector<Atlas*>> atlases_;
     std::unordered_map<uint32_t, ColorAtlas*> colorAtlases_;
     std::vector<uint8_t> scratch_;   // 光栅化临时缓冲（cellW*cellH*4，BGRA）

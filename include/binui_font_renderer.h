@@ -72,11 +72,6 @@ public:
     // 注意这不是"猜区间"：查的就是字体自报的 cmap（FT_Get_Char_Index）。
     int faceIndexFor(uint32_t cp);
 
-    // 指定链上下标的面是否含该码点（0.30.1）。用途只有一个：让**同一段文字**里的
-    // 拉丁字母跟着中日韩字面走，从而粗细一致 —— 见 binui_glyph_atlas.h 的
-    // PrepareScriptFace 注释。
-    bool faceHasGlyph(int index, uint32_t cp);
-
     // 缺失字形的兜底：一个空心方框（"豆腐块"）。
     // 语义上必须画 —— 留白是显示 bug，方框是"字体里没有这个字"的明确信号。
     // 返回 false = 字号太小画不出（调用方退化成空白 + advance）。
