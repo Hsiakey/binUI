@@ -69,3 +69,4 @@ Windows 11 · MinGW-w64 gcc · Go 1.26（cgo）
   用 IME 无关的方式注入（`WM_CHAR`）就正常。不是 `BINUI_EV_INPUT` 的问题。
 - **`go vet` 报 `possible misuse of unsafe.Pointer`** —— 在 `bindings/go/binui/binui.go`
   的上游代码里，见 07 的最后一段（顺手提了，算绑定侧的小活）。
+| 11 | [box-shadow 被近似成多层环，吃掉 64% 的圆角填充像素](11-shadow-rings.md) | perf | 中（不影响正确性，挡 120 fps） | 每帧 fillRounded 的 63.8% 像素是阴影环，且环是**整块**画的（同一块 cache line 写 5 遍）。环带化实测**性能平账、像素必变**（±2 缝隙 / 页面 1.3%）→ 已回退，等金标准策略 |
