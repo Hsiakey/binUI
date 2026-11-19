@@ -121,7 +121,7 @@ CHANGELOG 写明 + 硬门禁先绿）。
   `gate-migrate` 与 `bench-draw` 都不退化；SVG 示例（`svgdemo`）的 819 KB 顶点量**下降**。
 - **回滚条件**：任何一端出现 >0 像素差，或单帧退化 >20%。
 
-### P3：圆角 / 投影 / 九宫格 —— 🔶 第一半已落地（0.23.0 + bin2d 0.7.0）
+### P3：圆角 / 投影 / 九宫格 —— ✅ 已落地（0.23.0 + 0.25.0）
 
 **已落地（0.23.0）**：三个 GPU 后端的**圆角模板内容**收口到 bin2d
 （`RasterizeRoundedTileCoverage`）。GL / VK / D3D11 原本各写一份同样的解析式距离循环，
@@ -134,11 +134,19 @@ CHANGELOG 写明 + 硬门禁先绿）。
 三端一致的判据不变。
 
 - ~~`fillRounded` → `bin2d::FillRoundedRect`；假投影 → `bin2d::Shadow`；
-  九宫格 → `bin2d::DrawNineSlice`~~
-- ~~**删**：三端各自的圆角模板与描边层叠实现~~（圆角模板已在 0.23.0 收口到 bin2d；
-  `strokeRounded` 的"9 × 线宽层数"仍在，它的三条实现现在都只消费 bin2d 的模板）
-- **验收**：三端 0 diff + 圆角/投影的像素基准不新增差异；九宫格的坐标错一类 bug 由
-  bin2d 的测试兜住（`test_raster` 已覆盖）。
+  九宫格 → `bin2d::DrawNineSlice`~~（不迁：这三个 API 的语义是"落 CPU 像素"，
+  而三端要的是四边形；真正该收口的是"几何与层数"，见下一条）
+- ~~**删**：三端各自的圆角模板与描边层叠实现~~ —— **第二半已落地（0.25.0）**：
+  `RoundedLayerCount / BuildRoundedLayer / BuildRoundedLayerQuads / ...Xf`
+  进了 `binui_paint.h`，三端的填充/描边/仿射圆角都只调这一份。
+  D3D11 那 66 行手抄的九宫格 UV 数学删掉；VK 的 `strokeRounded` 补上多层循环
+  （此前 `thickness` 被丢弃，>1px 也只画 1px —— 唯一一处三端分岔）。
+  后端代码净减 **114 行**（+123 / −237），共享实现 +94 行（只有一份）。
+- **验收**：`make pixels` 18/18 零差异、`baseline-strict` 172 项完全一致
+  （三端各 150 个像素用例的原始 ARGB 逐字节比对）、三端在"2px/3px 圆角环"临时页面上
+  0 diff、`test_elements` 新增 35 条几何断言（v49）。
+- **待办**：聚焦编辑环（`thickness=2` 的唯一可达路径）没有像素用例 —— 它需要运行时
+  焦点态，静态出图工具拍不到；目前靠共享计划单测 + 三端代码收口兜底。
 
 ### P4：图层语义收口
 

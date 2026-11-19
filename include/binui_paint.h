@@ -1297,6 +1297,100 @@ inline int BuildRoundedNineSlice(float x, float y, float w, float h, float radiu
     return n;
 }
 
+// ------------------------------------------------------------
+// 圆角图层（v0.25.0）：填充 / 描边 / 仿射圆角共用的那一层循环
+//
+// 缺口在哪：圆角模板是 **1px 环**，粗描边 = 同心环叠层（每层往里缩 1px、半径减 1）。
+// 这段循环以前 GL / VK / D3D11 各写一份，结果 VK 那份把 thickness 丢了（>1 也只有
+// 1px），而 D3D11 又把九宫格 UV 手抄了一遍。收口到这里之后，三端都只负责
+// "把某一层的九块发出去"，几何与层数只有一个来源。
+//
+// 为什么分"层数 + 取一层"而不是一次算完：层数上界是短边的一半（400+ 层 × 9 块），
+// 一次算完要几百 KB；后端本来就是逐层取模板纹理的。
+// ------------------------------------------------------------
+struct RoundedLayer {
+    float x = 0, y = 0, w = 0, h = 0;  // 这一层的外框
+    float r = 0;                        // 几何半径（浮点：缩放动画里半径要连续）
+    int tileRadius = 1;                 // 角片模板的整数半径（模板是位图，只能整数）
+};
+
+// 0 = 半径无效（调用方退回 fillRect）。填充恒为 1 层；描边 = round(max(1,thickness))，
+// 再被"半径耗尽"限制住。
+inline int RoundedLayerCount(float w, float h, float radius, bool stroke, float thickness) {
+    if (w <= 0.0f || h <= 0.0f) return 0;
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    if (rf <= 0.0f) return 0;
+    if (!stroke) return 1;
+    int layers = static_cast<int>(std::lround(std::max(1.0f, thickness)));
+    const int radiusCap = static_cast<int>(std::floor(rf));
+    if (layers > radiusCap) layers = radiusCap;
+    return layers < 1 ? 0 : layers;
+}
+
+// 第 layer 层；false = 这一层已退化（半径耗尽 / 外框不足 1px），调用方应当停。
+inline bool BuildRoundedLayer(float x, float y, float w, float h, float radius, bool stroke,
+                              int layer, RoundedLayer& out) {
+    if (w <= 0.0f || h <= 0.0f || layer < 0) return false;
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    if (rf <= 0.0f) return false;
+    if (!stroke) {
+        if (layer != 0) return false;
+        out.x = x;
+        out.y = y;
+        out.w = w;
+        out.h = h;
+        out.r = rf;
+        out.tileRadius = std::max(1, static_cast<int>(std::lround(rf)));
+        return true;
+    }
+    const float k = static_cast<float>(layer);
+    out.x = x + k;
+    out.y = y + k;
+    out.w = w - 2.0f * k;
+    out.h = h - 2.0f * k;
+    if (out.w <= 1.0f || out.h <= 1.0f) return false;
+    out.r = std::min(rf - k, std::min(out.w, out.h) * 0.5f);
+    if (out.r <= 0.0f) return false;
+    out.tileRadius = std::max(1, static_cast<int>(std::lround(out.r)));
+    return true;
+}
+
+// 一层 → 九块（tileSize = 后端为该层取到的模板边长，必须 = RoundTemplateSize(tileRadius)）
+inline int BuildRoundedLayerQuads(const RoundedLayer& L, int tileSize, PaintQuad* out,
+                                  int cap = 9) {
+    return BuildRoundedNineSlice(L.x, L.y, L.w, L.h, L.r, tileSize, out, cap);
+}
+
+// 仿射路径：一层 → 九块的四角坐标 + UV（pos/uv 都是 4 个顶点 × 2 分量）
+struct RoundedQuadXf {
+    float pos[8];
+    float uv[8];
+};
+
+inline int BuildRoundedLayerQuadsXf(const RoundedLayer& L, int tileSize, const float xf[6],
+                                    RoundedQuadXf* out, int cap = 9) {
+    if (!out || cap <= 0) return 0;
+    PaintQuad q[9];
+    const int n = BuildRoundedNineSlice(L.x, L.y, L.w, L.h, L.r, tileSize, q, 9);
+    const int m = n < cap ? n : cap;
+    for (int i = 0; i < m; i++) {
+        const PaintQuad& c = q[i];
+        const float corners[8] = { c.x,     c.y,     c.x + c.w, c.y,
+                                   c.x,     c.y + c.h, c.x + c.w, c.y + c.h };
+        RoundedQuadXf& o = out[i];
+        for (int v = 0; v < 4; v++) {
+            const float lx = corners[v * 2], ly = corners[v * 2 + 1];
+            o.pos[v * 2] = xf[0] * lx + xf[1] * ly + xf[2];
+            o.pos[v * 2 + 1] = xf[3] * lx + xf[4] * ly + xf[5];
+        }
+        o.uv[0] = c.u0; o.uv[1] = c.v0;
+        o.uv[2] = c.u1; o.uv[3] = c.v0;
+        o.uv[4] = c.u0; o.uv[5] = c.v1;
+        o.uv[6] = c.u1; o.uv[7] = c.v1;
+    }
+    return m;
+}
+
 // 盒子 → 1 个（直角）或 9 个（圆角）四角带色四边形。
 // tpl = 后端圆角模板的边长（RoundTemplateSize(r)）；直角时忽略。
 //

@@ -3731,43 +3731,33 @@ void BinUIVK::fillRoundedXf(float w, float h, float radius, bool stroke, float t
                             uint32_t color, const float xf[6]) {
     Impl& d = *impl_;
     if (!d.ready || w <= 0 || h <= 0) return;
-    const float rf = std::min(radius, std::min(w, h) * 0.5f);
-    const int layers = stroke ? std::max(1, static_cast<int>(std::lround(std::max(1.0f, thickness))))
-                              : 1;
-    auto xform = [&](float lx, float ly, float* out) {
-        out[0] = xf[0] * lx + xf[1] * ly + xf[2];
-        out[1] = xf[3] * lx + xf[4] * ly + xf[5];
-    };
+    const int layers = RoundedLayerCount(w, h, radius, stroke, thickness);
     Premult(color);
     int emitted = 0;
-    for (int k = 0; k < layers; k++) {
-        const float lx = static_cast<float>(k), ly = static_cast<float>(k);
-        const float lw = w - 2.0f * k, lh = h - 2.0f * k;
-        if (lw <= 1.0f || lh <= 1.0f) break;
-        const float rk = rf - static_cast<float>(k);
-        if (rk <= 0.0f) break;
-        const int rri = std::max(1, static_cast<int>(std::lround(rk)));
-        Impl::RoundTex& rt = d.roundFor(rri, stroke);
+    for (int k = 0; k < layers; ++k) {
+        RoundedLayer L;
+        if (!BuildRoundedLayer(0.0f, 0.0f, w, h, radius, stroke, k, L)) break;
+        Impl::RoundTex& rt = d.roundFor(L.tileRadius, stroke);
         if (!rt.tex.image) break;
-        PaintQuad q[9];
-        const int n = BuildRoundedNineSlice(lx, ly, lw, lh, rk, rt.t, q, 9);
+        RoundedQuadXf q[9];
+        const int n = BuildRoundedLayerQuadsXf(L, rt.t, xf, q, 9);
+        if (n <= 0) break;
         for (int i = 0; i < n; i++) {
-            const PaintQuad& c = q[i];
-            const float corners[8] = { c.x, c.y, c.x + c.w, c.y,
-                                       c.x, c.y + c.h, c.x + c.w, c.y + c.h };
-            const float uv[8] = { c.u0, c.v0, c.u1, c.v0, c.u0, c.v1, c.u1, c.v1 };
-            float sp[8];
-            for (int v = 0; v < 4; v++) xform(corners[v * 2], corners[v * 2 + 1], sp + v * 2);
-            d.emitQuadUV(sp, uv, color, &rt.tex);
+            d.emitQuadUV(q[i].pos, q[i].uv, color, &rt.tex);
             emitted++;
         }
     }
     if (emitted == 0) {
         const float corners[8] = { 0, 0, w, 0, 0, h, w, h };
-        const float uv[8] = { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
-        float sp[8];
-        for (int v = 0; v < 4; v++) xform(corners[v * 2], corners[v * 2 + 1], sp + v * 2);
-        d.emitQuadUV(sp, uv, color, &d.white);
+        RoundedQuadXf q;
+        for (int v = 0; v < 4; v++) {
+            const float lx = corners[v * 2], ly = corners[v * 2 + 1];
+            q.pos[v * 2] = xf[0] * lx + xf[1] * ly + xf[2];
+            q.pos[v * 2 + 1] = xf[3] * lx + xf[4] * ly + xf[5];
+            q.uv[v * 2] = 0.5f;
+            q.uv[v * 2 + 1] = 0.5f;
+        }
+        d.emitQuadUV(q.pos, q.uv, color, &d.white);
     }
 }
 
@@ -4098,17 +4088,13 @@ void BinUIVK::fillRect(float x, float y, float w, float h, uint32_t color) {
 void BinUIVK::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
     Impl& d = *impl_;
     if (!d.ready || w <= 0 || h <= 0) return;
-    // v0.11.8：几何半径用浮点，角片模板按最近的整数半径取（模板是位图，只能整数）。
-    // 静态页面传进来本来就是整数，逐像素等价；缩放动画里半径必须连续，
-    // 否则圆/胶囊的 2r 与 w 会周期性错开 1px，中间那几块一胀一缩。
-    const float rf = std::min(radius, std::min(w, h) * 0.5f);
-    if (rf <= 0.0f) { fillRect(x, y, w, h, color); return; }
-    const int r = std::max(1, static_cast<int>(std::lround(rf)));
-    Impl::RoundTex& rt = d.roundFor(r, false);
+    // 半径钳制与角片模板取整都在 binui_paint.h（v0.25.0：三端共用同一份）
+    RoundedLayer L;
+    if (!BuildRoundedLayer(x, y, w, h, radius, false, 0, L)) { fillRect(x, y, w, h, color); return; }
+    Impl::RoundTex& rt = d.roundFor(L.tileRadius, false);
     if (!rt.tex.image) { fillRect(x, y, w, h, color); return; }
     PaintQuad q[9];
-    const int n = BuildRoundedNineSlice(x, y, w, h, rf,
-                                       static_cast<float>(rt.t), q, 9);
+    const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
     if (n <= 0) { fillRect(x, y, w, h, color); return; }
     Premult(color);
     for (int i = 0; i < n; i++)
@@ -4215,28 +4201,23 @@ void BinUIVK::strokeRounded(float x, float y, float w, float h, float radius,
                             float thickness, uint32_t color) {
     Impl& d = *impl_;
     if (!d.ready || w <= 0 || h <= 0 || thickness <= 0) return;
-    // P2 先按"四边 + 四角"的九宫格模板画；与 GL 的 strokeRounded 同源（同一套模板与几何）
-    // v0.11.8：几何半径用浮点（缩放动画要连续），模板按最近整数
-    const float rf = std::min(radius, std::min(w, h) * 0.5f);
-    if (rf <= 0.0f) {
-        // 直角边框：上/下/左/右四条
-        fillRect(x, y, w, thickness, color);
-        fillRect(x, y + h - thickness, w, thickness, color);
-        fillRect(x, y + thickness, thickness, h - 2 * thickness, color);
-        fillRect(x + w - thickness, y + thickness, thickness, h - 2 * thickness, color);
-        return;
-    }
-    const int r = std::max(1, static_cast<int>(std::lround(rf)));
-    Impl::RoundTex& rt = d.roundFor(r, true);
-    if (!rt.tex.image) return;
-    PaintQuad q[9];
-    const int n = BuildRoundedNineSlice(x, y, w, h, rf,
-                                       static_cast<float>(rt.t), q, 9);
-    if (n <= 0) return;
+    // v0.25.0：层数与几何走 binui_paint.h 的共享实现。以前这里**没有多层循环**
+    // （thickness 被丢掉，>1px 也只有 1px），与 GL / D3D11 分岔 —— 现在三端同一份。
+    const int layers = RoundedLayerCount(w, h, radius, true, thickness);
+    if (layers <= 0) { fillRect(x, y, w, h, color); return; }
     Premult(color);
-    for (int i = 0; i < n; i++)
-        d.emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
-                   q[i].u0, q[i].v0, q[i].u1, q[i].v1, color, &rt.tex);
+    for (int k = 0; k < layers; ++k) {
+        RoundedLayer L;
+        if (!BuildRoundedLayer(x, y, w, h, radius, true, k, L)) break;
+        Impl::RoundTex& rt = d.roundFor(L.tileRadius, true);
+        if (!rt.tex.image) break;
+        PaintQuad q[9];
+        const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
+        if (n <= 0) break;
+        for (int i = 0; i < n; i++)
+            d.emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
+                       q[i].u0, q[i].v0, q[i].u1, q[i].v1, color, &rt.tex);
+    }
 }
 
 // ---------- 文本 ----------

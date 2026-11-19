@@ -1699,50 +1699,32 @@ void BinUIGL::fillLine(float x0, float y0, float x1, float y1, float width, uint
 void BinUIGL::fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
                                uint32_t color, const float xf[6]) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    const float rf = std::min(radius, std::min(w, h) * 0.5f);
-    const int layers = stroke ? std::max(1, static_cast<int>(std::lround(std::max(1.0f, thickness))))
-                              : 1;
-    // 圆环模板是"1px 环"，多层同心 = 每层往里缩 1px、半径减 1（与 strokeRounded 一致）
+    const int layers = RoundedLayerCount(w, h, radius, stroke, thickness);
     Premult(color);
     int emitted = 0;
-    // 诊断（BINUI_XF_DUMP=1）：把前两次调用的九宫格分格与 UV 打出来。仿射路径"角看起来
-    // 不对"时，先看这里的 local/uv/screen 三组数是否自洽（格边共享、UV 镜像、1:1 采样），
-    // 再去怀疑模板或采样器。
+    // 诊断（BINUI_XF_DUMP=1）：把前两次调用的分格屏幕坐标打出来。仿射路径"角看起来
+    // 不对"时，先看这里的 screen 四角是否自洽，再去怀疑模板或采样器。
     static int dumpLeft = getenv("BINUI_XF_DUMP") ? 2 : 0;
-    for (int k = 0; k < layers; k++) {
-        const float lx = static_cast<float>(k), ly = static_cast<float>(k);
-        const float lw = w - 2.0f * k, lh = h - 2.0f * k;
-        if (lw <= 1.0f || lh <= 1.0f) break;
-        const float rk = rf - static_cast<float>(k);
-        if (rk <= 0.0f) break;
-        const int rri = std::max(1, static_cast<int>(std::lround(rk)));
-        RoundTex& rt = impl_->roundFor(rri, stroke);
+    for (int k = 0; k < layers; ++k) {
+        RoundedLayer L;
+        if (!BuildRoundedLayer(0.0f, 0.0f, w, h, radius, stroke, k, L)) break;
+        RoundTex& rt = impl_->roundFor(L.tileRadius, stroke);
         if (!rt.tex) break;
-        PaintQuad q[9];
-        const int n = BuildRoundedNineSlice(lx, ly, lw, lh, rk, rt.t, q, 9);
+        RoundedQuadXf q[9];
+        const int n = BuildRoundedLayerQuadsXf(L, rt.t, xf, q, 9);
+        if (n <= 0) break;
         impl_->curTex = rt.tex;
         for (int i = 0; i < n; i++) {
-            const PaintQuad& c = q[i];
-            const float p[8] = { c.x, c.y, c.x + c.w, c.y, c.x, c.y + c.h, c.x + c.w, c.y + c.h };
-            const float uv[8] = { c.u0, c.v0, c.u1, c.v0, c.u0, c.v1, c.u1, c.v1 };
-            float sp[8];
-            for (int v = 0; v < 4; v++) {
-                const float lxp = p[v * 2], lyp = p[v * 2 + 1];
-                sp[v * 2]     = xf[0] * lxp + xf[1] * lyp + xf[2];
-                sp[v * 2 + 1] = xf[3] * lxp + xf[4] * lyp + xf[5];
-            }
-            impl_->emitQuadUV(sp, uv, color);
+            impl_->emitQuadUV(q[i].pos, q[i].uv, color);
             emitted++;
-            if (dumpLeft > 0) {
+            if (dumpLeft > 0 && k == 0) {
                 std::fprintf(stderr,
-                             "[xf] w=%.2f h=%.2f r=%.2f t=%d rri=%d cell=%d "
-                             "local=(%.2f,%.2f %.2fx%.2f) uv=(%.3f,%.3f)-(%.3f,%.3f) "
+                             "[xf] w=%.2f h=%.2f r=%.2f t=%d cell=%d "
                              "screen=(%.2f,%.2f)(%.2f,%.2f)(%.2f,%.2f)(%.2f,%.2f)\n",
-                             (double)w, (double)h, (double)rf, rt.t, rri, i,
-                             (double)c.x, (double)c.y, (double)c.w, (double)c.h,
-                             (double)c.u0, (double)c.v0, (double)c.u1, (double)c.v1,
-                             (double)sp[0], (double)sp[1], (double)sp[2], (double)sp[3],
-                             (double)sp[4], (double)sp[5], (double)sp[6], (double)sp[7]);
+                             (double)w, (double)h, (double)L.r, rt.t, i,
+                             (double)q[i].pos[0], (double)q[i].pos[1], (double)q[i].pos[2],
+                             (double)q[i].pos[3], (double)q[i].pos[4], (double)q[i].pos[5],
+                             (double)q[i].pos[6], (double)q[i].pos[7]);
             }
         }
     }
@@ -1750,37 +1732,30 @@ void BinUIGL::fillRoundedXf(float w, float h, float radius, bool stroke, float t
     if (dumpLeft > 0) { dumpLeft--; }
     if (emitted == 0) {
         // 模板不可用：至少把变换后的外框画出来，别让节点凭空消失
-        const float p[8] = { 0, 0, w, 0, 0, h, w, h };
-        const float uv[8] = { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
-        float sp[8];
+        const float corners[8] = { 0, 0, w, 0, 0, h, w, h };
+        RoundedQuadXf q;
         for (int v = 0; v < 4; v++) {
-            const float lxp = p[v * 2], lyp = p[v * 2 + 1];
-            sp[v * 2]     = xf[0] * lxp + xf[1] * lyp + xf[2];
-            sp[v * 2 + 1] = xf[3] * lxp + xf[4] * lyp + xf[5];
+            const float lx = corners[v * 2], ly = corners[v * 2 + 1];
+            q.pos[v * 2] = xf[0] * lx + xf[1] * ly + xf[2];
+            q.pos[v * 2 + 1] = xf[3] * lx + xf[4] * ly + xf[5];
+            q.uv[v * 2] = 0.5f;
+            q.uv[v * 2 + 1] = 0.5f;
         }
-        impl_->emitQuadUV(sp, uv, color);
+        impl_->emitQuadUV(q.pos, q.uv, color);
     }
 }
 
 void BinUIGL::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    // 半径钳到短边一半：再大就是圆/胶囊，多出来的部分没有几何意义。
-    // v0.11.7：半径的**几何**用浮点（缩放动画里半径要跟 w/h 一起连续变化），
-    // 只有"角片模板"仍取最近的整数半径 —— 模板是位图，只能按整数建。
-    // 静态页面传进来的本来就是整数，两种写法逐像素等价。
-    const float rf = std::min(radius, std::min(w, h) * 0.5f);
-    if (rf <= 0.0f) { fillRect(x, y, w, h, color); return; }
-
-    const int r = std::max(1, static_cast<int>(std::lround(rf)));
-    RoundTex& rt = impl_->roundFor(r, false);
+    // 半径钳到短边一半、角片模板按最近整数取 —— 这两条与另两端共用 binui_paint.h 的
+    // BuildRoundedLayer（v0.25.0 起三端不再各写一份）。
+    RoundedLayer L;
+    if (!BuildRoundedLayer(x, y, w, h, radius, false, 0, L)) { fillRect(x, y, w, h, color); return; }
+    RoundTex& rt = impl_->roundFor(L.tileRadius, false);
     if (!rt.tex) { fillRect(x, y, w, h, color); return; }
-
-    // 九宫格拆分走共用几何（include/binui_paint.h）：角片边长 = r，
-    // 中段宽高按 max(0, …) 跳过，所以 r == 短边一半时四角正好拼成圆/胶囊。
     PaintQuad q[9];
-    const int n = BuildRoundedNineSlice(x, y, w, h, rf, rt.t, q, 9);
+    const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
     if (n <= 0) { fillRect(x, y, w, h, color); return; }
-
     Premult(color);
     impl_->curTex = rt.tex;
     for (int i = 0; i < n; i++)
@@ -1792,27 +1767,18 @@ void BinUIGL::fillRounded(float x, float y, float w, float h, float radius, uint
 void BinUIGL::strokeRounded(float x, float y, float w, float h, float radius,
                             float thickness, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    // v0.11.8：几何半径用浮点（缩放动画要连续），模板按最近整数取
-    const float rf = std::min(radius, std::min(w, h) * 0.5f);
-    if (rf <= 0.0f) { fillRect(x, y, w, h, color); return; }
-
-    // 线宽：以前这里 (void)thickness 把参数丢了，所有描边都是 1px（"2px 编辑环"实际
-    // 只有 1px）。stroke 纹理本身就是 1px 的环，所以按厚度画多层同心圆角环叠出粗描边：
-    // 每往里一层缩 1px、半径减 1。thickness<=1 时只有一层，和旧行为一致。
-    int layers = static_cast<int>(std::lround(std::max(1.0f, thickness)));
-    if (layers < 1) layers = 1;
+    // 模板是 1px 环，粗描边 = 同心环叠层（每层往里缩 1px、半径减 1）。
+    // 层数与每层几何都来自 binui_paint.h —— 以前三端各写一份，VK 那份还丢了 thickness。
+    const int layers = RoundedLayerCount(w, h, radius, true, thickness);
+    if (layers <= 0) { fillRect(x, y, w, h, color); return; }
     Premult(color);
-    for (int k = 0; k < layers; k++) {
-        const float ex = x + k, ey = y + k;
-        const float ew = w - 2.0f * k, eh = h - 2.0f * k;
-        if (ew <= 1.0f || eh <= 1.0f) break;
-        const float rfk = rf - static_cast<float>(k);
-        if (rfk <= 0.0f) break;
-        const int rr = std::max(1, static_cast<int>(std::lround(rfk)));
-        RoundTex& rt = impl_->roundFor(rr, true);
+    for (int k = 0; k < layers; ++k) {
+        RoundedLayer L;
+        if (!BuildRoundedLayer(x, y, w, h, radius, true, k, L)) break;
+        RoundTex& rt = impl_->roundFor(L.tileRadius, true);
         if (!rt.tex) break;
         PaintQuad q[9];
-        const int n = BuildRoundedNineSlice(ex, ey, ew, eh, rfk, rt.t, q, 9);
+        const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
         if (n <= 0) break;
         impl_->curTex = rt.tex;
         for (int i = 0; i < n; i++)

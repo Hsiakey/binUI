@@ -3255,6 +3255,96 @@ int run() {
     return g_fail;
 }
 
+// ---------------------------------------------------------------------------
+// v0.25.0：圆角图层计划（RoundedLayerCount / BuildRoundedLayer / ...Quads[Xf]）
+//
+// 三端（GL / VK / D3D11）现在都只调这一份。它错了三端会一起错，它对了三端不可能
+// "各错各的" —— 所以这组断言的权重比任何一端的截图都高。
+// ---------------------------------------------------------------------------
+static int RunRoundedLayers() {
+    // 层数：填充恒 1；描边 = round(max(1,thickness))，被半径限制
+    CHECK(RoundedLayerCount(100, 40, 12, false, 0) == 1, "v49: 填充恒为 1 层");
+    CHECK(RoundedLayerCount(100, 40, 12, false, 5) == 1, "v49: 填充忽略 thickness");
+    CHECK(RoundedLayerCount(100, 40, 12, true, 1) == 1, "v49: 1px 描边 = 1 层");
+    CHECK(RoundedLayerCount(100, 40, 12, true, 2) == 2, "v49: 2px 描边 = 2 层（VK 以前丢了这层）");
+    CHECK(RoundedLayerCount(100, 40, 12, true, 2.4f) == 2, "v49: 2.4px 四舍五入 = 2 层");
+    CHECK(RoundedLayerCount(100, 40, 12, true, 3.5f) == 4, "v49: 3.5px 四舍五入 = 4 层");
+    CHECK(RoundedLayerCount(100, 40, 6, true, 100) == 6, "v49: 层数被半径限制（r=6 → 6）");
+    CHECK(RoundedLayerCount(100, 40, 0, true, 2) == 0, "v49: r=0 → 0 层");
+    CHECK(RoundedLayerCount(0, 40, 12, true, 2) == 0, "v49: 空盒 → 0 层");
+
+    // 每层几何
+    {
+        RoundedLayer L;
+        CHECK(BuildRoundedLayer(10, 20, 100, 40, 12, false, 0, L), "v49: 填充层有效");
+        CHECK_NEAR(L.r, 12, 1e-6, "v49: 填充层半径");
+        CHECK(L.tileRadius == 12, "v49: 填充层模板半径");
+        CHECK(!BuildRoundedLayer(10, 20, 100, 40, 12, false, 1, L), "v49: 填充没有第 2 层");
+        CHECK(BuildRoundedLayer(10, 20, 100, 40, 12, true, 2, L), "v49: 描边第 2 层有效");
+        CHECK_NEAR(L.x, 12, 1e-6, "v49: 描边第 2 层内缩 2px");
+        CHECK_NEAR(L.w, 96, 1e-6, "v49: 描边第 2 层宽减 4px");
+        CHECK_NEAR(L.r, 10, 1e-6, "v49: 描边第 2 层半径减 2");
+        CHECK(!BuildRoundedLayer(0, 0, 100, 40, 3, true, 3, L), "v49: 半径耗尽后层无效");
+        CHECK(!BuildRoundedLayer(0, 0, 10, 40, 12, true, 5, L), "v49: 外框退化后层无效");
+        CHECK(BuildRoundedLayer(0, 0, 100, 40, 50, false, 0, L), "v49: 大半径填充层有效");
+        CHECK_NEAR(L.r, 20, 1e-6, "v49: 半径钳到短边一半");
+        CHECK(L.tileRadius == 20, "v49: 钳制后模板半径按钳制值");
+    }
+
+    // 九宫格：手算一组值钉死 UV（t = 2r+4 = 20，cu = 8/20 = 0.4，中段条 1/20 = 0.05）
+    {
+        RoundedLayer L;
+        BuildRoundedLayer(10, 20, 100, 40, 8, false, 0, L);
+        const int t = RoundTemplateSize(L.tileRadius);
+        PaintQuad q[9];
+        const int n = BuildRoundedLayerQuads(L, t, q, 9);
+        CHECK(n == 9, "v49: 普通圆角矩形拆成 9 块");
+        CHECK_NEAR(q[0].x, 10, 1e-6, "v49: 角片 x");
+        CHECK_NEAR(q[0].w, 8, 1e-6, "v49: 角片边长 = r");
+        CHECK_NEAR(q[0].u1, 0.4f, 1e-6, "v49: 角片 u1 = r/t");
+        CHECK_NEAR(q[4].x, 18, 1e-6, "v49: 上边中段 x = x + r");
+        CHECK_NEAR(q[4].w, 84, 1e-6, "v49: 上边中段宽 = w - 2r");
+        CHECK_NEAR(q[4].u0, 0.5f, 1e-6, "v49: 中段 u0 = 0.5");
+        CHECK_NEAR(q[4].u1, 0.55f, 1e-6, "v49: 中段 u1 = 0.5 + 1/t");
+        BuildRoundedLayer(0, 0, 100, 24, 12, false, 0, L);
+        const int n2 = BuildRoundedLayerQuads(L, RoundTemplateSize(L.tileRadius), q, 9);
+        CHECK(n2 > 0 && n2 < 9, "v49: 胶囊（h=2r）跳过退化的中段块");
+    }
+
+    // 仿射：单位变换与轴对齐逐位相同；平移/缩放只作用在 pos 上
+    {
+        RoundedLayer L;
+        BuildRoundedLayer(10, 20, 100, 40, 8, false, 0, L);
+        const int t = RoundTemplateSize(L.tileRadius);
+        PaintQuad q[9];
+        RoundedQuadXf x[9];
+        const int n = BuildRoundedLayerQuads(L, t, q, 9);
+        // 布局是 {a, c, e, b, d, f}（x' = a*x + c*y + e；y' = b*x + d*y + f）
+        const float identity[6] = { 1, 0, 0, 0, 1, 0 };
+        CHECK(BuildRoundedLayerQuadsXf(L, t, identity, x, 9) == n, "v49: 仿射单位变换块数一致");
+        int same = 0;
+        for (int i = 0; i < n; i++) {
+            const float expect[8] = { q[i].x, q[i].y, q[i].x + q[i].w, q[i].y,
+                                      q[i].x, q[i].y + q[i].h, q[i].x + q[i].w, q[i].y + q[i].h };
+            const float expectUv[8] = { q[i].u0, q[i].v0, q[i].u1, q[i].v0,
+                                        q[i].u0, q[i].v1, q[i].u1, q[i].v1 };
+            if (std::memcmp(x[i].pos, expect, sizeof(expect)) == 0 &&
+                std::memcmp(x[i].uv, expectUv, sizeof(expectUv)) == 0)
+                ++same;
+        }
+        CHECK(same == n, "v49: 单位仿射的四角/UV 与轴对齐逐位相同");
+        const float shift[6] = { 1, 0, 5, 0, 1, 7 };
+        BuildRoundedLayerQuadsXf(L, t, shift, x, 9);
+        CHECK_NEAR(x[0].pos[0], q[0].x + 5.0f, 1e-6, "v49: 仿射平移作用在四角 x 上");
+        CHECK_NEAR(x[0].pos[1], q[0].y + 7.0f, 1e-6, "v49: 仿射平移作用在四角 y 上");
+        CHECK_NEAR(x[0].uv[0], q[0].u0, 1e-6, "v49: 仿射不改 UV");
+        const float scale[6] = { 2, 0, 0, 0, 2, 0 };
+        BuildRoundedLayerQuadsXf(L, t, scale, x, 9);
+        CHECK_NEAR(x[0].pos[2], (q[0].x + q[0].w) * 2.0f, 1e-6, "v49: 仿射缩放作用在四角上");
+    }
+    return g_fail;
+}
+
 }  // namespace suite_paint
 
 // ---------------------------------------------------------------------------
@@ -5490,6 +5580,7 @@ int main() {
     fails += suite_renderer::run();
     fails += suite_renderer_real::run();
     fails += suite_paint::run();
+    fails += suite_paint::RunRoundedLayers();
     fails += suite_anim::run();
     fails += suite_hot_reload::run();
     fails += suite_hover_dirty::run();

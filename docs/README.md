@@ -8,6 +8,8 @@
 | [app_layout.md](app_layout.md) | **应用散装形态**：exe 真实路径解析、UI 文件 6 级查找顺序、`src` 相对规则、`.bex` 容器的映射契约 |
 | [startup.md](startup.md) | **启动耗时实测**：`BINUI_STARTUP`/`BINUI_STARTUP_FILE`/`BINUI_FRAME_EXIT` 三个探针怎么用、本机 660 ms 到首帧的逐段归属（binUI 自己只占 ~35 ms，其余是建窗/GL 上下文/首次 SwapBuffers 的一次性系统与驱动成本）、以及"用 PowerShell 重定向 stderr 量启动会凭空多 3 秒"这个坑 |
 | [components.md](components.md) | **组件化**：`<use src="x.bum.html">` 编译期内联、参数/合并/CSS 作用域规则、`.bum` 二进制与运行时挂载、目录结构 |
+| [migrate-to-bin2d.md](migrate-to-bin2d.md) | **把绘制数学迁到 bin2d 的台账**：P1（覆盖率导出）→ P2/P2b（填充/描边换源）→ P3（圆角模板 + 三端圆角图层计划，0.25.0 完成）→ P4/P5 剩余、每步的验收线、删除条件与回滚 |
+| [p3b-plan.md](p3b-plan.md) | P3 第二半的**决策记录**（已实施，0.25.0）：三端重复块台账、共享 API 提案、分步与风险；行号已过期，结论见 CHANGELOG |
 | [svg.md](svg.md) | **SVG 支持（P1 已实现）**：现状实测、`BINUI_PATH` 节点 + v15 路径段的格式、编译期 viewBox/变换/继承、三端共用扫描线填充、四阶段拆分与验收 |
 | [vulkan.md](vulkan.md) | **Vulkan 后端调研（结论：现在 NO-GO）**：本机实测（loader 1.4.341 / RTX 4060 Ti）、三份节点遍历的重复（749/694/530 行）与 `IBinUIGfx` 抽取方案、Windows 独立翻转对 GL/Vulkan 同样生效、透明窗口只能读回、局部重绘必须用持久累积帧、原语映射表、20~30 人日估算、GO/NO-GO 条件 |
 | [vulkan_design.md](vulkan_design.md) | **Vulkan 后端设计（P1~P5）**：六条后端契约、`IBinUIGfx` 接口全文与三份遍历的合并步骤、Vulkan 模块/同步模型/交换链协商表、字节序与色卡验收线、三路 present、鲁棒性清单、12~17 人日时间线与回滚点；P3 落地记录（共享字形图集、帧内上传、`vkCmdClearColorImage` 陷阱、14 个用例的 VK↔GL↔GDI 三方 diff 表）见 §5.9；P2b 窗口/交换链/三路 present 见 §5.10；P4 鲁棒性压测见 §6.1；P5 共享窗口外壳与 `GPU=vk` 见 §7.1 |

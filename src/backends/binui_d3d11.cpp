@@ -1901,36 +1901,21 @@ void BinUID3D::fillLine(float x0, float y0, float x1, float y1, float width, uin
 
 void BinUID3D::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    // v0.11.8：几何半径用浮点（缩放动画里半径要跟着连续变），角片模板仍取最近的整数。
-    // 圆/胶囊在缩放时如果半径取整，2r 与 w 会周期性错开 1px，中间几块在 0/1/2px 之间跳。
-    float c = std::min(radius, std::min(w, h) * 0.5f);
-    if (c <= 0.0f) { fillRect(x, y, w, h, color); return; }
-
-    const int r = std::max(1, static_cast<int>(std::lround(c)));
-    RoundTex& rt = impl_->roundFor(r, false);
+    // v0.25.0：UV 与九宫格划分不再手抄 —— 走 binui_paint.h 的同一份几何（以前这里
+    // 有 66 行与共用实现逐字重复的数学，任何一边改了都没机制保证另一端跟上）。
+    RoundedLayer L;
+    if (!BuildRoundedLayer(x, y, w, h, radius, false, 0, L)) { fillRect(x, y, w, h, color); return; }
+    RoundTex& rt = impl_->roundFor(L.tileRadius, false);
     if (!rt.srv) { fillRect(x, y, w, h, color); return; }
-
-    float t = static_cast<float>(rt.t);
-    float cu = c / t;
-    float strip0 = 0.5f;
-    float strip1 = 0.5f + 1.0f / t;
-
+    PaintQuad q[9];
+    const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
+    if (n <= 0) { fillRect(x, y, w, h, color); return; }
     Premult(color);
     impl_->curLinear = 1;
     impl_->curSrv = rt.srv;
-    auto quad = [&](float qx, float qy, float qw, float qh,
-                    float u0, float v0, float u1, float v1) {
-        impl_->emitQuad(qx, qy, qx + qw, qy + qh, u0, v0, u1, v1, color);
-    };
-    quad(x, y, c, c, 0, 0, cu, cu);
-    quad(x + w - c, y, c, c, 1 - cu, 0, 1, cu);
-    quad(x, y + h - c, c, c, 0, 1 - cu, cu, 1);
-    quad(x + w - c, y + h - c, c, c, 1 - cu, 1 - cu, 1, 1);
-    quad(x + c, y, w - 2 * c, c, strip0, 0, strip1, cu);
-    quad(x + c, y + h - c, w - 2 * c, c, strip0, 1 - cu, strip1, 1);
-    quad(x, y + c, c, h - 2 * c, 0, strip0, cu, strip1);
-    quad(x + w - c, y + c, c, h - 2 * c, 1 - cu, strip0, 1, strip1);
-    quad(x + c, y + c, w - 2 * c, h - 2 * c, strip0, strip0, strip1, strip1);
+    for (int i = 0; i < n; i++)
+        impl_->emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
+                        q[i].u0, q[i].v0, q[i].u1, q[i].v1, color);
     impl_->curLinear = 0;
     impl_->curSrv = impl_->whiteSrv;
 }
@@ -1940,58 +1925,35 @@ void BinUID3D::fillRounded(float x, float y, float w, float h, float radius, uin
 void BinUID3D::fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
                              uint32_t color, const float xf[6]) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    const float rf = std::min(radius, std::min(w, h) * 0.5f);
-    const int layers = stroke ? std::max(1, static_cast<int>(std::lround(std::max(1.0f, thickness))))
-                              : 1;
-    auto xform = [&](float lx, float ly, float* out) {
-        out[0] = xf[0] * lx + xf[1] * ly + xf[2];
-        out[1] = xf[3] * lx + xf[4] * ly + xf[5];
-    };
+    const int layers = RoundedLayerCount(w, h, radius, stroke, thickness);
     Premult(color);
     impl_->curLinear = 1;
     int emitted = 0;
-    for (int k = 0; k < layers; k++) {
-        const float lx = static_cast<float>(k), ly = static_cast<float>(k);
-        const float lw = w - 2.0f * k, lh = h - 2.0f * k;
-        if (lw <= 1.0f || lh <= 1.0f) break;
-        const float rk = rf - static_cast<float>(k);
-        if (rk <= 0.0f) break;
-        const int rri = std::max(1, static_cast<int>(std::lround(rk)));
-        RoundTex& rt = impl_->roundFor(rri, stroke);
+    for (int k = 0; k < layers; ++k) {
+        RoundedLayer L;
+        if (!BuildRoundedLayer(0.0f, 0.0f, w, h, radius, stroke, k, L)) break;
+        RoundTex& rt = impl_->roundFor(L.tileRadius, stroke);
         if (!rt.srv) break;
-        const float t = static_cast<float>(rt.t);
-        const float cu = rk / t;
-        const float strip0 = 0.5f;
-        const float strip1 = 0.5f + 1.0f / t;
-        const float c = rk;
+        RoundedQuadXf q[9];
+        const int n = BuildRoundedLayerQuadsXf(L, rt.t, xf, q, 9);
+        if (n <= 0) break;
         impl_->curSrv = rt.srv;
-        auto quad = [&](float lqx, float lqy, float lqw, float lqh,
-                        float u0, float v0, float u1, float v1) {
-            if (lqw <= 0.0f || lqh <= 0.0f) return;
-            const float corners[8] = { lqx, lqy, lqx + lqw, lqy,
-                                       lqx, lqy + lqh, lqx + lqw, lqy + lqh };
-            const float uv[8] = { u0, v0, u1, v0, u0, v1, u1, v1 };
-            float sp[8];
-            for (int v = 0; v < 4; v++) xform(corners[v * 2], corners[v * 2 + 1], sp + v * 2);
-            impl_->emitQuadUV(sp, uv, color);
+        for (int i = 0; i < n; i++) {
+            impl_->emitQuadUV(q[i].pos, q[i].uv, color);
             emitted++;
-        };
-        quad(lx, ly, c, c, 0, 0, cu, cu);
-        quad(lx + lw - c, ly, c, c, 1 - cu, 0, 1, cu);
-        quad(lx, ly + lh - c, c, c, 0, 1 - cu, cu, 1);
-        quad(lx + lw - c, ly + lh - c, c, c, 1 - cu, 1 - cu, 1, 1);
-        quad(lx + c, ly, lw - 2 * c, c, strip0, 0, strip1, cu);
-        quad(lx + c, ly + lh - c, lw - 2 * c, c, strip0, 1 - cu, strip1, 1);
-        quad(lx, ly + c, c, lh - 2 * c, 0, strip0, cu, strip1);
-        quad(lx + lw - c, ly + c, c, lh - 2 * c, 1 - cu, strip0, 1, strip1);
-        quad(lx + c, ly + c, lw - 2 * c, lh - 2 * c, strip0, strip0, strip1, strip1);
+        }
     }
     if (emitted == 0) {
         const float corners[8] = { 0, 0, w, 0, 0, h, w, h };
-        const float uv[8] = { 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f, 0.5f };
-        float sp[8];
-        for (int v = 0; v < 4; v++) xform(corners[v * 2], corners[v * 2 + 1], sp + v * 2);
-        impl_->emitQuadUV(sp, uv, color);
+        RoundedQuadXf q;
+        for (int v = 0; v < 4; v++) {
+            const float lx = corners[v * 2], ly = corners[v * 2 + 1];
+            q.pos[v * 2] = xf[0] * lx + xf[1] * ly + xf[2];
+            q.pos[v * 2 + 1] = xf[3] * lx + xf[4] * ly + xf[5];
+            q.uv[v * 2] = 0.5f;
+            q.uv[v * 2 + 1] = 0.5f;
+        }
+        impl_->emitQuadUV(q.pos, q.uv, color);
     }
     impl_->curLinear = 0;
     impl_->curSrv = impl_->whiteSrv;
@@ -2000,46 +1962,23 @@ void BinUID3D::fillRoundedXf(float w, float h, float radius, bool stroke, float 
 void BinUID3D::strokeRounded(float x, float y, float w, float h, float radius,
                              float thickness, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    // v0.11.8：几何半径用浮点（缩放动画要连续），模板按最近整数取
-    const float rf = std::min(radius, std::min(w, h) * 0.5f);
-    if (rf <= 0.0f) { fillRect(x, y, w, h, color); return; }
-
-    // 线宽：不再丢弃 thickness —— stroke 纹理是 1px 环，按厚度画同心层叠出粗描边
-    // （GL 后端同款做法，保证"2px 编辑环"三端一致）。
-    int layers = static_cast<int>(std::lround(std::max(1.0f, thickness)));
-    if (layers < 1) layers = 1;
-
+    // 模板是 1px 环，粗描边 = 同心环叠层；层数与几何来自 binui_paint.h（v0.25.0 三端同源）
+    const int layers = RoundedLayerCount(w, h, radius, true, thickness);
+    if (layers <= 0) { fillRect(x, y, w, h, color); return; }
     Premult(color);
     impl_->curLinear = 1;
-    for (int k = 0; k < layers; k++) {
-        const float ex = x + k, ey = y + k;
-        const float ew = w - 2.0f * k, eh = h - 2.0f * k;
-        if (ew <= 1.0f || eh <= 1.0f) break;
-        const float cr = std::min(rf - static_cast<float>(k), std::min(ew, eh) * 0.5f);
-        if (cr <= 0.0f) break;
-        const int rr = std::max(1, static_cast<int>(std::lround(cr)));
-        RoundTex& rt = impl_->roundFor(rr, true);
+    for (int k = 0; k < layers; ++k) {
+        RoundedLayer L;
+        if (!BuildRoundedLayer(x, y, w, h, radius, true, k, L)) break;
+        RoundTex& rt = impl_->roundFor(L.tileRadius, true);
         if (!rt.srv) break;
-
-        const float t = static_cast<float>(rt.t);
-        const float cu = cr / t;
-        const float strip0 = 0.5f;
-        const float strip1 = 0.5f + 1.0f / t;
-        const float c = cr;
+        PaintQuad q[9];
+        const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
+        if (n <= 0) break;
         impl_->curSrv = rt.srv;
-        auto quad = [&](float qx, float qy, float qw, float qh,
-                        float u0, float v0, float u1, float v1) {
-            impl_->emitQuad(qx, qy, qx + qw, qy + qh, u0, v0, u1, v1, color);
-        };
-        quad(ex, ey, c, c, 0, 0, cu, cu);
-        quad(ex + ew - c, ey, c, c, 1 - cu, 0, 1, cu);
-        quad(ex, ey + eh - c, c, c, 0, 1 - cu, cu, 1);
-        quad(ex + ew - c, ey + eh - c, c, c, 1 - cu, 1 - cu, 1, 1);
-        quad(ex + c, ey, ew - 2 * c, c, strip0, 0, strip1, cu);
-        quad(ex + c, ey + eh - c, ew - 2 * c, c, strip0, 1 - cu, strip1, 1);
-        quad(ex, ey + c, c, eh - 2 * c, 0, strip0, cu, strip1);
-        quad(ex + ew - c, ey + c, c, eh - 2 * c, 1 - cu, strip0, 1, strip1);
-        quad(ex + c, ey + c, ew - 2 * c, eh - 2 * c, strip0, strip0, strip1, strip1);
+        for (int i = 0; i < n; i++)
+            impl_->emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
+                            q[i].u0, q[i].v0, q[i].u1, q[i].v1, color);
     }
     impl_->curLinear = 0;
     impl_->curSrv = impl_->whiteSrv;
