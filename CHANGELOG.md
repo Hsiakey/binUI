@@ -5,6 +5,49 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.34.5] - 2026-11-20 【格式 v34 不变】
+
+**圆角边框的锯齿：等宽边框的快路以前只放行 1px，2px 以上一直走"逐行矩形拼"。**
+
+### 现象与成因
+
+`border: 3px solid` 这类粗边框在圆角弧上是**一格一格的台阶**（master 指出的锯齿）。
+原因是 `binui_draw_nodes.h` 里那条快路写死成 `bw[0..3] == 1`：
+
+- 1px 等宽 → 走 `strokeRounded`（九宫格环，解析式 AA）；
+- 其余全部（2/3/4/6px…）→ 走 `BuildBorderBands`：**逐行生成轴对齐矩形**，
+  每行一个 `fillRect`，而 `fillRect` 是按像素中心一刀切的硬边 —— 于是 45° 处就是台阶。
+
+上一轮（bin2D 0.20.0）整圈环带模板出来之后，任意厚度都能一次九宫格画完，
+所以这条快路可以放开。
+
+### 改法
+
+```cpp
+// 以前：uniform1px（只放行 1px）
+// 现在：等宽 + 同色 + 厚度不超过圆角 → 走 strokeRounded（任意厚度）
+if (uniformBorder && effRadius > 0.5f && bw[0] <= effRadius)
+    gfx.strokeRounded(x, y, nw, nh, effRadius, bw[0], borderColor[0]);
+```
+
+厚度**超过**圆角时仍走逐行条带：环带模板的角片只有 r 宽，再厚九宫格的中段会采样错
+（宁可粗糙，也不要画错宽度）。
+
+### 验收
+
+| 门禁 | 结果 |
+|---|---|
+| `make pixels`（GL 自回归） | 只有 `image-round` 变（225 像素，全是那两张粗边框卡片的环）→ 基准图重生 |
+| `make pixels-vk`（VK vs GL） | **0 不同像素**，容差口径 0.00% |
+| `make pixels-d3d11`（D3D11 vs GL） | **0 不同像素** |
+| `make pixels-bin2d` | 同样只有 `image-round` 变（218 像素，同一批像素）→ 基准图重生后容差 0 全过 |
+| 自带测试套件 | 全过 |
+
+顺带记一个**流程坑**（这轮踩了一次）：`make`（默认目标）**不构建 tools**，所以改完
+`binui_draw_nodes.h` 之后直接跑 `gl_shot` 用的是**上一次链接**的二进制 —— 头一次验证
+时渲染结果字节相同，其实我改的代码根本没进那个 exe。核验办法：`make tools` 之后看
+`build-mingw/bin/gl_shot.exe` 的时间戳是否新于 `build-mingw/binui_gl.o`。
+
 ## [0.34.4] - 2026-11-20 【格式 v34 不变】
 
 **圆角统一到"CPU 光栅那一套"（master 定），三端 GPU 后端 + 基准图随之更新。**

@@ -1093,20 +1093,26 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
                                       ptBord->borderColor[0], xf);
                     return;
                 }
-                // 等宽 1px 边框 + 圆角：走九宫格圆环（有解析式 AA），不用逐行矩形拼。
-                // 逐行拼的条带在 45° 处每行 1.4~2px 宽、且只有亚像素混色没有 AA，
-                // 圆角看起来比直边"更粗更亮"，和旁边 AA 过的填充不搭。
+                // 等宽边框 + 圆角：走九宫格圆环（有解析式 AA），不用逐行矩形拼。
+                // 逐行拼的条带在 45° 处每行 1.4~2px 宽、且没有 AA，圆角看起来是**一格
+                // 一格的台阶**（2px 以上尤其明显 —— 以前这条路只放行 1px，所以粗边框
+                // 一直是台阶）。
+                // v0.34.5：整圈环带模板出来了，任意厚度都能一次九宫格画完，这条快路
+                // 放开到"等宽、同色、厚度不超过圆角"的全部情况。
                 const uint8_t* bw = pt->borderW;
-                const bool uniform1px = bw[0] == 1 && bw[1] == 1 && bw[2] == 1 && bw[3] == 1 &&
-                                        ptBord->borderColor[0] == ptBord->borderColor[1] &&
-                                        ptBord->borderColor[0] == ptBord->borderColor[2] &&
-                                        ptBord->borderColor[0] == ptBord->borderColor[3];
-                if (uniform1px && effRadius > 0.5f) {
-                    // 圆角走九宫格圆环（解析式 AA）：弧线是渐变而不是 1px 一格的台阶，
-                    // 直边段模板覆盖率已修成满值，颜色和作者给的一致。
+                const bool uniformBorder = bw[0] >= 1 && bw[0] == bw[1] && bw[0] == bw[2] &&
+                                           bw[0] == bw[3] &&
+                                           ptBord->borderColor[0] == ptBord->borderColor[1] &&
+                                           ptBord->borderColor[0] == ptBord->borderColor[2] &&
+                                           ptBord->borderColor[0] == ptBord->borderColor[3];
+                // 厚度不能超过圆角：环带模板的角片只有 r 宽，再厚九宫格的中段就会采样错。
+                // 超过时仍走逐行条带（宁可粗糙，也不要画错宽度）。
+                if (uniformBorder && effRadius > 0.5f &&
+                    static_cast<float>(bw[0]) <= static_cast<float>(effRadius)) {
                     gfx.strokeRounded(static_cast<float>(x), static_cast<float>(y),
                                       static_cast<float>(nw), static_cast<float>(nh),
-                                      static_cast<float>(effRadius), 1.0f, ptBord->borderColor[0]);
+                                      static_cast<float>(effRadius),
+                                      static_cast<float>(bw[0]), ptBord->borderColor[0]);
                     return;
                 }
                 binui::PaintBand bb[binui::kMaxBorderBands];
