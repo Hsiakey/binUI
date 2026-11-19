@@ -89,14 +89,21 @@ binUI 只剩一条路：`binUI ──► bin2d（+bin3d）──► binGPU ─�
 
 第 3 步仍然卡在第 1 步：bin2d 的 GPU 执行模式没做完之前删掉那三份实现，等于把
 GPU 绘制能力直接扔掉（CPU 光栅 9 ms/帧装不下一个刷新周期）。
-### 还量出来一件事：bin2d 内部有**两套**圆角 AA 定义
+### 圆角 AA 已经统一了（0.34.4，master 2026-11-20 定"用质量最好的那一套"）
 
 | 路径 | AA 做法 | 谁在用 |
 |---|---|---|
-| `Canvas::fillRounded` | 8 子采样扫描线 | binUI 的 bin2d 后端、离屏出图 |
-| `RasterizeRoundedTileCoverage` | 解析 SDF | binUI 的 GL / VK / D3D11 三端 |
+| `Canvas::fillRounded` | 8 子采样扫描线 | binUI 的 bin2d 后端、离屏出图 —— **唯一的一份** |
+| `RasterizeRoundedTileCoverage` | ~~解析 SDF~~ → **调上面那份扫描线**（0.20.0） | binUI 的 GL / VK / D3D11 三端 |
 
-同一个圆角矩形的弧边差到 **48 个电平**。一直没被发现，是因为两个 golden 是分开的
+以前同一个圆角矩形的弧边差到 **48 个电平**，一直没被发现，是因为两个 golden 是分开的
 （`docs/pixels` 对 GL、`tests/pixels-bin2d` 对 bin2d 后端），**"逐像素相同"从来没跨过
-实现比**。这是"换执行体不换像素"这条原则在 bin2d 自己体内就漏掉的一处 ——
-统一到哪一套会改像素（弧边变软/变硬），需要单独批准。
+实现比**。0.20.0 把模板内容换成 CPU 光栅自己的扫描线覆盖率之后：
+
+- bin2d 的 `test_raster` 钉住"角片与 `Canvas::fillRounded` 逐像素相同（r=1..40）"，**max 0**；
+- bin2d 的 `test_gpu_bridge` 钉住"九宫格 vs 直填"，四端 **max 0**；
+- binUI 侧 `make pixels-bin2d` 一个像素没动（语义没变），而 GL 的基准图按新实现重生成了。
+
+**仍未统一的一处**：盒子落在小数像素上时，位图模板（整像素相位）与连续相位的扫描线
+仍会差 —— 实测 `box(8.5,8.5)` 差 416 像素、最大 119。这不是"两套定义"，是模板这个
+表示方式的固有代价，要消掉得让模板带相位（每 1/8 像素一张，或用 SDF+导数着色器）。

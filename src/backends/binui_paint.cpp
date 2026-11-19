@@ -226,4 +226,17 @@ int BuildRoundedTileRGBA(int radius, bool stroke, uint32_t* out) {
     return t;
 }
 
+int BuildRoundedRingRGBA(int radius, int thickness, uint32_t* out) {
+    const int t = RoundTemplateSize(radius);
+    if (!out || t <= 0) return 0;
+    bin2d::CoverageRect& cov = ThreadCoverage();
+    if (!bin2d::RasterizeRoundedRingCoverage(radius, static_cast<float>(thickness), cov)) return 0;
+    if (cov.w != t || cov.h != t) return 0;
+    for (int i = 0; i < t * t; i++) {
+        const uint32_t lum = cov.v[static_cast<size_t>(i)];
+        out[i] = (lum << 24) | (lum << 16) | (lum << 8) | lum;
+    }
+    return t;
+}
+
 } // namespace binui

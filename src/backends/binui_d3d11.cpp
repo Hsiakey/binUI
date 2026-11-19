@@ -514,9 +514,13 @@ struct BinUID3D::Impl {
         return true;
     }
 
-    RoundTex& roundFor(int radius, bool stroke) {
+    RoundTex& roundFor(int radius, bool stroke) { return roundForThick(radius, stroke ? 1 : 0); }
+    // 模板键：thickness == 0 = 填充模板；> 0 = 该厚度的整圈环带模板
+    RoundTex& roundForThick(int radius, int thickness) {
         int r = std::max(1, radius);
-        int key = stroke ? -r : r;
+        int th = thickness < 0 ? 0 : thickness;
+        if (th > r) th = r;
+        int key = th * 256 + r;
         auto it = rounds.find(key);
         if (it != rounds.end()) {
             it->second.lastUse = ++roundClock;
@@ -533,9 +537,12 @@ struct BinUID3D::Impl {
         }
         memset(rasterBits, 0, static_cast<size_t>(t) * t * 4);
 
-        // 模板内容来自 bin2d（v0.23.0）：三端以前各写一份同样的解析式距离循环，
-        // 现在只有 bin2d 里那一份（`RasterizeRoundedTileCoverage`，0.7.0）。
-        if (BuildRoundedTileRGBA(r, stroke, static_cast<uint32_t*>(rasterBits)) != t) {
+        // 模板内容来自 bin2d：v0.20.0 起不再是解析距离场，而是 **CPU 光栅自己的
+        // 扫描线覆盖率**；th > 0 时是整圈环带模板（粗描边不再叠同心环）。
+        const int built = (th == 0)
+                              ? BuildRoundedTileRGBA(r, false, static_cast<uint32_t*>(rasterBits))
+                              : BuildRoundedRingRGBA(r, th, static_cast<uint32_t*>(rasterBits));
+        if (built != t) {
             std::fprintf(stderr, "[d3d11] roundFor: 圆角模板生成失败 (%dx%d)\n", t, t);
             return emptyRound_;
         }
@@ -1969,24 +1976,44 @@ void BinUID3D::fillRoundedXf(float w, float h, float radius, bool stroke, float 
 void BinUID3D::strokeRounded(float x, float y, float w, float h, float radius,
                              float thickness, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    // 模板是 1px 环，粗描边 = 同心环叠层；层数与几何来自 binui_paint.h（v0.25.0 三端同源）
-    const int layers = RoundedLayerCount(w, h, radius, true, thickness);
-    if (layers <= 0) { fillRect(x, y, w, h, color); return; }
+    // v0.34.4：**一整圈环带模板 + 一次九宫格**，不再叠同心 1px 环（叠层在弧上会
+    // 丢掉约 40% 的覆盖率，肉眼是"发灰发断"）。模板几何与 bin2d 的 strokePath 同一条。
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    if (rf <= 0.0f) {
+        const float t = thickness;
+        fillRect(x, y, w, t, color);
+        fillRect(x, y + h - t, w, t, color);
+        if (h - 2.0f * t > 0.0f) {
+            fillRect(x, y + t, t, h - 2.0f * t, color);
+            fillRect(x + w - t, y + t, t, h - 2.0f * t, color);
+        }
+        return;
+    }
+    int th = static_cast<int>(std::lround(std::max(1.0f, thickness)));
+    const int tileRadius = std::max(1, static_cast<int>(std::lround(rf)));
+    if (th > tileRadius) th = tileRadius;
+    RoundTex& rt = impl_->roundForThick(tileRadius, th);
+    if (!rt.srv) {
+        fillRect(x, y, w, thickness, color);
+        fillRect(x, y + h - thickness, w, thickness, color);
+        return;
+    }
+    RoundedLayer L;
+    L.x = x;
+    L.y = y;
+    L.w = w;
+    L.h = h;
+    L.r = rf;
+    L.tileRadius = tileRadius;
+    PaintQuad q[9];
+    const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
+    if (n <= 0) return;
     Premult(color);
     impl_->curLinear = 1;
-    for (int k = 0; k < layers; ++k) {
-        RoundedLayer L;
-        if (!BuildRoundedLayer(x, y, w, h, radius, true, k, L)) break;
-        RoundTex& rt = impl_->roundFor(L.tileRadius, true);
-        if (!rt.srv) break;
-        PaintQuad q[9];
-        const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
-        if (n <= 0) break;
-        impl_->curSrv = rt.srv;
-        for (int i = 0; i < n; i++)
-            impl_->emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
-                            q[i].u0, q[i].v0, q[i].u1, q[i].v1, color);
-    }
+    impl_->curSrv = rt.srv;
+    for (int i = 0; i < n; i++)
+        impl_->emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
+                        q[i].u0, q[i].v0, q[i].u1, q[i].v1, color);
     impl_->curLinear = 0;
     impl_->curSrv = impl_->whiteSrv;
 }

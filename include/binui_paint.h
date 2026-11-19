@@ -1264,6 +1264,17 @@ inline int RoundTemplateSize(int radius) {
 // src/backends/binui_paint.cpp（唯一依赖 bin2d 的翻译单元）。
 int BuildRoundedTileRGBA(int radius, bool stroke, uint32_t* out);
 
+// **整圈环带**模板（v0.34.4）：厚度 thickness 的抗锯齿圆角环，一次九宫格画完。
+//
+// 为什么要它：粗描边以前是"同心 1px 环叠层"（`RoundedLayerCount` / `BuildRoundedLayer`）。
+// 那套做法在**直边**上是精确的，但弧上不是 —— 相邻两层的抗锯齿边各贡献约一半覆盖率，
+// 源覆盖叠加两次得到 0.5 + 0.5×0.5 = 0.75，于是弧上的带子只有直边的约 60% 亮度
+// （实测覆盖总量 2.56 vs 4.53），肉眼是"发灰发断"。
+//
+// 内容来自 `bin2d::RasterizeRoundedRingCoverage`（几何与 `Canvas::strokePath` 完全同一条），
+// 所以 GPU 三端与 bin2d 的 CPU 光栅画出来的是同一圈环。前提 thickness <= radius。
+int BuildRoundedRingRGBA(int radius, int thickness, uint32_t* out);
+
 // 把圆角矩形拆成九个轴对齐块（四角 + 四边中段 + 中心）。返回块数；
 // 0 = 半径无效，调用方应退回 fillRect。t 必须是 RoundTemplateSize(radius)。
 inline int BuildRoundedNineSlice(float x, float y, float w, float h, float radius, int t,

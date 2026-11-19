@@ -1003,9 +1003,14 @@ struct BinUIGL::Impl {
     // 圆角模板（九宫格）：把"圆弧紧贴边"的圆角矩形光栅化到临时 DIB，再传成纹理。
     // 模板边长 RoundTemplateSize(r) = 2r+4：角片只采样 [0,r]（圆弧的包围盒），
     // 末尾 4px 是直边段，供九宫格中段取一个实心像素。
-    RoundTex& roundFor(int radius, bool stroke) {
+    RoundTex& roundFor(int radius, bool stroke) { return roundForThick(radius, stroke ? 1 : 0); }
+    // 模板键：thickness == 0 = 填充模板；> 0 = 该厚度的整圈环带模板。
+    // 同一个半径下 1px / 2px / 3px 是三张不同的覆盖率位图，键里必须带厚度。
+    RoundTex& roundForThick(int radius, int thickness) {
         int r = std::max(1, radius);
-        int key = stroke ? -r : r;
+        int th = thickness < 0 ? 0 : thickness;
+        if (th > r) th = r;                 // 带宽不能超过角片
+        int key = th * 256 + r;
         auto it = rounds.find(key);
         if (it != rounds.end()) {
             it->second.lastUse = ++roundClock_;
@@ -1021,11 +1026,14 @@ struct BinUIGL::Impl {
         }
         memset(rasterBits, 0, static_cast<size_t>(t) * t * 4);
 
-        // 模板内容来自 bin2d（v0.23.0）：三端以前各写一份同样的解析式距离循环，
-        // 现在只有 bin2d 里那一份（`RasterizeRoundedTileCoverage`，0.7.0）。
-        // 形状铺满整个模板 [0,t] → 圆弧包围盒正好是 [0,r]，角片边长与弧长严格对应，
-        // 半径到短边一半时四角才能无缝拼成圆/胶囊。
-        if (BuildRoundedTileRGBA(r, stroke, static_cast<uint32_t*>(rasterBits)) != t) {
+        // 模板内容来自 bin2d（v0.23.0 / v0.34.4）：三端以前各写一份同样的解析式距离循环，
+        // 现在只有 bin2d 里那一份。**0.20.0 起那份内容不再是有符号距离场，而是
+        // CPU 光栅自己的扫描线覆盖率** —— 于是 GPU 三端与 bin2d 的 CPU 光栅
+        // 画出来的是同一批像素，不再是"两套看起来差不多的 AA"。
+        const int built = (th == 0)
+                              ? BuildRoundedTileRGBA(r, false, static_cast<uint32_t*>(rasterBits))
+                              : BuildRoundedRingRGBA(r, th, static_cast<uint32_t*>(rasterBits));
+        if (built != t) {
             std::fprintf(stderr, "[gl] roundFor: 圆角模板生成失败 (%dx%d)\n", t, t);
             return emptyRound_;
         }
@@ -1774,24 +1782,47 @@ void BinUIGL::fillRounded(float x, float y, float w, float h, float radius, uint
 void BinUIGL::strokeRounded(float x, float y, float w, float h, float radius,
                             float thickness, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
-    // 模板是 1px 环，粗描边 = 同心环叠层（每层往里缩 1px、半径减 1）。
-    // 层数与每层几何都来自 binui_paint.h —— 以前三端各写一份，VK 那份还丢了 thickness。
-    const int layers = RoundedLayerCount(w, h, radius, true, thickness);
-    if (layers <= 0) { fillRect(x, y, w, h, color); return; }
-    Premult(color);
-    for (int k = 0; k < layers; ++k) {
-        RoundedLayer L;
-        if (!BuildRoundedLayer(x, y, w, h, radius, true, k, L)) break;
-        RoundTex& rt = impl_->roundFor(L.tileRadius, true);
-        if (!rt.tex) break;
-        PaintQuad q[9];
-        const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
-        if (n <= 0) break;
-        impl_->curTex = rt.tex;
-        for (int i = 0; i < n; i++)
-            impl_->emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
-                            q[i].u0, q[i].v0, q[i].u1, q[i].v1, color);
+    // v0.34.4：**一整圈环带模板 + 一次九宫格**，不再叠同心 1px 环。
+    // 叠层在直边上是对的，弧上会丢掉约 40% 的覆盖率（相邻两层的抗锯齿边各贡献
+    // 约一半，源覆盖叠加两次 = 0.5 + 0.5×0.5 = 0.75），肉眼就是"发灰发断"。
+    // 新模板的几何与 bin2d 的 `Canvas::strokePath` 完全同一条（内缩 t/2 + 居中描边 t）。
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    if (rf <= 0.0f) {
+        // 半径退化：直角四条边（与 bin2d 的 strokePath 直角分支同一套）
+        const float t = thickness;
+        fillRect(x, y, w, t, color);
+        fillRect(x, y + h - t, w, t, color);
+        if (h - 2.0f * t > 0.0f) {
+            fillRect(x, y + t, t, h - 2.0f * t, color);
+            fillRect(x + w - t, y + t, t, h - 2.0f * t, color);
+        }
+        return;
     }
+    int th = static_cast<int>(std::lround(std::max(1.0f, thickness)));
+    const int tileRadius = std::max(1, static_cast<int>(std::lround(rf)));
+    if (th > tileRadius) th = tileRadius;
+    RoundTex& rt = impl_->roundForThick(tileRadius, th);
+    if (!rt.tex) {
+        // 模板起不来：退回矩形四条边，别让边框凭空消失
+        fillRect(x, y, w, thickness, color);
+        fillRect(x, y + h - thickness, w, thickness, color);
+        return;
+    }
+    RoundedLayer L;
+    L.x = x;
+    L.y = y;
+    L.w = w;
+    L.h = h;
+    L.r = rf;
+    L.tileRadius = tileRadius;
+    PaintQuad q[9];
+    const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
+    if (n <= 0) return;
+    Premult(color);
+    impl_->curTex = rt.tex;
+    for (int i = 0; i < n; i++)
+        impl_->emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
+                        q[i].u0, q[i].v0, q[i].u1, q[i].v1, color);
     impl_->curTex = impl_->whiteTex;
 }
 

@@ -2005,14 +2005,19 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     }
 
     // 建模板：现在可以在帧内直接建（上传走命令缓冲）
-    void buildRound(int radius, bool stroke) {
+    void buildRound(int radius, int thickness) {
         const int r = std::max(1, radius);
-        const int key = stroke ? -r : r;
+        int th = thickness < 0 ? 0 : thickness;
+        if (th > r) th = r;
+        const int key = th * 256 + r;
         const int t = RoundTemplateSize(r);
         std::vector<uint32_t> px(static_cast<size_t>(t) * t);
-        // 模板内容来自 bin2d（v0.23.0）：三端以前各写一份同样的解析式距离循环，
-        // 现在只有 bin2d 里那一份（`RasterizeRoundedTileCoverage`，0.7.0）。
-        if (BuildRoundedTileRGBA(r, stroke, px.data()) != t) return;
+        // 模板内容来自 bin2d：v0.20.0 起不再是解析距离场，而是 **CPU 光栅自己的
+        // 扫描线覆盖率** —— GPU 三端与 bin2d 的 CPU 光栅因此是同一批像素。
+        // th == 0 是填充模板，th > 0 是那一厚度的整圈环带模板（粗描边不再叠同心环）。
+        const int built = (th == 0) ? BuildRoundedTileRGBA(r, false, px.data())
+                                    : BuildRoundedRingRGBA(r, th, px.data());
+        if (built != t) return;
         auto old = rounds.find(key);
         if (old != rounds.end()) {
             freeTex(old->second.tex);
@@ -2035,12 +2040,16 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         }
     }
 
-    RoundTex& roundFor(int radius, bool stroke) {
+    RoundTex& roundFor(int radius, bool stroke) { return roundForThick(radius, stroke ? 1 : 0); }
+    // 模板键：thickness == 0 = 填充模板；> 0 = 该厚度的整圈环带模板
+    RoundTex& roundForThick(int radius, int thickness) {
         const int r = std::max(1, radius);
-        const int key = stroke ? -r : r;
+        int th = thickness < 0 ? 0 : thickness;
+        if (th > r) th = r;
+        const int key = th * 256 + r;
         auto it = rounds.find(key);
         if (it != rounds.end() && it->second.tex.view) return it->second;
-        buildRound(r, stroke);
+        buildRound(r, th);
         it = rounds.find(key);
         return it != rounds.end() ? it->second : emptyRound();
     }
@@ -4209,23 +4218,45 @@ void BinUIVK::strokeRounded(float x, float y, float w, float h, float radius,
                             float thickness, uint32_t color) {
     Impl& d = *impl_;
     if (!d.ready || w <= 0 || h <= 0 || thickness <= 0) return;
-    // v0.25.0：层数与几何走 binui_paint.h 的共享实现。以前这里**没有多层循环**
-    // （thickness 被丢掉，>1px 也只有 1px），与 GL / D3D11 分岔 —— 现在三端同一份。
-    const int layers = RoundedLayerCount(w, h, radius, true, thickness);
-    if (layers <= 0) { fillRect(x, y, w, h, color); return; }
-    Premult(color);
-    for (int k = 0; k < layers; ++k) {
-        RoundedLayer L;
-        if (!BuildRoundedLayer(x, y, w, h, radius, true, k, L)) break;
-        Impl::RoundTex& rt = d.roundFor(L.tileRadius, true);
-        if (!rt.tex.image) break;
-        PaintQuad q[9];
-        const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
-        if (n <= 0) break;
-        for (int i = 0; i < n; i++)
-            d.emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
-                       q[i].u0, q[i].v0, q[i].u1, q[i].v1, color, &rt.tex);
+    // v0.34.4：**一整圈环带模板 + 一次九宫格**，不再叠同心 1px 环。
+    // 叠层在直边上精确，弧上会丢掉约 40% 的覆盖率（相邻两层各贡献约一半，
+    // 源覆盖叠加两次 = 0.5 + 0.5×0.5 = 0.75），肉眼就是"发灰发断"。
+    // 新模板的几何与 bin2d 的 `Canvas::strokePath` 完全同一条（内缩 t/2 + 居中描边 t）。
+    const float rf = std::min(radius, std::min(w, h) * 0.5f);
+    if (rf <= 0.0f) {
+        // 半径退化：直角四条边（与 bin2d 的 strokePath 直角分支同一套）
+        const float t = thickness;
+        fillRect(x, y, w, t, color);
+        fillRect(x, y + h - t, w, t, color);
+        if (h - 2.0f * t > 0.0f) {
+            fillRect(x, y + t, t, h - 2.0f * t, color);
+            fillRect(x + w - t, y + t, t, h - 2.0f * t, color);
+        }
+        return;
     }
+    int th = static_cast<int>(std::lround(std::max(1.0f, thickness)));
+    const int tileRadius = std::max(1, static_cast<int>(std::lround(rf)));
+    if (th > tileRadius) th = tileRadius;
+    Impl::RoundTex& rt = d.roundForThick(tileRadius, th);
+    if (!rt.tex.image) {
+        fillRect(x, y, w, thickness, color);
+        fillRect(x, y + h - thickness, w, thickness, color);
+        return;
+    }
+    RoundedLayer L;
+    L.x = x;
+    L.y = y;
+    L.w = w;
+    L.h = h;
+    L.r = rf;
+    L.tileRadius = tileRadius;
+    PaintQuad q[9];
+    const int n = BuildRoundedLayerQuads(L, rt.t, q, 9);
+    if (n <= 0) return;
+    Premult(color);
+    for (int i = 0; i < n; i++)
+        d.emitQuad(q[i].x, q[i].y, q[i].x + q[i].w, q[i].y + q[i].h,
+                   q[i].u0, q[i].v0, q[i].u1, q[i].v1, color, &rt.tex);
 }
 
 // ---------- 文本 ----------
