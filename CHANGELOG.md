@@ -5,6 +5,60 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.29.0] - 2026-11-19 【格式 v34 不变】
+
+**默认后端就是 bin2d** —— master 那条分层从这一版起是**默认行为**，不再是并列的一条路：
+
+```
+binUI ──► bin2d / bin3d ──► binGPU ──► GL / Vulkan / D3D11
+                                      └► 系统贴屏（无 GPU 时）
+```
+
+三份 GPU 后端没删，但降级成**可选的对照构建**：`-DBINUI_GPU_GL` / `_VK` / `_D3D11`
+（`make demos-vk` / `demos-d3d11`），以及 `make pixels` 那条"像素参考实现"的路。
+理由写在 `src/backends/binui_ui.h` 顶部：binUI 这一层不该再自己拿图形 API ——
+以前圆角/渐变/字形要在三个后端各写一遍，改一处漏两处（VK 的 `strokeRounded` 就漏过
+`thickness`，见 0.25.0）。
+
+### Changed —— 默认后端
+
+- `src/backends/binui_ui.h`：默认分支从 GL 改成 **bin2d**；`-DBINUI_GPU_GL` 变成显式
+  选项（以前是默认）。三个 `-DBINUI_GPU_*` 名字不变，`UiBackend` / `UiApp` 一处切换。
+- `Makefile`：9 个默认示例改成链 `binui_bin2d.o` + `$(BINGPU_LNK)`，产物名**不再带
+  `_2d` 后缀**（`appshow.exe` 而不是 `appshow_2d.exe` —— 用户是要双击那个的）。
+  `make demos-2d` 保留成别名，脚本/文档里那批命令继续可用。
+- `src/binui_c.cpp`：C ABI 的默认后端也从 `BinUIAppGL` 换成 `BinUIApp2D`，
+  `libbinui_c.a` / `binui_c.dll` 的构建依赖与链接跟着改（`Makefile` 两处 + `test_capi`）。
+  C ABI 只用外壳 API 与 `gfx()` 返回的 `IBinUIGfx&`，所以换后端只是换一个类型别名。
+
+### Changed —— 核心库不再依赖任何具体后端
+
+- `include/binui_charts.h` 的 `BinUIChart::draw(BinUIGL&)` → `draw(IBinUIGfx&)`
+  （`LineChart` 只用到 `fillRounded` / `fillLine`，本来就是接口方法）。
+  顺带**去掉了 `#ifdef _WIN32` 分叉** —— 以前非 Windows 构建要靠一个空实现占住
+  vtable 符号；现在核心库在任何平台都不链接图形后端。
+
+### Fixed —— VK / D3D11 的 `filter: blur(Npx)` 在 N < 4 时没糊
+
+- 与 0.28.0 修的 GL 同一处病：降采样链函数在 `levels <= 0` 时**提前 return**，
+  于是 `gaussBlurLevel` 一次都没跑。改成 GL 的判据（链只包 `levels > 0`，
+  高斯留在块外，0 级也跑）。
+- 取证：把 VK 的提前返回临时放回去重渲，**VK vs GL = 17791 像素 (5.735%)，
+  最大通道差 100，26 个连通区域**（正好是页面上那些 blur/阴影块）；修复后 **0**。
+  这个 bug 之所以一直没被跨后端门禁抓到，是因为**三端一起没糊，互比是 0 差异**
+  —— 只有 CPU 参考（bin2d）能照出来。
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| `make all` | 0 warning，默认示例全部链 bin2d |
+| `make test` | 6 个套件全绿（含 `test_shell` 38 项、`test_capi`） |
+| `make pixels`（GL 金标准，19 例） | 通过，`svg-filter` 差异 0 像素 |
+| `make pixels-bin2d`（容差 0） | 18/18 像素一致 |
+| `make pixels-vk` / `pixels-d3d11` | 通过（`svg-filter` 0 像素 / 最大通道差 2） |
+| 真窗口 | 默认 `appshow.exe` 截图：整壳（侧栏/卡片/弹窗/页脚）正常，`present 可阻塞垂直同步=否` 确认走的是 bin2d |
+
 ## [0.28.0] - 2026-11-19 【格式 v34 不变】
 
 **把三份 GPU 后端剩下的能力缺口补齐** —— 0.27.0 之后"bin2d 能当唯一后端"只剩三处

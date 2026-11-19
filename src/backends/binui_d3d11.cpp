@@ -1224,40 +1224,47 @@ struct BinUID3D::Impl {
     int buildChain(float blurPx) {
         const int levels = blurLevelsFor(blurPx);
         int finalLevel = 0;
-        if (levels <= 0) return 0;
-        // 降采样趟的批次矩形必须换成"小图局部"（见下），退出时**务必还原** ——
-        // 不还原的话 scissor 会停在最后那一级的大小上（比如 18×17），之后画的
-        // 文字/图元全被裁在那块里，表现为"模糊元素之后的东西整块消失"。
-        const int savedSc[4] = { scissor[0], scissor[1], scissor[2], scissor[3] };
-        const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-        ctx->OMSetBlendState(blendReplace, bf, 0xFFFFFFFF);
-        for (int i = 1; i <= levels; i++) {
-            const int dw = std::max(1, blurAt(static_cast<size_t>(i - 1)).w / 2);
-            const int dh = std::max(1, blurAt(static_cast<size_t>(i - 1)).h / 2);
-            if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) break;
-            BlurLevel& L = blurAt(static_cast<size_t>(i));
-            ID3D11RenderTargetView* lrt = L.rtv;
-            ctx->OMSetRenderTargets(1, &lrt, nullptr);
-            const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-            ctx->ClearRenderTargetView(lrt, zero);
-            D3D11_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(dw),
-                                  static_cast<float>(dh), 0.0f, 1.0f };
-            ctx->RSSetViewports(1, &vp);
-            float vs[2] = { static_cast<float>(dw), static_cast<float>(dh) };
-            ctx->UpdateSubresource(cb, 0, nullptr, vs, 0, 0);
-            ignoreLayerClip = true;
-            scissor[0] = 0; scissor[1] = 0; scissor[2] = dw; scissor[3] = dh;
-            curSrv = blurAt(static_cast<size_t>(i - 1)).srv;
-            curLinear = 1;
-            emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
-                     0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu);
-            flushAll();
-            ignoreLayerClip = false;
-            finalLevel = i;
+        /* 0.27.2 修（与 GL 同一条）：原来这里写的是 `if (levels <= 0) return 0;` ——
+         * levels 由 PaintFilterBlurLevel 给，blurPx < 4 时是 0，于是这一趟**提前返回**，
+         * 下面的分离高斯一次都没跑：`filter: blur(3px)` / `stdDeviation="3"` 在 D3D11 上
+         * 只是把抓下来的层内容 1:1 拷回去 = 完全没糊。判据是"有没有 σ"，不是"降了几级"：
+         * 降采样链只在 levels > 0 时建，卷积**每一级都要跑，包括 0 级**。 */
+        if (levels > 0) {
+            // 降采样趟的批次矩形必须换成"小图局部"（见下），退出时**务必还原** ——
+            // 不还原的话 scissor 会停在最后那一级的大小上（比如 18×17），之后画的
+            // 文字/图元全被裁在那块里，表现为"模糊元素之后的东西整块消失"。
+            const int savedSc[4] = { scissor[0], scissor[1], scissor[2], scissor[3] };
+            const float bf[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+            ctx->OMSetBlendState(blendReplace, bf, 0xFFFFFFFF);
+            for (int i = 1; i <= levels; i++) {
+                const int dw = std::max(1, blurAt(static_cast<size_t>(i - 1)).w / 2);
+                const int dh = std::max(1, blurAt(static_cast<size_t>(i - 1)).h / 2);
+                if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) break;
+                BlurLevel& L = blurAt(static_cast<size_t>(i));
+                ID3D11RenderTargetView* lrt = L.rtv;
+                ctx->OMSetRenderTargets(1, &lrt, nullptr);
+                const float zero[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                ctx->ClearRenderTargetView(lrt, zero);
+                D3D11_VIEWPORT vp = { 0.0f, 0.0f, static_cast<float>(dw),
+                                      static_cast<float>(dh), 0.0f, 1.0f };
+                ctx->RSSetViewports(1, &vp);
+                float vs[2] = { static_cast<float>(dw), static_cast<float>(dh) };
+                ctx->UpdateSubresource(cb, 0, nullptr, vs, 0, 0);
+                ignoreLayerClip = true;
+                scissor[0] = 0; scissor[1] = 0; scissor[2] = dw; scissor[3] = dh;
+                curSrv = blurAt(static_cast<size_t>(i - 1)).srv;
+                curLinear = 1;
+                emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
+                         0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu);
+                flushAll();
+                ignoreLayerClip = false;
+                finalLevel = i;
+            }
+            scissor[0] = savedSc[0]; scissor[1] = savedSc[1];
+            scissor[2] = savedSc[2]; scissor[3] = savedSc[3];
         }
-        scissor[0] = savedSc[0]; scissor[1] = savedSc[1];
-        scissor[2] = savedSc[2]; scissor[3] = savedSc[3];
-        // v0.16.44：末级上跑横/纵分离高斯（失败就保持"只降采样"的老观感）
+        // 分离高斯（失败就保持"只降采样"的老观感 —— 0 级时那就是"完全不糊"，但那只在
+        // 确实没有 σ 的退化输入上发生）
         gaussBlurLevel(finalLevel, blurPx);
         return finalLevel;
     }

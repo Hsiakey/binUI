@@ -1,10 +1,10 @@
 # binUI - 跨平台描述式 UI 核心
 
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.20.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.29.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
-[![Format v29](https://img.shields.io/badge/binUI%20format-v29-orange.svg)](include/binui_format.h)
+[![Format v34](https://img.shields.io/badge/binUI%20format-v34-orange.svg)](include/binui_format.h)
 [![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux-lightgrey.svg)](#跨平台方向)
 
 把 **UI 描述源码（XML / HTML5）编译为紧凑的二进制布局（binUI），再解析为节点树供任何渲染后端绘制**。纯 C++17，核心（编译/解析/命中测试/事件）无平台 API 依赖；字体渲染基于 FreeType + HarfBuzz（`third_party` 静态源码，跨平台一致）。
@@ -15,6 +15,11 @@
 |---|---|---|---|
 | ![自适应布局](docs/img/flexshow.png) | ![按钮样式](docs/img/buttonshow.png) | ![动画](docs/img/animshow.png) | ![应用壳](docs/img/appshow.png) | ![3D](docs/img/cubedemo.png) |
 
+> **后端分层（0.29.0 起默认）**：`binUI ──► bin2d / bin3d ──► binGPU ──► GL / Vulkan / D3D11`。
+> binUI 这一层不写图形 API —— 2D 语义全交给 bin2d（CPU 覆盖率光栅是像素权威），
+> GPU 只负责把 Surface 送上交换链（`bin2d::GpuCompositor` → bingpu），没显卡时退回系统贴屏。
+> 三份 GPU 后端还在，但降级为可选对照构建（`-DBINUI_GPU_GL|VK|D3D11`，`make demos-vk|demos-d3d11`）。
+>
 > 前三张是 `gl_shot`（GL 后端 + 隐藏窗口 + 离屏 FBO）从当前源码渲染的真实布局；第四张是 GL 真机截屏
 > —— 立方体是应用在 `<canvas>` 回调里用 `fillLine` 画的，离屏渲染跑不到那段代码。
 > 其余示例（features / fontshow / svgdemo / texturedemo / 组件库）的截图见

@@ -3180,30 +3180,38 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     int buildChain(float blurPx) {
         const int levels = blurLevelsFor(blurPx);
         int finalLevel = 0;
-        if (levels <= 0) return 0;
-        blurReplace = true;
-        blurForceSingle = true;
-        for (int i = 1; i <= levels; i++) {
-            const size_t pi = static_cast<size_t>(i - 1);
-            const int dw = std::max(1, blurAt(pi).w / 2);
-            const int dh = std::max(1, blurAt(pi).h / 2);
-            if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) break;
-            blurLevelToSampled(blurAt(pi));
-            blurLevelToAttachment(blurAt(static_cast<size_t>(i)));
-            beginBlurLevelPass(blurAt(static_cast<size_t>(i)));
-            clipL = 0; clipT = 0; clipR = dw; clipB = dh;
-            ignoreLayerClip = true;
-            emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
-                     0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu, &blurAt(pi).tex);
-            flush();
-            g_vk.vkCmdEndRendering(cmd);
-            ignoreLayerClip = false;
-            finalLevel = i;
+        /* 0.27.2 修（与 GL 同一条）：原来这里写的是 `if (levels <= 0) return 0;` ——
+         * levels 由 PaintFilterBlurLevel 给，blurPx < 4 时是 0，于是这一趟**提前返回**，
+         * 下面那句分离高斯一次都没跑：`filter: blur(3px)` / `stdDeviation="3"` 在 VK 上
+         * 只是把抓下来的层内容 1:1 拷回去 = 完全没糊（GL 当时也这样，三端共有的 bug）。
+         * 判据是"有没有 σ"，不是"降了几级"：降采样链只在 levels > 0 时建，
+         * 卷积**每一级都要跑，包括 0 级**。 */
+        if (levels > 0) {
+            blurReplace = true;
+            blurForceSingle = true;
+            for (int i = 1; i <= levels; i++) {
+                const size_t pi = static_cast<size_t>(i - 1);
+                const int dw = std::max(1, blurAt(pi).w / 2);
+                const int dh = std::max(1, blurAt(pi).h / 2);
+                if (!ensureBlurLevel(static_cast<size_t>(i), dw, dh)) break;
+                blurLevelToSampled(blurAt(pi));
+                blurLevelToAttachment(blurAt(static_cast<size_t>(i)));
+                beginBlurLevelPass(blurAt(static_cast<size_t>(i)));
+                clipL = 0; clipT = 0; clipR = dw; clipB = dh;
+                ignoreLayerClip = true;
+                emitQuad(0.0f, 0.0f, static_cast<float>(dw), static_cast<float>(dh),
+                         0.0f, 0.0f, 1.0f, 1.0f, 0xFFFFFFFFu, &blurAt(pi).tex);
+                flush();
+                g_vk.vkCmdEndRendering(cmd);
+                ignoreLayerClip = false;
+                finalLevel = i;
+            }
+            blurReplace = false;
+            blurForceSingle = false;
         }
-        blurReplace = false;
-        blurForceSingle = false;
         blurLevelToSampled(blurAt(static_cast<size_t>(finalLevel)));
-        // v0.16.44：末级上跑横/纵分离高斯（失败就保持"只降采样"的老观感）
+        // 分离高斯（失败就保持"只降采样"的老观感 —— 0 级时那就是"完全不糊"，但那只在
+        // 确实没有 σ 的退化输入上发生）
         gaussBlurLevel(finalLevel, blurPx);
         return finalLevel;
     }

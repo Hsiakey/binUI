@@ -7,7 +7,7 @@
 #include "binui_format.h"
 #ifdef _WIN32
 // 后端头只在 Windows 下存在（核心库的其他部分不依赖它）
-#include "backends/binui_gl.h"
+#include "backends/binui_gfx.h"   // IBinUIGfx：draw() 只认接口，不再依赖任何具体后端
 #endif
 
 namespace binui {
@@ -172,8 +172,9 @@ bool LineChart::tick(float) {
     return changed;
 }
 
-#ifdef _WIN32
-void LineChart::draw(BinUIGL& gfx) {
+// 不再区分平台：只用到 IBinUIGfx 的 fillRounded / fillLine，核心库因此不依赖任何
+// 后端实现（以前非 Windows 构建要靠一个空实现占住 vtable 符号）。
+void LineChart::draw(IBinUIGfx& gfx) {
     if (cols_ == 0) return;
     float hw = lineWidth_ * 0.5f;
     for (int c = 0; c < cols_; c++) {
@@ -186,11 +187,6 @@ void LineChart::draw(BinUIGL& gfx) {
         }
     }
 }
-#else
-// 非 Windows 构建：核心库不链接任何绘制后端，折线图只提供数据/节点布局，
-// 绘制由应用侧用自己后端的同类实现完成（vtable 仍需这个符号，故给个空实现）。
-void LineChart::draw(BinUIGL&) {}
-#endif
 
 // ============ 环形进度 ============
 RingGauge::RingGauge(BinUIRenderer& r, uint16_t cid, int ticks, uint32_t color)
