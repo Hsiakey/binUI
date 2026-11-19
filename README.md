@@ -633,7 +633,7 @@ DetachVideoEngine();   // 进程退出前停止全部解码/输出线程
 
 绘制后端是独立模块，可随时替换：三个 GPU 后端共享同一份节点树、交互语义与绘制代码（inui_draw_nodes.h），逐像素相同。**文本层已是跨平台实现**（FreeType + HarfBuzz，灰度/COLR 均与平台无关）；换平台时只需替换"窗口 + 事件 + 交换链"外壳（Linux 对应 X11/Wayland + OpenGL，macOS 对应 Cocoa + Metal），字体发现接 fontconfig / CoreText。
 
-## 生态：bin2d / bin3d / binGPU（同级目录；binGPU 0.5.2，bin2d 0.11.0，bin3d 0.2.0）
+## 生态：bin2d / bin3d / binGPU（同级目录；binGPU 0.6.1，bin2d 0.11.0，bin3d 0.3.0）
 
 分层（master 2026-11-19 定）：**binUI 的后端交给 bin2d / bin3d，bin2d / bin3d 的后端交给 binGPU。**
 
@@ -646,9 +646,9 @@ binUI 的边界只有四件事：**布局 + 事件 + 文本 + 描述式绘制**�
 
 | 项目 | 语言 | 一句话 | 现状 |
 |---|---|---|---|
-| `../binGPU` | **C++17 / C 兼容 ABI** | 设备 / 交换链 / 资源 / 管线 / 命令 / 呈现 | v0.5.2 / ABI 2：**NULL + CPU 参考 + Vulkan + D3D11 + OpenGL 五个后端**（全部真实现）；固定管线（quad / mesh）+ 5 种混合 + 离屏 + 深度 + 采样器 + affine；`make abi-check` 用纯 C 编一遍头文件 |
+| `../binGPU` | **C++17 / C 兼容 ABI** | 设备 / 交换链 / 资源 / 管线 / 命令 / 呈现 | v0.6.1 / ABI 3：**NULL + CPU 参考 + Vulkan + D3D11 + OpenGL 五个后端**（全部真实现）；固定管线（quad / mesh）+ 5 种混合 + 离屏 + 深度 + 采样器 + affine + **固定功能 Lambert + 透视校正**（网格顶点带原始 w）；`make abi-check` 用纯 C 编一遍头文件 |
 | `../bin2D` | C++17 | 保留模式 2D 画布：场景图 + 图层 + 合成 + 光栅数学 | 0.10.1：覆盖率 AA 填充/描边、路径、渐变、圆角、九宫格、颜色矩阵滤镜、盒式模糊、组透明度离屏、5 种混合、按组缓存 + 组内脏矩形；与 binGPU CPU 后端**逐像素往返 0 差**；缓存命中 1280×720/200 图元 **1.28 ms**（全量 10.45 ms） |
-| `../bin3D` | C++17 | 小型实时 3D：相机 + 裁剪 + 深度 + 光照（先软光栅） | 0.2.0：六平面齐次裁剪、1/w 透视校正、z-buffer、逐像素 Lambert、**纹理 mipmap + 三线性**；`make qa` 容差验收；720p 一帧 ≈9.5 ms；GPU 阶段待 binGPU 补固定功能光照状态 |
+| `../bin3D` | C++17 | 小型实时 3D：相机 + 裁剪 + 深度 + 光照（先软光栅） | 0.3.0：六平面齐次裁剪、1/w 透视校正、z-buffer、逐像素 Lambert、**纹理 mipmap + 三线性**；`make qa` 容差验收；720p 一帧 ≈9.5 ms；**另有 GPU 路径**（`GpuRenderer` → binGPU），与软光栅逐像素对拍 100%（几何/深度/Lambert/UV 四场景）、端到端 99.4% |
 
 binUI 已经在 **P2 / P2b / P3 / P4** 四处真的用上了 bin2d（`<path>` 填充、描边、圆角模板与
 三端圆角图层计划，以及 0.26.0 的**整份 bin2d 后端** `BinUI2D`；台账见
