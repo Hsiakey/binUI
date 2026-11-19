@@ -32,6 +32,7 @@
 #include "bin2d/gpu.h"          // GpuCompositor：窗口呈现（present → bingpu 交换链）
 #endif
 #include "bin2d/image.h"
+#include "bin2d/filter.h"       // ColorMatrix：图片滤镜（setImageFilter）
 #include "bin2d/paint.h"
 #include "bin2d/path.h"
 #include "bin2d/png.h"
@@ -39,6 +40,7 @@
 #include "bin2d/surface.h"
 #include "bin2d/transform.h"
 
+#include "binui_filter.h"     // ImageFilterKey：图片滤镜的缓存键（四端同源）
 #include "binui_format.h"
 #include "binui_gfx.h"
 #include "binui_glyph_atlas.h"
@@ -190,6 +192,20 @@ struct BinUI2D::Impl {
     // 反预乘用的缓冲（GDI 贴屏复用，避免每帧分配）
     std::vector<uint8_t> gdiPixels;
 
+    // ---- 透明分层窗（0.27.1）----
+    // 交换链那条路**没有逐像素 alpha**：WS_EX_LAYERED 窗口必须用
+    // UpdateLayeredWindow 把一整块 premultiplied BGRA 交给 DWM 合成。
+    // 所以 transparent 时 present() 的第一支就不是 compositor。
+    //   · GL 后端靠 glReadPixels 拿回 premultiplied BGRA；
+    //   · bin2d 的 Surface 本来就是 premultiplied RGBA —— 只差一次 R/B 交换，
+    //     不需要反预乘（反预乘只服务 SRCCOPY 贴屏，见 presentViaGdi）。
+#ifdef _WIN32
+    HBITMAP layeredDib = nullptr;
+    HDC     layeredDC = nullptr;
+    void*   layeredBits = nullptr;
+    int     layeredW = 0, layeredH = 0;
+#endif
+
     // ---- 状态（每次 beginFrame 都要把它们重新压进新 Canvas）----
     bool hasAffine = false;
     float affine[6] = {1.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f};
@@ -210,6 +226,8 @@ struct BinUI2D::Impl {
         bool offscreen = false;
         float alpha = 1.0f;
         float blurPx = 0.0f;
+        // 外阴影（0.27.1）：书写顺序，靠前的在上层 → 合成时逆序
+        std::vector<BinUIFilterDropShadowEntry> shadows;
         size_t clipMark = 0;   // 入层时的 clipMarks.size()，出层要截断
     };
     std::vector<LayerRec> layers;
@@ -218,8 +236,16 @@ struct BinUI2D::Impl {
     struct ImageEntry {
         std::unique_ptr<bin2d::Image> img;
         uint32_t generation = 0xFFFFFFFFu;
+        // 滤镜变体（0.27.1）：GL 那边是"矩阵进纹理缓存键，同一张图配两种滤镜 = 两份
+        // 纹理"；bin2d 这里是"同一张图配两种滤镜 = 两份 Image"。键用 binui::
+        // ImageFilterKey 的 64 位哈希，与三份 GPU 后端同一个函数 —— 三端缓存键同源。
+        std::unique_ptr<bin2d::Image> filtered;
+        uint64_t filterKey = 0;
     };
     std::unordered_map<uint32_t, ImageEntry> images;
+    // setImageFilter 设进来的状态：键 0 = 无滤镜
+    uint64_t filterKey = 0;
+    bin2d::ColorMatrix filterMatrix = bin2d::ColorMatrix::identity();
 
     // ---- 文字 ----
     GlyphHost2D host;
@@ -239,6 +265,77 @@ struct BinUI2D::Impl {
         if (it == images.end() || !it->second.img || it->second.img->empty()) return nullptr;
         return it->second.img.get();
     }
+
+    // 绘制用的图：有滤镜时返回"按 (图, 矩阵) 缓存"的过滤变体。
+    // 变体是**一次性**的（换图或换矩阵才重建），不进每帧热路径。
+    bin2d::Image* findImageForDraw(uint16_t index) {
+        auto it = images.find(index);
+        if (it == images.end() || !it->second.img || it->second.img->empty()) return nullptr;
+        ImageEntry& e = it->second;
+        if (filterKey == 0 || filterMatrix.isIdentity()) return e.img.get();
+        if (!e.filtered || e.filterKey != filterKey) {
+            e.filtered = std::make_unique<bin2d::Image>(*e.img);
+            if (e.filtered && !e.filtered->empty())
+                bin2d::ApplyColorMatrix(e.filtered->surface(), filterMatrix);
+            e.filterKey = filterKey;
+            // mip 跟着旧图算出来的，形状换了就作废
+            if (e.filtered) e.filtered->clearMips();
+        }
+        return (e.filtered && !e.filtered->empty()) ? e.filtered.get() : e.img.get();
+    }
+
+#ifdef _WIN32
+    // 透明分层窗：premultiplied RGBA → premultiplied BGRA（顶层 DIB）→ UpdateLayeredWindow。
+    // 返回 false = 这条路走不通（窗口不是 WS_EX_LAYERED / 没窗口），调用方退回贴屏。
+    bool presentLayered() {
+        if (!hwnd || surface.empty()) return false;
+        HWND win = static_cast<HWND>(hwnd);
+        if (!(GetWindowLongW(win, GWL_EXSTYLE) & WS_EX_LAYERED)) return false;
+        const int w = surface.width(), h = surface.height();
+        if (layeredDib == nullptr || layeredW != w || layeredH != h) {
+            if (layeredDib) DeleteObject(layeredDib);
+            if (layeredDC) DeleteDC(layeredDC);
+            BITMAPINFO bi = {};
+            bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bi.bmiHeader.biWidth = w;
+            bi.bmiHeader.biHeight = -h;          // 负 = 顶层（与 Surface 行序一致）
+            bi.bmiHeader.biPlanes = 1;
+            bi.bmiHeader.biBitCount = 32;
+            bi.bmiHeader.biCompression = BI_RGB;
+            layeredDib = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &layeredBits, nullptr, 0);
+            layeredDC = CreateCompatibleDC(nullptr);
+            layeredW = w;
+            layeredH = h;
+            if (!layeredDib || !layeredDC || !layeredBits) return false;
+        }
+        // 只换字节序，**不动 alpha**：alpha 已经是预乘过的，ULW_ALPHA 要的就是它
+        uint8_t* d = static_cast<uint8_t*>(layeredBits);
+        for (int y = 0; y < h; ++y) {
+            const uint8_t* s = surface.row(y);
+            uint8_t* row = d + static_cast<size_t>(y) * w * 4u;
+            for (int x = 0; x < w; ++x, s += 4, row += 4) {
+                row[0] = s[2];
+                row[1] = s[1];
+                row[2] = s[0];
+                row[3] = s[3];
+            }
+        }
+        HDC screenDC = GetDC(nullptr);
+        if (!screenDC) return false;
+        HGDIOBJ old = SelectObject(layeredDC, layeredDib);
+        RECT wr;
+        GetWindowRect(win, &wr);
+        POINT dst = { wr.left, wr.top };
+        SIZE  sz = { w, h };
+        POINT src = { 0, 0 };
+        BLENDFUNCTION bf = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
+        const BOOL ok = UpdateLayeredWindow(win, screenDC, &dst, &sz, layeredDC, &src, 0, &bf,
+                                            ULW_ALPHA);
+        SelectObject(layeredDC, old);
+        ReleaseDC(nullptr, screenDC);
+        return ok != FALSE;
+    }
+#endif
 };
 
 BinUI2D::BinUI2D() : impl_(std::make_unique<Impl>()) {
@@ -298,6 +395,12 @@ bool BinUI2D::init(void* hwnd, int width, int height, bool vsync) {
 void BinUI2D::shutdown() {
 #ifndef BINUI_NO_BINGPU
     if (impl_->compositor) { impl_->compositor->destroy(); impl_->compositor.reset(); }
+#endif
+#ifdef _WIN32
+    if (impl_->layeredDib) { DeleteObject(impl_->layeredDib); impl_->layeredDib = nullptr; }
+    if (impl_->layeredDC) { DeleteDC(impl_->layeredDC); impl_->layeredDC = nullptr; }
+    impl_->layeredBits = nullptr;
+    impl_->layeredW = impl_->layeredH = 0;
 #endif
     impl_->canvas.reset();
     impl_->images.clear();
@@ -366,6 +469,28 @@ void BinUI2D::beginFrame(const void* clipRect) {
 }
 
 void BinUI2D::present() {
+    // ⓪ 透明分层窗（0.27.1）：交换链没有逐像素 alpha，必须先判。
+    //    compositor 一旦建起来就会一直贴着这个窗口，这里直接拆掉，
+    //    否则后面 setTransparent(false) 切回来时它已经错过了帧。
+#ifdef _WIN32
+    if (impl_->transparent) {
+#ifndef BINUI_NO_BINGPU
+        if (impl_->compositor) {
+            impl_->compositor->destroy();
+            impl_->compositor.reset();
+        }
+#endif
+        if (impl_->presentLayered()) {
+            impl_->presentPath = "bin2d+layered";
+            return;
+        }
+        // 窗口没有 WS_EX_LAYERED（宿主自己关掉了）→ 退回普通贴屏：
+        // 半透明区域会变成"直接盖住桌面"，但画面不会丢。
+        impl_->presentPath = impl_->hwnd ? "bin2d+gdi" : "bin2d+offscreen";
+        presentViaGdi();
+        return;
+    }
+#endif
     // ① GPU 上屏（bin2d 的后端交给 binGPU）：Surface → 纹理 → 交换链 present
 #ifndef BINUI_NO_BINGPU
     if (impl_->compositor && impl_->compositor->ready()) {
@@ -384,6 +509,9 @@ void BinUI2D::present() {
 void BinUI2D::presentViaGdi() {
 #ifdef _WIN32
     if (!impl_->hwnd || impl_->surface.empty()) return;
+    // presentBackendName() 必须**跟着实际路径走**：透明分层窗关掉之后还报
+    // "bin2d+layered" 就是在诊断信息里撒谎（测试就是这么发现的）。
+    impl_->presentPath = "bin2d+gdi";
     const int w = impl_->surface.width(), h = impl_->surface.height();
     impl_->gdiPixels.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
     // 预乘 RGBA → 直通 BGRA（BITMAPINFO 的 32bpp 是 BGRA 字节序 + 直通 alpha）
@@ -602,7 +730,7 @@ bool BinUI2D::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
 void BinUI2D::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
                           float x, float y, float w, float h, uint32_t tint) {
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return;
-    bin2d::Image* img = impl_->findImage(index);
+    bin2d::Image* img = impl_->findImageForDraw(index);
     if (!img) return;
     impl_->canvas->drawImage(*img, bin2d::Rect(x, y, w, h),
                              bin2d::Rect(u0, v0, u1 - u0, v1 - v0), ToColor(tint),
@@ -612,7 +740,7 @@ void BinUI2D::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1
 void BinUI2D::drawImageNine(uint16_t index, float x, float y, float w, float h,
                             float slice, int repX, int repY, uint32_t tint) {
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return;
-    bin2d::Image* img = impl_->findImage(index);
+    bin2d::Image* img = impl_->findImageForDraw(index);
     if (!img) return;
     // 切分数学在 binui_gfx.h 的 BuildNineSlice（三端共用），这里只按结果逐块画。
     // "九宫格要源图像素尺寸"这件事在 bin2d 侧是现成的（Image 自己知道宽高）。
@@ -712,9 +840,26 @@ bool BinUI2D::setAffine(const float xf[6]) {
     return true;
 }
 
-void BinUI2D::setImageFilter(const BinUIImageFilter* /*f*/) {
-    // 未实现（P4 遗留）：bin2d 有 ColorMatrix（filter.h），但"按 (图, 矩阵) 分键缓存"
-    // 还没接。像素用例 svg-filter 会因此与 GL 不同 —— 门禁里已经把它单列出来。
+// v26 图片滤镜（0.27.1）：`BinUIImageFilter` 是"3×3 + 3 偏移、作用在直通 RGB"，
+// bin2d 的 `ColorMatrix` 是"4×5、同样作用在直通空间" —— 两者是同一个东西的不同写法，
+// 所以这里是**逐位搬运**而不是重新解释：
+//   · 行 0..2 = f->m[0..8]（3×3，行主序），常数项 = f->offset[0..2]；
+//   · 行 3 = alpha 恒等（1），第 4 列 0 —— 滤镜不动 alpha，这与 CSS filter 一致
+//     （opacity 另走图层）。
+// 矩阵的合成（多个 filter 函数按书写顺序相乘）在编译期就做完了，运行期只做逐像素乘。
+void BinUI2D::setImageFilter(const BinUIImageFilter* f) {
+    const uint64_t key = f ? binui::ImageFilterKey(f) : 0;
+    if (key == 0) {
+        impl_->filterKey = 0;
+        impl_->filterMatrix = bin2d::ColorMatrix::identity();
+        return;
+    }
+    bin2d::ColorMatrix m = bin2d::ColorMatrix::identity();
+    for (int r = 0; r < 3; ++r)
+        for (int c = 0; c < 3; ++c) m.m[r][c] = f->m[r * 3 + c];
+    for (int r = 0; r < 3; ++r) m.m[r][4] = f->offset[r];
+    impl_->filterMatrix = m;
+    impl_->filterKey = key;
 }
 
 bool BinUI2D::setEraseBlend(bool on) {
@@ -760,7 +905,7 @@ bool BinUI2D::backdropBlur(float x, float y, float w, float h, float radius,
                         s + static_cast<size_t>(sx) * 4, 4);
         }
     }
-    bin2d::Blur(bg, blurPx);
+    bin2d::BlurSigma(bg, blurPx);   // σ 语义：CSS blur(Npx) 的 N 就是 σ（bin2d 0.12.0）
 
     // 2) 圆角覆盖率：用一张白色圆角矩形当遮罩（AA 与形状同一套语义）
     bin2d::Surface mask(bw, bh);
@@ -846,8 +991,9 @@ bool BinUI2D::pushLayer(float x, float y, float w, float h, float alpha) {
 bool BinUI2D::pushLayerEx(float x, float y, float w, float h, const LayerFx& fx) {
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return false;
     if (fx.alpha <= 0.0f) return false;
-    // 有 blur 就必须走离屏（bin2d 的 pushLayer 不支持"pop 时模糊"）；
-    // drop-shadow 同理，但本版本还没实现（见 popLayer 的注释）。
+    if (fx.shadowCount > 0 && !fx.shadows) return false;
+    // 有 blur 或外阴影就必须走离屏：bin2d 的 pushLayer 只做"组 alpha 一次乘"，
+    // 而模糊/阴影都是"pop 时对整层内容做的操作"。
     const bool needOffscreen = fx.blurPx > 0.0f || fx.shadowCount > 0;
     if (!needOffscreen) return pushLayer(x, y, w, h, fx.alpha);
 
@@ -855,12 +1001,20 @@ bool BinUI2D::pushLayerEx(float x, float y, float w, float h, const LayerFx& fx)
     rec.offscreen = true;
     rec.alpha = fx.alpha;
     rec.blurPx = fx.blurPx;
+    // 指针只在调用期间有效（编译器的 drop-shadow 段是另一份内存），必须拷进来
+    if (fx.shadowCount > 0 && fx.shadows)
+        rec.shadows.assign(fx.shadows, fx.shadows + fx.shadowCount);
     rec.clipMark = impl_->clipMarks.size();
     if (!impl_->canvas->pushOffscreen(bin2d::Rect(x, y, w, h))) return false;
     impl_->layers.push_back(rec);
     return true;
 }
 
+// 外阴影（0.27.1）：**轮廓的影子**，形状来自层内容自己的 alpha 通道。
+// 算法与三份 GPU 后端同一套：
+//   ① 铺一张纯色（预乘），② dst *= 层 alpha（得到 c·a 的上色轮廓），
+//   ③ 按半径模糊，④ 按偏移（取整）合成到元素**下面**。
+// 与 box-shadow 的本质区别就在这里：星形图标的投影是星形，不是它所在的方块。
 void BinUI2D::popLayer() {
     if (!impl_->canvas || impl_->layers.empty()) return;
     const Impl::LayerRec rec = impl_->layers.back();
@@ -880,8 +1034,41 @@ void BinUI2D::popLayer() {
     bin2d::Surface content;
     int ox = 0, oy = 0;
     if (!impl_->canvas->popOffscreen(content, ox, oy)) return;
-    if (rec.blurPx > 0.0f) bin2d::Blur(content, rec.blurPx);
-    // drop-shadow 未实现：LayerFx::shadows 目前被忽略（migrate 文档已记）
+
+    // ① 外阴影先铺（书写顺序里靠前的在上层 → 逆序画），本体最后画在最上面。
+    //    阴影各自从**未模糊**的层内容取轮廓：模糊只作用于本体，不叠加到影子上。
+    if (!rec.shadows.empty() && !content.empty()) {
+        const int cw = content.width(), ch = content.height();
+        for (int i = static_cast<int>(rec.shadows.size()) - 1; i >= 0; --i) {
+            const BinUIFilterDropShadowEntry& sh = rec.shadows[static_cast<size_t>(i)];
+            bin2d::Surface shadow(cw, ch);
+            if (shadow.empty()) break;
+            // 上色：out = premul(color) × 层 alpha —— 预乘空间里逐通道同乘，无需反预乘
+            const bin2d::Color c = ToColor(sh.color);
+            for (int y = 0; y < ch; ++y) {
+                const uint8_t* s = content.row(y);
+                uint8_t* d = shadow.row(y);
+                for (int x = 0; x < cw; ++x, s += 4, d += 4) {
+                    const uint32_t a = s[3];
+                    if (a == 0) { d[0] = d[1] = d[2] = d[3] = 0; continue; }
+                    d[0] = static_cast<uint8_t>(c.r * a / 255u);
+                    d[1] = static_cast<uint8_t>(c.g * a / 255u);
+                    d[2] = static_cast<uint8_t>(c.b * a / 255u);
+                    d[3] = static_cast<uint8_t>(c.a * a / 255u);
+                }
+            }
+            if (sh.blur > 0.0f) bin2d::BlurSigma(shadow, sh.blur);   // 阴影的 stdDeviation 也是 σ
+            // 偏移取整：合成四边形恒落在像素边界上，与三份 GPU 后端同口径
+            const int sdx = static_cast<int>(std::lround(sh.dx));
+            const int sdy = static_cast<int>(std::lround(sh.dy));
+            // 与三份 GPU 后端一致：阴影不乘组 alpha（f.alpha 只作用于本体）。
+            // 这是一处**已知的口径**而不是笔误 —— 要改就四端一起改。
+            impl_->canvas->compositeSurface(shadow, ox + sdx, oy + sdy, 1.0f,
+                                            bin2d::BlendMode::SrcOver);
+        }
+    }
+
+    if (rec.blurPx > 0.0f) bin2d::BlurSigma(content, rec.blurPx);   // filter: blur(Npx) → σ=N
     impl_->canvas->compositeSurface(content, ox, oy, rec.alpha,
                                     bin2d::BlendMode::SrcOver);
 }

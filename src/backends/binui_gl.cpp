@@ -600,10 +600,13 @@ struct BinUIGL::Impl {
             }
             ignoreLayerClip = false;
             glBlendFunc(GL_ONE, GL_ONE_MINUS_SRC_ALPHA);
-            // v0.16.44：末级上跑分离高斯。失败（暂存图建不出来）就保持"只降采样"的老观感 ——
-            // 宁可糊得糙，也不要整块不画。
-            if (!gaussBlurLevel(finalLevel, blurPx)) finalLevel = levels;
         }
+        // 分离高斯：**每一级都要跑，包括 0 级**。
+        // v0.16.44 起这句被关在 `if (levels > 0)` 里面，于是 blurPx < 4（levels=0）
+        // 的滤镜一次卷积都没跑 —— `filter: blur(3px)` / `stdDeviation="3"` 在
+        // GL/VK/D3D11 三端**完全没糊**，只是把抓下来的区域 1:1 拷了回去。
+        // 0.27.2 修：判据是"有没有 σ"，不是"降了几级"。
+        if (!gaussBlurLevel(finalLevel, blurPx)) finalLevel = levels;
         bindFbo(target);
         glViewport(0, 0, winW, winH);
         glUniform2fP(uniView, static_cast<float>(winW), static_cast<float>(winH));

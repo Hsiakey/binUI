@@ -5,6 +5,74 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.28.0] - 2026-11-19 【格式 v34 不变】
+
+**把三份 GPU 后端剩下的能力缺口补齐** —— 0.27.0 之后"bin2d 能当唯一后端"只剩三处
+功能差：透明分层窗、图片滤镜、图层外阴影。这一版全部补上，并顺带修掉一个**三端共有
+的模糊 bug**。
+
+```
+binUI ──► bin2d ──► binGPU / 系统贴屏
+                     └─ 透明分层窗：UpdateLayeredWindow（不经过交换链）
+```
+
+### Added —— 透明分层窗（`bin2d+layered`）
+
+- `BinUI2D::present()` 的第一支现在是透明判断：`transparent && hwnd` → Surface
+  **只换字节序**（premultiplied RGBA → premultiplied BGRA）→ `UpdateLayeredWindow`。
+  不反预乘：`ULW_ALPHA` 要的就是预乘值，反预乘只服务 `SRCCOPY` 贴屏。
+- compositor 会被拆掉（交换链没有逐像素 alpha），窗口没设 `WS_EX_LAYERED` 时退回贴屏。
+- `presentBackendName()` 多一个 `bin2d+layered`。
+- 这是删三份 GPU 后端前唯一"用户可见"的缺口：以前 `setTransparent(true)` 在 bin2d
+  后端只存了个标志，分层窗会直接不上屏。
+
+### Added —— `setImageFilter`（v26 图片滤镜）
+
+- `BinUIImageFilter`（3×3 + 3 偏移、作用在直通 RGB）逐位搬进 bin2d 的
+  `ColorMatrix`（4×5、同样作用在直通空间），alpha 行取恒等。
+- 按 **`(图, 矩阵)` 缓存过滤变体**，键用 `binui::ImageFilterKey` —— 与三份 GPU 后端
+  同一个函数（那边是把哈希编进纹理缓存键，这边是一份 Image）。换图时变体作废。
+
+### Added —— 图层 `drop-shadow`
+
+- `popLayer` 里按三份 GPU 后端的同一套算法补上：纯色预乘 → 乘层 alpha 得**上色轮廓**
+  → 按 σ 模糊 → 按取整偏移合成到本体**下面**。书写顺序里靠前的在上层，所以逆序画。
+- 已知口径（不是笔误）：阴影不乘组 alpha，四端一致；要改就四端一起改。
+
+### Fixed —— `filter: blur(Npx)` 在 N < 4 时三端**完全没糊**
+
+- 根因：`compositeThroughLevels()` 里那句分离高斯被关在 `if (levels > 0)` 里面，而
+  `PaintFilterBlurLevel(N)` 在 N<4 时返回 0 —— 整个块被跳过，只剩"抓层内容 → 1:1
+  拷回去"。`filter: blur(3px)` / SVG `stdDeviation="3"` 因此一点没糊。
+- GL 改成"0 级也跑卷积"，判据变成"有没有 σ"而不是"降了几级"。VK / D3D11 同款，另行补齐。
+- 这个 bug 是靠 bin2d 后端**逐像素比对**发现的：两个后端对同一个 svg-filter 用例差
+  13.8%，把 bin2d 的模糊改成 σ 语义后差到 8.2%，再修掉这条 → **2.446%**，
+  剩下的差异全在文字行（已知的字形采样类）。
+
+### Changed —— 模糊改走 bin2d 0.12.0 的 σ 语义
+
+`bin2d::Blur(radius)` 的 `radius` 是**盒式核半宽**，而被喂进来的数字全是 σ
+（CSS `blur(Npx)` / SVG `stdDeviation`）。σ=3 的盒式实际只有 σ≈2.0，所以 bin2d 这一侧
+一直"糊得不够"。改用 0.12.0 新增的 `bin2d::BlurSigma(surface, sigmaPx)`（三趟盒式近似
+高斯，实测 10–90% 过渡宽度 2.50–2.67σ，理想值 2.563σ）：
+`filter: blur`、`drop-shadow`、`backdropBlur` 三处全换。
+
+### 验收
+
+| 项 | 结果 |
+|---|---|
+| `make pixels`（GL 金标准，19 例） | 通过（只有 `svg-filter` 一例更新） |
+| `make pixels-bin2d`（bin2d 自回归，容差 0） | 18/18 像素一致 |
+| `make bin2d-vs-gl` 的 `svg-filter` | 13.8% → 8.2% → **2.446%**（余下全在文字行） |
+| `tests/test_shell` | 38 项通过（新增透明分层窗 3 项） |
+| `make test` | 6 个套件全绿 |
+
+### 还没做
+
+三份 GPU 后端仍不能删：`IBinUIGfx` 之外还剩 4 处编译期硬依赖（`binui_charts.h` 的
+`draw(BinUIGL&)`、C ABI 的 `BinUIAppGL`、`binui_ui.h` 默认分支、CMake 没有 bin2d 目标）。
+能力缺口这一栏现在是空的 —— 见 `docs/migrate-to-bin2d.md`。
+
 ## [0.27.0] - 2026-11-19 【格式 v34 不变】
 
 **bin2d 后端接管整个应用外壳** —— 0.26.1 只证明了"bin2d 能把像素送到屏幕上"；这一版

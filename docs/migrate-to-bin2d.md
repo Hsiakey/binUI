@@ -224,15 +224,29 @@ binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D
 
 | 能力 | 三份 GPU 后端 | bin2d 现状 | 影响 |
 |---|---|---|---|
-| **透明分层窗** | GL `glReadPixels`→`UpdateLayeredWindow`（gl.cpp:1453-1503）/ VK 1599 / D3D 1445 | **没有**，`setTransparent` 只存标志（bin2d.cpp:329） | 唯一"用户可见"缺口：`WS_EX_LAYERED` 窗口不上屏 |
-| `setImageFilter` | 三端都有 | 空实现（bin2d.cpp:715-718） | `svg-filter` 用例 13.8% 差异 |
-| 图层 `drop-shadow` | 三端都有 | 明确忽略（bin2d.cpp:884）；blur 已有 | `filter: drop-shadow` 掉效果 |
+| **透明分层窗** | GL `glReadPixels`→`UpdateLayeredWindow`（gl.cpp:1453-1503）/ VK 1599 / D3D 1445 | ✅ **0.28.0 已补**（`present()` 第一支 → `bin2d+layered`） | 无 |
+| `setImageFilter` | 三端都有 | ✅ **0.28.0 已补**（`ColorMatrix` + 按 (图,矩阵) 缓存变体） | 无 |
+| 图层 `drop-shadow` | 三端都有 | ✅ **0.28.0 已补**（上色轮廓 → σ 模糊 → 逆序合成到本体下面） | 无 |
 | `readbackPixels` | VK 4062 / D3D 2327（GL 没有，靠 BitBlt） | `pixels()` / `savePng()`（预乘 RGBA，语义不同） | 只影响 `vk_shot` / `d3d11_shot` 等工具，随删 |
 | VK 诊断四项 | `setCaptureReadback` / `swapchainActive` / `presentUsedGdi` / `deviceMemoryBytes` | 无 | 只影响 `vk_window` / `vk_stress`，随删 |
 | `presentPacesFrames` | 三端都有真判据 | 恒 false（保守） | 只影响帧相位，不挂功能 |
 
 MSAA 解析 / DPI / `RemoteSession` / `fullscreenPresent_` **都不是后端的事**：
 MSAA 是 GPU 的做法，bin2d 在覆盖率光栅里解析掉了；后三项在外壳（`binui_app.h`）。
+
+#### 顺带量出来的两个 backend 口径问题（0.28.0）
+
+1. **`filter: blur(Npx)` 在 N < 4 时三端完全没糊。** `compositeThroughLevels()` 里那句
+   分离高斯被关在 `if (levels > 0)` 里面，而 `PaintFilterBlurLevel(N)` 在 N<4 时返回 0，
+   整块被跳过 —— 只剩"抓层内容 → 1:1 拷回去"。GL 已修（0 级也跑卷积）。
+2. **模糊的 σ 语义。** `bin2d::Blur(radius)` 的 radius 是盒式核半宽，而喂进来的数字
+   全是 σ（CSS `blur(Npx)` / SVG `stdDeviation`）。σ=3 的盒式实际只有 σ≈2.0。
+   bin2d 0.12.0 新增 `BlurSigma(surface, sigmaPx)`：三趟盒式近似高斯，实测
+   10–90% 过渡宽度 2.50–2.67σ（理想 2.563σ）。binUI 三处（`filter: blur` /
+   `drop-shadow` / `backdropBlur`）全换过去了。
+
+两条都靠**逐像素比对**发现：`svg-filter` 与 GL 的差异 13.8% → （σ 修正）8.2%
+→（0 级卷积修正）**2.446%**，余下差异全部落在文字行（已知的字形采样类）。
 
 - 性能：features 页 900×932，全屏重画 23.6 ms（脏区 120×40 只要 3.56 ms）。
   全屏那 23.6 ms 主要是大面积圆角/渐变的覆盖率栅格，不是字形。要压下去得接

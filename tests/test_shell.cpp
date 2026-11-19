@@ -455,8 +455,38 @@ int main() {
         app2.close();
     }
 
-    // ---------------- 12. 生命周期 ----------------
-    std::printf("\n--- 12. 收尾 ---\n");
+    // ---------------- 12. 透明分层窗 ----------------
+    // 三份 GPU 后端都有这条路（GL 靠 glReadPixels + UpdateLayeredWindow），
+    // bin2d 到 0.27.1 才有。它不能靠"把 Surface 贴到窗口 DC"冒充：
+    // WS_EX_LAYERED 窗口必须交一整块 premultiplied 位图给 DWM。
+    std::printf("\n--- 12. 透明分层窗 ---\n");
+    {
+        HWND lay = CreateWindowExW(WS_EX_LAYERED | WS_EX_TOOLWINDOW, L"BinUIShellTestParent",
+                                   L"", WS_POPUP, -400, -400, 64, 48, nullptr, nullptr,
+                                   GetModuleHandleW(nullptr), nullptr);
+        CHECK(lay != nullptr, "建一个 WS_EX_LAYERED 弹窗（摆在屏幕外）");
+        if (lay) {
+            ShowWindow(lay, SW_SHOWNOACTIVATE);
+            BinUI2D g;
+            CHECK(g.init(lay, 64, 48), "BinUI2D::init(layered hwnd)");
+            g.setTransparent(true);
+            g.beginFrame(nullptr);
+            g.fillRect(0.0f, 0.0f, 64.0f, 48.0f, 0x80FF0000u);   // 半透明红
+            g.present();
+            std::printf("[info] 透明窗 present 路径 = %s\n", g.presentBackendName());
+            CHECK(std::strcmp(g.presentBackendName(), "bin2d+layered") == 0,
+                  "transparent=true → present 走 bin2d+layered（UpdateLayeredWindow）");
+            g.setTransparent(false);
+            g.present();
+            CHECK(std::strcmp(g.presentBackendName(), "bin2d+layered") != 0,
+                  "transparent=false → 离开分层路径");
+            g.shutdown();
+            DestroyWindow(lay);
+        }
+    }
+
+    // ---------------- 13. 生命周期 ----------------
+    std::printf("\n--- 13. 生命周期 ---\n");
     app.requestExit();
     CHECK(app.pump(1) == 1, "requestExit → pump 返回 1");
     app.close();
