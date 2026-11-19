@@ -9,6 +9,7 @@
 | [startup.md](startup.md) | **启动耗时实测**：`BINUI_STARTUP`/`BINUI_STARTUP_FILE`/`BINUI_FRAME_EXIT` 三个探针怎么用、本机 660 ms 到首帧的逐段归属（binUI 自己只占 ~35 ms，其余是建窗/GL 上下文/首次 SwapBuffers 的一次性系统与驱动成本）、以及"用 PowerShell 重定向 stderr 量启动会凭空多 3 秒"这个坑 |
 | [components.md](components.md) | **组件化**：`<use src="x.bum.html">` 编译期内联、参数/合并/CSS 作用域规则、`.bum` 二进制与运行时挂载、目录结构 |
 | [migrate-to-bin2d.md](migrate-to-bin2d.md) | **把绘制数学迁到 bin2d 的台账**：P1（覆盖率导出）→ P2/P2b（填充/描边换源）→ P3（圆角模板 + 三端圆角图层计划，0.25.0 完成）→ P4/P5 剩余、每步的验收线、删除条件与回滚 |
+| [backend_layering.md](backend_layering.md) | **谁定功能、谁定怎么画**：binUI = 功能（节点/CSS/布局/语义原语），bin2d/bin3d = 绘制语义，**binGPU = 怎么画、用什么画**（`vk/gl/d3d × GPU/CPU` + 质量档）；含 0.33.0 那次"把决策放回 binUI"的错层记录与三步收口计划 |
 | [frame_pacing.md](frame_pacing.md) | **帧节拍与"看着卡"**：为什么平均帧率达标仍然一顿一顿（帧间隔不是刷新周期整数倍）、刷新网格 + 滞回的做法与五个踩过的坑、抖动指标怎么读；以及**量测方法论**（这台机器单次读时钟 ~40 µs，按调用掐表会量出 6 倍假象 → 改用 `BINUI2D_SKIP` 消融法），附 buttonshow 的完整归因表 |
 | [p3b-plan.md](p3b-plan.md) | P3 第二半的**决策记录**（已实施，0.25.0）：三端重复块台账、共享 API 提案、分步与风险；行号已过期，结论见 CHANGELOG |
 | [svg.md](svg.md) | **SVG 支持（P1 已实现）**：现状实测、`BINUI_PATH` 节点 + v15 路径段的格式、编译期 viewBox/变换/继承、三端共用扫描线填充、四阶段拆分与验收 |
