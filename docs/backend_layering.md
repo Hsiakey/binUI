@@ -48,6 +48,8 @@
 binGPU 的 CPU 执行模式**（bin2d 不再自己决定在哪算）。文字：bin2d 的字形图集直接产出
 纹理（binGPU 已有纹理上传），不再走"CPU 逐个字形合成"。
 这一步做完，bin2d 的像素口径与 binGPU 的图元口径合一。
+**文字归属的拆分与迁移顺序见 [issues/12-font-layer-ownership.md](issues/12-font-layer-ownership.md)**
+（bin2d 侧三处文档现在和本条相反，先统一再动代码）。
 
 ### 第三步：删掉 binUI 的三份 GPU 后端
 
@@ -69,18 +71,19 @@ binUI 只剩一条路：`binUI ──► bin2d（+bin3d）──► binGPU ─�
 差的 12~16 倍是真钱。所以在把"GPU 执行模式"做进 binGPU 之前，0.33.0 作为**过渡基线**
 留着（它会自己后面被第一步+第二步取代）。**它不是一个我要维护的第二条永久路径。**
 
-## 5. 进展（0.34.2，2026-11-20）
+## 5. 进展（0.35.0，2026-11-20）
 
 | 步 | 状态 | 具体做了什么 |
 |---|---|---|
-| 1. binGPU 长出 2D 图元 + GPU/CPU 两种执行体 | **进行中** | `bingpu_render_plan()`（0.8.0）给 backend/exec/msaa；`bingpu_pace_*`（0.9.0）收"什么时候画"；`bingpu_cmd_draw_rounded_rect(s)`（0.10.0）收**圆角矩形的九宫格几何**；`bingpu_cmd_draw_rounded_rect_grad`（0.11.0）收**四角带色的九宫格**（AA 数学仍在 bin2d 的覆盖率模板）。执行体那一轴还是空的：binGPU 的 CPU 后端是参考实现，实测比 bin2d 的光栅慢 14×，所以"CPU 执行模式"应该由 bin2d 的光栅来当 |
-| 2. bin2d `Canvas` 把执行交给 binGPU | **起步** | ① `GpuCompositor::beginTarget/drawRect/drawRoundedRect(s)/drawRoundedStroke/drawRoundedGradient/endTarget` 能直接往设备目标画图元，四个后端各验一遍「设备像素 == 模板覆盖率」（逐像素精确）。② **`DisplayList`（0.17.0 → 0.19.0）**：绘制语义先记成列表，再交给执行体 —— `execute(Canvas&)` 走光栅、`execute(GpuCompositor&, …)` 走 binGPU。0.19.0 之后列表覆盖 **矩形 / 圆角 / 圆角描边 / 线性渐变 / 圆角渐变 / 染色贴图 / 矩形裁剪**，也就是 buttonshow 那种页面里的全部原语；矩形 + 1:1 贴图的页面在 Vulkan/D3D11/GL 上**差 0**，等 alpha 的渐变纯色区**差 1**。**但 `Canvas` 本身还是纯 CPU 光栅**，binUI 还没改成"先记列表再执行"那股流程 |
-| 3. 删掉 binui_vk / binui_gl / binui_d3d11 与 BinUIAuto | 未开始 | 三份实现仍在；`BinUIAuto` 仍然是选后端的那层薄壳。仍然卡在第 1/2 步 |
+| 1. binGPU 长出 2D 图元 + GPU/CPU 两种执行体 | **已完成（圆角这一半）** | `bingpu_render_plan()`（0.8.0）给 backend/exec/msaa；`bingpu_pace_*`（0.9.0）收"什么时候画"。**圆角的 AA 数学已经搬进设备层**：binGPU 0.12.0 / ABI 4 新增 `BGPU_VERTEX_SHAPE` + `BgpuShapeVertex`（36 字节）+ `bingpu_cmd_draw_shapes()`，片元里算有符号距离场（`cov = clamp(0.5 - d, 0, 1)`），四个后端（CPU 参考 / GL / VK / D3D11）都实现、端间最大差 1。旧的两条九宫格入口（0.10.0 / 0.11.0）留着，只给不支持 `BGPU_CAP_SHAPE` 的后端兜底。执行体那一轴仍然只有 GPU：binGPU 的 CPU 后端是参考实现，实测比 bin2d 的光栅慢 14× |
+| 2. bin2d `Canvas` 把执行交给 binGPU | **已完成（圆角这一半）** | bin2D 0.21.0：有 `BGPU_CAP_SHAPE` 时 `drawRoundedRect(s)/drawRoundedStroke/drawRoundedGradient` 直接发 `draw_shapes`，**不再生成也不上传任何覆盖率模板**；没有这项能力就原路退回 0.20.0 的模板那条路。`DisplayList`（0.17.0 → 0.19.0）仍然覆盖矩形 / 圆角 / 圆角描边 / 线性渐变 / 圆角渐变 / 染色贴图 / 矩形裁剪。**但 `Canvas` 本身还是纯 CPU 光栅**：它的圆角目前是 8 子采样扫描线，与 GPU 的解析解在弧上最多差 41 级 —— 下一步应当把 CPU 光栅也换成同一条解析式（会动所有像素基线，单独一版做） |
+| 2b. **binUI 自己的三端** | **已完成（圆角这一半）** | 0.35.0：`binui_gl` / `binui_vk` / `binui_d3d11` 的 `fillRounded` / `strokeRounded` 换成同一段 SDF，三条顶点流各自 36 字节、**不再采样圆角模板**。于是三端的跨后端像素门禁从 `PIXEL_VK_TOL 1.5%` / `PIXEL_D3D_TOL 3%` 收到 **0%**（单通道容差 128 → 8）。这一条是迫不得已的先手：三端各自实现，只改一端会让"后端互拍"门禁永久红 |
+| 3. 删掉 binui_vk / binui_gl / binui_d3d11 与 BinUIAuto | 未开始 | 三份实现仍在；`BinUIAuto` 仍然是选后端的那层薄壳。仍然卡在第 2 步（`Canvas` 与 binUI 的绘制入口还没改成"先记列表再执行"） |
 
 **卡点只剩一个了**：把 binUI 换成"先记列表 → 交给执行体"会让圆角弧边整体挪
-（`docs/pixels` 用的是解析 SDF、`tests/pixels-bin2d` 用的是扫描线，两者差 48 个电平）。
-原语缺口那条已经补齐 —— buttonshow 的边框（`strokeRounded`）与底色渐变
-（`fillRoundedGradient`）现在都在列表里。
+（`docs/pixels` 的 GL 基准已经换成解析 SDF、`tests/pixels-bin2d` 还是扫描线，两者差 41 个电平）。
+**0.35.0 之后 binUI 的三端已经全是解析 SDF 了**，所以这一步的前置条件比之前好：剩下的分歧只在
+bin2d 的 CPU 光栅那一边。
 
 这一轮唯一动的是**节拍**：它原本也在错的那一层（外壳自己算网格 + 滞回 + 猜 present
 有没有在等垂直同步），现在按同一套"判据在设备层"的道理挪进了 binGPU。

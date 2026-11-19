@@ -207,6 +207,22 @@ struct Batch {
     uint32_t count = 0;  // 四边形数
     int sx = 0, sy = 0, sw = 0, sh = 0;
     GLuint tex = 0;      // 采样纹理（0 = 未初始化；白色 1×1 用于纯色）
+    bool shape = false;  // v0.35.0：这一批是**解析圆角**（36 字节顶点、另一条着色器）
+};
+
+// v0.35.0：解析圆角的顶点（36 字节，与 binGPU 的 BgpuShapeVertex 同一套口径）。
+//
+// 为什么 binUI 也要这东西：圆角以前是"CPU 生成一张覆盖率位图 + 九宫格拉伸 + 纹理采样"，
+// AA **数学**在 CPU，而且半径/边框厚度被迫取整（模板是位图）。改成片元里算距离场之后，
+// 半径与厚度都是浮点原值，弧上的覆盖率是解析值，于是"小半径的胶囊按钮""1.4px 的焦点环"
+// 这类东西不再走样 —— 与 binGPU / bin2d 用的是同一套式子（三处的注释互为镜像）。
+struct GLShapeVertex {
+    float x, y;        // 目标像素
+    float lx, ly;      // 相对盒子中心的局部坐标（顶点处 = ±hx, ±hy）
+    float hx, hy;      // 盒子半尺寸
+    float radius;      // 圆角半径（浮点）
+    float thick;       // 0 = 实心；>0 = 向内环带厚度（浮点）
+    uint32_t color;    // 预乘 0xAARRGGBB（内存序 R,G,B,A —— 与 GLVertex 同一套交换）
 };
 
 struct RoundTex {
@@ -284,6 +300,15 @@ struct BinUIGL::Impl {
     GLint uniView = -1;
     GLuint vao = 0, vb = 0;
     GLuint whiteTex = 0; // 1×1 纯白（纯色四边形）
+
+    // v0.35.0 解析圆角：第二条管线（另一个程序 + 另一个 VAO/顶点流）。
+    // 编不出来（老驱动 / GLSL 330 里出错）就置 0，fillRounded/strokeRounded 自动走
+    // 模板那条老路 —— 两条都是完整实现，不是"画得差不多"。
+    GLuint shapeProgram = 0;
+    GLint uniShapeView = -1;
+    GLuint shapeVao = 0, shapeVb = 0;
+    std::vector<GLShapeVertex> shapeVerts;
+    size_t shapeCount = 0;
     // 持久离屏帧缓冲：局部重绘只更新脏区，present 时整帧 blit 到默认帧缓冲。
     // 4x MSAA 渲染缓冲（msFbo）为绘制目标，present 时解析（resolve）到单采样 offTex，
     // 之后 offTex 用于整帧 blit / 透明窗口读回 —— 线条与圆角边缘获得抗锯齿。
@@ -978,6 +1003,107 @@ struct BinUIGL::Impl {
         return whiteTex != 0;
     }
 
+    // ---------- 解析圆角（v0.35.0）----------
+    //
+    // 与 binGPU / bin2d 的同一条式子（三处注释互为镜像）：
+    //     q   = abs(p) - half + r
+    //     d   = length(max(q,0)) + min(max(q.x,q.y),0) - r
+    //     cov = clamp(0.5 - d, 0, 1)                     实心
+    //     cov = clamp(0.5 - |d + t/2| + t/2, 0, 1)       环带（厚度 t）
+    // 轴对齐 1:1 时 |grad d| ≡ 1，所以 0.5 - d 是**精确**解析覆盖率 —— 不用 fwidth。
+    //
+    // 顶点色在这里是**预乘**的（binUI 的惯例：emit 之前先 Premult），所以片元直接
+    // `frag = vcol * cov`，四个通道一起乘。
+    bool createShapeProgram() {
+        const char* vs =
+            "#version 330 core\n"
+            "layout(location=0) in vec2 pos;\n"
+            "layout(location=1) in vec2 local;\n"
+            "layout(location=2) in vec2 ext;\n"
+            "layout(location=3) in float rad;\n"
+            "layout(location=4) in float thick;\n"
+            "layout(location=5) in vec4 col;\n"
+            "uniform vec2 viewSize;\n"
+            "out vec2 vLocal;\n"
+            "flat out vec2 vExt;\n"
+            "flat out vec2 vRT;\n"
+            "out vec4 vcol;\n"
+            "void main() {\n"
+            "  gl_Position = vec4(pos.x / viewSize.x * 2.0 - 1.0,\n"
+            "                     1.0 - pos.y / viewSize.y * 2.0, 0.0, 1.0);\n"
+            "  vLocal = local;\n"
+            "  vExt = ext;\n"
+            "  vRT = vec2(rad, thick);\n"
+            "  vcol = col;\n"
+            "}\n";
+        const char* fs =
+            "#version 330 core\n"
+            "in vec2 vLocal;\n"
+            "flat in vec2 vExt;\n"
+            "flat in vec2 vRT;\n"
+            "in vec4 vcol;\n"
+            "out vec4 frag;\n"
+            "void main() {\n"
+            "  float r = max(vRT.x, 0.0);\n"
+            "  float th = vRT.y;\n"
+            "  vec2 q = abs(vLocal) - vExt + vec2(r);\n"
+            "  float d = length(max(q, vec2(0.0))) + min(max(q.x, q.y), 0.0) - r;\n"
+            "  float cov;\n"
+            "  if (th > 0.0) {\n"
+            "    float ht = th * 0.5;\n"
+            "    cov = 0.5 - abs(d + ht) + ht;\n"
+            "  } else {\n"
+            "    cov = 0.5 - d;\n"
+            "  }\n"
+            "  frag = vcol * clamp(cov, 0.0, 1.0);\n"
+            "}\n";
+        GLuint s1 = compileShader(GL_VERTEX_SHADER, vs);
+        GLuint s2 = compileShader(GL_FRAGMENT_SHADER, fs);
+        if (!s1 || !s2) {
+            if (s1) glDeleteShaderP(s1);
+            if (s2) glDeleteShaderP(s2);
+            return false;
+        }
+        shapeProgram = glCreateProgramP();
+        glAttachShaderP(shapeProgram, s1);
+        glAttachShaderP(shapeProgram, s2);
+        glLinkProgramP(shapeProgram);
+        glDeleteShaderP(s1);
+        glDeleteShaderP(s2);
+        GLint ok = GL_FALSE;
+        glGetProgramivP(shapeProgram, GL_LINK_STATUS, &ok);
+        if (!ok) {
+            char log[1024] = {};
+            GLsizei len = 0;
+            glGetProgramInfoLogP(shapeProgram, sizeof(log) - 1, &len, log);
+            std::fprintf(stderr, "[gl] shape program link error: %s\n", log);
+            glDeleteProgramP(shapeProgram);
+            shapeProgram = 0;
+            return false;
+        }
+        uniShapeView = glGetUniformLocationP(shapeProgram, "viewSize");
+
+        glGenVertexArraysP(1, &shapeVao);
+        glBindVertexArrayP(shapeVao);
+        glGenBuffersP(1, &shapeVb);
+        glBindBufferP(GL_ARRAY_BUFFER, shapeVb);
+        const GLsizei stride = static_cast<GLsizei>(sizeof(GLShapeVertex));
+        glVertexAttribPointerP(0, 2, GL_FLOAT, GL_FALSE, stride, (void*)0);
+        glVertexAttribPointerP(1, 2, GL_FLOAT, GL_FALSE, stride, (void*)8);
+        glVertexAttribPointerP(2, 2, GL_FLOAT, GL_FALSE, stride, (void*)16);
+        glVertexAttribPointerP(3, 1, GL_FLOAT, GL_FALSE, stride, (void*)24);
+        glVertexAttribPointerP(4, 1, GL_FLOAT, GL_FALSE, stride, (void*)28);
+        glVertexAttribPointerP(5, 4, GL_UNSIGNED_BYTE, GL_TRUE, stride, (void*)32);
+        glEnableVertexAttribArrayP(0);
+        glEnableVertexAttribArrayP(1);
+        glEnableVertexAttribArrayP(2);
+        glEnableVertexAttribArrayP(3);
+        glEnableVertexAttribArrayP(4);
+        glEnableVertexAttribArrayP(5);
+        glBindVertexArrayP(0);
+        return true;
+    }
+
     // ---------- GDI 光栅化 ----------
     bool ensureRasterDC(int w, int h) {
         if (rasterDC && rasterW == w && rasterH == h) return true;
@@ -1177,22 +1303,53 @@ struct BinUIGL::Impl {
                      "同屏内容太多，见 docs/future.md P0-5\n", kMaxVertsCeiling / 6);
     }
 
-    void beginBatch() {
+    void beginBatch(bool shape = false) {
         if (curBatch != static_cast<size_t>(-1) &&
+            batches[curBatch].shape == shape &&
             batches[curBatch].sx == scissor[0] && batches[curBatch].sy == scissor[1] &&
             batches[curBatch].sw == scissor[2] - scissor[0] &&
             batches[curBatch].sh == scissor[3] - scissor[1] && batches[curBatch].tex == curTex)
             return;
         Batch b;
-        b.first = static_cast<uint32_t>(vcount);
+        // first 在**自己那条流**里的下标：四边形流与形状流各有一条顶点缓冲
+        b.first = shape ? static_cast<uint32_t>(shapeCount) : static_cast<uint32_t>(vcount);
         b.count = 0;
         b.sx = scissor[0];
         b.sy = scissor[1];
         b.sw = scissor[2] - scissor[0];
         b.sh = scissor[3] - scissor[1];
         b.tex = curTex;
+        b.shape = shape;
         batches.push_back(b);
         curBatch = batches.size() - 1;
+    }
+
+    // v0.35.0：解析圆角。一个圆角矩形 = 4 个 36 字节顶点（发成 6 个顶点，索引型
+    // 0,1,2 / 2,1,3），AA 在片元里按距离场算 —— 不再需要任何覆盖率模板。
+    // batch 列表与四边形共用，所以绘制顺序天然保持（形状与普通图元可以任意交错）。
+    void emitShape(float x, float y, float w, float h, float radius, float thick, uint32_t color) {
+        if (!shapeProgram || w <= 0.0f || h <= 0.0f) return;
+        if (shapeCount + 6 > shapeVerts.size()) {
+            size_t cap = shapeVerts.empty() ? 4096 : shapeVerts.size();
+            while (cap < shapeCount + 6) cap *= 2;
+            shapeVerts.resize(cap);
+        }
+        beginBatch(true);
+        const float hx = w * 0.5f, hy = h * 0.5f;
+        const float x0 = x, x1 = x + w, y0 = y, y1 = y + h;
+        // 0xAARRGGBB → 0xAABBGGRR（与 emitQuad 同一条交换：UNSIGNED_BYTE 按内存字节序读）
+        const uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
+        GLShapeVertex c[4] = {
+            { x0, y0, -hx, -hy, hx, hy, radius, thick, sw },
+            { x1, y0,  hx, -hy, hx, hy, radius, thick, sw },
+            { x0, y1, -hx,  hy, hx, hy, radius, thick, sw },
+            { x1, y1,  hx,  hy, hx, hy, radius, thick, sw },
+        };
+        GLShapeVertex* o = shapeVerts.data() + shapeCount;
+        o[0] = c[0]; o[1] = c[1]; o[2] = c[2];
+        o[3] = c[2]; o[4] = c[1]; o[5] = c[3];
+        shapeCount += 6;
+        batches[curBatch].count++;
     }
 
     void emitQuad(float x0, float y0, float x1, float y1,
@@ -1285,12 +1442,33 @@ void emitQuadUVColor(const BinUIGradQuad& q) {
 }
 
 void flushAll() {
-        if (vcount == 0 || !vb) return;
+        if ((vcount == 0 && shapeCount == 0) || !vb) return;
         frameVerts += vcount;
-        glBufferDataP(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vcount * sizeof(GLVertex)),
-                      verts.data(), GL_DYNAMIC_DRAW);
+        // 两条流各自上传前**必须先绑回自己那条缓冲**：GL_ARRAY_BUFFER 是全局状态
+        // （不是 VAO 状态），上一帧形状上传之后它还指着 shapeVb —— 那时直接
+        // glBufferData 会把四边形顶点写进形状缓冲，两条流一起烂
+        // （实测现象：背景与大段文字整块消失，只有圆角还在）。
+        glBindVertexArrayP(vao);
+        glBindBufferP(GL_ARRAY_BUFFER, vb);
+        if (vcount) {
+            glBufferDataP(GL_ARRAY_BUFFER, static_cast<GLsizeiptr>(vcount * sizeof(GLVertex)),
+                          verts.data(), GL_DYNAMIC_DRAW);
+        }
+        // v0.35.0：形状顶点是另一条流（36 字节），只在真有形状时才上传
+        const bool haveShapes = shapeCount != 0 && shapeVb != 0;
+        if (haveShapes) {
+            glBindVertexArrayP(shapeVao);
+            glBindBufferP(GL_ARRAY_BUFFER, shapeVb);
+            glBufferDataP(GL_ARRAY_BUFFER,
+                          static_cast<GLsizeiptr>(shapeCount * sizeof(GLShapeVertex)),
+                          shapeVerts.data(), GL_DYNAMIC_DRAW);
+            glBindVertexArrayP(vao);
+            glBindBufferP(GL_ARRAY_BUFFER, vb);
+        }
         // 正在画进图层时，每条批次再和层框求交（层外的内容不该出现在层里）
         const LayerFrame* lf = layerStack.empty() ? nullptr : &layerStack.back();
+        int prog = 0;   // 0 = 四边形程序，1 = 形状程序（省重复的 glUseProgram）
+        glUseProgramP(program);
         for (const auto& b : batches) {
             if (b.count == 0) continue;
             int l = b.sx, t = b.sy, r = b.sx + b.sw, bot = b.sy + b.sh;
@@ -1303,8 +1481,31 @@ void flushAll() {
             if (r <= l || bot <= t) continue;
             // GL scissor 原点在左下：换算为从底部计
             glScissor(l, winH - bot, r - l, bot - t);
-            glBindTexture(GL_TEXTURE_2D, b.tex);
-            glDrawArrays(GL_TRIANGLES, static_cast<GLint>(b.first), static_cast<GLsizei>(b.count * 6));
+            if (b.shape) {
+                if (!haveShapes) continue;
+                if (prog != 1) {
+                    glUseProgramP(shapeProgram);
+                    glUniform2fP(uniShapeView, static_cast<float>(winW), static_cast<float>(winH));
+                    glBindVertexArrayP(shapeVao);
+                    prog = 1;
+                }
+                glDrawArrays(GL_TRIANGLES, static_cast<GLint>(b.first),
+                             static_cast<GLsizei>(b.count * 6));
+            } else {
+                if (prog != 0) {
+                    glUseProgramP(program);
+                    glBindVertexArrayP(vao);
+                    prog = 0;
+                }
+                glBindTexture(GL_TEXTURE_2D, b.tex);
+                glDrawArrays(GL_TRIANGLES, static_cast<GLint>(b.first),
+                             static_cast<GLsizei>(b.count * 6));
+            }
+        }
+        if (prog != 0) {
+            // 收尾把状态装回四边形那条路：帧末的 present / 图层合成都假定它是当前的
+            glUseProgramP(program);
+            glBindVertexArrayP(vao);
         }
         // 本帧真正用完了，淘汰的模板现在可以删（见 roundFor 里的淘汰注释）
         for (GLuint t : pendingTexDelete) glDeleteTextures(1, &t);
@@ -1312,6 +1513,7 @@ void flushAll() {
         // 图层（v0.16.9）：flush 之后必须清零，否则 present 会把同一批图元再画一遍 ——
         // 空层里那次没事，但"合成四边形"会被重复画到主目标上，表现为组透明度失效（全不透明）。
         vcount = 0;
+        shapeCount = 0;
         batches.clear();
         curBatch = static_cast<size_t>(-1);
     }
@@ -1342,6 +1544,9 @@ void flushAll() {
         if (msRbo) { glDeleteRenderbuffersP(1, &msRbo); msRbo = 0; }
         if (msFbo) { glDeleteFramebuffersP(1, &msFbo); msFbo = 0; }
         if (program) { glDeleteProgramP(program); program = 0; }
+        if (shapeProgram) { glDeleteProgramP(shapeProgram); shapeProgram = 0; }
+        if (shapeVb) { glDeleteBuffersP(1, &shapeVb); shapeVb = 0; }
+        if (shapeVao) { glDeleteVertexArraysP(1, &shapeVao); shapeVao = 0; }
         if (vb) { glDeleteBuffersP(1, &vb); vb = 0; }
         if (vao) { glDeleteVertexArraysP(1, &vao); vao = 0; }
         if (layeredDib) { DeleteObject(layeredDib); layeredDib = nullptr; }
@@ -1375,6 +1580,12 @@ bool BinUIGL::init(void* hwnd, int width, int height, bool vsync) {
     if (!impl_->createProgram()) { impl_->shutdown(); return false; }
     binui::ex::StartupMark(t0, "GL shaders");
     if (!impl_->createState()) { impl_->shutdown(); return false; }
+    // 解析圆角（v0.35.0）：**编不出来不算致命** —— 只是 fillRounded/strokeRounded
+    // 退回覆盖率模板那条老路（老驱动 / GLSL 330 出错时）。
+    if (!impl_->createShapeProgram()) {
+        std::fprintf(stderr, "[gl] 解析圆角着色器不可用，圆角退回覆盖率模板\n");
+    }
+    binui::ex::StartupMark(t0, "GL shape program");
     if (!impl_->createOffscreen()) { impl_->shutdown(); return false; }
     binui::ex::StartupMark(t0, "GL state+framebuffer");
     glViewport(0, 0, width, height);
@@ -1422,6 +1633,7 @@ void BinUIGL::beginFrame(const void* clipRect) {
     // 只复位计数，不 clear()：缓冲已经预分配到 kMaxVerts，clear() 每次会把
     // 2 MB 全部析构再由 vertRoom 重新 resize 一遍（白白 memset 一次）。
     impl_->vcount = 0;
+    impl_->shapeCount = 0;
     impl_->frameVerts = 0;
     impl_->batches.clear();
     impl_->curBatch = static_cast<size_t>(-1);
@@ -1762,6 +1974,17 @@ void BinUIGL::fillRoundedXf(float w, float h, float radius, bool stroke, float t
 
 void BinUIGL::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
+    // v0.35.0：解析圆角（片元里算距离场）。只在**没有仿射**时走 —— 旋转/斜切会把局部
+    // 坐标非均匀拉伸，而距离场不知道这件事（那种情况交给下面九宫格那条路，它的
+    // 九块各自过矩阵，几何是对的）。半径用**浮点原值**：模板那条路会四舍五入成整数。
+    if (impl_->shapeProgram && !impl_->affineOn) {
+        const float rf = std::min(radius, std::min(w, h) * 0.5f);
+        if (rf <= 0.0f) { fillRect(x, y, w, h, color); return; }
+        uint32_t c = color;
+        Premult(c);
+        impl_->emitShape(x, y, w, h, rf, 0.0f, c);
+        return;
+    }
     // 半径钳到短边一半、角片模板按最近整数取 —— 这两条与另两端共用 binui_paint.h 的
     // BuildRoundedLayer（v0.25.0 起三端不再各写一份）。
     RoundedLayer L;
@@ -1796,6 +2019,15 @@ void BinUIGL::strokeRounded(float x, float y, float w, float h, float radius,
             fillRect(x, y + t, t, h - 2.0f * t, color);
             fillRect(x + w - t, y + t, t, h - 2.0f * t, color);
         }
+        return;
+    }
+    // v0.35.0：解析圆角环带。距离场里 `|d + t/2| - t/2` 就是"到带子中心线的距离"，
+    // 所以边框不需要环带模板，厚度也是**浮点原值**（老路要把厚度取整，1.4px 的焦点环
+    // 会被画成 1px）。同样只在没有仿射时走。
+    if (impl_->shapeProgram && !impl_->affineOn) {
+        uint32_t c = color;
+        Premult(c);
+        impl_->emitShape(x, y, w, h, rf, thickness, c);
         return;
     }
     int th = static_cast<int>(std::lround(std::max(1.0f, thickness)));

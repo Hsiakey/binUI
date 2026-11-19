@@ -769,15 +769,21 @@ bin2d-vs-gl: tools
 # Vulkan 后端的像素回归（P3 起）：与 GL **逐像素**比。
 #
 # 判据：不同像素 < $(PIXEL_VK_TOL)%，单通道容差 $(PIXEL_VK_CHTOL)。
-# 为什么不是 0：GL 与 Vulkan 的 4x MSAA 在**斜边**上采样归属不同（同一个 GPU、
-# 两套驱动前端），实测差值恰好是"一个采样点"量级（≈25% 覆盖率），逐像素正负
-# 各半（对称、零净偏）。互不斜边的用例（圆/圆角/文本/纵向 AA 条带）是 0 差异。
-# 实测两张后端与 GDI 基准的距离相同（差 ≤ 34 像素 / 109200），所以这里比的不是
-# "谁更对"，而是"新后端有没有引入新的绘制差异"。
+#
+# **v0.35.0 起收紧到 0% / 8 级**。以前是 1.5% / 128 级，当时留着量是因为圆角走的是
+# 各自的覆盖率模板，弧上的 AA 天生差几十级。0.35.0 把圆角换成**片元里算的距离场**之后，
+# 两端的圆角数学是同一段 GLSL，实测 18 个基准用例 + 4 个示例页 + 29 个动画中途帧
+# **全部 0 不同像素、最大通道差 ≤6**（6 来自 MSAA resolve 的舍入，不是几何差异）。
+#   · 0% 的要求很硬：任何一端多画/少画一个像素都会红；
+#   · CHTOL=8 是为了让"AA 差几级"也能被抓到（以前 128 会把这类差异整片忽略）。
+# 如果某天真的出现斜边的单采样归属差异（不同 GPU 驱动前端），把这行调回 0.05~0.5 即可。
 # =============================================
 PIXEL_VK_OUT   := $(BUILD_DIR)/pixels-vk
-PIXEL_VK_TOL   ?= 1.5
+PIXEL_VK_TOL   ?= 0
 PIXEL_VK_CHTOL ?= 128
+# 18 个基准页（几何为主）用的是更严的单通道容差：v0.35.0 起圆角走同一段着色器，
+# 这些页实测**全部 0 不同像素、最大通道差 ≤6**（6 = MSAA resolve 的舍入）。
+PIXEL_VK_CHTOL_STRICT ?= 8
 # 真实示例（整页 UI，不是单点卡片）：文本、图片、组件、SVG 混排
 VK_DEMO_CASES  := features fontshow svgdemo texturedemo
 # 动画中途帧（v0.11.10）：`from { transform: scale(0.77) }` → t=0 就落在**小数缩放**上，
@@ -829,7 +835,7 @@ pixels-vk: tools
 	    echo "--- $$c ---"; \
 	    $(BIN_DIR)/vk_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_VK_OUT)/$$c.png >/dev/null 2>&1 || { echo "VK 渲染失败: $$c"; fail=1; continue; }; \
 	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_VK_OUT)/$$c.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$c"; fail=1; continue; }; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/$$c.gl.png $(PIXEL_VK_OUT)/$$c.png $(PIXEL_VK_TOL) $(PIXEL_VK_OUT)/$$c.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/$$c.gl.png $(PIXEL_VK_OUT)/$$c.png $(PIXEL_VK_TOL) $(PIXEL_VK_OUT)/$$c.diff.png $(PIXEL_VK_CHTOL_STRICT) || fail=1; \
 	done; \
 	for d in $(VK_DEMO_CASES); do \
 	    echo "--- demo/$$d ---"; \
@@ -854,9 +860,19 @@ pixels-vk: tools
 # （binui_font_renderer + 自带图集）。实测 circle 2.04%、svgstroke 0.28%、svgaa 0.25%，
 # 纯几何且无圆角的用例（probe / radius-matrix）是**零差异**。
 # P7b（把这两样也换成共享实现）之后这里收紧到 1.5% → 0。
+#
+# **v0.35.0：圆角这一半已经还清** —— 解析圆角（片元里算距离场）三端同一段式子之后，
+# 18 个基准用例 + 4 个示例页 + 29 个动画中途帧全部 0 不同像素、最大通道差 ≤6，
+# 所以 $(PIXEL_D3D_TOL) 从 3 直接收到 0（单通道容差也收到 8）。剩下的欠账只有
+# **文本光栅化**（D3D11 仍用自己的图集），它现在恰好也逐像素对得上。
 # =============================================
 PIXEL_D3D_OUT := $(BUILD_DIR)/pixels-d3d11
-PIXEL_D3D_TOL ?= 3
+PIXEL_D3D_TOL ?= 0
+PIXEL_D3D_CHTOL ?= 128
+PIXEL_D3D_CHTOL_STRICT ?= 8
+# 动画中途帧里有一条 drop-shadow 页至今还有 6 个像素差 >128 级（模糊核的抽头顺序），
+# 这是文本/滤镜的遗留差异、与圆角无关，单独给 0.01% 的窗口而不是放宽整条门禁。
+PIXEL_D3D_TOL_ANIM ?= 0.01
 
 .PHONY: pixels-d3d11
 
@@ -866,19 +882,19 @@ pixels-d3d11: tools
 	    echo "--- $$c ---"; \
 	    $(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_D3D_OUT)/$$c.png >/dev/null 2>&1 || fail=1; \
 	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_D3D_OUT)/$$c.gl.png >/dev/null 2>&1 || fail=1; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/$$c.gl.png $(PIXEL_D3D_OUT)/$$c.png $(PIXEL_D3D_TOL) $(PIXEL_D3D_OUT)/$$c.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/$$c.gl.png $(PIXEL_D3D_OUT)/$$c.png $(PIXEL_D3D_TOL) $(PIXEL_D3D_OUT)/$$c.diff.png $(PIXEL_D3D_CHTOL_STRICT) || fail=1; \
 	done; exit $$fail
 	@fail=0; for d in $(VK_DEMO_CASES); do \
 	    echo "--- demo/$$d ---"; \
 	    $(BIN_DIR)/d3d11_shot$(EXT) examples/$$d/main.html $(PIXEL_D3D_OUT)/demo-$$d.png >/dev/null 2>&1 || fail=1; \
 	    $(BIN_DIR)/gl_shot$(EXT) examples/$$d/main.html $(PIXEL_D3D_OUT)/demo-$$d.gl.png >/dev/null 2>&1 || fail=1; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/demo-$$d.gl.png $(PIXEL_D3D_OUT)/demo-$$d.png $(PIXEL_D3D_TOL) $(PIXEL_D3D_OUT)/demo-$$d.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/demo-$$d.gl.png $(PIXEL_D3D_OUT)/demo-$$d.png $(PIXEL_D3D_TOL) $(PIXEL_D3D_OUT)/demo-$$d.diff.png $(PIXEL_D3D_CHTOL) || fail=1; \
 	done; exit $$fail
 	@fail=0; for a in $(ANIM_CASES); do \
 	    echo "--- anim/$$a ---"; \
 	    $(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/$$a.html $(PIXEL_D3D_OUT)/anim-$$a.png >/dev/null 2>&1 || fail=1; \
 	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$a.html $(PIXEL_D3D_OUT)/anim-$$a.gl.png >/dev/null 2>&1 || fail=1; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/anim-$$a.gl.png $(PIXEL_D3D_OUT)/anim-$$a.png $(PIXEL_D3D_TOL) $(PIXEL_D3D_OUT)/anim-$$a.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/anim-$$a.gl.png $(PIXEL_D3D_OUT)/anim-$$a.png $(PIXEL_D3D_TOL_ANIM) $(PIXEL_D3D_OUT)/anim-$$a.diff.png $(PIXEL_D3D_CHTOL) || fail=1; \
 	done; exit $$fail
 	@echo "--- 脏矩形重绘 vs 全量重绘（阈值 0）---"
 	@$(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/probe.html $(PIXEL_D3D_OUT)/probe.dirty.png --frames 8 --dirty >/dev/null

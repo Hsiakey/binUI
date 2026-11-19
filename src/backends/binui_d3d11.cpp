@@ -86,7 +86,20 @@ struct Batch {
     int sx = 0, sy = 0, sw = 0, sh = 0;
     uint8_t linear = 0;  // 0=点采样(字形/纯色) 1=线性(圆角/图片)
     uint8_t wrap = 0;    // v0.16.28：1 = REPEAT 采样（颗粒噪声平铺）
+    uint8_t shape = 0;   // v0.35.0：1 = 解析圆角（36 字节顶点、另一条 VS/PS、不采样）
     ID3D11ShaderResourceView* srv = nullptr;
+};
+
+// v0.35.0：解析圆角的顶点（36 字节）。与 GLShapeVertex / VkShapeVertex / binGPU 的
+// BgpuShapeVertex 逐字段同口径。颜色在这里是**直通** 0xAARRGGBB（PS 里乘 cov 之前
+// 先按 binui 的惯例预乘 —— 与四边形那条走同一条规矩，见 ps_shape）。
+struct D3DShapeVertex {
+    float x, y;
+    float lx, ly;
+    float hx, hy;
+    float radius;
+    float thick;
+    uint32_t color;
 };
 
 struct RoundTex {
@@ -128,6 +141,15 @@ struct BinUID3D::Impl {
     ID3D11VertexShader* vs = nullptr;
     ID3D11PixelShader* ps = nullptr;
     ID3D11InputLayout* il = nullptr;
+    // v0.35.0 解析圆角：另一对 VS/PS + 第二套输入布局 + 第二条顶点流。
+    // 编不出来（老驱动 / D3DCompile 拒绝）就置空，圆角退回覆盖率模板那条老路。
+    ID3D11VertexShader* vsShape = nullptr;
+    ID3D11PixelShader* psShape = nullptr;
+    ID3D11InputLayout* ilShape = nullptr;
+    ID3D11Buffer* sb = nullptr;
+    size_t sbCapVerts = 0;
+    std::vector<D3DShapeVertex> sverts;
+    size_t scount = 0;
     ID3D11Buffer* cb = nullptr;
     ID3D11Buffer* vb = nullptr;
     size_t vbCapVerts = 0;              // vb 目前能装多少顶点（扩容后跟着变大）
@@ -329,7 +351,77 @@ struct BinUID3D::Impl {
         device->CreateInputLayout(elems, 3, vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &il);
         vsBlob->Release();
         psBlob->Release();
-        return il != nullptr;
+        if (!il) return false;
+        compileShapeShaders();   // 失败不致命：只是没有解析圆角，圆角退回模板
+        return true;
+    }
+
+    // v0.35.0：解析圆角的着色器对。式子与 GL/D3D11/GL 三端以及 binGPU/bin2d 逐字相同：
+    //     q = abs(p) - half + r;  d = length(max(q,0)) + min(max(q.x,q.y),0) - r
+    //     cov = clamp(0.5 - d, 0, 1)（实心） / clamp(0.5 - |d + t/2| + t/2, 0, 1)（环带）
+    // 轴对齐 1:1 时 |grad d| ≡ 1，所以这是精确解析覆盖率，不需要导数。
+    void compileShapeShaders() {
+        const char* hlsl =
+            "cbuffer CB : register(b0) { float2 viewSize; };\n"
+            "struct VSIn { float2 pos : POSITION; float2 loc : TEXCOORD0; float2 ext : TEXCOORD1;\n"
+            "              float rad : TEXCOORD2; float thick : TEXCOORD3; float4 col : COLOR0; };\n"
+            "struct PSIn { float4 pos : SV_Position; float2 loc : TEXCOORD0; float2 ext : TEXCOORD1;\n"
+            "              float2 rt : TEXCOORD2; float4 col : COLOR0; };\n"
+            "PSIn vs_shape(VSIn v) {\n"
+            "  PSIn o;\n"
+            "  o.pos = float4(v.pos.x / viewSize.x * 2 - 1, 1 - v.pos.y / viewSize.y * 2, 0, 1);\n"
+            "  o.loc = v.loc; o.ext = v.ext; o.rt = float2(v.rad, v.thick); o.col = v.col;\n"
+            "  return o;\n"
+            "}\n"
+            "float4 ps_shape(PSIn i) : SV_Target {\n"
+            "  float r = max(i.rt.x, 0.0);\n"
+            "  float th = i.rt.y;\n"
+            "  float2 q = abs(i.loc) - i.ext + float2(r, r);\n"
+            "  float d = length(max(q, 0.0)) + min(max(q.x, q.y), 0.0) - r;\n"
+            "  float cov;\n"
+            "  if (th > 0.0) { float ht = th * 0.5; cov = 0.5 - abs(d + ht) + ht; }\n"
+            "  else { cov = 0.5 - d; }\n"
+            "  return i.col * saturate(cov);\n"   // 颜色已经是预乘的（与 GL/VK 同口径）
+            "}\n";
+        ID3DBlob* vsBlob = nullptr;
+        ID3DBlob* psBlob = nullptr;
+        ID3DBlob* err = nullptr;
+        if (FAILED(D3DCompile(hlsl, strlen(hlsl), "binui_shape", nullptr, nullptr, "vs_shape",
+                              "vs_4_0", 0, 0, &vsBlob, &err)) ||
+            FAILED(D3DCompile(hlsl, strlen(hlsl), "binui_shape", nullptr, nullptr, "ps_shape",
+                              "ps_4_0", 0, 0, &psBlob, &err))) {
+            if (err) {
+                std::fprintf(stderr, "[d3d11] shape shader error: %s\n",
+                             static_cast<const char*>(err->GetBufferPointer()));
+                err->Release();
+            }
+            if (vsBlob) vsBlob->Release();
+            if (psBlob) psBlob->Release();
+            return;
+        }
+        device->CreateVertexShader(vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), nullptr,
+                                   &vsShape);
+        device->CreatePixelShader(psBlob->GetBufferPointer(), psBlob->GetBufferSize(), nullptr,
+                                  &psShape);
+        if (vsShape && psShape) {
+            const D3D11_INPUT_ELEMENT_DESC selem[] = {
+                { "POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "TEXCOORD", 2, DXGI_FORMAT_R32_FLOAT, 0, 24, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "TEXCOORD", 3, DXGI_FORMAT_R32_FLOAT, 0, 28, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                { "COLOR", 0, DXGI_FORMAT_R8G8B8A8_UNORM, 0, 32, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            };
+            device->CreateInputLayout(selem, 6, vsBlob->GetBufferPointer(),
+                                      vsBlob->GetBufferSize(), &ilShape);
+        }
+        vsBlob->Release();
+        psBlob->Release();
+        if (!ilShape) {
+            std::fprintf(stderr, "[d3d11] shape 输入布局创建失败，圆角退回覆盖率模板\n");
+            if (vsShape) { vsShape->Release(); vsShape = nullptr; }
+            if (psShape) { psShape->Release(); psShape = nullptr; }
+        }
     }
 
     bool createStates() {
@@ -796,6 +888,84 @@ struct BinUID3D::Impl {
                      "见 docs/future.md P0-5\n", kMaxVertsCeiling / 6);
     }
 
+    // ---- v0.35.0 形状流：与顶点流同构（36 字节 stride），单独一条缓冲 ----
+    D3DShapeVertex* shapeRoom(size_t n) {
+        if (scount + n > sverts.size()) {
+            size_t cap = sverts.size() ? sverts.size() : kMaxVerts;
+            while (cap < scount + n && cap < kMaxVertsCeiling) cap *= 2;
+            if (cap > kMaxVertsCeiling) cap = kMaxVertsCeiling;
+            if (scount + n > cap) { warnVertsOverflow(); return nullptr; }
+            sverts.resize(cap);
+        }
+        return sverts.data() + scount;
+    }
+
+    bool ensureSbCapacity(size_t needVerts) {
+        if (sb && sbCapVerts >= needVerts) return true;
+        size_t cap = sbCapVerts ? sbCapVerts : kMaxVerts;
+        while (cap < needVerts && cap < kMaxVertsCeiling) cap *= 2;
+        if (cap > kMaxVertsCeiling) cap = kMaxVertsCeiling;
+        if (cap < needVerts) { warnVertsOverflow(); return false; }
+        D3D11_BUFFER_DESC vbd = {};
+        vbd.ByteWidth = static_cast<UINT>(cap * sizeof(D3DShapeVertex));
+        vbd.Usage = D3D11_USAGE_DYNAMIC;
+        vbd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        vbd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        ID3D11Buffer* nb = nullptr;
+        if (FAILED(device->CreateBuffer(&vbd, nullptr, &nb))) {
+            std::fprintf(stderr, "[d3d11] 形状顶点缓冲扩容失败（%zu 顶点）\n", cap);
+            return false;
+        }
+        if (sb) sb->Release();
+        sb = nb;
+        sbCapVerts = cap;
+        return true;
+    }
+
+    // 一个圆角矩形 = 6 个形状顶点（TL,TR,BL / BL,TR,BR），AA 在 PS 里算。
+    // 与四边形批共用批次列表（绘制顺序天然保持），颜色按 binui 的惯例**预乘**。
+    void emitShape(float x, float y, float w, float h, float radius, float thick,
+                   uint32_t color) {
+        if (!ilShape || !vsShape || !psShape) return;
+        D3DShapeVertex* o = shapeRoom(6);
+        if (!o) return;
+        // 形状批次与四边形批次共用列表，但 first 是在**形状流**里的下标
+        if (curBatch != static_cast<size_t>(-1) &&
+            batches[curBatch].shape != 0 &&
+            batches[curBatch].sx == scissor[0] && batches[curBatch].sy == scissor[1] &&
+            batches[curBatch].sw == scissor[2] - scissor[0] &&
+            batches[curBatch].sh == scissor[3] - scissor[1]) {
+            // 同一批，继续追加
+        } else {
+            Batch b;
+            b.first = static_cast<uint32_t>(scount);
+            b.count = 0;
+            b.sx = scissor[0];
+            b.sy = scissor[1];
+            b.sw = scissor[2] - scissor[0];
+            b.sh = scissor[3] - scissor[1];
+            b.shape = 1;
+            b.srv = nullptr;
+            batches.push_back(b);
+            curBatch = batches.size() - 1;
+        }
+        const float hx = w * 0.5f, hy = h * 0.5f;
+        const float x0 = x, x1 = x + w, y0 = y, y1 = y + h;
+        // 0xAARRGGBB → 0xAABBGGRR（R8G8B8A8_UNORM 按内存字节序读 —— 与 emitQuad 同一条交换）。
+        // 漏了这一步的后果是颜色红蓝互换（实测圆心的 #7AAAFF 出来是 rgba(255,170,122)）。
+        const uint32_t sw = (color & 0xFF00FF00u) | ((color & 0xFFu) << 16) | ((color >> 16) & 0xFFu);
+        const D3DShapeVertex c[4] = {
+            { x0, y0, -hx, -hy, hx, hy, radius, thick, sw },
+            { x1, y0,  hx, -hy, hx, hy, radius, thick, sw },
+            { x0, y1, -hx,  hy, hx, hy, radius, thick, sw },
+            { x1, y1,  hx,  hy, hx, hy, radius, thick, sw },
+        };
+        o[0] = c[0]; o[1] = c[1]; o[2] = c[2];
+        o[3] = c[2]; o[4] = c[1]; o[5] = c[3];
+        scount += 6;
+        batches[curBatch].count++;
+    }
+
     // 顶点缓冲按需变大：D3D11 的动态 VB 尺寸建好就固定，所以只有"本帧顶点数超过
     // 现有 VB 容量"时才重建一次（之后一直复用它，不会每帧重建）。
     bool ensureVbCapacity(size_t needVerts) {
@@ -826,6 +996,7 @@ struct BinUID3D::Impl {
 
     void beginBatch() {
         if (curBatch != static_cast<size_t>(-1) &&
+            batches[curBatch].shape == 0 &&   // v0.35.0：四边形不许并进形状批次
             batches[curBatch].sx == scissor[0] && batches[curBatch].sy == scissor[1] &&
             batches[curBatch].sw == scissor[2] - scissor[0] && batches[curBatch].sh == scissor[3] - scissor[1] &&
             batches[curBatch].linear == curLinear && batches[curBatch].srv == curSrv &&
@@ -1415,15 +1586,29 @@ struct BinUID3D::Impl {
     }
 
     void flushAll() {
-        if (vcount == 0 || !vb) return;
-        if (!ensureVbCapacity(vcount)) return;   // 本帧顶点比 VB 大：先扩容（不会每帧发生）
-        D3D11_MAPPED_SUBRESOURCE map = {};
-        if (FAILED(ctx->Map(vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
-        memcpy(map.pData, verts.data(), vcount * sizeof(D3DVertex));
-        ctx->Unmap(vb, 0);
+        if ((vcount == 0 && scount == 0) || !vb) return;
+        if (vcount > 0) {
+            if (!ensureVbCapacity(vcount)) return;   // 本帧顶点比 VB 大：先扩容（不会每帧发生）
+            D3D11_MAPPED_SUBRESOURCE map = {};
+            if (FAILED(ctx->Map(vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return;
+            memcpy(map.pData, verts.data(), vcount * sizeof(D3DVertex));
+            ctx->Unmap(vb, 0);
+        }
+        // v0.35.0：形状流（36 字节）单独一条缓冲。
+        // ★ haveShapes 必须在 ensureSbCapacity **之后**才能定：sb 是懒建的，
+        //   先判 `sb != nullptr` 会得到 false，于是所有形状批次都被跳过（实测整页圆角不见）。
+        bool haveShapes = false;
+        if (scount > 0 && ensureSbCapacity(scount)) {
+            D3D11_MAPPED_SUBRESOURCE smap = {};
+            if (FAILED(ctx->Map(sb, 0, D3D11_MAP_WRITE_DISCARD, 0, &smap))) return;
+            memcpy(smap.pData, sverts.data(), scount * sizeof(D3DShapeVertex));
+            ctx->Unmap(sb, 0);
+            haveShapes = true;
+        }
 
         // 正在画进图层时，每条批次再和层框求交（层外的内容不该出现在层里）
         const LayerFrame* lf = layerStack.empty() ? nullptr : &layerStack.back();
+        int pipeState = 0;   // 0 = 四边形那套 VS/PS/IL，1 = 形状那套
         for (const auto& b : batches) {
             if (b.count == 0) continue;
             D3D11_RECT r = { b.sx, b.sy, b.sx + b.sw, b.sy + b.sh };
@@ -1437,10 +1622,39 @@ struct BinUID3D::Impl {
             }
             if (r.right <= r.left || r.bottom <= r.top) continue;
             ctx->RSSetScissorRects(1, &r);
-            ctx->PSSetShaderResources(0, 1, &b.srv);
-            ctx->PSSetSamplers(0, 1, b.wrap ? &samPointWrap
-                                             : (b.linear ? &samLinear : &samPoint));
-            ctx->Draw(b.count * 6, b.first);
+            if (b.shape) {
+                if (!haveShapes) continue;
+                if (pipeState != 1) {
+                    ctx->IASetInputLayout(ilShape);
+                    ctx->VSSetShader(vsShape, nullptr, 0);
+                    ctx->PSSetShader(psShape, nullptr, 0);
+                    UINT st = sizeof(D3DShapeVertex), of = 0;
+                    ctx->IASetVertexBuffers(0, 1, &sb, &st, &of);
+                    pipeState = 1;
+                }
+                ctx->Draw(b.count * 6, b.first);
+            } else {
+                if (pipeState != 0) {
+                    ctx->IASetInputLayout(il);
+                    ctx->VSSetShader(vs, nullptr, 0);
+                    ctx->PSSetShader(ps, nullptr, 0);
+                    UINT st = sizeof(D3DVertex), of = 0;
+                    ctx->IASetVertexBuffers(0, 1, &vb, &st, &of);
+                    pipeState = 0;
+                }
+                ctx->PSSetShaderResources(0, 1, &b.srv);
+                ctx->PSSetSamplers(0, 1, b.wrap ? &samPointWrap
+                                                 : (b.linear ? &samLinear : &samPoint));
+                ctx->Draw(b.count * 6, b.first);
+            }
+        }
+        if (pipeState != 0) {
+            // 收尾装回四边形那套：帧末的图层合成 / present 都假定它是当前的
+            ctx->IASetInputLayout(il);
+            ctx->VSSetShader(vs, nullptr, 0);
+            ctx->PSSetShader(ps, nullptr, 0);
+            UINT st = sizeof(D3DVertex), of = 0;
+            ctx->IASetVertexBuffers(0, 1, &vb, &st, &of);
         }
         // 本帧绘制完毕，淘汰的模板现在才 Release（见 roundFor 里的淘汰注释）
         for (auto& rt : pendingRoundRelease) {
@@ -1451,6 +1665,7 @@ struct BinUID3D::Impl {
         // 图层（v0.16.10）：flush 之后必须清零，否则 present 会把合成四边形再画一遍
         // （GL 那边踩过：表现为组透明度彻底失效、画面全不透明）。
         vcount = 0;
+        scount = 0;
         batches.clear();
         curBatch = static_cast<size_t>(-1);
     }
@@ -1751,6 +1966,7 @@ void BinUID3D::beginFrame(const void* clipRect) {
     if (!impl_->ready) return;
     // 只复位计数：缓冲已预分配到 kMaxVerts，clear() 每帧会把 2 MB 析构再扩容一遍
     impl_->vcount = 0;
+    impl_->scount = 0;
     impl_->batches.clear();
     impl_->curBatch = static_cast<size_t>(-1);
     impl_->scissorDepth = 0;
@@ -1915,6 +2131,18 @@ void BinUID3D::fillLine(float x0, float y0, float x1, float y1, float width, uin
 
 void BinUID3D::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
     if (!impl_->ready || w <= 0 || h <= 0) return;
+    // v0.35.0：解析圆角（片元里算距离场）。只在**没有仿射**时走 —— 旋转/斜切的局部
+    // 坐标是非均匀拉伸的，距离场不知道这件事（交给下面九宫格那条路，它逐片过矩阵）。
+    // 半径用浮点原值：模板那条路会四舍五入成整数。
+    // 混合状态在 D3D11 是**动态状态**（不像 VK 那样烘进管线），所以这条路在
+    // erase/keep/replace 三种变体下同样正确，不需要额外门控。
+    if (impl_->ilShape && !impl_->affineOn) {
+        const float rf = std::min(radius, std::min(w, h) * 0.5f);
+        if (rf <= 0.0f) { fillRect(x, y, w, h, color); return; }
+        Premult(color);
+        impl_->emitShape(x, y, w, h, rf, 0.0f, color);
+        return;
+    }
     // v0.25.0：UV 与九宫格划分不再手抄 —— 走 binui_paint.h 的同一份几何（以前这里
     // 有 66 行与共用实现逐字重复的数学，任何一边改了都没机制保证另一端跟上）。
     RoundedLayer L;
@@ -1990,6 +2218,13 @@ void BinUID3D::strokeRounded(float x, float y, float w, float h, float radius,
         return;
     }
     int th = static_cast<int>(std::lround(std::max(1.0f, thickness)));
+    // v0.35.0：解析圆角环带（`|d + t/2| - t/2`），厚度走浮点原值 ——
+    // 模板那条路必须把厚度取整，1.4px 的焦点环会被画成 1px。
+    if (impl_->ilShape && !impl_->affineOn) {
+        Premult(color);
+        impl_->emitShape(x, y, w, h, rf, thickness, color);
+        return;
+    }
     const int tileRadius = std::max(1, static_cast<int>(std::lround(rf)));
     if (th > tileRadius) th = tileRadius;
     RoundTex& rt = impl_->roundForThick(tileRadius, th);

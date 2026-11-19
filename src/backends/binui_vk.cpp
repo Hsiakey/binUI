@@ -381,12 +381,31 @@ struct VkVertex {
 };
 static_assert(sizeof(VkVertex) == 20, "顶点必须与 GLVertex 同 20 字节");
 
+// v0.35.0：解析圆角的顶点（36 字节）。与 GL 后端的 GLShapeVertex、binGPU 的
+// BgpuShapeVertex 逐字段同口径 —— 三处注释互为镜像。
+// x,y = 目标像素；lx,ly = 相对盒子中心的局部坐标（顶点处 = ±hx,±hy）；hx,hy = 半尺寸；
+// radius / thick 都是**浮点**（模板那条路必须取整，1.4px 的边框会被画成 1px）。
+struct VkShapeVertex {
+    float x, y;
+    float lx, ly;
+    float hx, hy;
+    float radius;
+    float thick;
+    uint32_t color;   // 预乘 0xAARRGGBB（管线按 B8G8R8A8_UNORM 读，与 VkVertex 一致）
+};
+static_assert(sizeof(VkShapeVertex) == 36, "形状顶点必须是 36 字节");
+
 constexpr VkFormat kColorFormat = VK_FORMAT_B8G8R8A8_UNORM;
 // 顶点缓冲：初始 10 万顶点（约 1.66 万四边形，与 GL/D3D11 一致），满了按需扩容，
 // 硬上限 100 万顶点（约 17 万四边形）。以前满了就丢图元且不报错（docs/future.md P0-5）。
 constexpr size_t kMaxVertices = 100000;
 constexpr size_t kMaxVerticesCeiling = 1u << 20;
 constexpr int kMaxBatches = 2048;
+
+// v0.35.0：解析圆角的形状预算（1 个圆角 = 4 个顶点；10000 个 = 40 万顶点 / 1.4 MB）。
+// 撞上限只告警一次并丢弃后面的（与四边形那条流的硬上限同一套口径）。
+constexpr size_t kMaxShapes = 10000;
+constexpr size_t kMaxShapesCeiling = 1u << 18;   // 262144 个形状
 
 uint32_t ScaleAlphaU32(uint32_t c, float op) {
     if (op >= 1.0f) return c;
@@ -438,6 +457,12 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         VkDeviceMemory vmem = VK_NULL_HANDLE;
         VkDeviceSize vbufBytes = 0;              // vbuf 的容量（扩容后跟着变大）
         VkVertex* vmap = nullptr;
+        // v0.35.0：解析圆角**自己一条**顶点流（36 字节，与四边形的 20 字节不混）。
+        VkBuffer sbuf = VK_NULL_HANDLE;
+        VkDeviceMemory smem = VK_NULL_HANDLE;
+        VkDeviceSize sbufBytes = 0;
+        VkShapeVertex* smap = nullptr;
+        std::vector<std::pair<VkBuffer, VkDeviceMemory>> retiredSb;  // 帧内扩容淘汰的形状缓冲
         std::vector<std::pair<VkBuffer, VkDeviceMemory>> staging;   // 等本槽 fence 后释放
         std::vector<std::pair<VkBuffer, VkDeviceMemory>> retiredVb; // 帧内扩容淘汰的顶点缓冲
         bool submitted = false;   // 已提交、fence 还没等（只有一帧会处于这个状态）
@@ -451,6 +476,10 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     VkBuffer vbuf = VK_NULL_HANDLE;
     VkDeviceMemory vmem = VK_NULL_HANDLE;
     VkVertex* vmap = nullptr;
+    // 形状流（v0.35.0）的同名别名
+    VkBuffer sbuf = VK_NULL_HANDLE;
+    VkDeviceMemory smem = VK_NULL_HANDLE;
+    VkShapeVertex* smap = nullptr;
     // ---- 帧耗时拆分（BINUI_VK_PERF=1：每 60 帧一行）----
     // 判断瓶颈在 CPU 录制还是 GPU 执行：录制 ≫ 等 GPU 说明是 CPU 侧（路径细分/排版），
     // 等 GPU ≫ 录制说明是填充率/带宽（大窗口 + 4x MSAA / 读回）。
@@ -528,6 +557,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     VkDescriptorSetLayout dsLayout = VK_NULL_HANDLE;
     VkPipelineLayout pipeLayout = VK_NULL_HANDLE;
     VkPipeline pipeline = VK_NULL_HANDLE;
+    // v0.35.0 解析圆角（主目标 + 图层目标两个采样数版本）。0 = 不可用，走模板老路。
+    VkPipeline pipelineShape = VK_NULL_HANDLE;
+    VkPipeline pipelineShapeLayer = VK_NULL_HANDLE;
     // 层管线：与主管线只差"采样数"（层目标是单采样）和 render pass 绑定方式。
     // flush() 里按 activePipeline 绑，所以同一套 vertex/descriptor 代码两边共用。
     VkPipeline pipelineLayer = VK_NULL_HANDLE;
@@ -636,12 +668,18 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
     size_t vcount = 0;                           // 本帧已写顶点数（跨 flush 累加，不归零）
     size_t flushBase = 0;                        // 本帧已拷进 GPU 缓冲的顶点数（见 flush）
     size_t frameVerts = 0;                       // 上一帧最终提交的顶点数（perf 用）
+    // 形状流（v0.35.0）：自己的 CPU 数组与自己的 flush 游标（理由同 verts/flushBase）
+    std::vector<VkShapeVertex> sverts;
+    size_t scount = 0;
+    size_t sflushBase = 0;
+    size_t frameShapes = 0;
 
     struct Batch {
-        uint32_t first = 0;
-        uint32_t count = 0;
+        uint32_t first = 0;      // 在**自己那条流**里的起始顶点
+        uint32_t count = 0;      // 三角形数
         Tex* tex = nullptr;      // 采样纹理（nullptr = 纯白 1×1，纯色四边形）
         int sx = 0, sy = 0, sw = 0, sh = 0;
+        bool shape = false;      // v0.35.0：这一批走解析圆角管线（不采样）
     };
     std::vector<Batch> batches;
     Batch cur{};
@@ -806,6 +844,12 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
             freeMem(kv.second);
         }
         s.retiredVb.clear();
+        // 形状流（v0.35.0）淘汰的缓冲同样要等 fence 之后再释放
+        for (auto& kv : s.retiredSb) {
+            g_vk.vkDestroyBuffer(device, kv.first, nullptr);
+            freeMem(kv.second);
+        }
+        s.retiredSb.clear();
     }
 
     // 等这一槽的 GPU 工作跑完，并回收它的 staging
@@ -2209,6 +2253,66 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         };
         VkResult pr = build(samples, pipeline);
         if (pr == VK_SUCCESS && useDynamic) pr = build(VK_SAMPLE_COUNT_1_BIT, pipelineLayer);
+        // v0.35.0 解析圆角：另一对着色器 + 另一份顶点输入（36 字节），
+        // 混合状态与主管线相同（预乘）。**必须在下面几个变体改 cba 之前建**。
+        if (pr == VK_SUCCESS && g_vk.vkCreateShaderModule) {
+            VkShaderModule svs = VK_NULL_HANDLE, sfs = VK_NULL_HANDLE;
+            VkShaderModuleCreateInfo smi2{};
+            smi2.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+            smi2.codeSize = sizeof(kVkShapeVertSpv);
+            smi2.pCode = kVkShapeVertSpv;
+            VkResult sr = g_vk.vkCreateShaderModule(device, &smi2, nullptr, &svs);
+            if (sr == VK_SUCCESS) {
+                smi2.codeSize = sizeof(kVkShapeFragSpv);
+                smi2.pCode = kVkShapeFragSpv;
+                sr = g_vk.vkCreateShaderModule(device, &smi2, nullptr, &sfs);
+            }
+            if (sr == VK_SUCCESS) {
+                VkPipelineShaderStageCreateInfo sstages[2]{};
+                sstages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                sstages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+                sstages[0].module = svs;
+                sstages[0].pName = "main";
+                sstages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+                sstages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+                sstages[1].module = sfs;
+                sstages[1].pName = "main";
+                // 形状顶点的六个属性：位置 / 局部 / 半尺寸 / 半径 / 厚度 / 颜色
+                VkVertexInputBindingDescription sbind{};
+                sbind.binding = 0;
+                sbind.stride = sizeof(VkShapeVertex);
+                sbind.inputRate = VK_VERTEX_INPUT_RATE_VERTEX;
+                VkVertexInputAttributeDescription sattr[6]{};
+                sattr[0] = {0, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(VkShapeVertex, x)};
+                sattr[1] = {1, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(VkShapeVertex, lx)};
+                sattr[2] = {2, 0, VK_FORMAT_R32G32_SFLOAT, offsetof(VkShapeVertex, hx)};
+                sattr[3] = {3, 0, VK_FORMAT_R32_SFLOAT, offsetof(VkShapeVertex, radius)};
+                sattr[4] = {4, 0, VK_FORMAT_R32_SFLOAT, offsetof(VkShapeVertex, thick)};
+                sattr[5] = {5, 0, VK_FORMAT_B8G8R8A8_UNORM, offsetof(VkShapeVertex, color)};
+                VkPipelineVertexInputStateCreateInfo svin{};
+                svin.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+                svin.vertexBindingDescriptionCount = 1;
+                svin.pVertexBindingDescriptions = &sbind;
+                svin.vertexAttributeDescriptionCount = 6;
+                svin.pVertexAttributeDescriptions = sattr;
+                // 共用同一个 VkGraphicsPipelineCreateInfo，只换这两块 + 阶段
+                gp.pStages = sstages;
+                gp.pVertexInputState = &svin;
+                pr = build(samples, pipelineShape);
+                if (pr == VK_SUCCESS && useDynamic)
+                    pr = build(VK_SAMPLE_COUNT_1_BIT, pipelineShapeLayer);
+                gp.pStages = stages;
+                gp.pVertexInputState = &vin;
+            }
+            if (svs) g_vk.vkDestroyShaderModule(device, svs, nullptr);
+            if (sfs) g_vk.vkDestroyShaderModule(device, sfs, nullptr);
+            if (pr != VK_SUCCESS) {
+                // 建不出来就当没有：fillRounded/strokeRounded 会退回模板那条路
+                if (pipelineShape) { g_vk.vkDestroyPipeline(device, pipelineShape, nullptr); pipelineShape = VK_NULL_HANDLE; }
+                if (pipelineShapeLayer) { g_vk.vkDestroyPipeline(device, pipelineShapeLayer, nullptr); pipelineShapeLayer = VK_NULL_HANDLE; }
+                pr = VK_SUCCESS;
+            }
+        }
         // v27 擦除变体
         if (pr == VK_SUCCESS) {
             cba.srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
@@ -2343,8 +2447,114 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         return true;
     }
 
+    // ---- 形状流（v0.35.0）：与顶点流同构，只是 stride 是 36 字节 ----
+    bool ensureShapeBuf(Slot& s) {
+        if (s.sbuf) return true;
+        const VkDeviceSize bytes =
+            static_cast<VkDeviceSize>(kMaxShapes) * sizeof(VkShapeVertex);
+        if (!createBuffer(bytes, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          s.sbuf, s.smem)) {
+            std::fprintf(stderr, "[vk] ensureShapeBuf: 形状顶点缓冲创建失败\n");
+            return false;
+        }
+        void* mapped = nullptr;
+        if (g_vk.vkMapMemory(device, s.smem, 0, VK_WHOLE_SIZE, 0, &mapped) == VK_SUCCESS)
+            s.smap = static_cast<VkShapeVertex*>(mapped);
+        s.sbufBytes = bytes;
+        if (sverts.size() < kMaxShapes) sverts.resize(kMaxShapes);
+        return true;
+    }
+
+    // 扩容规则与 growVertBuf 一致（旧的挂到 retiredSb 等本槽 fence 之后再释放）
+    bool growShapeBuf(size_t needShapes) {
+        Slot& s = slots[slotIdx];
+        const VkDeviceSize needBytes = static_cast<VkDeviceSize>(needShapes) * sizeof(VkShapeVertex);
+        if (s.sbuf && s.sbufBytes >= needBytes) return true;
+        size_t cap = s.sbufBytes ? static_cast<size_t>(s.sbufBytes / sizeof(VkShapeVertex))
+                                 : kMaxShapes;
+        while (cap < needShapes && cap < kMaxShapesCeiling) cap *= 2;
+        if (cap > kMaxShapesCeiling) cap = kMaxShapesCeiling;
+        if (cap < needShapes) {
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                std::fprintf(stderr, "[vk] 圆角形状数撞上硬上限（%zu 个/帧），后面的被丢弃\n",
+                             kMaxShapesCeiling / 4);
+            }
+            return false;
+        }
+        if (s.sbuf) {
+            g_vk.vkUnmapMemory(device, s.smem);
+            s.retiredSb.emplace_back(s.sbuf, s.smem);
+            s.sbuf = VK_NULL_HANDLE;
+            s.smem = VK_NULL_HANDLE;
+            s.smap = nullptr;
+            s.sbufBytes = 0;
+        }
+        if (!createBuffer(static_cast<VkDeviceSize>(cap) * sizeof(VkShapeVertex),
+                          VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                          VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                          s.sbuf, s.smem)) {
+            std::fprintf(stderr, "[vk] growShapeBuf: 重建失败（%zu 个形状）\n", cap);
+            return false;
+        }
+        void* mapped = nullptr;
+        if (g_vk.vkMapMemory(device, s.smem, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS)
+            return false;
+        s.smap = static_cast<VkShapeVertex*>(mapped);
+        s.sbufBytes = static_cast<VkDeviceSize>(cap) * sizeof(VkShapeVertex);
+        sbuf = s.sbuf;
+        smem = s.smem;
+        smap = s.smap;
+        return true;
+    }
+
+    // 一个圆角矩形 = 6 个形状顶点（TL,TR,BL / BL,TR,BR），AA 在片元里算。
+    // 与四边形的批**共用批次列表**，所以绘制顺序天然保持（可以任意交错）。
+    void emitShape(float x, float y, float w, float h, float radius, float thick, uint32_t color) {
+        if (scount + 6 > sverts.size()) {
+            size_t cap = sverts.empty() ? kMaxShapes : sverts.size();
+            while (cap < scount + 6 && cap < kMaxShapesCeiling) cap *= 2;
+            if (scount + 6 > cap) return;
+            sverts.resize(cap);
+        }
+        // ★ 只有"当前批次也是形状批、且裁剪区相同"才能追加。少了 `!cur.shape` 这一条，
+        //   形状会被并进前面的**纯色四边形**批次（纯色四边形恰好也传 tex == nullptr）：
+        //   顶点写进形状流、批次却从四边形流里取顶点 —— 结果是那些形状根本不出现。
+        //   实测：shadow 页的 9 张卡阴影（100+ 层同心圆角）只剩两个。
+        if (!cur.shape || cur.sx != clipL || cur.sy != clipT || cur.sw != clipR - clipL ||
+            cur.sh != clipB - clipT) {
+            if (cur.count > 0 && batches.size() < static_cast<size_t>(kMaxBatches))
+                batches.push_back(cur);
+            cur = Batch{};
+            cur.first = static_cast<uint32_t>(scount);
+            cur.tex = nullptr;
+            cur.shape = true;
+            cur.sx = clipL; cur.sy = clipT; cur.sw = clipR - clipL; cur.sh = clipB - clipT;
+        }
+        const float hx = w * 0.5f, hy = h * 0.5f;
+        const float x0 = x, x1 = x + w, y0 = y, y1 = y + h;
+        VkShapeVertex c[4] = {
+            { x0, y0, -hx, -hy, hx, hy, radius, thick, color },
+            { x1, y0,  hx, -hy, hx, hy, radius, thick, color },
+            { x0, y1, -hx,  hy, hx, hy, radius, thick, color },
+            { x1, y1,  hx,  hy, hx, hy, radius, thick, color },
+        };
+        VkShapeVertex* o = sverts.data() + scount;
+        o[0] = c[0]; o[1] = c[1]; o[2] = c[2];
+        o[3] = c[2]; o[4] = c[1]; o[5] = c[3];
+        scount += 6;
+        cur.count += 2;   // 两个三角形
+    }
+
     void switchBatch(Tex* tex) {
-        if (cur.tex == tex && cur.sx == clipL && cur.sy == clipT && cur.sw == clipR - clipL &&
+        // ★ 形状批次绝不能吸附四边形：形状批次的 `first` 是在**形状流**里的下标，
+        //   而四边形顶点写进的是另一条流。纯色四边形恰好也传 tex == nullptr，
+        //   少了这道判据就会并进前面的形状批次 —— 表现是"整页卡片都不见了，
+        //   只剩几个 fillRect"（实测 shadow 页：9 张卡只剩 2 张）。
+        if (!cur.shape &&
+            cur.tex == tex && cur.sx == clipL && cur.sy == clipT && cur.sw == clipR - clipL &&
             cur.sh == clipB - clipT)
             return;
         if (cur.count > 0 && batches.size() < static_cast<size_t>(kMaxBatches)) {
@@ -2414,8 +2624,12 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         // 和本文件 fillRect 里同一个坑（§7.3）。
         static const bool trace = std::getenv("BINUI_VK_TRACE") != nullptr;
         if (trace) {
-            std::fprintf(stderr, "[vk][trace] flush: verts=%zu batches=%zu cur.count=%u\n",
-                         vcount, batches.size(), cur.count);
+            std::fprintf(stderr,
+                         "[vk][trace] flush: verts=%zu shapes=%zu batches=%zu cur.count=%u "
+                         "shapePipe=%d shapePipeLayer=%d single=%d sbuf=%d smap=%d\n",
+                         vcount, scount, batches.size(), cur.count,
+                         pipelineShape ? 1 : 0, pipelineShapeLayer ? 1 : 0,
+                         layerStack.empty() ? 0 : 1, sbuf ? 1 : 0, smap ? 1 : 0);
         }
         if (cur.count > 0) batches.push_back(cur);
         cur = Batch{};
@@ -2425,17 +2639,59 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         // 顶点缓冲是帧共享的，前面已经录进命令缓冲的 draw 都指着它。以前一帧只 flush 一次，
         // 从 0 重拷看不出问题；接上图层后，后一次 flush 的 memcpy 会把前面所有 draw 的
         // 数据覆盖成最后一批 —— 现象是"整帧只剩最后画的那几个四边形"（v0.16.12 抓到）。
-        if (vcount == flushBase || !vmap) { batches.clear(); return; }
+        if (vcount == flushBase && scount == sflushBase) { batches.clear(); return; }
         // 本帧顶点比槽缓冲大：先扩容（扩容会把旧缓冲挂到 staging 上等 fence 后再释放，
         // 否则已经录进命令缓冲的 draw 会指向一张已销毁的缓冲）
-        if (!growVertBuf(vcount)) { batches.clear(); return; }
-        std::memcpy(vmap + flushBase, verts.data() + flushBase,
-                    (vcount - flushBase) * sizeof(VkVertex));
+        if (vcount > flushBase) {
+            if (!growVertBuf(vcount)) { batches.clear(); return; }
+            std::memcpy(vmap + flushBase, verts.data() + flushBase,
+                        (vcount - flushBase) * sizeof(VkVertex));
+        }
+        // v0.35.0：形状流（36 字节）单独一条，理由与上面完全相同
+        if (scount > sflushBase) {
+            if (!growShapeBuf(scount)) { scount = sflushBase; }
+            if (scount > sflushBase)
+                std::memcpy(smap + sflushBase, sverts.data() + sflushBase,
+                            (scount - sflushBase) * sizeof(VkShapeVertex));
+        }
 
-        g_vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              activePipeline ? activePipeline : pipeline);
-        VkDeviceSize off = 0;
-        g_vk.vkCmdBindVertexBuffers(cmd, 0, 1, &vbuf, &off);
+        // 管线按批次切换：四边形批次用当前混合状态的那条（activePipeline 可能是
+        // erase/keep/replace 变体），形状批次用解析圆角的那两条之一（图层目标用单采样）。
+        // 形状批次只会在**默认预乘混合**下出现（emit 时已挡掉其它混合），所以两者不冲突。
+        const bool single = !layerStack.empty();
+        VkPipeline curPipe = VK_NULL_HANDLE;
+        // 当前绑的是哪条顶点缓冲：-1 = 还没绑，0 = 四边形流，1 = 形状流。
+        // **初值必须是 -1**：如果默认成"四边形流已绑"（false），第一笔四边形批次
+        // 就会跳过 vkCmdBindVertexBuffers —— 那一帧什么都画不出来（实测整幅白底）。
+        int boundBuf = -1;
+        auto bindFor = [&](const Batch& b) {
+            if (b.shape) {
+                VkPipeline want = single ? pipelineShapeLayer : pipelineShape;
+                if (!want) want = pipelineShape ? pipelineShape : pipelineShapeLayer;
+                if (!want) return false;   // 没有形状管线：这一批不画（不该发生）
+                if (want != curPipe) {
+                    curPipe = want;
+                    g_vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want);
+                }
+                if (boundBuf != 1) {
+                    VkDeviceSize off = 0;
+                    g_vk.vkCmdBindVertexBuffers(cmd, 0, 1, &sbuf, &off);
+                    boundBuf = 1;
+                }
+                return true;
+            }
+            VkPipeline want = activePipeline ? activePipeline : pipeline;
+            if (curPipe != want) {
+                curPipe = want;
+                g_vk.vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, want);
+            }
+            if (boundBuf != 0) {
+                VkDeviceSize off = 0;
+                g_vk.vkCmdBindVertexBuffers(cmd, 0, 1, &vbuf, &off);
+                boundBuf = 0;
+            }
+            return true;
+        };
         // 正在画进图层时，每条批次再和层框求交 —— 层外的内容不该出现在层里。
         // 层内若发生 popClipTo（把裁剪放宽回整窗），这条兜住它，不让图元越出层框。
         const LayerFrame* lf = layerStack.empty() ? nullptr : &layerStack.back();
@@ -2456,6 +2712,7 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
                              static_cast<uint32_t>(std::max(0, bb - t))};
             }
             if (sc.extent.width == 0 || sc.extent.height == 0) continue;
+            if (!bindFor(b)) continue;
             Tex* tex = b.tex ? b.tex : &white;
             // 上传留下的 TRANSFER_DST 必须在这里转成只读：绘制是 flush 时才录进
             // 命令缓冲的，所以转换点只能是 draw 之前（不是 emit 那一刻）。
@@ -2467,7 +2724,9 @@ struct BinUIVK::Impl : binui::IGlyphTexHost {
         }
         batches.clear();
         flushBase = vcount;   // 已提交到 GPU 的部分，下一次 flush 只追加后面的
+        sflushBase = scount;
         frameVerts = vcount;
+        frameShapes = scount;
     }
 
     // ============================================================
@@ -3701,10 +3960,14 @@ void BinUIVK::beginFrame(const void* clipRect) {
     d.waitSlot(slot);
     g_vk.vkResetFences(d.device, 1, &slot.fence);
     d.ensureVertBuf(slot);
+    d.ensureShapeBuf(slot);
     d.cmd = slot.cmd;          // 当前槽别名：绘制/上传代码只认 d.cmd / d.vbuf / d.vmap
     d.vbuf = slot.vbuf;
     d.vmem = slot.vmem;
     d.vmap = slot.vmap;
+    d.sbuf = slot.sbuf;
+    d.smem = slot.smem;
+    d.smap = slot.smap;
     d.perfBeginFrame();
     g_vk.vkResetCommandBuffer(slot.cmd, 0);
 
@@ -3738,6 +4001,8 @@ void BinUIVK::beginFrame(const void* clipRect) {
     d.ensureVertBuf(d.slots[d.slotIdx]);
     d.vcount = 0;
     d.flushBase = 0;
+    d.scount = 0;
+    d.sflushBase = 0;
     d.batches.clear();
     d.cur = Impl::Batch{};
     d.switchBatch(&d.white);
@@ -4105,6 +4370,16 @@ void BinUIVK::fillRect(float x, float y, float w, float h, uint32_t color) {
 void BinUIVK::fillRounded(float x, float y, float w, float h, float radius, uint32_t color) {
     Impl& d = *impl_;
     if (!d.ready || w <= 0 || h <= 0) return;
+    // v0.35.0：解析圆角（片元里算距离场）。只在**没有仿射 + 默认预乘混合**时走 ——
+    // 旋转/斜切会把局部坐标非均匀拉伸（距离场不知道这件事），
+    // 而 erase/keep/replace 三种混合变体没有形状管线（只有预乘那一版）。
+    if (d.pipelineShape && !d.affineOn && !d.eraseOn && !d.keepOn && !d.blurReplace) {
+        const float rf = std::min(radius, std::min(w, h) * 0.5f);
+        if (rf <= 0.0f) { fillRect(x, y, w, h, color); return; }
+        Premult(color);
+        d.emitShape(x, y, w, h, rf, 0.0f, color);
+        return;
+    }
     // 半径钳制与角片模板取整都在 binui_paint.h（v0.25.0：三端共用同一份）
     RoundedLayer L;
     if (!BuildRoundedLayer(x, y, w, h, radius, false, 0, L)) { fillRect(x, y, w, h, color); return; }
@@ -4235,6 +4510,13 @@ void BinUIVK::strokeRounded(float x, float y, float w, float h, float radius,
         return;
     }
     int th = static_cast<int>(std::lround(std::max(1.0f, thickness)));
+    // v0.35.0：解析圆角环带（`|d + t/2| - t/2`），厚度走**浮点原值** ——
+    // 模板那条路必须把厚度取整，1.4px 的焦点环会被画成 1px。
+    if (d.pipelineShape && !d.affineOn && !d.eraseOn && !d.keepOn && !d.blurReplace) {
+        Premult(color);
+        d.emitShape(x, y, w, h, rf, thickness, color);
+        return;
+    }
     const int tileRadius = std::max(1, static_cast<int>(std::lround(rf)));
     if (th > tileRadius) th = tileRadius;
     Impl::RoundTex& rt = d.roundForThick(tileRadius, th);

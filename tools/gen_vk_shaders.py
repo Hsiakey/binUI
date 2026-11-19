@@ -7,6 +7,9 @@ def spv_to_header(path):
 
 vs = spv_to_header("tools/vk_shaders/quad.vert.spv")
 fs = spv_to_header("tools/vk_shaders/quad.frag.spv")
+# v0.35.0 解析圆角（AA 数学在片元里算）
+svs = spv_to_header("tools/vk_shaders/shape.vert.spv")
+sfs = spv_to_header("tools/vk_shaders/shape.frag.spv")
 
 def emit(name, words):
     out = [f"static const uint32_t {name}[] = {{"]
@@ -42,6 +45,10 @@ namespace binui {{
 {emit("kVkQuadVertSpv", vs)}
 
 {emit("kVkQuadFragSpv", fs)}
+
+{emit("kVkShapeVertSpv", svs)}
+
+{emit("kVkShapeFragSpv", sfs)}
 
 }} // namespace binui
 
