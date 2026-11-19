@@ -1517,6 +1517,8 @@ inline void BinUIAppT<Gfx>::renderFrame() {
     // pump 立刻返回，帧间隔就退化成"纯耗时"，又漂回非整数格。
     using Clock = std::chrono::steady_clock;
     const auto endT = Clock::now();
+    // 这一帧 present 是不是自己阻塞等过刷新边界（见下面 sleepSteps）
+    const bool presentWaited = lastPresentMs_ >= refreshMs_ * 0.5;
     {
         const long long gridUs = static_cast<long long>(refreshMs_ * 1000.0 + 0.5);
         const auto grid = std::chrono::duration_cast<Clock::duration>(
@@ -1556,7 +1558,13 @@ inline void BinUIAppT<Gfx>::renderFrame() {
         if (k < 1) k = 1;
         if (k > 512) k = 512;
         frameSteps_ = k;
-        nextFrameTime_ = t + grid * k;
+        // present 自己已经等掉一拍时（它阻塞到了刷新边界，实测 ≥ 半个刷新周期），
+        // 下一拍就**不要再补一整格** —— 否则就是双重等待：VK 后端 FIFO 交换链实测
+        // present 7.9 ms、帧耗时 8.33 ms，却按 2.03 个刷新周期出帧（120fps 掉成 60）。
+        // 判据用**实测**的 present 耗时，不用后端声明；GDI/贴屏那条路 present 很快，
+        // 不会被误判。
+        const long long sleepSteps = (presentWaited && k > 1) ? k - 1 : k;
+        nextFrameTime_ = t + grid * sleepSteps;
     }
 }
 

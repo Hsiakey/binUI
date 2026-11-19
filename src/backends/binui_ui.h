@@ -23,14 +23,18 @@
 
 #include "backends/binui_draw_nodes.h"   // drawNodesBinUI（后端无关遍历）
 
+// 0.33.0：**默认是运行期选择**（BinUIAuto）—— 问 binGPU 这台机器有什么，按
+// VK > GL > D3D11 > CPU 挑一个。编译期宏仍然可用，但降级成"钉住某个后端做对照/金标准"。
 #if defined(BINUI_GPU_VK)
 #include "backends/binui_vk.h"
 #elif defined(BINUI_GPU_D3D11)
 #include "backends/binui_d3d11.h"
 #elif defined(BINUI_GPU_GL)
 #include "backends/binui_gl.h"
-#else
+#elif defined(BINUI_GPU_2D)
 #include "backends/binui_bin2d.h"
+#else
+#include "backends/binui_auto.h"
 #endif
 
 namespace binui {
@@ -44,9 +48,12 @@ using UiApp     = BinUIAppT<BinUID3D>;
 #elif defined(BINUI_GPU_GL)
 using UiBackend = BinUIGL;
 using UiApp     = BinUIAppT<BinUIGL>;
-#else
+#elif defined(BINUI_GPU_2D)
 using UiBackend = BinUI2D;
 using UiApp     = BinUIApp2D;
+#else
+using UiBackend = BinUIAuto;
+using UiApp     = BinUIAppT<BinUIAuto>;
 #endif
 
 // <canvas> 绘制回调：参数是**接口**（IBinUIGfx），不是具体后端 —— 这样 demo 的绘制代码
@@ -84,10 +91,12 @@ inline const char* UiBackendName() {
     return "vulkan";
 #elif defined(BINUI_GPU_D3D11)
     return "d3d11";
+#elif defined(BINUI_GPU_GL)
+    return "gl";
 #elif defined(BINUI_GPU_2D)
     return "bin2d";
 #else
-    return "gl";
+    return "auto";   // 运行期选：真实后端看启动时那行 [binui] 后端:
 #endif
 }
 

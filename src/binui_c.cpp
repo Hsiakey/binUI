@@ -21,7 +21,7 @@
 #include "binui_paths.h"
 #include "binui_renderer.h"
 #include "backends/binui_draw_nodes.h"   // drawNodesBinUI（后端无关遍历）
-#include "backends/binui_bin2d.h"   // BinUIApp2D：C ABI 默认后端（0.28.1 起不再绑死 GL）
+#include "backends/binui_auto.h"    // BinUIAuto：C ABI 也是运行期选后端（0.33.0）
 
 namespace {
 
@@ -49,7 +49,7 @@ struct QueuedEvent {
 
 struct App {
     binui::BinUIRenderer renderer;
-    std::unique_ptr<binui::BinUIApp2D> shell;
+    std::unique_ptr<binui::BinUIAppT<binui::BinUIAuto>> shell;
     std::deque<QueuedEvent> queue;
     std::string eventText;   // poll 期间 text 指向这里（下一次 poll 前有效）
     std::string assetDir;    // 图片 / 外挂组件基准目录（末尾带分隔符）
@@ -210,12 +210,12 @@ static int32_t OpenAppInternal(void* appp, int32_t width, int32_t height,
 
     // 0.28.1：默认后端从 GL 换成 bin2d。C ABI 只用外壳 API + gfx() 返回的 IBinUIGfx&，
     // 所以换后端只是换一个类型别名（这正是"后端交给 bin2d"在绑定层的样子）。
-    a->shell.reset(new binui::BinUIApp2D(w, h, (flags & BINUI_OPEN_NO_VSYNC) == 0));
+    a->shell.reset(new binui::BinUIAppT<binui::BinUIAuto>(w, h, (flags & BINUI_OPEN_NO_VSYNC) == 0));
     a->shell->setWindowOptions(resizable, child ? 0.0f : (wd.present ? wd.aspect : 0.0f),
                                transparent, title.c_str());
 
     binui::BinUIRenderer& r = a->renderer;
-    binui::BinUIApp2D& sh = *a->shell;
+    binui::BinUIAppT<binui::BinUIAuto>& sh = *a->shell;
 
     // ---- 绘制 ----
     sh.setDrawFn([a](binui::IBinUIGfx& gfx, const void* clip) {

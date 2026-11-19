@@ -1,7 +1,7 @@
 # binUI - 跨平台描述式 UI 核心
 
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.32.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.33.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
 [![Format v34](https://img.shields.io/badge/binUI%20format-v34-orange.svg)](include/binui_format.h)
@@ -15,10 +15,12 @@
 |---|---|---|---|
 | ![自适应布局](docs/img/flexshow.png) | ![按钮样式](docs/img/buttonshow.png) | ![动画](docs/img/animshow.png) | ![应用壳](docs/img/appshow.png) | ![3D](docs/img/cubedemo.png) |
 
-> **后端分层（0.29.0 起默认）**：`binUI ──► bin2d / bin3d ──► binGPU ──► GL / Vulkan / D3D11`。
-> binUI 这一层不写图形 API —— 2D 语义全交给 bin2d（CPU 覆盖率光栅是像素权威），
-> GPU 只负责把 Surface 送上交换链（`bin2d::GpuCompositor` → bingpu），没显卡时退回系统贴屏。
-> 三份 GPU 后端还在，但降级为可选对照构建（`-DBINUI_GPU_GL|VK|D3D11`，`make demos-vk|demos-d3d11`）。
+> **后端（0.33.0 起运行期选择）**：`binUI` 启动时问 **binGPU**「这台机器有什么」，
+> 按 **Vulkan → GL → D3D11 → CPU** 取第一个可用的；一个 GPU 后端都用不了才走 CPU 光栅
+> （bin2d，此时的落点是 `binUI ──► bin2d ──► binGPU` 把 Surface 贴上屏，没有显卡就系统贴屏）。
+> 同一页实测：VK 8.5ms/帧（112fps）、D3D11 0.75ms、GL 1.5ms、CPU 光栅 12.1ms（56fps）——
+> **CPU 光栅慢 12~16 倍**，所以 GPU 优先是默认。
+> `BINUI_GPU=vk|gl|d3d11|2d` 可强制；编译期宏 `-DBINUI_GPU_VK|GL|D3D11|2D` 仍在（钉住后端做对照/金标准）。
 >
 > 前三张是 `gl_shot`（GL 后端 + 隐藏窗口 + 离屏 FBO）从当前源码渲染的真实布局；第四张是 GL 真机截屏
 > —— 立方体是应用在 `<canvas>` 回调里用 `fillLine` 画的，离屏渲染跑不到那段代码。

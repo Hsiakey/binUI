@@ -411,7 +411,10 @@ struct BinUI2D::Impl {
     // 建窗口版合成器（GL → Vulkan → D3D11，桌面平台上 WGL 最成熟所以先试）。
     // vsync 是**建链时**定的，所以换 vsync 只能重建 —— 见 setVsync。
     bool openCompositor(int w, int h, bool vsync) {
-        const BgpuBackendKind order[] = {BGPU_BACKEND_GL, BGPU_BACKEND_VULKAN,
+        // 顺序按 master 2026-11-20 定的优先级：**VK > GL > D3D11**
+        // （以前是 GL 先 —— 当时 WGL 最成熟；现在 VK 的交换链路径已经稳定，且实测
+        //  present 直接贴合成边界，比 GL 少一半呈现耗时，所以按优先级排。）
+        const BgpuBackendKind order[] = {BGPU_BACKEND_VULKAN, BGPU_BACKEND_GL,
                                          BGPU_BACKEND_D3D11};
         for (BgpuBackendKind k : order) {
             if (!bingpu_backend_available(k)) continue;
