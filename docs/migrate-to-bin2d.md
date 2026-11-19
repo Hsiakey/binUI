@@ -187,6 +187,20 @@ binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D
 `clipRect` 就把内容裁成 0×0。`opacity` 用例 48.9% → 0%。回归测试见
 `bin2D/tests/test_composite.cpp::TestClipRectInsideLayer`。
 
+**踩出来的 bin2d 后端 bug（已在 0.31.1 修）**：字形位图从 `binui_glyph_atlas.h`
+出来时已经是预乘白色（`p[0..3] = 覆盖率`），而 `GlyphHost2D::updateTex` 走了
+`BlitBgraStraightInto` 又预乘了一次 —— 纹素变成 `(a²/255, a²/255, a²/255, a)`，
+覆盖率在 RGB 上被平方。症状：**白字压浅底出现一圈灰边**（白底上字形核心只有 191
+而不是 255），整体墨量偏少，小字号拉丁发虚，与汉字放一起就像"有的粗有的细"。
+三份 GPU 后端把字节原样上纹理，所以只有 bin2d 这条有。改成 `BlitBgraPremulInto`
+（只换字节序）之后，白字压蓝底的文本像素与 GL **0 差异**，`svg-filter` 与 GL 的
+差异 2.446% → 0.513%。
+
+> 定位方法记一笔：把同一个字形分别压在**黑 / 白 / 灰**三种底色上。只有"源 rgb 比
+> 正确值暗"这一种解释能同时对上三组数（s=243/a=249、s=85/a=149，两组都等于 a²/255）。
+> 只压在一种底色上会误判成"阴影"或"字体粗细"。
+
+
 **还没做（P4 第二半）**：
 
 - ~~窗口呈现~~ —— **已落地（0.26.1 + bin2d 0.11.0）**：`BinUI2D::init(hwnd,…)` 建一台
