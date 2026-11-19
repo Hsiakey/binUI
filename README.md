@@ -1,7 +1,7 @@
 # binUI - 跨平台描述式 UI 核心
 
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.33.0-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.33.1-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
 [![Format v34](https://img.shields.io/badge/binUI%20format-v34-orange.svg)](include/binui_format.h)
@@ -18,7 +18,7 @@
 > **后端（0.33.0 起运行期选择）**：`binUI` 启动时问 **binGPU**「这台机器有什么」，
 > 按 **Vulkan → GL → D3D11 → CPU** 取第一个可用的；一个 GPU 后端都用不了才走 CPU 光栅
 > （bin2d，此时的落点是 `binUI ──► bin2d ──► binGPU` 把 Surface 贴上屏，没有显卡就系统贴屏）。
-> 同一页实测：VK 8.5ms/帧（112fps）、D3D11 0.75ms、GL 1.5ms、CPU 光栅 12.1ms（56fps）——
+> 同一页实测：GL 1.4ms/帧（100fps）稳定、VK/D3D11 的呈现节奏还不稳（见 binGPU 0.8.0 的已知问题）、CPU 光栅 12.1ms（56fps）——
 > **CPU 光栅慢 12~16 倍**，所以 GPU 优先是默认。
 > `BINUI_GPU=vk|gl|d3d11|2d` 可强制；编译期宏 `-DBINUI_GPU_VK|GL|D3D11|2D` 仍在（钉住后端做对照/金标准）。
 >

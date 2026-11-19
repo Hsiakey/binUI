@@ -33,12 +33,30 @@ GpuBackend FromEnv(const char* v) {
     return GpuBackend::Auto;
 }
 
-// binGPU 说这台机器有什么。返回第一个可用的（按 VK → GL → D3D11）。
-GpuBackend Probe() {
-    if (bingpu_backend_available(BGPU_BACKEND_VULKAN)) return GpuBackend::Vulkan;
-    if (bingpu_backend_available(BGPU_BACKEND_GL)) return GpuBackend::GL;
-    if (bingpu_backend_available(BGPU_BACKEND_D3D11)) return GpuBackend::D3D11;
-    return GpuBackend::Cpu;
+// 让 **binGPU** 决定用哪个 API、在哪执行（0.33.1：决策权归 binGPU）。
+// binUI 这边只负责把计划翻译成"用哪份 binUI 后端实现"——这是过渡期的翻译层，
+// 等 bin2d 的 GPU 执行模式做完（见 docs/backend_layering.md 的三步），这一层就删掉。
+bool AskBinGpu(GpuBackend want, GpuBackend* out) {
+    BgpuRenderPlan plan{};
+    BgpuBackendKind k = BGPU_BACKEND_AUTO;
+    switch (want) {
+        case GpuBackend::Vulkan: k = BGPU_BACKEND_VULKAN; break;
+        case GpuBackend::GL:     k = BGPU_BACKEND_GL; break;
+        case GpuBackend::D3D11:  k = BGPU_BACKEND_D3D11; break;
+        case GpuBackend::Cpu:    k = BGPU_BACKEND_CPU; break;
+        default:                 k = BGPU_BACKEND_AUTO; break;
+    }
+    if (bingpu_render_plan(k, &plan) != BGPU_OK) return false;
+    switch (plan.backend) {
+        case BGPU_BACKEND_VULKAN: *out = GpuBackend::Vulkan; break;
+        case BGPU_BACKEND_GL:     *out = GpuBackend::GL; break;
+        case BGPU_BACKEND_D3D11:  *out = GpuBackend::D3D11; break;
+        default:                  *out = GpuBackend::Cpu; break;
+    }
+    std::fprintf(stderr, "[binui] binGPU 计划: backend=%s exec=%s msaa=%u\n",
+                 bingpu_backend_name(plan.backend), bingpu_exec_mode_name(plan.exec),
+                 plan.msaa_samples);
+    return true;
 }
 
 } // namespace
@@ -55,7 +73,9 @@ const char* GpuBackendName(GpuBackend b) {
 
 GpuBackend ResolveGpuBackend() {
     const GpuBackend want = FromEnv(std::getenv("BINUI_GPU"));
-    return want == GpuBackend::Auto ? Probe() : want;
+    GpuBackend picked = GpuBackend::Cpu;
+    if (!AskBinGpu(want, &picked)) return want == GpuBackend::Auto ? GpuBackend::Cpu : want;
+    return picked;
 }
 
 BinUIAuto::BinUIAuto() = default;

@@ -5,6 +5,36 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.33.1] - 2026-11-20 【格式 v34 不变】
+
+**选后端的决策权交给 binGPU。** 接 binGPU 0.8.0 的 `bingpu_render_plan()`：
+`BinUIAuto` 不再自己按 `VK > GL > D3D11` 探测，而是问一句计划（backend + exec + msaa），
+只负责把计划翻译成"用哪份 binUI 后端实现"。启动多打一行
+`[binui] binGPU 计划: backend=vulkan exec=gpu msaa=4`。
+
+这仍然是**过渡期的翻译层**。按 master 2026-11-20 的分工（binUI/bin2D 定功能，
+binGPU 定怎么画、用什么执行），最终这三份 binUI GPU 后端要删掉，bin2d 的 Canvas
+直接把语义交给 binGPU 的图元 —— 三步计划见 [docs/backend_layering.md](docs/backend_layering.md)。
+
+### 收回一个报错的数字
+
+0.33.0 的 CHANGELOG 写的是「Vulkan 8.50ms / 112 fps」。**那是一次运气好的测量。**
+同一段代码重复跑，present 会在 1 拍 / 2 拍之间摆：
+
+| 后端 | present | fps | 可复现？ |
+|---|---|---|---|
+| GL | 1.42 ~ 1.48 ms | **100.6 ~ 100.8** | ✅ 连跑三次都在这个区间 |
+| Vulkan | 8.08（1 拍）或 17.7（2 拍） | 112 或 55 | ❌ 两种都见过 |
+| D3D11 | 0.30（不等）或 31.5（3.8 拍） | 113 或 31 | ❌ 两种都见过 |
+| bin2d（CPU 光栅） | 2.9 ms | 56 | ✅ |
+
+同一段代码两次跑出 4 倍差距 = **交换链"在飞几帧"没被约束住**，这是 binGPU 层的缺陷，
+已记进 binGPU 0.8.0 的 CHANGELOG（修法：固定最多 1 帧在飞 + 按 present mode 显式协商；
+验收：连跑 5 次 present 耗时方差 < 10%）。
+
+现在能拍的胸脯只有 GL 那条：**100 fps 稳定、present 1.4ms**。CPU 光栅 56 fps 稳定。
+
+---
 ## [0.33.0] - 2026-11-20 【格式 v34 不变】
 
 **默认后端改成"运行期选择"：有 GPU 就用 GPU（VK > GL > D3D11），一个都用不了才走 CPU 光栅（bin2d）。**
