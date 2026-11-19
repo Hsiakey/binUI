@@ -216,6 +216,14 @@ const std::string& FontEngine::faceName(int index) const {
     return impl_->defaultFace;
 }
 
+bool FontEngine::faceHasGlyph(int index, uint32_t cp) {
+    if (index < 0 || impl_->fallback.empty()) return false;
+    if (static_cast<size_t>(index) >= impl_->fallback.size()) return false;
+    FT_Face f = Impl::probeFace(impl_, impl_->fallback[static_cast<size_t>(index)]);
+    if (!f) return false;
+    return FT_Get_Char_Index(f, cp) != 0;
+}
+
 int FontEngine::faceIndexFor(uint32_t cp) {
     auto it = impl_->coverCache.find(cp);
     if (it != impl_->coverCache.end()) return it->second;
