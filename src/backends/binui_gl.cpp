@@ -1376,7 +1376,11 @@ bool BinUIGL::init(void* hwnd, int width, int height, bool vsync) {
     binui::ex::StartupMark(t0, "font atlas initFonts");
     wglSwapIntervalEXT = reinterpret_cast<PFNWGLSWAPINTERVALEXT>(
         GetGLProc("wglSwapIntervalEXT"));
-    if (impl_->vsync && wglSwapIntervalEXT) wglSwapIntervalEXT(1);
+    // **两个方向都要调**。老写法只在 vsync 为真时调 `wglSwapIntervalEXT(1)`，于是传
+    // vsync=false 等于什么都没做 —— 驱动的默认 interval 就是 1，SwapBuffers 每帧照样等
+    // 刷新。实测：vsync=false 时 present 8.8 ms、卡在 ~105 fps；真的调过 (0) 之后
+    // 同一窗口 800+ fps（见 binGPU 的 bingpu_gl.cpp 同一处修复）。
+    if (wglSwapIntervalEXT) wglSwapIntervalEXT(impl_->vsync ? 1 : 0);
     impl_->ready = true;
     binui::ex::StartupMark(t0, "GL init total");
     return true;

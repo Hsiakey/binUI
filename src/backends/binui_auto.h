@@ -24,6 +24,11 @@
 #include "binui_gfx.h"
 #include "backends/binui_app.h"   // 无边框窗口外壳模板（四个后端共用同一份）
 
+// binGPU 的节拍器结构体（0.9.0）：这里只前置声明它的**标签**，全局命名空间 ——
+// binUI 的公共头不该把 bingpu.h 带进来（纯 C++ 核心库要能在没有 binGPU 的构建里编过）。
+// 完整定义只在 binui_auto.cpp 里落地（那里 include 了 bingpu.h）。
+struct BgpuPacer;
+
 namespace binui {
 
 // 后端种类。Auto = 让 binGPU 决定。
@@ -62,6 +67,18 @@ public:
     void beginFrame(const void* clipRect) override;
     void present() override;
     bool presentPacesFrames() const override;
+
+    // ---- 帧节拍（v0.34.0）----
+    // bin2d 那条路自己就有节拍器（bin2d::GpuCompositor → binGPU），这里直通；
+    // 仓里遗留的 gl/vk/d3d11 三份实现没有，于是**由这层壳持有一个 binGPU 节拍器**替它们算
+    // —— 算法仍然只有 binGPU 那一份，这里只是把 present 的真实耗时喂进去。
+    // （那三份实现按 docs/backend_layering.md 第 3 步要删，删完这段跟着没了。）
+    bool paceAvailable() const override;
+    double paceFrameMs() const override;
+    long long paceWaitUs() override;
+    double paceRefreshMs() const override;
+    void setPacePolicyText(const char* text) override;
+    const char* pacePolicyName() const override;
 
     void fillRect(float x, float y, float w, float h, uint32_t color) override;
     void fillRounded(float x, float y, float w, float h, float radius,
@@ -116,7 +133,11 @@ public:
 
 private:
     bool open(GpuBackend which, void* hwnd, int width, int height, bool vsync);
+    // 遗留三后端（gl/vk/d3d11）用的节拍器：内层自己不管节拍时才启用
+    bool legacyPaceActive() const { return legacyPacer_ && inner_ && !inner_->paceAvailable(); }
     std::unique_ptr<IBinUIGfx> inner_;
+    std::unique_ptr<BgpuPacer> legacyPacer_;
+    char paceText_[32] = {0};
     GpuBackend active_ = GpuBackend::Cpu;
     bool offscreen_ = false;
 };

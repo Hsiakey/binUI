@@ -7,6 +7,7 @@
 // binGPU 已经给了 `bingpu_backend_available()`，这里只是把它翻译成"选哪个 binUI 后端"。
 #include "backends/binui_auto.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -20,6 +21,13 @@
 namespace binui {
 
 namespace {
+
+// 节拍用的单调时钟（微秒）。外壳与节拍器必须共用同一个时间原点 —— 只在这个文件里取。
+long long PacerNowUs() {
+    using namespace std::chrono;
+    static const auto epoch = steady_clock::now();
+    return static_cast<long long>(duration_cast<microseconds>(steady_clock::now() - epoch).count());
+}
 
 // `BINUI_GPU=vk|gl|d3d11|2d` 强制指定；空/未知 = 自动。
 GpuBackend FromEnv(const char* v) {
@@ -91,6 +99,8 @@ bool BinUIAuto::open(GpuBackend which, void* hwnd, int width, int height, bool v
         case GpuBackend::D3D11:  made = std::make_unique<BinUID3D>(); break;
         default:                 made = std::make_unique<BinUI2D>(); break;
     }
+    // 策略必须在 init **之前**转给内层：bin2d 那条路要在建交换链时按策略决定 vsync。
+    made->setPacePolicyText(paceText_);
     bool ok;
     if (which == GpuBackend::Cpu) {
         BinUI2D* c = static_cast<BinUI2D*>(made.get());
@@ -121,6 +131,17 @@ bool BinUIAuto::init(int width, int height) {
 }
 
 bool BinUIAuto::init(void* hwnd, int width, int height, bool vsync) {
+    // 节拍器先起来（在选后端之前）：交换链的垂直同步位要按策略决定 ——
+    // "unlimited"/"240" 不关 vsync 就永远超不过刷新率。
+    legacyPacer_.reset(new BgpuPacer);
+    bingpu_pace_init(legacyPacer_.get(), hwnd);
+    if (paceText_[0]) {
+        BgpuPacePolicy pol = BGPU_PACE_STANDARD;
+        if (bingpu_pace_policy_parse(paceText_, &pol))
+            bingpu_pace_set_policy(legacyPacer_.get(), pol);
+    }
+    const bool allowVsync = vsync && bingpu_pace_wants_vsync(legacyPacer_.get()) != 0;
+
     GpuBackend want = ResolveGpuBackend();
     const char* env = std::getenv("BINUI_GPU");
     // 自动选的那一个起不来时往后退（VK → GL → D3D11 → CPU），保证总能出画面。
@@ -128,7 +149,7 @@ bool BinUIAuto::init(void* hwnd, int width, int height, bool vsync) {
                                GpuBackend::D3D11, GpuBackend::Cpu};
     for (GpuBackend b : order) {
         if (b == GpuBackend::Auto) continue;
-        if (open(b, hwnd, width, height, vsync)) {
+        if (open(b, hwnd, width, height, allowVsync)) {
             std::fprintf(stderr, "[binui] 后端: %s（%s；binGPU 可用: VK=%d GL=%d D3D11=%d）\n",
                          GpuBackendName(b),
                          env && *env ? "BINUI_GPU 指定" : "按 binGPU 探测自动选",
@@ -152,10 +173,18 @@ void BinUIAuto::shutdown() {
 
 void BinUIAuto::presentViaGdi() {
     if (!inner_) return;
-    if (active_ == GpuBackend::Cpu) static_cast<BinUI2D*>(inner_.get())->presentViaGdi();
-    else if (active_ == GpuBackend::Vulkan) static_cast<BinUIVK*>(inner_.get())->presentViaGdi();
+    if (!legacyPaceActive()) {
+        if (active_ == GpuBackend::Cpu) static_cast<BinUI2D*>(inner_.get())->presentViaGdi();
+        else if (active_ == GpuBackend::Vulkan) static_cast<BinUIVK*>(inner_.get())->presentViaGdi();
+        else if (active_ == GpuBackend::GL) static_cast<BinUIGL*>(inner_.get())->presentViaGdi();
+        else static_cast<BinUID3D*>(inner_.get())->presentViaGdi();
+        return;
+    }
+    // 贴屏不等刷新 → present_ms 传 0，节拍器按"从本拍开始算一格"处理。
+    if (active_ == GpuBackend::Vulkan) static_cast<BinUIVK*>(inner_.get())->presentViaGdi();
     else if (active_ == GpuBackend::GL) static_cast<BinUIGL*>(inner_.get())->presentViaGdi();
-    else static_cast<BinUID3D*>(inner_.get())->presentViaGdi();
+    else if (active_ == GpuBackend::D3D11) static_cast<BinUID3D*>(inner_.get())->presentViaGdi();
+    bingpu_pace_frame_end(legacyPacer_.get(), PacerNowUs(), 0.0);
 }
 
 // ---- IBinUIGfx：全部直通（内层为空时给安全的空答复） ----
@@ -165,9 +194,66 @@ int  BinUIAuto::height() const { return inner_ ? inner_->height() : 0; }
 void BinUIAuto::resize(int w, int h) { if (inner_) inner_->resize(w, h); }
 void BinUIAuto::setVsync(bool on) { if (inner_) inner_->setVsync(on); }
 void BinUIAuto::setTransparent(bool t) { if (inner_) inner_->setTransparent(t); }
-void BinUIAuto::beginFrame(const void* rc) { if (inner_) inner_->beginFrame(rc); }
-void BinUIAuto::present() { if (inner_) inner_->present(); }
+void BinUIAuto::beginFrame(const void* rc) {
+    if (legacyPaceActive()) bingpu_pace_frame_begin(legacyPacer_.get(), PacerNowUs());
+    if (inner_) inner_->beginFrame(rc);
+}
+
+void BinUIAuto::present() {
+    if (!legacyPaceActive()) { if (inner_) inner_->present(); return; }
+    // 只量 present 自身：这是"它到底有没有在等垂直同步"的唯一证据（见 binGPU 的说明）。
+    // 注意 presentViaGdi() 不走这里 —— 贴屏路径由外壳按刷新网格兜底。
+    const long long t0 = PacerNowUs();
+    if (inner_) inner_->present();
+    const long long t1 = PacerNowUs();
+    bingpu_pace_frame_end(legacyPacer_.get(), t1, static_cast<double>(t1 - t0) / 1000.0);
+}
+
 bool BinUIAuto::presentPacesFrames() const { return inner_ && inner_->presentPacesFrames(); }
+
+// ---- 帧节拍 ----
+bool BinUIAuto::paceAvailable() const {
+    if (inner_ && inner_->paceAvailable()) return true;
+    return legacyPaceActive();
+}
+
+double BinUIAuto::paceFrameMs() const {
+    if (inner_ && inner_->paceAvailable()) return inner_->paceFrameMs();
+    if (legacyPaceActive()) return bingpu_pace_frame_ms(legacyPacer_.get());
+    return 0.0;
+}
+
+long long BinUIAuto::paceWaitUs() {
+    if (inner_ && inner_->paceAvailable()) return inner_->paceWaitUs();
+    if (legacyPaceActive()) return static_cast<long long>(bingpu_pace_wait_us(legacyPacer_.get(), PacerNowUs()));
+    return 0;
+}
+
+double BinUIAuto::paceRefreshMs() const {
+    if (inner_ && inner_->paceAvailable()) return inner_->paceRefreshMs();
+    if (legacyPaceActive()) {
+        const int hz = legacyPacer_->refresh_hz;
+        return hz > 1 ? 1000.0 / static_cast<double>(hz) : 0.0;
+    }
+    return 0.0;
+}
+
+void BinUIAuto::setPacePolicyText(const char* text) {
+    if (!text) text = "";
+    std::snprintf(paceText_, sizeof(paceText_), "%s", text);
+    if (inner_) inner_->setPacePolicyText(paceText_);
+    if (legacyPacer_) {
+        BgpuPacePolicy pol = BGPU_PACE_STANDARD;
+        if (bingpu_pace_policy_parse(paceText_, &pol))
+            bingpu_pace_set_policy(legacyPacer_.get(), pol);
+    }
+}
+
+const char* BinUIAuto::pacePolicyName() const {
+    if (inner_ && inner_->paceAvailable()) return inner_->pacePolicyName();
+    if (legacyPaceActive()) return bingpu_pace_policy_name(bingpu_pace_policy(legacyPacer_.get()));
+    return "unavailable";
+}
 
 void BinUIAuto::fillRect(float x, float y, float w, float h, uint32_t c) {
     if (inner_) inner_->fillRect(x, y, w, h, c);

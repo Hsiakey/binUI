@@ -125,13 +125,21 @@ inline void PerfFlush() {
                  p.sumPrep / p.frames, p.sumDib / p.frames,
                  p.sumRead / p.frames, p.sumBlit / p.frames,
                  p.maxInterval, p.missed);
-    // 抖动单独一行：它回答的是"帧率够了，为什么还是看着卡"
-    std::fprintf(stderr,
-                 "[perf] 刷新周期/帧 min/avg/max=%.2f/%.2f/%.2f  抖动=%lld/%lld"
-                 "（间隔不是刷新周期整数倍的次数）\n",
-                 p.minPeriods > 1e8 ? 0.0 : p.minPeriods,
-                 p.ivN ? p.sumPeriods / static_cast<double>(p.ivN) : 0.0,
-                 p.maxPeriods, p.judder, p.ivN);
+    // 抖动单独一行：它回答的是"帧率够了，为什么还是看着卡"。
+    // `标准` 策略**允许**一帧超过一个刷新周期（性能不够就尽力多画，见 bingpu.h 的口径），
+    // 那种情况下间隔本来就不可能是整数倍 —— 那不是节拍器出错，是画不完，所以单独点出来。
+    {
+        const double avgPeriods = p.ivN ? p.sumPeriods / static_cast<double>(p.ivN) : 0.0;
+        std::fprintf(stderr,
+                     "[perf] 刷新周期/帧 min/avg/max=%.2f/%.2f/%.2f  抖动=%lld/%lld"
+                     "（间隔不是刷新周期整数倍的次数）%s\n",
+                     p.minPeriods > 1e8 ? 0.0 : p.minPeriods, avgPeriods, p.maxPeriods,
+                     p.judder, p.ivN,
+                     avgPeriods > 1.05
+                         ? "  ← 一帧画不完一个刷新周期：标准策略下这就是「尽力多画」，"
+                           "抖动是必然的，不是节拍错"
+                         : "");
+    }
     p.sumResize = p.sumDraw = p.sumPresent = p.sumTotal = 0;
     p.maxTotal = p.maxPresent = p.maxResize = 0;
     p.maxInterval = 0;
@@ -174,6 +182,9 @@ inline int DisplayRefreshHzFor(HWND hwnd) {
 // 1058px 的滑动在 200ms 里走完，120Hz 是 2.6px/帧、60Hz 是 5.3px/帧，肉眼差得很明显。
 // 交互正在发生的时候值得给满刷新率 —— 真正的省电收益在"没动画/后台/最小化"那几条
 // （见 renderFrame 的节拍闸门与 IsIconic 短路），不在砍活跃帧率。
+//
+// v0.34.0 起这只是**没有设备层节拍器的后端**的兜底（仓里遗留的三份 GPU 实现）：
+// 只要后端能回答 paceAvailable()，节拍就由 binGPU 算，这个频率不再参与。
 inline int FrameHzFor(HWND hwnd) {
     const char* e = std::getenv("BINUI_FPS");
     if (e && *e) {
@@ -182,6 +193,18 @@ inline int FrameHzFor(HWND hwnd) {
     }
     return DisplayRefreshHzFor(hwnd);
 }
+
+// 帧节拍策略（v0.34.0）：**外壳不再自己算节拍**，只把"最多多少帧"的意图交给后端。
+//   BIN2D_PACE / BINUI_PACE = standard | unlimited | 240 | 120 | 90 | 60 | 30
+//   BINUI_FPS=<n> 保留为兼容写法（0 = unlimited，数字 = 对应档位；其它数字走 standard）
+// 为什么名字里带 BIN2D：这个 knob 属于**绘制语义层**（bin2D/bin3D），不是外壳的。
+// 外壳只做两件事：把字符串转下去、按后端给的 wait 睡觉。
+inline const char* PaceTextFromEnv() {
+    if (const char* e = std::getenv("BIN2D_PACE"); e && *e) return e;
+    if (const char* e = std::getenv("BINUI_PACE"); e && *e) return e;
+    return std::getenv("BINUI_FPS");
+}
+
 
 
 // UTF-8 → UTF-16（光标定位与 IME 组字坐标都按 UTF-16 单位算，与 Win32 一致）
@@ -462,6 +485,8 @@ private:
     void markAllDirty();
     // 节拍由 present() 的垂直同步阻塞决定（vsync 交换链），此时不再自己掐帧
     bool pacedByPresent() const;
+    // 建窗/init 之后把节拍参数定下来（v0.34.0：有设备层节拍器就问它，没有才用老网格）
+    void setupPacing(HWND hwnd);
     // 睡到指定时刻（保留消息可唤醒；用高精度定时器，见实现里的注释）
     void waitForFrame(std::chrono::steady_clock::time_point t);
     void* frameTimer_ = nullptr;   // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 的定时器句柄
@@ -1319,6 +1344,9 @@ inline bool BinUIAppT<Gfx>::open() {
     DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &corner, sizeof(corner));
 
     gfx_.setTransparent(transparent_);
+    // 节拍策略要在 init **之前**交下去：交换链的 vsync 位是建链时定的，
+    // 而 "unlimited"/"240" 这类策略不开 vsync 才有意义（见 bingpu_pace_wants_vsync）。
+    gfx_.setPacePolicyText(PaceTextFromEnv());
     if (!gfx_.init(hwnd, winW, winH, vsync_)) {
         std::fprintf(stderr, "[gl] OpenGL init failed\n");
         DestroyWindow(hwnd);
@@ -1335,29 +1363,7 @@ inline bool BinUIAppT<Gfx>::open() {
     invalidateAll(); // 首帧全量绘制（初始脏矩形为空，避免首帧仅动画区域被绘制，其余留白/留黑）
 
     lastTime_ = std::chrono::steady_clock::now();
-    {
-        const int hz = FrameHzFor(hwnd);
-        frameBudget_ = std::chrono::microseconds(1000000 / hz);
-        // 抖动指标要用**显示器刷新周期**，不是帧预算：BINUI_FPS 封顶之后两者不同，
-        // 用预算当刻度会把"4 个刷新的稳定 30fps 节拍"算成 1.00 个周期（看着很稳，其实 30fps）。
-        refreshMs_ = 1000.0 / static_cast<double>(DisplayRefreshHzFor(hwnd));
-        if (Perf().on) {
-            const int panelHz = DisplayRefreshHzFor(hwnd);
-            if (hz != panelHz)
-                std::fprintf(stderr,
-                             "[perf] display refresh=%dHz budget=%.2fms（BINUI_FPS=%d 封顶）\n",
-                             panelHz, frameBudget_.count() / 1000.0, hz);
-            else
-                std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
-                             hz, frameBudget_.count() / 1000.0);
-            // 节拍来自谁：present 声明自己能阻塞到垂直同步时，帧相位由显示器兜底；
-            // 否则完全靠外壳的合成节拍（依赖高精度定时器，见 waitForFrame）。
-            // 注意这只说明后端的"声明"，实际阻塞与否由驱动/合成器决定（窗口模式下
-            // 有的驱动让 SwapBuffers 立刻返回），所以两种情况下外壳都保留 nextFrameTime_ 闸门。
-            std::fprintf(stderr, "[perf] 节拍: 合成预算 %.2fms（高精度定时器）；present 可阻塞垂直同步=%s\n",
-                         frameBudget_.count() / 1000.0, pacedByPresent() ? "是" : "否");
-        }
-    }
+    setupPacing(hwnd);
     nextFrameTime_ = std::chrono::steady_clock::now();
     running_ = true;
     ownerThread_ = static_cast<unsigned long>(GetCurrentThreadId());
@@ -1394,6 +1400,7 @@ inline bool BinUIAppT<Gfx>::openChild(void* parent, int x, int y, int width, int
     SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
 
     gfx_.setTransparent(false);
+    gfx_.setPacePolicyText(PaceTextFromEnv());
     if (!gfx_.init(hwnd, width, height, vsync_)) {
         std::fprintf(stderr, "[gl] openChild: OpenGL init failed\n");
         DestroyWindow(hwnd);
@@ -1406,29 +1413,7 @@ inline bool BinUIAppT<Gfx>::openChild(void* parent, int x, int y, int width, int
     invalidateAll();
 
     lastTime_ = std::chrono::steady_clock::now();
-    {
-        const int hz = FrameHzFor(hwnd);
-        frameBudget_ = std::chrono::microseconds(1000000 / hz);
-        // 抖动指标要用**显示器刷新周期**，不是帧预算：BINUI_FPS 封顶之后两者不同，
-        // 用预算当刻度会把"4 个刷新的稳定 30fps 节拍"算成 1.00 个周期（看着很稳，其实 30fps）。
-        refreshMs_ = 1000.0 / static_cast<double>(DisplayRefreshHzFor(hwnd));
-        if (Perf().on) {
-            const int panelHz = DisplayRefreshHzFor(hwnd);
-            if (hz != panelHz)
-                std::fprintf(stderr,
-                             "[perf] display refresh=%dHz budget=%.2fms（BINUI_FPS=%d 封顶）\n",
-                             panelHz, frameBudget_.count() / 1000.0, hz);
-            else
-                std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
-                             hz, frameBudget_.count() / 1000.0);
-            // 节拍来自谁：present 声明自己能阻塞到垂直同步时，帧相位由显示器兜底；
-            // 否则完全靠外壳的合成节拍（依赖高精度定时器，见 waitForFrame）。
-            // 注意这只说明后端的"声明"，实际阻塞与否由驱动/合成器决定（窗口模式下
-            // 有的驱动让 SwapBuffers 立刻返回），所以两种情况下外壳都保留 nextFrameTime_ 闸门。
-            std::fprintf(stderr, "[perf] 节拍: 合成预算 %.2fms（高精度定时器）；present 可阻塞垂直同步=%s\n",
-                         frameBudget_.count() / 1000.0, pacedByPresent() ? "是" : "否");
-        }
-    }
+    setupPacing(hwnd);
     nextFrameTime_ = std::chrono::steady_clock::now();
     running_ = true;
     ownerThread_ = static_cast<unsigned long>(GetCurrentThreadId());
@@ -1497,12 +1482,30 @@ inline void BinUIAppT<Gfx>::renderFrame() {
     //     · A 依赖"交换链声明 vsync == 驱动真的阻塞"。DWM 合成下 wglSwapBuffers(1) 常常
     //       立刻返回，外壳于是彻底放手，帧落点自由漂移；
     //     · B 的"现在 + 预算"只保证**至少**隔一个预算，落点相对刷新边界任意。
-    //   两者共同的结果就是：120Hz 上实测间隔散在 1.75/2.00/2.25/2.50/2.75 个刷新周期上
-    //   （抖动 175/239）—— 平均帧率还行，肉眼一顿一顿。
-    //   现在只有一个规则：**下一拍必须落在刷新网格上**（见 renderOnce 之后那段），
-    //   闸门也就无条件生效了。
-    if (now < nextFrameTime_) return;
+    // 节拍闸门（v0.34.0）：**问后端"还差多久"，不再自己算网格**。
+    //
+    // 老写法（v0.32.0）在外壳里按刷新网格量化 + 滞回，还要用
+    // `present 耗时 >= 半个刷新周期` 猜"它自己等过没有"。那个启发式在 Vulkan 上猜错，
+    // 于是 present 等一格、外壳再补一格 = **双重等待**：120 Hz 屏实测 55 fps，
+    // 而同一份代码裸跑 present 是 119.9 fps（bin2D/build-mingw/tmp/present_probe）。
+    // 判据（刷新率 / present mode / present 真实耗时）只有设备层知道，所以闸门搬到了
+    // binGPU（b2d::GpuCompositor → bingpu_pace_*），外壳只剩"问 + 睡"。
+    const bool byDevice = gfx_.paceAvailable();
+    if (byDevice) {
+        const long long waitUs = gfx_.paceWaitUs();
+        if (waitUs > 0) {
+            // 睡完就画，**不再复查**：定时器粒度 ~0.5 ms，早醒最多早半个毫秒，
+            // 而下一拍是"本拍开始 + 目标周期"的绝对值，早一点不会累积漂移。
+            // 复查过的版本会多走一趟 pump（消息泵 + 闸门重算），实测把 240 fps
+            // 拉到 169 —— 每帧白扔 1.7 ms，全是醒来之后的往返。
+            waitForFrame(now + std::chrono::microseconds(waitUs));
+        }
+    } else if (now < nextFrameTime_) {
+        return;
+    }
     renderOnce();
+    if (byDevice) return;   // 设备层节拍器接管，下面的网格推算不再参与
+
     // 下一拍的时间点（v0.32.0：**刷新网格**，不是"现在 + 预算"）。
     //
     // 为什么要网格：120Hz 屏刷新周期 8.33ms，一帧 19.3ms = 2.3 个周期。旧写法
@@ -1577,6 +1580,54 @@ inline bool BinUIAppT<Gfx>::pacedByPresent() const {
     return gfx_.presentPacesFrames() && !gdiPresent_ && !fullscreenPresent_;
 }
 
+// 节拍参数定下来（v0.34.0）。
+//
+// 两条路的区别只有"谁算"：
+//   · 后端能回答 paceAvailable()（= bin2D/bin3D → binGPU 的节拍器）→ 目标周期由它给，
+//     外壳只负责睡；
+//   · 不能（仓里遗留的 gl/vk/d3d11 三份实现，见 docs/backend_layering.md 第 3 步）
+//     → 外壳按刷新率兜底。
+// `frameBudget_` 同时是"宿主时钟多久推进一次"：unlimited（0ms）时它退化成 0，
+// 于是 update_ 被尽可能频繁地调用 —— 这正是"无限制"的含义。
+template <class Gfx>
+inline void BinUIAppT<Gfx>::setupPacing(HWND hwnd) {
+    const int panelHz = DisplayRefreshHzFor(hwnd);
+    const bool byDevice = gfx_.paceAvailable();
+    if (byDevice) {
+        const double paceMs = gfx_.paceFrameMs();
+        const double devRefreshMs = gfx_.paceRefreshMs();
+        frameBudget_ = std::chrono::microseconds(
+            paceMs > 0.0 ? static_cast<long long>(paceMs * 1000.0 + 0.5) : 0);
+        // 抖动指标要用**显示器刷新周期**，不是帧预算：`BIN2D_PACE=30` 之后两者不同，
+        // 用预算当刻度会把"4 个刷新的稳定 30fps 节拍"算成 1.00 个周期（看着很稳，其实 30fps）。
+        refreshMs_ = devRefreshMs > 0.0 ? devRefreshMs : 1000.0 / panelHz;
+    } else {
+        frameBudget_ = std::chrono::microseconds(1000000 / FrameHzFor(hwnd));
+        refreshMs_ = 1000.0 / panelHz;
+    }
+    if (!Perf().on) return;
+    const double budgetMs = frameBudget_.count() / 1000.0;
+    if (byDevice) {
+        if (frameBudget_.count() > 0)
+            std::fprintf(stderr,
+                         "[perf] display refresh=%dHz 节拍=%s（binGPU 节拍器，目标 %.2fms ≈ %d fps；"
+                         "present 自等垂直同步=%s）\n",
+                         panelHz, gfx_.pacePolicyName(), budgetMs,
+                         static_cast<int>(1000.0 / budgetMs + 0.5),
+                         pacedByPresent() ? "是" : "否");
+        else
+            std::fprintf(stderr,
+                         "[perf] display refresh=%dHz 节拍=%s（binGPU 节拍器，**不掐拍**；"
+                         "present 自等垂直同步=%s）\n",
+                         panelHz, gfx_.pacePolicyName(), pacedByPresent() ? "是" : "否");
+    } else {
+        std::fprintf(stderr,
+                     "[perf] display refresh=%dHz 节拍=%s（外壳兜底网格 %.2fms；"
+                     "present 自等垂直同步=%s）\n",
+                     panelHz, gfx_.pacePolicyName(), budgetMs, pacedByPresent() ? "是" : "否");
+    }
+}
+
 // 睡到 t（同时保持消息可唤醒）。毫秒级的 MsgWait 超时会被系统计时器精度
 // （默认 15.6ms）兑现，128Hz/120Hz 这种亚 10ms 的节拍完全没法用 —— 所以优先用
 // CREATE_WAITABLE_TIMER_HIGH_RESOLUTION（Win10 1803+，精度 ~0.5ms，且不像
@@ -1597,9 +1648,19 @@ inline void BinUIAppT<Gfx>::waitForFrame(std::chrono::steady_clock::time_point t
     }
     HANDLE h = static_cast<HANDLE>(frameTimer_);
     if (h) {
+        /* 实际迟到是**稳定的 ~1.0 ms**，不是"分辨率不够"而是"对齐到 ~1 ms tick"：
+         *   实测（build-mingw/tmp/timer_probe）：请求 1/2/4/8/16 ms → 中位迟到
+         *   967/999/1000/949/821 µs；而请求 500 µs → 只迟到 16 µs。
+         * 所以请求时间**提前 900 µs**：醒来落在目标附近（±0.1 ms），一帧 2.4 ms 的
+         * 抖动就没了。提前醒不会累积漂移（下一拍是"本拍开始 + 周期"的绝对值），
+         * vsync 下 present 也会自己等到刷新边界 —— 白等的时间它本来就吃掉了。
+         * 不这么做的后果是实测出来的：240 fps 档只能跑到 163 fps（每帧多睡 1.9 ms），
+         * 60 fps 档跑到 57.8。 */
+        auto req = remain;
+        if (req > microseconds(900)) req -= microseconds(900);
         LARGE_INTEGER due;
         // 负值 = 相对时间，单位 100ns
-        due.QuadPart = -static_cast<LONGLONG>(duration_cast<nanoseconds>(remain).count() / 100);
+        due.QuadPart = -static_cast<LONGLONG>(duration_cast<nanoseconds>(req).count() / 100);
         if (SetWaitableTimer(h, &due, 0, nullptr, nullptr, FALSE)) {
             MsgWaitForMultipleObjectsEx(1, &h, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             return;
@@ -1953,7 +2014,9 @@ inline void BinUIAppT<Gfx>::renderOnce() {
             // 每帧都 flush 会把"本拍结束时刻"硬贴到合成边界上，代价是每帧多等最多一个
             // 刷新周期 —— 实测 40fps 与 60fps 的差别就来自这一下，而它解决不了网格
             // 已经解决的东西（帧落点仍然只在每帧被重新锚定一次）。
-            if (!phaseAnchored_ && lastPresentMs_ < refreshMs_ * 0.5) {
+            // v0.34.0：设备层有节拍器时不需要这一下 —— 它自己就是按刷新边界算的，
+            // 外壳再 Flush 一次等于又插一次等待（正是"双重等待"那类问题）。
+            if (!gfx_.paceAvailable() && !phaseAnchored_ && lastPresentMs_ < refreshMs_ * 0.5) {
                 DwmFlush();
                 phaseAnchored_ = true;
             }
@@ -1973,7 +2036,9 @@ inline void BinUIAppT<Gfx>::renderOnce() {
             if (perf.lastFrameMs > 0) {
                 const double iv = t0 - perf.lastFrameMs;
                 if (iv > perf.maxInterval) perf.maxInterval = iv;
-                if (iv > frameBudget_.count() / 1000.0 * 1.5) ++perf.missed;
+                // 掉拍阈值要按**目标周期**算；unlimited（预算 0）时这一项没有意义，跳过
+                if (frameBudget_.count() > 0 &&
+                    iv > frameBudget_.count() / 1000.0 * 1.5) ++perf.missed;
                 // 抖动：把间隔换算成"显示刷新周期数"，接近整数才算跟住了刷新节拍。
                 // 1.5 个预算以上的掉拍通常就是"多占了 1~2 个刷新"，这项会把它点出来。
                 const double refreshMs = refreshMs_ > 0.0 ? refreshMs_ : 1.0;

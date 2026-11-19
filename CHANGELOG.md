@@ -5,6 +5,64 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.34.0] - 2026-11-20 【格式 v34 不变】
+
+**外壳不再自己掐帧：节拍交给 binGPU，档位可调（`BIN2D_PACE`）。**
+接 binGPU 0.9.0 的 `bingpu_pace_*` 与 bin2D 0.15.0 的 `GpuCompositor::setPacePolicy`。
+
+### 为什么（master 2026-11-20）
+
+> 「按理说这种绘制请求 GPU 应该能画个几百上千帧才对。防止使用率过高，性能钳制才用的
+> 节拍器（即达到屏幕或系统刷新率即可）。这个性能钳制在哪做呢？我感觉是在 bin2D/3D 这里，
+> 当然做成可调的最好：标准/无限制/240/120/90/60/30 等」
+>
+> 「那个"标准"的意思是：跟着合成帧节拍或屏幕刷新率来决定：路性能不够时尽可能画多点帧，
+> 性能超过时钳制在系统合成帧率」
+
+先量：GPU 一帧只要 0.5–1.0 ms，**帧率从来不是画出来的上限，是被节拍器掐出来的上限**。
+而掐拍需要的判据（刷新率 / present mode / present 到底有没有等垂直同步 / 它真实耗时多久）
+全在设备层 —— 0.32.0–0.33.1 在外壳里用 "present 耗时 ≥ 半个刷新周期" 猜，Vulkan 上猜错
+就是**双重等待**（present 等一格 + 外壳再补一格），120 Hz 屏上 55 fps。
+
+### 变更
+
+- 帧节拍闸门搬到 binGPU（`bingpu_pace_*`），档位从 bin2D/bin3D 下传，外壳只剩
+  "问一句 `paceWaitUs()` 然后睡"。原来那 60 行刷新网格 + 滞回 + 启发式从
+  `binui_app.h` 删除，只留给"没有设备层节拍器的遗留后端"（gl/vk/d3d11 三份实现，
+  按 `docs/backend_layering.md` 第 3 步要删）。
+- 新环境变量：`BIN2D_PACE` / `BINUI_PACE` = `standard`（默认）| `unlimited` | `240` |
+  `120` | `90` | `60` | `30`。`BINUI_FPS` 保留为兼容写法（`0` = unlimited）。
+  解析表只有 binGPU 那一份。
+- `IBinUIGfx` 新增 5 个节拍钩子（`paceAvailable/paceFrameMs/paceWaitUs/paceRefreshMs/
+  setPacePolicyText/pacePolicyName`），`BinUI2D` 转发给 bin2d、`BinUIAuto` 给遗留三后端
+  各持一个 binGPU 节拍器（算法仍然只有一份）。
+- **`标准` 不向上凑整**：画不完一个刷新周期时尽力多画，不为了"整数个刷新周期"退成 60 fps。
+  CPU 光栅那条路因此从 56 fps 变成 93–96 fps。
+- perf 行加一句解释：一帧画不完一个刷新周期时点明"这是尽力多画，不是节拍错"。
+
+### 修复
+
+- **`BinUIGL` 传 `vsync=false` 等于没传**：只在 vsync 为真时调
+  `wglSwapIntervalEXT(1)`，为假时**不调** —— 而"不调"等于保持驱动的默认 interval=1。
+  改成两个方向都调。修前 `unlimited` 只有 105 fps，修后 702–729 fps。
+  （binGPU 的 GL 后端里是同一个 bug 的另一种形态：从来没装载过这个函数。）
+- **`waitForFrame` 睡过站 ~1.0 ms**：本机的 `CREATE_WAITABLE_TIMER_HIGH_RESOLUTION`
+  是对齐到 ~1 ms tick 的（请求 1/2/4/8/16 ms 的中位迟到 967/999/1000/949/821 µs，
+  而请求 500 µs 只迟到 16 µs），所以请求时间提前 900 µs。修前 240 fps 档只跑到 163、
+  60 档跑到 57.8。
+- 睡醒后**不再复查**再等一轮：那会多走一趟 pump（消息泵 + 闸门重算），每帧白扔 1.7 ms。
+
+### 实测（buttonshow 1020×684，120 Hz 屏，240 帧 × 3 次，min–max）
+
+| 后端 | `standard` | `unlimited` | `60` | `240` |
+|---|---|---|---|---|
+| Vulkan | 114.3–114.6 fps | **2116–2207 fps** | 58.6–58.7 | 201.6–212.7 |
+| D3D11 | 115.7–116.2 fps | 1893–2491 fps | — | — |
+| OpenGL | 108.2–108.6 fps | 702–729 fps | — | — |
+| bin2d（CPU 光栅） | 92.9–95.9 fps（绘制 9 ms 装不下一个刷新 → 尽力多画） | 96.6–98.2 | 61.6–61.8 | — |
+
+详细诊断与两个 bug 的取证过程见 `docs/frame_pacing.md` §8。
+
 ## [0.33.1] - 2026-11-20 【格式 v34 不变】
 
 **选后端的决策权交给 binGPU。** 接 binGPU 0.8.0 的 `bingpu_render_plan()`：

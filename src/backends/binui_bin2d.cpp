@@ -419,6 +419,9 @@ struct BinUI2D::Impl {
         for (BgpuBackendKind k : order) {
             if (!bingpu_backend_available(k)) continue;
             compositor = std::make_unique<bin2d::GpuCompositor>();
+            // 节拍策略必须在 createWindow **之前**灌进去：交换链的垂直同步位要按策略决定
+            // （unlimited / 240 fps 不关 vsync 就是一句空话）。见 bin2d::GpuCompositor。
+            if (paceText[0]) compositor->setPacePolicy(ParsePace(paceText));
             if (compositor->createWindow(hwnd, w, h, k, vsync)) return true;
             compositor.reset();
         }
@@ -428,6 +431,16 @@ struct BinUI2D::Impl {
 #endif
     void* hwnd = nullptr;
     const char* presentPath = "bin2d+offscreen";
+    // 帧节拍策略的**原文**（"standard"/"unlimited"/"240"/...）。
+    // 存字符串而不是解析后的枚举：合成的 compositor 会被 setVsync / resize 重建，
+    // 每次重建都要把策略再灌一遍；而解析表只有 binGPU 那一份（bingpu_pace_policy_parse）。
+    char paceText[16] = {0};
+#ifndef BINUI_NO_BINGPU
+    static BgpuPacePolicy ParsePace(const char* text) {
+        BgpuPacePolicy p = BGPU_PACE_STANDARD;
+        return bingpu_pace_policy_parse(text, &p) ? p : BGPU_PACE_STANDARD;
+    }
+#endif
     // 反预乘用的缓冲（GDI 贴屏复用，避免每帧分配）
     std::vector<uint8_t> gdiPixels;
 
@@ -706,6 +719,10 @@ bool BinUI2D::savePng(const char* path) const {
 void BinUI2D::beginFrame(const void* clipRect) {
     if (!impl_->ready) return;
     ++impl_->prof.frames;
+#ifndef BINUI_NO_BINGPU
+    // 节拍锚点 = **帧开始**（不是 present 开始）：外壳量到的帧间隔才不会跟着绘制耗时抖。
+    if (impl_->compositor && impl_->compositor->ready()) impl_->compositor->paceFrameBegin();
+#endif
     // 每帧重建 Canvas：Canvas 构造绑定目标 Surface，而 Surface 只 resize 一次。
     // 重建的代价是一次 State 拷贝（几百字节），换来的是"帧与帧之间状态绝对不串"
     // —— 上一帧漏掉的 restore 不会把这一帧的裁剪带歪（那类 bug 极难复现）。
@@ -769,6 +786,12 @@ void BinUI2D::present() {
 
 void BinUI2D::presentViaGdi() {
 #ifdef _WIN32
+    // 贴屏这条路不经过交换链 → 节拍器要由这里收尾（present_ms 传 0：它不等刷新，
+    // 节拍按"从本拍开始算一格"处理）。不调的话 beginFrame 开的那一帧永远不结束，
+    // 节拍器就学不到任何东西，于是整条 GDI 路径等于没节拍。
+#ifndef BINUI_NO_BINGPU
+    if (impl_->compositor && impl_->compositor->ready()) impl_->compositor->paceFrameEnd(0.0);
+#endif
     if (!impl_->hwnd || impl_->surface.empty()) return;
     // presentBackendName() 必须**跟着实际路径走**：透明分层窗关掉之后还报
     // "bin2d+layered" 就是在诊断信息里撒谎（测试就是这么发现的）。
@@ -823,18 +846,76 @@ const char* BinUI2D::presentBackendName() const {
 }
 
 bool BinUI2D::presentPacesFrames() const {
-    // 只有真正走交换链、而且这条链**确实会阻塞到垂直同步**时，才让外壳别再掐帧。
+    // 只有真正走交换链、而且这条链**确实会阻塞到垂直同步**时，才认为 present 自己掐拍。
     // GDI 贴屏与离屏必须返回 false —— 它们不阻塞，外壳要按刷新率节流。
     //
     // 这个答案不能猜：以前这里写死 false（理由写的是"建链时没开 VSYNC 标志"），
     // 于是 120Hz 屏上外壳按 8.33ms 自己掐拍、而交换链是 IMMEDIATE 模式不锁刷新，
     // 帧落点漂在两档之间（实测 2.75 / 3.00 个刷新周期各占一半，抖动 44/239）。
     // 现在问 binGPU 的交换链本身（bingpu_swapchain_info 的 present_paces_frames）。
+    //
+    // v0.34.0 起这个值**只是诊断**：节拍已经统一交给 pace* 那组（binGPU 的节拍器），
+    // 外壳不再拿它当分支条件。
 #ifndef BINUI_NO_BINGPU
     if (impl_->compositor && impl_->compositor->ready())
         return impl_->compositor->presentPacesFrames();
 #endif
     return false;
+}
+
+// ------------------------------------------------------------------
+// 帧节拍（v0.34.0）：全套转发给 bin2d::GpuCompositor → binGPU
+// ------------------------------------------------------------------
+bool BinUI2D::paceAvailable() const {
+#ifndef BINUI_NO_BINGPU
+    // 只有交换链那条路才有"设备层"可以问。GDI 贴屏/离屏没有 —— 那两条路
+    // present 不阻塞，由外壳按刷新网格兜底（老路径，本来也是对的）。
+    return impl_->compositor && impl_->compositor->ready();
+#else
+    return false;
+#endif
+}
+
+double BinUI2D::paceFrameMs() const {
+#ifndef BINUI_NO_BINGPU
+    if (impl_->compositor && impl_->compositor->ready()) return impl_->compositor->paceFrameMs();
+#endif
+    return 0.0;
+}
+
+long long BinUI2D::paceWaitUs() {
+#ifndef BINUI_NO_BINGPU
+    if (impl_->compositor && impl_->compositor->ready())
+        return static_cast<long long>(impl_->compositor->paceWaitUs());
+#endif
+    return 0;
+}
+
+double BinUI2D::paceRefreshMs() const {
+#ifndef BINUI_NO_BINGPU
+    if (impl_->compositor && impl_->compositor->ready())
+        return impl_->compositor->paceRefreshMs();
+#endif
+    return 0.0;
+}
+
+void BinUI2D::setPacePolicyText(const char* text) {
+    // 存原文，等 compositor（可能被 setVsync / resize 重建）建起来时再灌。
+    if (!text) text = "";
+    std::snprintf(impl_->paceText, sizeof(impl_->paceText), "%s", text);
+#ifndef BINUI_NO_BINGPU
+    if (impl_->compositor) impl_->compositor->setPacePolicy(Impl::ParsePace(impl_->paceText));
+#endif
+}
+
+const char* BinUI2D::pacePolicyName() const {
+#ifndef BINUI_NO_BINGPU
+    if (impl_->compositor && impl_->compositor->ready())
+        return bingpu_pace_policy_name(impl_->compositor->pacePolicy());
+    return bingpu_pace_policy_name(Impl::ParsePace(impl_->paceText));
+#else
+    return "standard";
+#endif
 }
 
 // ------------------------------------------------------------------

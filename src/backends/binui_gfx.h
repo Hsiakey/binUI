@@ -46,6 +46,34 @@ public:
     // 的路径必须返回 false，由外壳按刷新率节流。
     virtual bool presentPacesFrames() const { return false; }
 
+    // ---- 帧节拍（v0.34.0）：**闸门在 binGPU，knob 在 bin2D/bin3D，外壳只执行** ----
+    //
+    // 为什么接口长成这样（又为什么不是外壳自己算）：
+    //   外壳原来自己按"刷新网格 + 滞回"掐拍，靠一个 `present 耗时 >= 半个刷新周期`
+    //   的启发式猜"后端有没有在等垂直同步"。猜错就是**双重等待**：present 已经等了
+    //   一格，外壳再补一格 —— 120 Hz 屏上 Vulkan 实测掉到 55 fps，而同一份代码裸跑
+    //   present 是 119.9 fps。判据（刷新率、present mode、present 真实耗时）全在设备层，
+    //   外壳猜不出来。所以：**问后端"还差多久"，不再自己算。**
+    //
+    //   `paceAvailable() == false` 的后端（仓里遗留的 gl/vk/d3d11 三份实现）仍然由
+    //   外壳的老网格兜底 —— 它们本来就要删（见 docs/backend_layering.md 第 3 步）。
+    virtual bool paceAvailable() const { return false; }
+    // 生效的目标帧间隔（ms）；0 = 不掐拍（无限制）。也用来当"宿主时钟多久推进一次"。
+    virtual double paceFrameMs() const { return 0.0; }
+    // 现在离下一拍还差多少微秒；0 = 立刻可以画。
+    // **不带 now 参数**是故意的：节拍状态是后端用自己那份时钟喂进去的，换一份时钟进来
+    // 就等于换了时间原点（pacer 里的 next_us 立刻变成垃圾）。谁持有 pacer 谁带时钟。
+    virtual long long paceWaitUs() { return 0; }
+    // 刷新周期（ms）；0 = 探测不到。抖动指标要用它当刻度，不能用帧预算。
+    virtual double paceRefreshMs() const { return 0.0; }
+    // 节拍策略的**原文**："standard" / "unlimited" / "240" / "120" / "90" / "60" / "30"。
+    // 为什么传字符串而不是枚举：解析表只有 binGPU 那一份（bingpu_pace_policy_parse），
+    // 而 binUI 的头不 include binGPU 的头；外壳只负责把 BIN2D_PACE 的值原样转下来。
+    // 空 / 不认识 → standard。
+    virtual void setPacePolicyText(const char* text) { (void)text; }
+    // 当前生效的策略名（诊断用）；"unavailable" = 这个后端没有节拍器
+    virtual const char* pacePolicyName() const { return "unavailable"; }
+
     // ---- 原语（颜色 0xAARRGGBB）----
     virtual void fillRect(float x, float y, float w, float h, uint32_t color) = 0;
     virtual void fillRounded(float x, float y, float w, float h, float radius,

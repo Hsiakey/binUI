@@ -90,6 +90,15 @@ public:
     static const wchar_t* appClassName();
     bool presentPacesFrames() const override;
 
+    // ---- 帧节拍（v0.34.0）：全部转发给 bin2d::GpuCompositor → binGPU ----
+    // 这一层**不许**自己算节拍（算过，算错过：见 binui_gfx.h 里那段注释）。
+    bool paceAvailable() const override;
+    double paceFrameMs() const override;
+    long long paceWaitUs() override;
+    double paceRefreshMs() const override;
+    void setPacePolicyText(const char* text) override;
+    const char* pacePolicyName() const override;
+
     // 实际用上的呈现路径（诊断 / 日志用）：
     //   "bin2d+gpu(gl)" / "bin2d+gpu(vulkan)" / "bin2d+gdi" / "bin2d+offscreen"
     const char* presentBackendName() const;
