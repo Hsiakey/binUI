@@ -18,6 +18,7 @@
 #include "binui_bin2d.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -166,7 +167,108 @@ struct GlyphHost2D : public IGlyphTexHost {
 
 // ==================================================================
 
+// ------------------------------------------------------------------
+// 原语级探针（0.30.0，BINUI2D_PROF=1）
+//
+// 为什么需要它：全屏重画 23.6 ms 这个数字本身没有信息量 —— 它既可能是"像素太多"
+// 也可能是"每个原语都有固定开销"。用 bin2d 自己的基准反推（1.6 M 填充像素只值
+// 2.2–8.3 ms，而一张卡片实测 236 µs、其中 53% 是那条 1px 圆角边框）只能给出
+// **等价解**，不是这一页的真实构成。所以按原语分类在这里计一次数、计一次时间，
+// 让"这一帧的钱花在哪"变成可读的数字，而不是猜。
+//
+// 开销：每次调用两次 steady_clock::now()（~20 ns）；关闭时只多一次 bool 判断。
+// 所以默认关闭，只在 BINUI2D_PROF=1 时开。
+struct ProfTimer;
+
+struct Prof {
+    enum Slot {
+        kFillRect, kFillRounded, kFillRoundedXf, kStrokeRounded, kFillLine, kGrad,
+        kDrawImage, kDrawImageNine, kDrawText, kDrawTextWrapped,
+        kPushLayer, kPushLayerEx, kPopLayer, kBackdropBlur,
+        kSlotCount
+    };
+    static const char* Name(int s) {
+        switch (s) {
+            case kFillRect:        return "fillRect";
+            case kFillRounded:     return "fillRounded";
+            case kFillRoundedXf:   return "fillRoundedXf";
+            case kStrokeRounded:   return "strokeRounded";
+            case kFillLine:        return "fillLine";
+            case kGrad:            return "fillGradientQuad";
+            case kDrawImage:       return "drawImageEx";
+            case kDrawImageNine:   return "drawImageNine";
+            case kDrawText:        return "drawText";
+            case kDrawTextWrapped: return "drawTextWrapped";
+            case kPushLayer:       return "pushLayer";
+            case kPushLayerEx:     return "pushLayerEx";
+            case kPopLayer:        return "popLayer";
+            case kBackdropBlur:    return "backdropBlur";
+            default:               return "?";
+        }
+    }
+    bool on = false;
+    long long calls[kSlotCount] = {};
+    double    us[kSlotCount] = {};
+    // 盒面积累计：让"µs/次"能换算成"ns/像素" —— 否则一个 900×932 的圆角底
+    // 和一个 12×14 的圆点在表里是同一行"次/帧"，看不出钱花在哪种面积上。
+    double    boxPx[kSlotCount] = {};
+    // 非整像素对齐的调用数：决定 bin2d 能不能走"中段整宽矩形"那条快速路径
+    long long nonAligned[kSlotCount] = {};
+    int frames = 0;
+
+    void Reset() {
+        for (int i = 0; i < kSlotCount; ++i) { calls[i] = 0; us[i] = 0.0; boxPx[i] = 0.0; nonAligned[i] = 0; }
+        frames = 0;
+    }
+    // 按总耗时降序打印（每帧均摊）。frames==0 时按累计值打印。
+    void Dump(const char* tag) const {
+        if (!on) return;
+        const double div = frames > 0 ? static_cast<double>(frames) : 1.0;
+        double total = 0.0;
+        for (int i = 0; i < kSlotCount; ++i) total += us[i];
+        std::fprintf(stderr, "[bin2d-prof] %s frames=%d 原语总耗时 %.2f ms/帧（探针开销未扣除）\n",
+                     tag, frames, total / div / 1000.0);
+        int order[kSlotCount];
+        for (int i = 0; i < kSlotCount; ++i) order[i] = i;
+        for (int i = 0; i < kSlotCount; ++i)
+            for (int j = i + 1; j < kSlotCount; ++j)
+                if (us[order[j]] > us[order[i]]) { const int t = order[i]; order[i] = order[j]; order[j] = t; }
+        for (int k = 0; k < kSlotCount; ++k) {
+            const int i = order[k];
+            if (calls[i] == 0) continue;
+            const double perFrameMs = us[i] / div / 1000.0;
+            const double pct = total > 0.0 ? 100.0 * us[i] / total : 0.0;
+            const double nsPerPx = boxPx[i] > 0.0 ? us[i] * 1000.0 / boxPx[i] : 0.0;
+            std::fprintf(stderr,
+                         "[bin2d-prof]   %-16s %7.1f 次/帧  %8.2f us/次  %7.3f ms/帧  %5.1f%%"
+                         "  %7.0f kpx/帧  %6.2f ns/px  非整对齐 %.1f/帧\n",
+                         Name(i), static_cast<double>(calls[i]) / div,
+                         us[i] / static_cast<double>(calls[i]), perFrameMs, pct,
+                         boxPx[i] / div / 1000.0, nsPerPx, static_cast<double>(nonAligned[i]) / div);
+        }
+        std::fflush(stderr);
+    }
+};
+
+struct ProfTimer {
+    Prof* p = nullptr;
+    std::chrono::steady_clock::time_point t0;
+    int id = 0;
+    ProfTimer(Prof& prof, int slot) : id(slot) {
+        if (!prof.on) return;
+        p = &prof;
+        t0 = std::chrono::steady_clock::now();
+    }
+    ~ProfTimer() {
+        if (!p) return;
+        p->us[id] += std::chrono::duration<double, std::micro>(
+                         std::chrono::steady_clock::now() - t0).count();
+        ++p->calls[id];
+    }
+};
+
 struct BinUI2D::Impl {
+    Prof prof;
     int width = 0;
     int height = 0;
     bool ready = false;
@@ -349,6 +451,14 @@ BinUI2D::~BinUI2D() { shutdown(); }
 bool BinUI2D::init(int width, int height) {
     if (width <= 0 || height <= 0) return false;
     shutdown();
+    {
+        // 原语级探针（0.30.0）：BINUI2D_PROF=1 打开，退出时按原语分类打一张表。
+        // 为什么用它：全屏 23.6 ms 既可能是像素多、也可能是每个原语都有固定开销，
+        // 用别的基准反推只能得到等价解；这里给的是**这一页**的真实构成。
+        const char* e = std::getenv("BINUI2D_PROF");
+        impl_->prof.on = e && *e && std::strcmp(e, "0") != 0;
+        impl_->prof.Reset();
+    }
     impl_->width = width;
     impl_->height = height;
     if (!impl_->surface.resize(width, height)) return false;
@@ -393,6 +503,7 @@ bool BinUI2D::init(void* hwnd, int width, int height, bool vsync) {
 }
 
 void BinUI2D::shutdown() {
+    impl_->prof.Dump("bin2d 后端原语分解");
 #ifndef BINUI_NO_BINGPU
     if (impl_->compositor) { impl_->compositor->destroy(); impl_->compositor.reset(); }
 #endif
@@ -449,6 +560,7 @@ bool BinUI2D::savePng(const char* path) const {
 // ------------------------------------------------------------------
 void BinUI2D::beginFrame(const void* clipRect) {
     if (!impl_->ready) return;
+    ++impl_->prof.frames;
     // 每帧重建 Canvas：Canvas 构造绑定目标 Surface，而 Surface 只 resize 一次。
     // 重建的代价是一次 State 拷贝（几百字节），换来的是"帧与帧之间状态绝对不串"
     // —— 上一帧漏掉的 restore 不会把这一帧的裁剪带歪（那类 bug 极难复现）。
@@ -573,23 +685,49 @@ bool BinUI2D::presentPacesFrames() const {
 // 几何
 // ------------------------------------------------------------------
 void BinUI2D::fillRect(float x, float y, float w, float h, uint32_t color) {
+    ProfTimer _pt(impl_->prof, Prof::kFillRect);
+    if (impl_->prof.on) impl_->prof.boxPx[Prof::kFillRect] += w * h;
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return;
     impl_->canvas->fillRect(bin2d::Rect(x, y, w, h), ToColor(color));
 }
 
 void BinUI2D::fillRounded(float x, float y, float w, float h, float radius,
                           uint32_t color) {
+    ProfTimer _pt(impl_->prof, Prof::kFillRounded);
+    if (impl_->prof.on) {
+        impl_->prof.boxPx[Prof::kFillRounded] += w * h;
+        if (x != std::floor(x) || y != std::floor(y) || w != std::floor(w) || h != std::floor(h))
+            ++impl_->prof.nonAligned[Prof::kFillRounded];
+    }
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return;
     // 半径 <= 0 = 直角（三端统一的回退语义，见 binui_gfx.h）
     if (radius <= 0.0f) {
         impl_->canvas->fillRect(bin2d::Rect(x, y, w, h), ToColor(color));
         return;
     }
+    const auto slow0 = impl_->prof.on ? std::chrono::steady_clock::now()
+                                      : std::chrono::steady_clock::time_point{};
     impl_->canvas->fillRounded(bin2d::Rect(x, y, w, h), radius, ToColor(color));
+    if (impl_->prof.on) {
+        // 单次 >250 µs 的调用单独点名：分类表只能说"fillRounded 贵"，
+        // 要优化得知道贵在**多大、什么半径、对齐不对齐**的那几次。
+        const double us = std::chrono::duration<double, std::micro>(
+                              std::chrono::steady_clock::now() - slow0).count();
+        const bool aligned = x == std::floor(x) && y == std::floor(y) &&
+                             w == std::floor(w) && h == std::floor(h);
+        static int budget = 40;
+        if (us > 250.0 && budget-- > 0)
+            std::fprintf(stderr,
+                         "[bin2d-slow] fillRounded %.0fx%.0f r=%.1f 对齐=%d  %.0f us  (%.2f ns/px)\n",
+                         w, h, radius, aligned ? 1 : 0, us,
+                         w * h > 0 ? us * 1000.0 / (w * h) : 0.0);
+    }
 }
 
 void BinUI2D::strokeRounded(float x, float y, float w, float h, float radius,
                             float thickness, uint32_t color) {
+    ProfTimer _pt(impl_->prof, Prof::kStrokeRounded);
+    if (impl_->prof.on) impl_->prof.boxPx[Prof::kStrokeRounded] += w * h;
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return;
     if (thickness <= 0.0f) return;
     if (radius <= 0.0f) {
@@ -627,6 +765,8 @@ void BinUI2D::strokeRounded(float x, float y, float w, float h, float radius,
 
 void BinUI2D::fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
                             uint32_t color, const float xf[6]) {
+    ProfTimer _pt(impl_->prof, Prof::kFillRoundedXf);
+    if (impl_->prof.on) impl_->prof.boxPx[Prof::kFillRoundedXf] += w * h;
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f || !xf) return;
     // fillRoundedXf 自带矩阵，**不受** setAffine 状态影响（见 binui_gfx.h 的注释：
     // 否则圆角底会被变换两次）。所以这里换掉当前变换、画完再还回去。
@@ -660,6 +800,7 @@ void BinUI2D::fillRoundedXf(float w, float h, float radius, bool stroke, float t
 
 void BinUI2D::fillLine(float x0, float y0, float x1, float y1, float width,
                        uint32_t color) {
+    ProfTimer _pt(impl_->prof, Prof::kFillLine);
     if (!impl_->canvas || width <= 0.0f) return;
     bin2d::Path path;
     path.moveTo(x0, y0);
@@ -675,6 +816,8 @@ void BinUI2D::fillLine(float x0, float y0, float x1, float y1, float width,
 
 bool BinUI2D::fillGradientQuad(float x, float y, float w, float h, float radius,
                                float angleDeg, uint32_t from, uint32_t to) {
+    ProfTimer _pt(impl_->prof, Prof::kGrad);
+    if (impl_->prof.on) impl_->prof.boxPx[Prof::kGrad] += w * h;
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return false;
     const bin2d::Rect box(x, y, w, h);
     // CSS 语义（0° = 向上、顺时针增）由 bin2d 的 linearAngle 实现，与 GPU 端的
@@ -729,6 +872,7 @@ bool BinUI2D::prepareImageRaw(uint16_t index, int w, int h, const uint8_t* rgba,
 
 void BinUI2D::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1,
                           float x, float y, float w, float h, uint32_t tint) {
+    ProfTimer _pt(impl_->prof, Prof::kDrawImage);
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return;
     bin2d::Image* img = impl_->findImageForDraw(index);
     if (!img) return;
@@ -739,6 +883,7 @@ void BinUI2D::drawImageEx(uint16_t index, float u0, float v0, float u1, float v1
 
 void BinUI2D::drawImageNine(uint16_t index, float x, float y, float w, float h,
                             float slice, int repX, int repY, uint32_t tint) {
+    ProfTimer _pt(impl_->prof, Prof::kDrawImageNine);
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return;
     bin2d::Image* img = impl_->findImageForDraw(index);
     if (!img) return;
@@ -764,6 +909,7 @@ void BinUI2D::drawImageNine(uint16_t index, float x, float y, float w, float h,
 void BinUI2D::drawText(float x, float y, float size, int weight,
                        const std::string& utf8, uint32_t color,
                        bool centerH, bool centerV, bool italic) {
+    ProfTimer _pt(impl_->prof, Prof::kDrawText);
     if (!impl_->canvas || utf8.empty() || !impl_->atlas) return;
     impl_->atlas->drawText(x, y, size, weight, utf8, color, centerH, centerV, italic,
                            [this](const GlyphQuad& g) {
@@ -779,6 +925,7 @@ void BinUI2D::drawText(float x, float y, float size, int weight,
 void BinUI2D::drawTextWrapped(float x, float y, float maxW, float size, int weight,
                               const std::string& utf8, uint32_t color, int align,
                               bool italic) {
+    ProfTimer _pt(impl_->prof, Prof::kDrawTextWrapped);
     if (!impl_->canvas || utf8.empty() || !impl_->atlas) return;
     impl_->atlas->drawTextWrapped(x, y, maxW, size, weight, utf8, color, align, italic,
                                   [this](const GlyphQuad& g) {
@@ -880,6 +1027,7 @@ bool BinUI2D::setKeepBlend(bool on) {
 
 bool BinUI2D::backdropBlur(float x, float y, float w, float h, float radius,
                            float blurPx, float /*grain*/) {
+    ProfTimer _pt(impl_->prof, Prof::kBackdropBlur);
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return false;
     if (blurPx <= 0.0f) return false;
 
@@ -977,6 +1125,7 @@ void BinUI2D::popClipTo(int depth) {
 }
 
 bool BinUI2D::pushLayer(float x, float y, float w, float h, float alpha) {
+    ProfTimer _pt(impl_->prof, Prof::kPushLayer);
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return false;
     if (alpha <= 0.0f) return false;
     Impl::LayerRec rec;
@@ -989,6 +1138,7 @@ bool BinUI2D::pushLayer(float x, float y, float w, float h, float alpha) {
 }
 
 bool BinUI2D::pushLayerEx(float x, float y, float w, float h, const LayerFx& fx) {
+    ProfTimer _pt(impl_->prof, Prof::kPushLayerEx);
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return false;
     if (fx.alpha <= 0.0f) return false;
     if (fx.shadowCount > 0 && !fx.shadows) return false;
@@ -1016,6 +1166,7 @@ bool BinUI2D::pushLayerEx(float x, float y, float w, float h, const LayerFx& fx)
 //   ③ 按半径模糊，④ 按偏移（取整）合成到元素**下面**。
 // 与 box-shadow 的本质区别就在这里：星形图标的投影是星形，不是它所在的方块。
 void BinUI2D::popLayer() {
+    ProfTimer _pt(impl_->prof, Prof::kPopLayer);
     if (!impl_->canvas || impl_->layers.empty()) return;
     const Impl::LayerRec rec = impl_->layers.back();
     impl_->layers.pop_back();
