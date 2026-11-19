@@ -28,6 +28,16 @@
 #include <utility>
 #include <vector>
 
+// 周期计数器（0.32.0）：原语探针以前用 steady_clock，在**被抢占的机器上会量出
+// 4 倍的假耗时**（1020×684 的 buttonshow：同一进程 CPU 时间 4.03s / 4.12s 两次
+// 完全一样，而"绘制"从 15.2ms 变成 109.7ms —— 差的全是等调度）。
+// 单线程光栅的耗时应当用**自己吃掉的周期**度量：RDTSC 不受别的进程影响。
+#if defined(_MSC_VER)
+#include <intrin.h>
+#elif defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__))
+#include <x86intrin.h>
+#endif
+
 #include "bin2d/canvas.h"
 #ifndef BINUI_NO_BINGPU
 #include "bin2d/gpu.h"          // GpuCompositor：窗口呈现（present → bingpu 交换链）
@@ -200,23 +210,72 @@ struct GlyphHost2D : public IGlyphTexHost {
 // ==================================================================
 
 // ------------------------------------------------------------------
-// 原语级探针（0.30.0，BINUI2D_PROF=1）
+// 消融测量（0.32.0，BINUI2D_SKIP=rstl）
+//
+// 为什么不用"每次调用掐表"：这台机器上 `steady_clock::now()` / `__rdtsc()` 单次要约
+// 40 µs（同一帧 234 次 fillRounded：关着 11.84 ms、只计数 15.59 ms、**开计时 69.73 ms**，
+// 而整进程 CPU 只多 2.7 ms —— 是虚拟化把 TSC 读成陷阱，不是代码慢）。所以按调用掐表
+// 在这种机器上量出来的"原语耗时"是假的。
+//
+// 换一条路：**把它关掉，看整体少了多少**。关掉某个原语后帧耗时的差值就是它的真实成本，
+// 不依赖任何时钟精度。
+//   r = fillRounded / strokeRounded 走空实现
+//   s = strokeRounded 空实现
+//   t = drawText / drawTextWrapped 空实现
+//   l = pushLayer / popLayer 空实现（图层内容照样画，只是不再单独合成）
+//   g = fillGradientQuad 空实现
+// 例：BINUI2D_SKIP=r → 与基准的帧耗时差 = 圆角填充的成本。
+// ------------------------------------------------------------------
+
+// ==================================================================
+
+// ------------------------------------------------------------------
+// 原语级**计数**探针（0.30.0，BINUI2D_PROF=1）
 //
 // 为什么需要它：全屏重画 23.6 ms 这个数字本身没有信息量 —— 它既可能是"像素太多"
 // 也可能是"每个原语都有固定开销"。用 bin2d 自己的基准反推（1.6 M 填充像素只值
 // 2.2–8.3 ms，而一张卡片实测 236 µs、其中 53% 是那条 1px 圆角边框）只能给出
-// **等价解**，不是这一页的真实构成。所以按原语分类在这里计一次数、计一次时间，
-// 让"这一帧的钱花在哪"变成可读的数字，而不是猜。
+// **等价解**，不是这一页的真实构成。所以按原语分类在这里计一次数，
+// 让"这一帧都画了什么"变成可读的数字，而不是猜。
 //
-// 开销：每次调用两次 steady_clock::now()（~20 ns）；关闭时只多一次 bool 判断。
-// 所以默认关闭，只在 BINUI2D_PROF=1 时开。
+// 计时默认关闭：这台机器（虚拟化）单次读时钟约 40 µs，按调用掐表会把帧耗时放大 6 倍
+// （见上面的"消融测量"注释）。要看时间就用消融法；BINUI2D_PROF=time 才开计时。
+// 计数本身的开销约 +3.7 ms/帧（同样因为有 234 次调用），测纯性能时别开。
 struct ProfTimer;
+
+// 当前核心的周期计数（不做序列化：探针只要"量级对"，不要精确到指令）。
+inline unsigned long long RdtscNow() {
+#if defined(_MSC_VER) || (defined(__GNUC__) && (defined(__x86_64__) || defined(__i386__)))
+    return __rdtsc();
+#else
+    return static_cast<unsigned long long>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+#endif
+}
+
+// TSC 频率（GHz）：用 QPC 标定 20 ms。只标定一次，标定失败按 3.0 GHz 兜底
+// （报告的 ms 会有个固定比例误差，但**分类占比**不受影响 —— 那才是这张表的用途）。
+inline double TscGhz() {
+    static const double ghz = [] {
+        const auto t0 = std::chrono::steady_clock::now();
+        const unsigned long long c0 = RdtscNow();
+        while (std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count() < 0.02) {
+        }
+        const unsigned long long c1 = RdtscNow();
+        const double sec = std::chrono::duration<double>(
+                               std::chrono::steady_clock::now() - t0).count();
+        if (sec <= 0.0 || c1 <= c0) return 3.0;
+        return static_cast<double>(c1 - c0) / sec / 1e9;
+    }();
+    return ghz;
+}
 
 struct Prof {
     enum Slot {
         kFillRect, kFillRounded, kFillRoundedXf, kStrokeRounded, kFillLine, kGrad,
         kDrawImage, kDrawImageNine, kDrawText, kDrawTextWrapped,
-        kPushLayer, kPushLayerEx, kPopLayer, kBackdropBlur,
+        kPushLayer, kPushLayerEx, kPopLayer, kBackdropBlur, kPresent,
         kSlotCount
     };
     static const char* Name(int s) {
@@ -235,12 +294,17 @@ struct Prof {
             case kPushLayerEx:     return "pushLayerEx";
             case kPopLayer:        return "popLayer";
             case kBackdropBlur:    return "backdropBlur";
+            case kPresent:         return "present()";
             default:               return "?";
         }
     }
     bool on = false;
+    // 只计数不计时（BINUI2D_PROF=count）：把"计数开销"和"计时开销"分开。
+    bool timing = true;
     long long calls[kSlotCount] = {};
-    double    us[kSlotCount] = {};
+    // 累加的是**周期**，不是微秒：RDTSC 只算本核吃掉的拍子，被别的进程抢走的时间
+    // 不会记到原语头上（steady_clock 会，实测能把同一段代码量成 4 倍）。
+    unsigned long long cyc[kSlotCount] = {};
     // 盒面积累计：让"µs/次"能换算成"ns/像素" —— 否则一个 900×932 的圆角底
     // 和一个 12×14 的圆点在表里是同一行"次/帧"，看不出钱花在哪种面积上。
     double    boxPx[kSlotCount] = {};
@@ -249,33 +313,38 @@ struct Prof {
     int frames = 0;
 
     void Reset() {
-        for (int i = 0; i < kSlotCount; ++i) { calls[i] = 0; us[i] = 0.0; boxPx[i] = 0.0; nonAligned[i] = 0; }
+        for (int i = 0; i < kSlotCount; ++i) { calls[i] = 0; cyc[i] = 0; boxPx[i] = 0.0; nonAligned[i] = 0; }
         frames = 0;
     }
     // 按总耗时降序打印（每帧均摊）。frames==0 时按累计值打印。
     void Dump(const char* tag) const {
         if (!on) return;
+        const double ghz = TscGhz();
         const double div = frames > 0 ? static_cast<double>(frames) : 1.0;
-        double total = 0.0;
-        for (int i = 0; i < kSlotCount; ++i) total += us[i];
-        std::fprintf(stderr, "[bin2d-prof] %s frames=%d 原语总耗时 %.2f ms/帧（探针开销未扣除）\n",
-                     tag, frames, total / div / 1000.0);
+        unsigned long long totalCyc = 0;
+        for (int i = 0; i < kSlotCount; ++i) totalCyc += cyc[i];
+        const double totalMs = static_cast<double>(totalCyc) / (ghz * 1e6);
+        std::fprintf(stderr,
+                     "[bin2d-prof] %s frames=%d 原语总耗时 %.2f ms/帧（%s；TSC %.2f GHz）\n",
+                     tag, frames, totalMs / div, timing ? "计时" : "仅计数", ghz);
         int order[kSlotCount];
         for (int i = 0; i < kSlotCount; ++i) order[i] = i;
         for (int i = 0; i < kSlotCount; ++i)
             for (int j = i + 1; j < kSlotCount; ++j)
-                if (us[order[j]] > us[order[i]]) { const int t = order[i]; order[i] = order[j]; order[j] = t; }
+                if (cyc[order[j]] > cyc[order[i]]) { const int t = order[i]; order[i] = order[j]; order[j] = t; }
         for (int k = 0; k < kSlotCount; ++k) {
             const int i = order[k];
             if (calls[i] == 0) continue;
-            const double perFrameMs = us[i] / div / 1000.0;
-            const double pct = total > 0.0 ? 100.0 * us[i] / total : 0.0;
-            const double nsPerPx = boxPx[i] > 0.0 ? us[i] * 1000.0 / boxPx[i] : 0.0;
+            const double usTotal = static_cast<double>(cyc[i]) / ghz / 1e3;   // 周期 → µs
+            const double perFrameMs = usTotal / div / 1000.0;
+            const double pct = totalCyc > 0 ? 100.0 * static_cast<double>(cyc[i]) /
+                                                  static_cast<double>(totalCyc) : 0.0;
+            const double nsPerPx = boxPx[i] > 0.0 ? usTotal * 1000.0 / boxPx[i] : 0.0;
             std::fprintf(stderr,
                          "[bin2d-prof]   %-16s %7.1f 次/帧  %8.2f us/次  %7.3f ms/帧  %5.1f%%"
                          "  %7.0f kpx/帧  %6.2f ns/px  非整对齐 %.1f/帧\n",
                          Name(i), static_cast<double>(calls[i]) / div,
-                         us[i] / static_cast<double>(calls[i]), perFrameMs, pct,
+                         usTotal / static_cast<double>(calls[i]), perFrameMs, pct,
                          boxPx[i] / div / 1000.0, nsPerPx, static_cast<double>(nonAligned[i]) / div);
         }
         std::fflush(stderr);
@@ -284,23 +353,41 @@ struct Prof {
 
 struct ProfTimer {
     Prof* p = nullptr;
-    std::chrono::steady_clock::time_point t0;
+    unsigned long long t0 = 0;
     int id = 0;
     ProfTimer(Prof& prof, int slot) : id(slot) {
         if (!prof.on) return;
         p = &prof;
-        t0 = std::chrono::steady_clock::now();
+        if (prof.timing) t0 = RdtscNow();
     }
     ~ProfTimer() {
         if (!p) return;
-        p->us[id] += std::chrono::duration<double, std::micro>(
-                         std::chrono::steady_clock::now() - t0).count();
+        if (p->timing) p->cyc[id] += RdtscNow() - t0;
         ++p->calls[id];
     }
 };
 
 struct BinUI2D::Impl {
     Prof prof;
+    // 消融开关（BINUI2D_SKIP=rstlg，见上面的注释）。按字符打开，init 时解析一次。
+    bool skipFillRounded = false;
+    bool skipStrokeRounded = false;
+    bool skipText = false;
+    bool skipLayer = false;
+    bool skipGradient = false;
+    void parseSkip(const char* s) {
+        if (!s) return;
+        for (const char* p = s; *p; ++p) {
+            switch (*p) {
+                case 'r': skipFillRounded = true; break;
+                case 's': skipStrokeRounded = true; break;
+                case 't': skipText = true; break;
+                case 'l': skipLayer = true; break;
+                case 'g': skipGradient = true; break;
+                default: break;
+            }
+        }
+    }
     int width = 0;
     int height = 0;
     bool ready = false;
@@ -320,6 +407,21 @@ struct BinUI2D::Impl {
     //   ③ 都没有           → 离屏：像素留在 surface 上（bin2d_shot 走这条）
 #ifndef BINUI_NO_BINGPU
     std::unique_ptr<bin2d::GpuCompositor> compositor;
+
+    // 建窗口版合成器（GL → Vulkan → D3D11，桌面平台上 WGL 最成熟所以先试）。
+    // vsync 是**建链时**定的，所以换 vsync 只能重建 —— 见 setVsync。
+    bool openCompositor(int w, int h, bool vsync) {
+        const BgpuBackendKind order[] = {BGPU_BACKEND_GL, BGPU_BACKEND_VULKAN,
+                                         BGPU_BACKEND_D3D11};
+        for (BgpuBackendKind k : order) {
+            if (!bingpu_backend_available(k)) continue;
+            compositor = std::make_unique<bin2d::GpuCompositor>();
+            if (compositor->createWindow(hwnd, w, h, k, vsync)) return true;
+            compositor.reset();
+        }
+        return false;
+    }
+
 #endif
     void* hwnd = nullptr;
     const char* presentPath = "bin2d+offscreen";
@@ -489,7 +591,11 @@ bool BinUI2D::init(int width, int height) {
         // 用别的基准反推只能得到等价解；这里给的是**这一页**的真实构成。
         const char* e = std::getenv("BINUI2D_PROF");
         impl_->prof.on = e && *e && std::strcmp(e, "0") != 0;
+        // 计时默认关：这台机器上一次 now() 约 40 µs（虚拟化），按调用掐表会把帧耗时
+        // 放大 6 倍。要时间请用 BINUI2D_SKIP 的消融法。
+        impl_->prof.timing = e && std::strcmp(e, "time") == 0;
         impl_->prof.Reset();
+        impl_->parseSkip(std::getenv("BINUI2D_SKIP"));
     }
     impl_->width = width;
     impl_->height = height;
@@ -517,18 +623,8 @@ bool BinUI2D::init(void* hwnd, int width, int height, bool vsync) {
     if (hwnd && !gpuDisabled) {
         // 尝试把呈现交给 binGPU：这是 master 那条分层里"bin2d 的后端交给 binGPU"
         // 的落点。一个后端都起不来不是失败 —— 退回 GDI 贴屏（见 present）。
-        // 顺序按"桌面平台上最稳的先试"：GL（WGL 最成熟）→ Vulkan → D3D11。
-        const BgpuBackendKind order[] = {BGPU_BACKEND_GL, BGPU_BACKEND_VULKAN,
-                                         BGPU_BACKEND_D3D11};
-        for (BgpuBackendKind k : order) {
-            if (!bingpu_backend_available(k)) continue;
-            impl_->compositor = std::make_unique<bin2d::GpuCompositor>();
-            if (impl_->compositor->createWindow(hwnd, width, height, k)) {
-                impl_->presentPath = "bin2d+gpu";
-                break;
-            }
-            impl_->compositor.reset();
-        }
+        if (impl_->openCompositor(width, height, impl_->vsync))
+            impl_->presentPath = "bin2d+gpu";
     }
 #endif
     return true;
@@ -571,7 +667,21 @@ void BinUI2D::resize(int width, int height) {
     impl_->layers.clear();
 }
 
-void BinUI2D::setVsync(bool on) { impl_->vsync = on; }
+void BinUI2D::setVsync(bool on) {
+    if (impl_->vsync == on) return;
+    impl_->vsync = on;
+#ifndef BINUI_NO_BINGPU
+    // 交换链的 vsync 位是建链时定的，运行期改它只能重建 —— 否则 setVsync 就成了一句空话
+    // （诊断里还会继续报"present 可阻塞垂直同步"，等于撒谎）。
+    if (impl_->compositor && impl_->compositor->ready() && impl_->hwnd) {
+        impl_->compositor->destroy();
+        impl_->compositor.reset();
+        impl_->presentPath = "bin2d+gdi";
+        if (impl_->openCompositor(impl_->width, impl_->height, on))
+            impl_->presentPath = "bin2d+gpu";
+    }
+#endif
+}
 void BinUI2D::setTransparent(bool t) { impl_->transparent = t; }
 
 const void* BinUI2D::pixels() const {
@@ -613,6 +723,10 @@ void BinUI2D::beginFrame(const void* clipRect) {
 }
 
 void BinUI2D::present() {
+    // present 是每帧固定成本里最大的一块（3 条路径各自的价钱差别很大），
+    // 所以把它也当"原语"记一档：贴屏 10 ms 里到底多少是转换、多少是交换链，
+    // 靠这一行与 upload 的分段一起看。
+    ProfTimer _pt(impl_->prof, Prof::kPresent);
     // ⓪ 透明分层窗（0.27.1）：交换链没有逐像素 alpha，必须先判。
     //    compositor 一旦建起来就会一直贴着这个窗口，这里直接拆掉，
     //    否则后面 setTransparent(false) 切回来时它已经错过了帧。
@@ -706,10 +820,17 @@ const char* BinUI2D::presentBackendName() const {
 }
 
 bool BinUI2D::presentPacesFrames() const {
-    // 只有真正走交换链（且后端自己会阻塞到垂直同步）时才让外壳别再掐帧。
-    // GDI 贴屏与离屏都必须返回 false —— 它们不阻塞，外壳要按刷新率节流。
-    // 窗口版交换链建的时候没开 VSYNC 标志（见 GpuCompositor::createWindow），
-    // 所以这里保守返回 false：多掐一帧只是多睡一会儿，少掐会撕裂 + 空转。
+    // 只有真正走交换链、而且这条链**确实会阻塞到垂直同步**时，才让外壳别再掐帧。
+    // GDI 贴屏与离屏必须返回 false —— 它们不阻塞，外壳要按刷新率节流。
+    //
+    // 这个答案不能猜：以前这里写死 false（理由写的是"建链时没开 VSYNC 标志"），
+    // 于是 120Hz 屏上外壳按 8.33ms 自己掐拍、而交换链是 IMMEDIATE 模式不锁刷新，
+    // 帧落点漂在两档之间（实测 2.75 / 3.00 个刷新周期各占一半，抖动 44/239）。
+    // 现在问 binGPU 的交换链本身（bingpu_swapchain_info 的 present_paces_frames）。
+#ifndef BINUI_NO_BINGPU
+    if (impl_->compositor && impl_->compositor->ready())
+        return impl_->compositor->presentPacesFrames();
+#endif
     return false;
 }
 
@@ -732,19 +853,23 @@ void BinUI2D::fillRounded(float x, float y, float w, float h, float radius,
             ++impl_->prof.nonAligned[Prof::kFillRounded];
     }
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return;
+    if (impl_->skipFillRounded) return;    // BINUI2D_SKIP=r：消融测量
     // 半径 <= 0 = 直角（三端统一的回退语义，见 binui_gfx.h）
     if (radius <= 0.0f) {
         impl_->canvas->fillRect(bin2d::Rect(x, y, w, h), ToColor(color));
         return;
     }
-    const auto slow0 = impl_->prof.on ? std::chrono::steady_clock::now()
-                                      : std::chrono::steady_clock::time_point{};
+    if (!impl_->prof.timing) {
+        // 不掐表时别读时钟（这台机器一次 ~40 µs，会把整帧放大 6 倍）
+        impl_->canvas->fillRounded(bin2d::Rect(x, y, w, h), radius, ToColor(color));
+        return;
+    }
+    const unsigned long long slow0 = RdtscNow();
     impl_->canvas->fillRounded(bin2d::Rect(x, y, w, h), radius, ToColor(color));
-    if (impl_->prof.on) {
+    {
         // 单次 >250 µs 的调用单独点名：分类表只能说"fillRounded 贵"，
         // 要优化得知道贵在**多大、什么半径、对齐不对齐**的那几次。
-        const double us = std::chrono::duration<double, std::micro>(
-                              std::chrono::steady_clock::now() - slow0).count();
+        const double us = static_cast<double>(RdtscNow() - slow0) / TscGhz() / 1e3;
         const bool aligned = x == std::floor(x) && y == std::floor(y) &&
                              w == std::floor(w) && h == std::floor(h);
         static int budget = 40;
@@ -761,6 +886,7 @@ void BinUI2D::strokeRounded(float x, float y, float w, float h, float radius,
     ProfTimer _pt(impl_->prof, Prof::kStrokeRounded);
     if (impl_->prof.on) impl_->prof.boxPx[Prof::kStrokeRounded] += w * h;
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return;
+    if (impl_->skipStrokeRounded) return;   // BINUI2D_SKIP=s
     if (thickness <= 0.0f) return;
     if (radius <= 0.0f) {
         // 直角框：四条矩形边的极限情况由下方的一般路径自然覆盖（半径会被夹到 0），
@@ -851,6 +977,7 @@ bool BinUI2D::fillGradientQuad(float x, float y, float w, float h, float radius,
     ProfTimer _pt(impl_->prof, Prof::kGrad);
     if (impl_->prof.on) impl_->prof.boxPx[Prof::kGrad] += w * h;
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return false;
+    if (impl_->skipGradient) return false;   // BINUI2D_SKIP=g
     const bin2d::Rect box(x, y, w, h);
     // CSS 语义（0° = 向上、顺时针增）由 bin2d 的 linearAngle 实现，与 GPU 端的
     // BuildGradientQuads 是同一套端点公式（两边都按盒子的投影长度取半长）。
@@ -943,6 +1070,7 @@ void BinUI2D::drawText(float x, float y, float size, int weight,
                        bool centerH, bool centerV, bool italic) {
     ProfTimer _pt(impl_->prof, Prof::kDrawText);
     if (!impl_->canvas || utf8.empty() || !impl_->atlas) return;
+    if (impl_->skipText) return;   // BINUI2D_SKIP=t
     impl_->atlas->drawText(x, y, size, weight, utf8, color, centerH, centerV, italic,
                            [this](const GlyphQuad& g) {
                                auto* img = static_cast<bin2d::Image*>(g.tex);
@@ -959,6 +1087,7 @@ void BinUI2D::drawTextWrapped(float x, float y, float maxW, float size, int weig
                               bool italic) {
     ProfTimer _pt(impl_->prof, Prof::kDrawTextWrapped);
     if (!impl_->canvas || utf8.empty() || !impl_->atlas) return;
+    if (impl_->skipText) return;   // BINUI2D_SKIP=t
     impl_->atlas->drawTextWrapped(x, y, maxW, size, weight, utf8, color, align, italic,
                                   [this](const GlyphQuad& g) {
                                       auto* img = static_cast<bin2d::Image*>(g.tex);
@@ -1160,6 +1289,7 @@ bool BinUI2D::pushLayer(float x, float y, float w, float h, float alpha) {
     ProfTimer _pt(impl_->prof, Prof::kPushLayer);
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return false;
     if (alpha <= 0.0f) return false;
+    if (impl_->skipLayer) return false;   // BINUI2D_SKIP=l
     Impl::LayerRec rec;
     rec.offscreen = false;
     rec.alpha = alpha;
@@ -1173,6 +1303,7 @@ bool BinUI2D::pushLayerEx(float x, float y, float w, float h, const LayerFx& fx)
     ProfTimer _pt(impl_->prof, Prof::kPushLayerEx);
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return false;
     if (fx.alpha <= 0.0f) return false;
+    if (impl_->skipLayer) return false;   // BINUI2D_SKIP=l
     if (fx.shadowCount > 0 && !fx.shadows) return false;
     // 有 blur 或外阴影就必须走离屏：bin2d 的 pushLayer 只做"组 alpha 一次乘"，
     // 而模糊/阴影都是"pop 时对整层内容做的操作"。

@@ -1,7 +1,7 @@
 # binUI - 跨平台描述式 UI 核心
 
 [![CI](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml/badge.svg)](https://github.com/Hsiakey/binUI/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-0.31.1-blue.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.32.0-blue.svg)](CHANGELOG.md)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](#构建)
 [![Format v34](https://img.shields.io/badge/binUI%20format-v34-orange.svg)](include/binui_format.h)
@@ -624,6 +624,8 @@ DetachVideoEngine();   // 进程退出前停止全部解码/输出线程
 - 拖拽期的呈现走 GDI（读回离屏像素贴到窗口 DC），绕开 NVIDIA 驱动在"resize + SwapBuffers"组合下的崩溃路径；
 - 固定布局的示例统一写 `window_resize="disable"`（拖不了边就不存在错位）；要演示自适应就看 `examples/flexshow`。
 - 自节拍（0.16.5 起）：帧预算默认跟显示器刷新率（`BINUI_FPS=n` 可封顶，想省电自己设）；pump 的空闲超时 = 一个帧预算，宿主的 `update()` 走节拍闸门（没脏区时最多每帧跑一次），最小化直接停（不推进时钟、不画）。以前 `while (pump(1))` + 每拍都跑 update 的空转、以及闸门漏清 `lastDrew_` 的自旋，会让"放后台的动画窗口"白烧 13~15% 一个核，修完是 0~1.7%。等待原语仍是 `MsgWaitForMultipleObjectsEx`——不节流的话，一个不停的小动画就能让界面常驻 ~80% 单核。`BINUI_PERF=1` 可打印每帧分段耗时（重排/绘制/呈现/读回/贴屏）。
+- **帧节拍按刷新网格量化（0.32.0）**：下一拍钉在"整数个刷新周期"之后（含滞回），`BINUI_PERF=1` 会多打一行 `刷新周期/帧 min/avg/max` 与 `抖动`（间隔不是刷新周期整数倍的次数）。**平均帧率达标也可能满屏抖**，验收动画要看这一项。诊断见 [docs/frame_pacing.md](docs/frame_pacing.md)。
+- **归因工具**：`BINUI2D_SKIP=rstlg` 把某个原语（圆角填充/圆角描边/文字/图层/渐变）换成空实现，用帧耗时差值算它的真实成本；`BINUI2D_PROF=1` 只做调用计数。别用"每次调用掐表"归因 —— 虚拟化环境上一次读时钟就 ~40 µs。
 
 
 ## 跨平台方向

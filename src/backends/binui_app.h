@@ -75,9 +75,19 @@ struct FramePerf {
     double lastFrameMs = 0;
     double maxInterval = 0;
     long long missed = 0;
-    // 帧间隔直方图（1ms 一档，0..19，20+ 归末档）：平均值看不出"两张快、一张慢"的
-    // 拍子，直方图一眼就能看出来。缩放类动画对这种拍子最敏感（形状每帧都在变）。
-    long long hist[21] = {};
+    // 抖动（v0.32.0）：间隔**不是刷新周期的整数倍**的次数。这才是"动画看着卡"的
+    // 直接指标 —— 60fps 落在 120Hz 屏上是 2 个刷新/帧，稳；而"33.6ms 一帧"落在
+    // 120Hz 上是 4.03 个刷新，于是每 25 帧多挤出一个 5 刷新周期，肉眼就是一顿一顿。
+    // 帧率（avg fps）达标也可能满屏抖动，所以单列这一项。
+    long long judder = 0;
+    long long ivN = 0;
+    double sumPeriods = 0;        // 间隔 / 刷新周期 的累加（单位：刷新周期）
+    double minPeriods = 1e9, maxPeriods = 0;
+    // 帧间隔直方图：**按刷新周期分档**（0.25 个周期一档，0..40 档 = 0..10 周期）。
+    // 以前是 1ms 一档，在 120Hz 上等于"每档 1/8 个周期"，看不出拍子；
+    // 换成周期刻度后，"4.00 档很宽"= 每帧正好吃 4 个刷新（稳），
+    // "4.00 和 5.00 两档都有一堆"= 一顿一顿。缩放类动画对这种拍子最敏感。
+    long long hist[41] = {};
     double winStart = 0;               // 本统计窗口的起始时刻（算 fps）
     int    frames  = 0;
     long long drawn = 0;               // 累计真正绘制的帧数（不随窗口重置）
@@ -115,17 +125,29 @@ inline void PerfFlush() {
                  p.sumPrep / p.frames, p.sumDib / p.frames,
                  p.sumRead / p.frames, p.sumBlit / p.frames,
                  p.maxInterval, p.missed);
+    // 抖动单独一行：它回答的是"帧率够了，为什么还是看着卡"
+    std::fprintf(stderr,
+                 "[perf] 刷新周期/帧 min/avg/max=%.2f/%.2f/%.2f  抖动=%lld/%lld"
+                 "（间隔不是刷新周期整数倍的次数）\n",
+                 p.minPeriods > 1e8 ? 0.0 : p.minPeriods,
+                 p.ivN ? p.sumPeriods / static_cast<double>(p.ivN) : 0.0,
+                 p.maxPeriods, p.judder, p.ivN);
     p.sumResize = p.sumDraw = p.sumPresent = p.sumTotal = 0;
     p.maxTotal = p.maxPresent = p.maxResize = 0;
     p.maxInterval = 0;
     p.missed = 0;
+    p.judder = 0;
+    p.ivN = 0;
+    p.sumPeriods = 0;
+    p.minPeriods = 1e9;
+    p.maxPeriods = 0;
     {   // 直方图：一行紧凑打印，0ms..19ms、20ms+
         char line[512];
         int o = 0;
-        for (int i = 0; i < 21 && o < 480; i++) {
+        for (int i = 0; i < 41 && o < 460; i++) {
             if (p.hist[i] == 0) continue;
-            o += std::snprintf(line + o, sizeof(line) - static_cast<size_t>(o), "%s%dms:%lld",
-                               o ? " " : "", i, p.hist[i]);
+            o += std::snprintf(line + o, sizeof(line) - static_cast<size_t>(o), "%s%.2f:%lld",
+                               o ? " " : "", i / 4.0, p.hist[i]);
             p.hist[i] = 0;
         }
         std::fprintf(stderr, "[perf] 间隔直方图 %s\n", o ? line : "(无)");
@@ -432,7 +454,12 @@ private:
     // 垂直同步下驱动会自旋等待（实测每帧 6~7ms CPU），空闲界面也能吃掉 80% 单核。
     std::chrono::steady_clock::time_point nextFrameTime_{};
     std::chrono::microseconds frameBudget_{16667};   // 1000000 / 刷新率（默认 60Hz）
+    // 显示器刷新周期（ms，**不受 BINUI_FPS 影响**）：抖动指标与直方图的刻度。
+    double refreshMs_ = 1000.0 / 60.0;
     void requestFrameNow() { nextFrameTime_ = std::chrono::steady_clock::time_point{}; }
+    // 全屏标脏但**不动节拍相位**：量测（BINUI_FRAME_EXIT 每帧强制重画）不能顺手把
+    // 刷新网格的相位砸掉，否则量出来的帧间隔根本没有参考价值。
+    void markAllDirty();
     // 节拍由 present() 的垂直同步阻塞决定（vsync 交换链），此时不再自己掐帧
     bool pacedByPresent() const;
     // 睡到指定时刻（保留消息可唤醒；用高精度定时器，见实现里的注释）
@@ -441,8 +468,13 @@ private:
     bool dirty_ = true;    // 上一拍是否真的画了一帧（renderOnce 里置位）。用来提前判断"这一拍还有活要干"：
     // 动画的脏区要到 update_ 跑完才出现，而 pump 的等待发生在 update_ 之前。
     bool lastDrew_ = false;
-    // 上一次 present 花了多少毫秒：>半个预算就说明它自己在等合成，不要再 DwmFlush
+    // 上一次 present 花了多少毫秒：>半个刷新周期就说明它自己在等合成边界
     double lastPresentMs_ = 0.0;
+    // 网格相位锚过没有（v0.32.0）：第一帧结束后用一次 DwmFlush 把网格贴到显示的
+    // 合成边界上，之后靠外壳自己的高精度定时器维持 —— 每帧都 flush 要多等一个周期。
+    bool phaseAnchored_ = false;
+    // 当前每帧占几个刷新周期（滞回用，见 renderFrame 末尾）。0 = 还没学到。
+    long long frameSteps_ = 0;
     int dirtyL_ = 0, dirtyT_ = 0, dirtyR_ = 0, dirtyB_ = 0;
     int pendingW_ = 0, pendingH_ = 0; // 挂起的窗口尺寸（WM_SIZE 只记录，帧内应用一次）
     bool trackingLeave_ = false;
@@ -1138,9 +1170,14 @@ inline void BinUIAppT<Gfx>::invalidateRect(int x, int y, int w, int h) {
 }
 
 template <class Gfx>
-inline void BinUIAppT<Gfx>::invalidateAll() {
+inline void BinUIAppT<Gfx>::markAllDirty() {
     dirty_ = true;
     dirtyL_ = 0; dirtyT_ = 0; dirtyR_ = width_; dirtyB_ = height_;
+}
+
+template <class Gfx>
+inline void BinUIAppT<Gfx>::invalidateAll() {
+    markAllDirty();
     requestFrameNow();   // 尺寸变化/热重载/失焦这类"整屏变了"的事件不等下一拍
 }
 
@@ -1301,9 +1338,18 @@ inline bool BinUIAppT<Gfx>::open() {
     {
         const int hz = FrameHzFor(hwnd);
         frameBudget_ = std::chrono::microseconds(1000000 / hz);
+        // 抖动指标要用**显示器刷新周期**，不是帧预算：BINUI_FPS 封顶之后两者不同，
+        // 用预算当刻度会把"4 个刷新的稳定 30fps 节拍"算成 1.00 个周期（看着很稳，其实 30fps）。
+        refreshMs_ = 1000.0 / static_cast<double>(DisplayRefreshHzFor(hwnd));
         if (Perf().on) {
-            std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
-                         hz, frameBudget_.count() / 1000.0);
+            const int panelHz = DisplayRefreshHzFor(hwnd);
+            if (hz != panelHz)
+                std::fprintf(stderr,
+                             "[perf] display refresh=%dHz budget=%.2fms（BINUI_FPS=%d 封顶）\n",
+                             panelHz, frameBudget_.count() / 1000.0, hz);
+            else
+                std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
+                             hz, frameBudget_.count() / 1000.0);
             // 节拍来自谁：present 声明自己能阻塞到垂直同步时，帧相位由显示器兜底；
             // 否则完全靠外壳的合成节拍（依赖高精度定时器，见 waitForFrame）。
             // 注意这只说明后端的"声明"，实际阻塞与否由驱动/合成器决定（窗口模式下
@@ -1363,9 +1409,18 @@ inline bool BinUIAppT<Gfx>::openChild(void* parent, int x, int y, int width, int
     {
         const int hz = FrameHzFor(hwnd);
         frameBudget_ = std::chrono::microseconds(1000000 / hz);
+        // 抖动指标要用**显示器刷新周期**，不是帧预算：BINUI_FPS 封顶之后两者不同，
+        // 用预算当刻度会把"4 个刷新的稳定 30fps 节拍"算成 1.00 个周期（看着很稳，其实 30fps）。
+        refreshMs_ = 1000.0 / static_cast<double>(DisplayRefreshHzFor(hwnd));
         if (Perf().on) {
-            std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
-                         hz, frameBudget_.count() / 1000.0);
+            const int panelHz = DisplayRefreshHzFor(hwnd);
+            if (hz != panelHz)
+                std::fprintf(stderr,
+                             "[perf] display refresh=%dHz budget=%.2fms（BINUI_FPS=%d 封顶）\n",
+                             panelHz, frameBudget_.count() / 1000.0, hz);
+            else
+                std::fprintf(stderr, "[perf] display refresh=%dHz budget=%.2fms\n",
+                             hz, frameBudget_.count() / 1000.0);
             // 节拍来自谁：present 声明自己能阻塞到垂直同步时，帧相位由显示器兜底；
             // 否则完全靠外壳的合成节拍（依赖高精度定时器，见 waitForFrame）。
             // 注意这只说明后端的"声明"，实际阻塞与否由驱动/合成器决定（窗口模式下
@@ -1436,31 +1491,79 @@ inline void BinUIAppT<Gfx>::renderFrame() {
     // 现在：网格用 `+=`（落后太多才重新对齐），等待用高精度可等待定时器（精度 ~0.5ms，
     // 见 waitForFrame），并且**保留 nextFrameTime_ 闸门**——present 会阻塞到垂直同步时，
     // 闸门正好挡住"刚提交完下一轮又立刻重画"。
-    // 帧节拍（v0.11.9）：分两条路 ——
-    //   A. present 自己会等合成（vsync 交换链 + DwmFlush）：**节拍归它**。这里既不设
-    //      闸门也不推网格，否则"合成等待 + 自己的节拍器"会双重等待，两者相位互相漂，
-    //      周期性丢一拍 —— 实测 VK 后端 total avg 7.41ms 却按 8.4ms/帧出帧，就是它。
-    //   B. 呈现不等（读回 + GDI / 透明窗 / 远程会话 / 拖拽）：外壳按刷新率节拍
-    //      （固定网格 + 高精度等待，见下）。
-    const bool paced = pacedByPresent();
-    if (!paced) {
-        if (now < nextFrameTime_) return;
-    } else if (!dirty_ && pendingW_ <= 0) {
-        lastDrew_ = false;      // 这一拍确实没东西要画：交给 pump 去睡
-        return;
-    }
+    // 帧节拍（v0.32.0）：**统一按刷新网格量化**，不再分"present 掐拍 / 外壳掐拍"两条路。
+    //   旧写法分两条：（A）present 会等合成 → 外壳完全不管；（B）否则外壳按"现在 + 预算"。
+    //   实测两条都有洞：
+    //     · A 依赖"交换链声明 vsync == 驱动真的阻塞"。DWM 合成下 wglSwapBuffers(1) 常常
+    //       立刻返回，外壳于是彻底放手，帧落点自由漂移；
+    //     · B 的"现在 + 预算"只保证**至少**隔一个预算，落点相对刷新边界任意。
+    //   两者共同的结果就是：120Hz 上实测间隔散在 1.75/2.00/2.25/2.50/2.75 个刷新周期上
+    //   （抖动 175/239）—— 平均帧率还行，肉眼一顿一顿。
+    //   现在只有一个规则：**下一拍必须落在刷新网格上**（见 renderOnce 之后那段），
+    //   闸门也就无条件生效了。
+    if (now < nextFrameTime_) return;
     renderOnce();
-    // 下一拍的时间点：present 自己等到垂直同步时，它只等到"下一次刷新"；帧预算被
-    // BINUI_FPS 封顶（或显示器比预算快）时，还差一截要外壳自己补 —— 所以这里统一
-    // 按 `now + 预算` 定下一拍，pump 用高精度定时器等到它（输入会提前唤醒）。
-    // 预算 == 刷新且 present 真的阻塞了整拍时，这个时刻已经过去，pump 立刻返回，
-    // 不会双重等待。
-    // 下一拍的时间点 = **本拍开始时刻 + 预算**（不是"画完之后 + 预算" —— present
-    // 自己已经等了半个刷新，从画完算起会把周期拖成 8.3+16.7≈25ms，帧率掉到 40fps）。
-    nextFrameTime_ = now + frameBudget_;
+    // 下一拍的时间点（v0.32.0：**刷新网格**，不是"现在 + 预算"）。
+    //
+    // 为什么要网格：120Hz 屏刷新周期 8.33ms，一帧 19.3ms = 2.3 个周期。旧写法
+    // `now + 预算` 只保证"至少等一个预算"，帧落点相对刷新边界**自由漂移**：实测
+    // 间隔落在 1.75/2.00/2.25/2.50/2.75 个刷新周期上各有一堆，同一帧有时被合成 2 次、
+    // 有时 3 次 —— 平均帧率还行，肉眼就是一顿一顿。
+    // 现在把下一拍钉在**整数个刷新周期**之后：帧耗时 19.3ms → 占 3 个周期（25ms），
+    // 每帧稳定吃 3 个刷新，宁可慢一点也不抖。
+    //
+    // 基准必须是**本拍真正结束的时刻**（含 present 可能等到的那一截），不是本拍开始
+    // 的时刻：从开始算的话，帧耗时一过整格，算出来的"下一拍"已经在过去，
+    // pump 立刻返回，帧间隔就退化成"纯耗时"，又漂回非整数格。
+    using Clock = std::chrono::steady_clock;
+    const auto endT = Clock::now();
+    {
+        const long long gridUs = static_cast<long long>(refreshMs_ * 1000.0 + 0.5);
+        const auto grid = std::chrono::duration_cast<Clock::duration>(
+            std::chrono::microseconds(gridUs > 0 ? gridUs : 16667));
+        // BINUI_FPS 封顶（比刷新慢）时，一拍要占**整数个**刷新周期 —— 60fps 落在 120Hz
+        // 屏上就是 2 个周期，不能是 16.67ms 这种"1.999 个周期"的自由落点。
+        const long long budgetUs = static_cast<long long>(frameBudget_.count());
+        // 四舍五入到最近的整档：8.3333ms 写成整数 µs 是 8333，直接 ceil 会把
+        // "33.33ms = 4 个刷新"算成 5 个（(33333+8333-1)/8333 恰好进位）—— 实测
+        // BINUI_FPS=30 因此变成了 5 个周期（41.7ms）。
+        long long minSteps = gridUs > 0 ? (budgetUs + gridUs / 2) / gridUs : 1;
+        if (minSteps < 1) minSteps = 1;
+        Clock::time_point t = nextFrameTime_;
+        // 落后太多（被挂起 / 窗口被拖走 / 长 stall / 首次）就以"现在"为基准重新学：
+        // 别一格一格追（那会连续空转几百拍），也别把 96 个周期的停顿当成新节拍。
+        if (t < endT - grid * 4 || t > endT) {
+            t = endT - grid;
+            frameSteps_ = 0;
+        }
+        // 本拍真正占了多少个刷新周期
+        const double need = grid.count() > 0
+                                ? static_cast<double>((endT - t).count()) /
+                                      static_cast<double>(grid.count())
+                                : 1.0;
+        long long k = frameSteps_ > 0 ? frameSteps_
+                                      : static_cast<long long>(std::ceil(need > 0.0 ? need : 1.0));
+        // 滞回（v0.32.0）：装不下立刻升档；**降档要求本拍真的装得下更小的档**（留 15% 余量）。
+        //   没有滞回时，帧耗时刚好压在"2 个周期"的边界上会 2/3 交替 —— 那本身就是
+        //   一顿一顿（实测 appshow：2.25/2.75/3.00 三档混着来，抖动 112/179）。
+        //   宁可多睡一点、节拍不动，也不要每帧换一个周期数。
+        //   注意"降档"的判据是 `need <= k-1`（本拍能在 k-1 个周期内画完），
+        //   不是 `need <= k-1+余量` —— 后者会让 k=1 却要在 1.2 个周期里画完，
+        //   结果是每帧都迟到、节拍反而更烂（踩过，实测退成 ~10ms 的杂乱节拍）。
+        if (need > static_cast<double>(k)) k = static_cast<long long>(std::ceil(need));
+        else if (k > 1 && need <= static_cast<double>(k - 1) - 0.15) --k;
+        if (k < minSteps) k = minSteps;
+        if (k < 1) k = 1;
+        if (k > 512) k = 512;
+        frameSteps_ = k;
+        nextFrameTime_ = t + grid * k;
+    }
 }
 
-// 这一帧是否由 present() 的垂直同步阻塞来决定节拍（只用于启动时打一行诊断）
+// present 自己会不会等到垂直同步（**只用于启动时打一行诊断**）。
+// v0.32.0 起帧相位不再交给它：交换链声明 vsync ≠ 驱动真的阻塞（DWM 合成下
+// wglSwapBuffers(1) 经常立刻返回），所以节拍统一由外壳按刷新网格量化，
+// present 等不等都不影响稳定性 —— 这一项留着是为了解释"慢在等合成还是慢在画"。
 template <class Gfx>
 inline bool BinUIAppT<Gfx>::pacedByPresent() const {
     return gfx_.presentPacesFrames() && !gdiPresent_ && !fullscreenPresent_;
@@ -1544,27 +1647,19 @@ inline int BinUIAppT<Gfx>::pump(int timeoutMs) {
     // 等"到下一帧点"必须精确到亚毫秒 —— 120Hz 的预算只有 8.33ms，而 MsgWait 的毫秒
     // 超时按系统计时器精度兑现（默认 15.6ms），一睡就跨两个刷新（v0.11.6 的坑）。
     MSG msg = {};
-    const bool paced = pacedByPresent();
     if (pendingW_ > 0 && pendingH_ > 0) {
         // 尺寸变化：这一拍就出帧，不等
     } else if (dirty_ || lastDrew_) {
         // 有脏区，或者上一拍刚画过（动画通常每拍都会产生脏区，但那要等 update_ 跑完
         // 才知道 —— 用 lastDrew_ 提前判断，免得在帧点前先睡掉一整拍）。
-        // 统一精确等到下一拍：present 能阻塞时它只等到"下一次刷新"，帧预算被
-        // BINUI_FPS 封顶后还差半拍要外壳补；预算 == 刷新时这个时刻已经过去，
-        // pump 立刻返回，不会双重等待（输入会提前唤醒）。
+        // 统一精确等到下一拍（刷新网格上的那个点），pump 用高精度定时器，输入会提前唤醒。
         const auto now = std::chrono::steady_clock::now();
         waitForFrame(nextFrameTime_ > now ? nextFrameTime_ : now);
     } else if (timeoutMs > 0) {
-        // 完全没活：睡到输入。paced 模式下用毫秒粗睡即可（OS 会合并到 15.6ms 节拍，
-        // 省电优先）；非 paced 模式仍睡到帧点，保证动画不会掉回 64fps。
-        if (paced) {
-            MsgWaitForMultipleObjectsEx(0, nullptr, static_cast<DWORD>(timeoutMs),
-                                        QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-        } else {
-            const auto now = std::chrono::steady_clock::now();
-            if (nextFrameTime_ > now) waitForFrame(nextFrameTime_);
-        }
+        // 完全没活：也睡到帧点（v0.32.0：以前 paced 时用毫秒粗睡省电，但那样醒来时刻
+        // 落在 15.6ms 的 OS 节拍上，动画一开动就要多漂半拍；有空转闸门在，粗睡省不了多少）。
+        const auto now = std::chrono::steady_clock::now();
+        if (nextFrameTime_ > now) waitForFrame(nextFrameTime_);
     }
 
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
@@ -1846,8 +1941,14 @@ inline void BinUIAppT<Gfx>::renderOnce() {
             gfx_.present();
             lastPresentMs_ = std::chrono::duration<double, std::milli>(
                                  std::chrono::steady_clock::now() - pStart).count();
-            if (pacedByPresent() && lastPresentMs_ < frameBudget_.count() / 1000.0 * 0.5)
+            // 相位锚定：**只在相位未知时**补一次 DwmFlush（见 anchorPhase_）。
+            // 每帧都 flush 会把"本拍结束时刻"硬贴到合成边界上，代价是每帧多等最多一个
+            // 刷新周期 —— 实测 40fps 与 60fps 的差别就来自这一下，而它解决不了网格
+            // 已经解决的东西（帧落点仍然只在每帧被重新锚定一次）。
+            if (!phaseAnchored_ && lastPresentMs_ < refreshMs_ * 0.5) {
                 DwmFlush();
+                phaseAnchored_ = true;
+            }
         }
         if (sp && firstDraw) {
             binui::ex::StartupMark("frame1: present done");
@@ -1865,9 +1966,22 @@ inline void BinUIAppT<Gfx>::renderOnce() {
                 const double iv = t0 - perf.lastFrameMs;
                 if (iv > perf.maxInterval) perf.maxInterval = iv;
                 if (iv > frameBudget_.count() / 1000.0 * 1.5) ++perf.missed;
-                int slot = static_cast<int>(iv);
+                // 抖动：把间隔换算成"显示刷新周期数"，接近整数才算跟住了刷新节拍。
+                // 1.5 个预算以上的掉拍通常就是"多占了 1~2 个刷新"，这项会把它点出来。
+                const double refreshMs = refreshMs_ > 0.0 ? refreshMs_ : 1.0;
+                const double periods = iv / refreshMs;
+                if (periods >= 0.7) {
+                    const double frac = std::fabs(periods - std::floor(periods + 0.5));
+                    if (frac > 0.15) ++perf.judder;
+                    ++perf.ivN;
+                    perf.sumPeriods += periods;
+                    if (periods < perf.minPeriods) perf.minPeriods = periods;
+                    if (periods > perf.maxPeriods) perf.maxPeriods = periods;
+                }
+                // 直方图按"刷新周期"分档（见 FramePerf::hist）
+                int slot = static_cast<int>(periods * 4.0);
                 if (slot < 0) slot = 0;
-                if (slot > 20) slot = 20;
+                if (slot > 40) slot = 40;
                 ++perf.hist[slot];
                 // 单次 >100ms 的间隔单独打一行（带时间偏移）：排查"卡一下"时最需要的就是
                 // "什么时候卡的、卡了多久"，而不是平均帧率。
@@ -1903,7 +2017,7 @@ inline void BinUIAppT<Gfx>::renderOnce() {
             // 强制连出 n 帧：静态页面本来只画 1 帧（没脏区就不出帧），n>1 就成了"永远不退出"。
             // 量测要的是"画够 n 帧自己退"，不是外部 Stop-Process 强杀（那样缓冲里的诊断会丢）。
             if (startupFrames >= frameExit) requestExit();
-            else invalidateAll();
+            else markAllDirty();   // 强制再画一帧，但**不动节拍相位**（量测要的是真实间隔）
         }
     }
 }
