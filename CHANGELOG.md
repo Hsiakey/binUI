@@ -5,7 +5,78 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.27.0] - 2026-11-19 【格式 v34 不变】
+
+**bin2d 后端接管整个应用外壳** —— 0.26.1 只证明了"bin2d 能把像素送到屏幕上"；这一版
+证明的是"它能顶替三份 GPU 后端当**唯一的后端**"。差别在于：上屏只是一帧的最后一脚，
+输入 / IME / 拖边框 / DPI / 脏区这些外壳行为从来没在 bin2d 上跑过。
+
+``` 
+binUI 外壳（BinUIAppT<Gfx>，与图形 API 无关）
+   └── BinUI2D ──► bin2d ──► binGPU / 系统贴屏
+```
+
+### Added
+
+- `make demos-2d`：同一份示例源码 + `-DBINUI_GPU_2D`，产出 9 个
+  `build-mingw/bin/examples/*_2d.exe`（含 `appshow_2d` —— 多页 / 弹窗 / 拖拽 / 滚动 /
+  输入框全在那个演示里）。与 `demos-vk` / `demos-d3d11` 并列，四端可并存。
+- `BinUIApp2D = BinUIAppT<BinUI2D>`（`src/backends/binui_bin2d.h`）：与
+  `BinUIAppGL` / `BinUIAppVK` / `BinUIAppD3D` 同一份模板。头文件里补上
+  `backends/binui_app.h` 的包含（`#ifdef _WIN32` 守卫 —— `binui_bin2d.h` 也被
+  `bin2d_shot` 这类无窗口工具包含，不该被拖上 windows.h）。
+- `tests/test_shell`（38 项断言，进 `make test`）：外壳 × bin2d 后端的**接口契约**
+  回归。子窗口模式跑在隐藏父窗口下，可进 CI。覆盖 12 组：
+  1. `openChild` 参数校验 / 建窗 / 类名（`BinUIApp2DWindow`，与三份 GPU 后端不冲突）
+  2. 首帧：脏矩形 = 整窗、像素尺寸 = w·h·4、颜色正确
+  3. **脏区语义**：`invalidateRect(10,20,30,40)` → 脏矩形 `{10,20,40,60}`；脏区外的
+     像素保留上一帧的值（不是被清成透明）—— 这条是"窗口抖动时整屏闪"的防线
+  4. 组透明度：`pushLayer(α=0.5)` 的合成结果 `(25,51,102,255)`
+  5. 裁剪栈：`pushClip` 真的挡住填充，`popClipTo` 真的恢复
+  6. 输入：鼠标移动/按下/抬起/双击/右中键/中键/离开/滚轮（屏幕坐标→客户区坐标）、
+     `WM_CHAR`（ASCII / 中文三字节 / 代理对四字节 / 控制字符被丢弃）、`WM_KEYDOWN`、
+     `WM_SETCURSOR` 光标查询
+  7. **输入法**：`imeActive=false` → `ImmGetContext` 返回 null（上下文被摘下）；
+     `true` → 非 null（挂回）。不是"调了没炸"，是真的查了上下文句柄
+  8. `WM_SIZE` → 挂起到帧内应用（回调 + 后端尺寸 + 像素缓冲都跟着变）
+  9. `WM_DPICHANGED` → `dpiChanged` 回调 + `dpi()`
+  10. 跨线程 `pump` 返回 -1（线程亲和自检）
+  11. 同进程双实例并存，像素互不干扰
+  12. `requestExit` / `close` 幂等
+
+### Changed
+
+- `docs/migrate-to-bin2d.md` §2 的"三份 GPU 后端的去留"更新：原先列的两条留用理由
+  里，①（输入/IME/拖拽只在 GL/VK 上真跑过）**已作废** —— 本条由 `make demos-2d` +
+  `tests/test_shell` 兑现；②（性能账）与"能不能删"无关，是另一件事。
+
+### 验收（本轮实测）
+
+| 项 | 结果 |
+|---|---|
+| `make demos-2d` | 9 个 exe，0 warning |
+| `tests/test_shell` | 38/38 通过 |
+| `make test`（6 个套件） | 全绿 |
+| `make pixels-bin2d` | 18/18 像素一致（容差 0） |
+
+### 测试期踩到的两处口径（写在这里省得下次再踩）
+
+- **外壳有帧节拍闸门**：`renderFrame` 里 `if (!paced) { if (now < nextFrameTime_) return; }`。
+  bin2d 后端的 `present` 不阻塞垂直同步 → `paced=false` → 节拍完全由外壳按刷新率推算。
+  测试若不等这一拍就 `pump()`，读到的是"上一帧还挂着"，脏区断言会全部落空。所以
+  测试的 `PumpOnce` 要先睡过一个帧预算。
+- **`PostMessage(WM_DPICHANGED)` 会被系统丢掉**（收不到），必须用 `SendMessage`。
+  这类"消息发出去没反应"的坑，只能靠断言"回调真的被调了"发现。
+
+### 还没做
+
+- 三份 GPU 后端仍不能删。审计（本轮实测）结论：`IBinUIGfx` 之外的三份后端还留着
+  4 处编译期硬依赖 + 3 项 bin2d 没有的能力 —— 见 `docs/migrate-to-bin2d.md` 新增的
+  「删后端的清单」一节。其中**透明分层窗**（`UpdateLayeredWindow`）是唯一"用户可见"的
+  缺口：`setTransparent(true)` 在 bin2d 后端只存了个标志，`WS_EX_LAYERED` 窗口会不上屏。
+
 ## [0.26.1] - 2026-11-19 【格式 v34 不变】
+
 
 **bin2d 后端接窗口呈现** —— 0.26.0 的 `BinUI2D` 只会离屏出图；这一版让它能当真正的
 窗口后端用，于是"binUI 不写图形 API"这件事从"注释"变成"可运行的程序"。

@@ -37,6 +37,13 @@
 #include <string>
 
 #include "binui_gfx.h"
+#ifdef _WIN32
+// 与 BinUIGL / BinUIVK / BinUID3D 三个后端**同一份**外壳模板（窗口 / 输入 / IME /
+// 拖边框 / DPI / 帧节流都在里面，后端只提供 8 个方法 + appClassName）。
+// 不无条件包含：binui_bin2d.h 也被 bin2d_shot 这类**不需要窗口**的工具包含，
+// 而 binui_app.h 会拖进 windows.h。非 Windows 平台没有这个外壳。
+#include "backends/binui_app.h"
+#endif
 
 namespace binui {
 
@@ -154,6 +161,13 @@ private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
+
+#ifdef _WIN32
+// 无边框窗口外壳 + bin2d 后端（与 BinUIAppGL / BinUIAppVK / BinUIAppD3D 同一份模板）。
+// 有没有这一行，决定了"三份 GPU 后端能不能删"：外壳只用到后端的 8 个方法，
+// BinUI2D 把它们全实现了，那么输入 / IME / 拖边框就不再是 GPU 后端的独占能力。
+using BinUIApp2D = BinUIAppT<BinUI2D>;
+#endif
 
 } // namespace binui
 

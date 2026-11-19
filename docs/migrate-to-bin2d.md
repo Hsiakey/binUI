@@ -195,8 +195,45 @@ binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D
   `StretchDIBits` 贴屏"。`tools/bin2d_window` 实测三条路都通（`present=gl` /
   `present=bin2d+gdi` / `present=bin2d+offscreen`），抓图内容一致。
 - 三份 GPU 后端的去留：窗口路径通了，但**现在还不能删** ——
-  ① `BinUIAppT` 的输入/IME/拖拽只在 GL/VK 上真跑过；
-  ② 性能账还没结（见下）。
+  ① ~~`BinUIAppT` 的输入/IME/拖拽只在 GL/VK 上真跑过~~ —— **已作废（0.27.0）**：
+  `make demos-2d` 产出 9 个 `*_2d.exe`（含 `appshow_2d` 这个外壳演示），
+  `tests/test_shell` 用 38 项断言把外壳与后端之间的契约钉住（消息 / IME 上下文挂载 /
+  脏区只清脏区 / 图层 / 裁剪栈 / 尺寸 / DPI / 线程亲和 / 双实例）。外壳只认
+  `IBinUIGfx` 的 8 个方法，`BinUI2D` 全部实现 → 这条理由不再成立；
+  ② 性能账还没结（见下）—— 与"能不能删"无关，是另一件事。
+
+#### 删后端的清单（0.27.0 审计：`IBinUIGfx` 之外还差什么）
+
+规模：`binui_gl.*` 111,793 B + `binui_vk.*` 233,825 B + `binui_d3d11.*` 117,275 B
+≈ 452 KB。删文件本身不难，难的是下面两类。
+
+**A. 编译期硬依赖（不补就编不过）**
+
+| 位置 | 现状 | 要改成 |
+|---|---|---|
+| `include/binui_charts.h:14,31,79` | `virtual void draw(BinUIGL&)` | `IBinUIGfx&`（内部只用到 `fillLine`，本就是接口方法） |
+| `src/binui_c.cpp:52,211,216` | `std::unique_ptr<BinUIAppGL>` | `BinUIApp2D`；`Makefile:452,457`、`CMakeLists.txt:89,93` 同步 |
+| `src/backends/binui_ui.h:21-23,36-38,71-81` | 默认分支是 GL | 默认改成 2D（`-DBINUI_GPU_2D` 分支已存在） |
+| `Makefile:212-293 / 469`、`CMakeLists.txt:82-84,114-146` | 9 个 demo 全链 `binui_gl.o`；**CMake 里没有 bin2d 目标** | 新建 2D 目标（Makefile 侧 `demos-2d` 已就位） |
+
+唯一的"薄壳"：`drawNodesGL`（`binui_gl.cpp:2104`，6 行，等于 `drawNodesBinUI`）、
+`flushFrame`（只服务 `make bench-gl`）、`BinUIGLGdi/BinUIAppGLGdi` 别名（零调用者）。
+`tests/` 目录对四份后端**零引用** —— 测试层早就后端无关了。
+
+**B. bin2d 还缺的能力（补了才谈得上等价替换）**
+
+| 能力 | 三份 GPU 后端 | bin2d 现状 | 影响 |
+|---|---|---|---|
+| **透明分层窗** | GL `glReadPixels`→`UpdateLayeredWindow`（gl.cpp:1453-1503）/ VK 1599 / D3D 1445 | **没有**，`setTransparent` 只存标志（bin2d.cpp:329） | 唯一"用户可见"缺口：`WS_EX_LAYERED` 窗口不上屏 |
+| `setImageFilter` | 三端都有 | 空实现（bin2d.cpp:715-718） | `svg-filter` 用例 13.8% 差异 |
+| 图层 `drop-shadow` | 三端都有 | 明确忽略（bin2d.cpp:884）；blur 已有 | `filter: drop-shadow` 掉效果 |
+| `readbackPixels` | VK 4062 / D3D 2327（GL 没有，靠 BitBlt） | `pixels()` / `savePng()`（预乘 RGBA，语义不同） | 只影响 `vk_shot` / `d3d11_shot` 等工具，随删 |
+| VK 诊断四项 | `setCaptureReadback` / `swapchainActive` / `presentUsedGdi` / `deviceMemoryBytes` | 无 | 只影响 `vk_window` / `vk_stress`，随删 |
+| `presentPacesFrames` | 三端都有真判据 | 恒 false（保守） | 只影响帧相位，不挂功能 |
+
+MSAA 解析 / DPI / `RemoteSession` / `fullscreenPresent_` **都不是后端的事**：
+MSAA 是 GPU 的做法，bin2d 在覆盖率光栅里解析掉了；后三项在外壳（`binui_app.h`）。
+
 - 性能：features 页 900×932，全屏重画 23.6 ms（脏区 120×40 只要 3.56 ms）。
   全屏那 23.6 ms 主要是大面积圆角/渐变的覆盖率栅格，不是字形。要压下去得接
   bin2d 的 `Scene` 缓存（静态组只贴图），那是下一步；不做也行 —— 正常 UI 有脏矩形。

@@ -184,6 +184,8 @@ test: $(TEST_BINS)
 ifdef ComSpec
 	@echo "--- test_capi ---"
 	$(TEST_DIR)/test_capi$(EXT)
+	@echo "--- test_shell (外壳 × bin2d 后端) ---"
+	$(TEST_DIR)/test_shell$(EXT)
 endif
 
 # =============================================
@@ -199,6 +201,17 @@ GL_LIBS := -lopengl32 -ldwmapi -limm32 -lmsimg32 -Lthird_party/freetype/build -l
 # C ABI 的冒烟测试（无窗口：只测编译/加载/节点查询/改文本，需链 GL 后端对象）
 TEST_BINS += $(TEST_DIR)/test_capi$(EXT)
 test: $(TEST_DIR)/test_capi$(EXT)
+
+# 外壳 × bin2d 后端（0.27.0）：子窗口模式下的消息/IME/脏区/图层/裁剪栈契约。
+# 它守的是"三份 GPU 后端能不能删"——外壳只认 IBinUIGfx，换后端不该丢任何能力。
+# 需要一个窗口站（建的是隐藏父窗口下的子窗口），所以归在 Windows 段里。
+TEST_BINS += $(TEST_DIR)/test_shell$(EXT)
+test: $(TEST_DIR)/test_shell$(EXT)
+
+$(TEST_DIR)/test_shell$(EXT): tests/test_shell.cpp $(BUILD_DIR)/binui_bin2d.o $(LIBS_A)
+	@mkdir -p $(TEST_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include -o $@ $< \
+	    $(BUILD_DIR)/binui_bin2d.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS)
 
 # 注意：这里必须直接写 $(BUILD_DIR)/libbinui_c.a，不能写 $(BINUI_C_A) ——
 # 那个变量是后面用 := 定义的，GNU Make 在读到这一行时就展开成了空，
@@ -366,6 +379,71 @@ DEMO_D3D11_BINS := $(foreach d,$(D3D11_DEMOS),$(DEMO_DIR)/$(d)_d3d11$(EXT))
 .PHONY: demos-d3d11
 demos-d3d11: $(DEMO_D3D11_BINS)
 	@echo "d3d11 demos -> $(DEMO_D3D11_BINS)"
+
+# =============================================
+# bin2d 版示例（0.27.0）：同一份 demo 源码 + -DBINUI_GPU_2D，链接 binui_bin2d.o。
+#   make demos-2d        → examples/*_2d.exe（与 GL / VK / D3D11 版并存）
+#
+# 这一组存在的理由不是"A/B 对拍"，而是**三份 GPU 后端可删的证据**：
+# 它们至今留着，唯一站得住的原因是输入 / IME / 拖边框 / DPI 只在它们上面真跑过。
+# 同一份 BinUIAppT<Gfx> 模板配 BinUI2D 也能开窗、吃消息、拖边框 —— 那条理由就没了。
+# 所以这一组要跑的是**外壳**，不是像素（像素由 make pixels-bin2d 管，容差 0）。
+# =============================================
+# appshow 单列：它是外壳演示（多页 + 弹窗 + 拖拽 + 滚动 + 输入框），也是这一组的主验收。
+# features / appshow 有外挂组件与 .bum，链接规则要额外拷资源，不走宏（宏只拷 main.html）。
+2D_DEMOS_SIMPLE := fontshow animshow buttonshow flexshow svgdemo cubedemo texturedemo
+2D_DEMOS := features appshow $(2D_DEMOS_SIMPLE)
+
+define DEMO_2D_RULE
+$(DEMO_DIR)/$(1)_2d$(EXT): $(BUILD_DIR)/binui_bin2d.o $(BUILD_DIR)/examples/$(1)/main_2d.o $(LIBS_A) $(EXA_DIR)/$(1)/main.html
+	@mkdir -p $(DEMO_DIR)/$(1)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $$@ $(BUILD_DIR)/binui_bin2d.o $(BUILD_DIR)/examples/$(1)/main_2d.o $(LIBS_A) \
+	    $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS)
+	cp -f $(EXA_DIR)/$(1)/main.html $(DEMO_DIR)/$(1)/main.html
+
+$(BUILD_DIR)/examples/$(1)/main_2d.o: examples/$(1)/main.cpp
+	@mkdir -p $(BUILD_DIR)/examples/$(1)
+	$(CXX) $(CXXFLAGS) -DBINUI_GPU_2D -I$(INC_DIR) -Isrc -c examples/$(1)/main.cpp -o $$@
+endef
+
+$(foreach d,$(2D_DEMOS_SIMPLE),$(eval $(call DEMO_2D_RULE,$(d))))
+
+# features / appshow 有外挂组件与 .bum：宏里那条只拷 main.html，这两条补全
+$(BUILD_DIR)/examples/features/main_2d.o: examples/features/main.cpp
+	@mkdir -p $(BUILD_DIR)/examples/features
+	$(CXX) $(CXXFLAGS) -DBINUI_GPU_2D -I$(INC_DIR) -Isrc -c examples/features/main.cpp -o $@
+
+$(BUILD_DIR)/examples/appshow/main_2d.o: examples/appshow/main.cpp
+	@mkdir -p $(BUILD_DIR)/examples/appshow
+	$(CXX) $(CXXFLAGS) -DBINUI_GPU_2D -I$(INC_DIR) -Isrc -c examples/appshow/main.cpp -o $@
+
+$(DEMO_DIR)/features_2d$(EXT): $(BUILD_DIR)/binui_bin2d.o $(BUILD_DIR)/examples/features/main_2d.o $(LIBS_A) \
+		$(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
+	@mkdir -p $(DEMO_DIR)/features
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_bin2d.o $(BUILD_DIR)/examples/features/main_2d.o $(LIBS_A) \
+	    $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS)
+	cp -f $(EXA_DIR)/features/main.html $(DEMO_DIR)/features/main.html
+	cp -f $(EXA_DIR)/features/button.bum.html $(DEMO_DIR)/features/button.bum.html
+	cp -f $(BUILD_DIR)/assets/components/card.bum $(DEMO_DIR)/features/card.bum
+	cp -f $(BUILD_DIR)/assets/components/dock.bum $(DEMO_DIR)/features/dock.bum
+
+$(DEMO_DIR)/appshow_2d$(EXT): $(BUILD_DIR)/binui_bin2d.o $(BUILD_DIR)/examples/appshow/main_2d.o $(LIBS_A) \
+		$(EXA_DIR)/appshow/main.html $(EXA_DIR)/appshow/appshow-navitem.bum.html $(EXA_DIR)/appshow/appshow-card.bum.html \
+		$(EXA_DIR)/appshow/appshow-dialog.bum.html $(EXA_DIR)/appshow/appshow-bubble.bum.html
+	@mkdir -p $(DEMO_DIR)/appshow
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_bin2d.o $(BUILD_DIR)/examples/appshow/main_2d.o $(LIBS_A) \
+	    $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS)
+	cp -f $(EXA_DIR)/appshow/main.html $(DEMO_DIR)/appshow/main.html
+	cp -f $(EXA_DIR)/appshow/appshow-navitem.bum.html $(DEMO_DIR)/appshow/appshow-navitem.bum.html
+	cp -f $(EXA_DIR)/appshow/appshow-card.bum.html $(DEMO_DIR)/appshow/appshow-card.bum.html
+	cp -f $(EXA_DIR)/appshow/appshow-dialog.bum.html $(DEMO_DIR)/appshow/appshow-dialog.bum.html
+	cp -f $(EXA_DIR)/appshow/appshow-bubble.bum.html $(DEMO_DIR)/appshow/appshow-bubble.bum.html
+
+DEMO_2D_BINS := $(foreach d,$(2D_DEMOS),$(DEMO_DIR)/$(d)_2d$(EXT))
+
+.PHONY: demos-2d
+demos-2d: $(DEMO_2D_BINS)
+	@echo "bin2d demos -> $(DEMO_2D_BINS)"
 
 # =============================================
 # C ABI：给 Python / Go / Rust 等宿主语言的绑定入口（include/binui_c.h）
