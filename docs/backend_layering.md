@@ -76,7 +76,7 @@ binUI 只剩一条路：`binUI ──► bin2d（+bin3d）──► binGPU ─�
 | 步 | 状态 | 具体做了什么 |
 |---|---|---|
 | 1. binGPU 长出 2D 图元 + GPU/CPU 两种执行体 | **进行中** | `bingpu_render_plan()`（0.8.0）给 backend/exec/msaa；`bingpu_pace_*`（0.9.0）收"什么时候画"；`bingpu_cmd_draw_rounded_rect(s)`（0.10.0）收**圆角矩形的九宫格几何**（AA 数学仍在 bin2d 的覆盖率模板）。执行体那一轴还是空的：binGPU 的 CPU 后端是参考实现，实测比 bin2d 的光栅慢 14×，所以"CPU 执行模式"应该由 bin2d 的光栅来当 |
-| 2. bin2d `Canvas` 把执行交给 binGPU | **起步** | `GpuCompositor::beginTarget/drawRect/drawRoundedRect(s)/endTarget`（0.16.0）已经能直接往设备目标画图元，四个后端各验一遍"设备像素 == 模板覆盖率"（逐像素精确）。**但 `Canvas` 本身还是纯 CPU 光栅** —— 要接的是"Canvas 的语义 + binGPU 的执行"，那一层还没做 |
+| 2. bin2d `Canvas` 把执行交给 binGPU | **起步** | ① `GpuCompositor::beginTarget/drawRect/drawRoundedRect(s)/endTarget`（0.16.0）能直接往设备目标画图元，四个后端各验一遍「设备像素 == 模板覆盖率」（逐像素精确）。② **`DisplayList`（0.17.0）**：绘制语义先记成列表，再交给执行体 —— `execute(Canvas&)` 走光栅、`execute(GpuCompositor&, …)` 走 binGPU；矩形 + 1:1 贴图的页面在 Vulkan/D3D11/GL 上**差 0**，64 个四边形只用 19 次提交。**但 `Canvas` 本身还是纯 CPU 光栅**，binUI 还没改成"先记列表再执行"那股流程 |
 | 3. 删掉 binui_vk / binui_gl / binui_d3d11 与 BinUIAuto | 未开始 | 三份实现仍在；`BinUIAuto` 仍然是选后端的那层薄壳。仍然卡在第 1/2 步 |
 
 这一轮唯一动的是**节拍**：它原本也在错的那一层（外壳自己算网格 + 滞回 + 猜 present
