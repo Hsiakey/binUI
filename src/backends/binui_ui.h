@@ -16,6 +16,8 @@
 #include "backends/binui_vk.h"
 #elif defined(BINUI_GPU_D3D11)
 #include "backends/binui_d3d11.h"
+#elif defined(BINUI_GPU_2D)
+#include "backends/binui_bin2d.h"
 #else
 #include "backends/binui_gl.h"
 #endif
@@ -28,6 +30,9 @@ using UiApp     = BinUIAppT<BinUIVK>;
 #elif defined(BINUI_GPU_D3D11)
 using UiBackend = BinUID3D;
 using UiApp     = BinUIAppT<BinUID3D>;
+#elif defined(BINUI_GPU_2D)
+using UiBackend = BinUI2D;
+using UiApp     = BinUIAppT<BinUI2D>;
 #else
 using UiBackend = BinUIGL;
 using UiApp     = BinUIAppT<BinUIGL>;
@@ -68,6 +73,8 @@ inline const char* UiBackendName() {
     return "vulkan";
 #elif defined(BINUI_GPU_D3D11)
     return "d3d11";
+#elif defined(BINUI_GPU_2D)
+    return "bin2d";
 #else
     return "gl";
 #endif

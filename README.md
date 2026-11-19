@@ -633,7 +633,7 @@ DetachVideoEngine();   // 进程退出前停止全部解码/输出线程
 
 绘制后端是独立模块，可随时替换：三个 GPU 后端共享同一份节点树、交互语义与绘制代码（inui_draw_nodes.h），逐像素相同。**文本层已是跨平台实现**（FreeType + HarfBuzz，灰度/COLR 均与平台无关）；换平台时只需替换"窗口 + 事件 + 交换链"外壳（Linux 对应 X11/Wayland + OpenGL，macOS 对应 Cocoa + Metal），字体发现接 fontconfig / CoreText。
 
-## 生态：bin2d / bin3d / binGPU（同级目录；binGPU 0.5.2，bin2d 0.10.1，bin3d 0.2.0）
+## 生态：bin2d / bin3d / binGPU（同级目录；binGPU 0.5.2，bin2d 0.11.0，bin3d 0.2.0）
 
 分层（master 2026-11-19 定）：**binUI 的后端交给 bin2d / bin3d，bin2d / bin3d 的后端交给 binGPU。**
 

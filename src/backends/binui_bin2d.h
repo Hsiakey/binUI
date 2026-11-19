@@ -56,8 +56,9 @@ public:
     // 离屏初始化：只分配 bin2d::Surface 与字形图集，不碰任何图形 API。
     // 失败返回 false（尺寸非法 / 字体服务不可用不是失败 —— 文字会降级成空白）。
     bool init(int width, int height);
-    // 与 BinUIGL 同名同签名，方便后端在调用点之间替换。
-    // hwnd 被忽略：本版本不出窗口（见头注释的"与三份 GPU 后端的关系"）。
+    // 窗口初始化：多建一台 bin2d::GpuCompositor（窗口版），present() 走
+    // bingpu 交换链。bingpu 一个可用后端都起不来时**不是失败** —— 退回
+    // "CPU 出 Surface + GDI 贴屏"，窗口照样能开（无显卡的机器也能跑）。
     bool init(void* hwnd, int width, int height, bool vsync = true);
     void shutdown();
 
@@ -72,10 +73,19 @@ public:
     // clipRect = int[4]{l,t,r,b}（nullptr = 全窗口）。只清这块矩形再画，
     // 语义与三个 GPU 后端的 beginFrame 一致。
     void beginFrame(const void* clipRect) override;
-    // CPU 路径没有"呈现"这一步：像素已经在 surface_ 上。
-    // 保留它是因为调用方按统一序列驱动后端（begin → draw → present）。
+    // 窗口版：Surface → bin2d::GpuCompositor::presentSurface → bingpu 交换链。
+    // 离屏版（init 没给窗口）：空操作，像素留在 surface 上。
     void present() override;
-    bool presentPacesFrames() const override { return false; }
+    // 外壳在"拖拽 resize"时会调这个（GL 那边是为了绕开 nvoglv64 的 present 崩溃）。
+    // bin2d 后端没有交换链直翻转那条路，所以它就是 present。
+    void presentViaGdi();
+    // 窗口类名（BinUIAppT 要求）：与 GL/VK/D3D11 的外壳在同一进程里并存时不冲突
+    static const wchar_t* appClassName();
+    bool presentPacesFrames() const override;
+
+    // 实际用上的呈现路径（诊断 / 日志用）：
+    //   "bin2d+gpu(gl)" / "bin2d+gpu(vulkan)" / "bin2d+gdi" / "bin2d+offscreen"
+    const char* presentBackendName() const;
 
     // ---- 像素出口（bin2d 后端独有，用于出图与对拍）----
     // 预乘 RGBA8，尺寸 = width()×height()。有效期到下一次 beginFrame/shutdown。

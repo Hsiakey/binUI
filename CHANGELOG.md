@@ -5,6 +5,85 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.26.1] - 2026-11-19 【格式 v34 不变】
+
+**bin2d 后端接窗口呈现** —— 0.26.0 的 `BinUI2D` 只会离屏出图；这一版让它能当真正的
+窗口后端用，于是"binUI 不写图形 API"这件事从"注释"变成"可运行的程序"。
+
+```
+binUI ──► bin2d ──► binGPU ──► GL / Vulkan / D3D11
+                 └► 系统贴屏（没有可用 GPU 后端时）
+```
+
+### Added
+
+- `BinUI2D::init(hwnd, w, h, vsync)` 真的用上了 `hwnd`：建一台
+  `bin2d::GpuCompositor`（窗口版），按 **GL → Vulkan → D3D11** 的顺序找第一个
+  能起来的后端。
+- `present()` 按三级降级：
+  1. `bin2d::GpuCompositor::presentSurface` → bingpu 交换链（GPU 上屏）；
+  2. 起不来 → Surface 反预乘成 BGRA → `StretchDIBits` 贴屏（**无显卡的机器靠这条**）；
+  3. 没有窗口（`bin2d_shot` 那类离屏调用）→ 空操作，像素留在 Surface 上。
+  `presentBackendName()` 报出实际走的那条。
+  一个后端都起不来**不是失败**：窗口照样能开，只是少了 GPU 合成。
+- `BINUI2D_NO_GPU=1` 强制走系统贴屏（验收兜底路径 / 隔离"慢在 CPU 还是慢在 GPU"）。
+- `tools/bin2d_window`：真窗口验证工具 —— 建窗、跑 N 帧、分段计时（光栅 vs 呈现）、
+  可选抓图。`--frames N` / `--shot png` / `--headless` / `--gdi` / `--clip x,y,w,h`。
+- `binui_ui.h` 加 `BINUI_GPU_2D` 分支：`UiBackend = BinUI2D`、`UiApp =
+  BinUIAppT<BinUI2D>`、`UiBackendName() == "bin2d"`。示例源码一行不改就能编出
+  bin2d 版本。
+- `BinUI2D::presentViaGdi()` / `appClassName()`：`BinUIAppT` 外壳要求的两个成员。
+
+### Fixed —— bin2d 侧（0.11.0）
+
+- `bin2d::DrawSurface` 新增**图集 1:1 快路径**：UV 子矩形落在整纹素边界、且与目标
+  矩形 1:1 时，采样点在纹素中心，双线性退化成取一个纹素。这既是性能（字形从 25 µs
+  降到几个 µs），也修掉了一个精度问题 —— 原来的 `u*(sw-1)` 口径在 1:1 时把采样点
+  放在"纹素边界 + 0.4 纹素"上，所以文字是糊的。
+
+  实测（18 个像素用例对 GL 基准，阈值 8）：
+
+  | 用例 | 修前 | 修后 |
+  |---|---|---|
+  | circle | 1.823% / max 82 | **1.617% / max 37** |
+  | display-none2 | 1.955% / 114 | **1.446% / 56** |
+  | probe | 2.478% / 149 | **1.603% / 63** |
+  | radius-matrix | 0.638% / 157 | **0.485% / 63** |
+  | text-shadow | 11.832% / 171 | **6.473% / 79** |
+  | text-shadow-multi | 19.483% / 175 | **15.807% / 148** |
+
+  （`image-mip` / `svg-filter` 不变：前者是缩放预滤波 vs mip 链，后者仍未实现。）
+
+### 性能 —— 诚实的一页
+
+features 页（900×932，900 个节点级别）实测：
+
+| 场景 | 光栅+遍历 | 呈现 | 每帧 |
+|---|---|---|---|
+| 全屏重画 + GL 上屏 | 23.6 ms | 9.41 ms | 33.0 ms |
+| 全屏重画 + 系统贴屏 | 23.6 ms | 3.22 ms | 26.8 ms |
+| 脏区 120×40 | 3.56 ms | — | 3.56 ms |
+| 脏区 900×60 | 1.13 ms | — | 1.13 ms |
+
+对照 GL 后端同一页：遍历 + 发射 **0.071 ms**（栅格化在 GPU 上）。
+
+所以差距**不在"bin2d 慢"，而在"谁来栅格化"**：GPU 后端把 160 万像素的填充面积
+交给显卡，bin2d 在 CPU 上做。正常 UI 走脏矩形（外壳 `BinUIAppT` 本来就有这套机制，
+`beginFrame(rc)`），成本 1~3.5 ms；只有整屏重画（滚动 / resize / 全屏动画）才付
+23.6 ms 的全价。
+
+这一版**没有**为性能做架构改动。真要压全屏那 23.6 ms，正确的路是接 bin2d 的
+`Scene` 缓存（静态组只贴图，bin2d 实测 8.2×），那是 P4 第二半的事。
+
+### 验证
+
+- `tools/bin2d_window` 在 features 页上三条路都跑通：`present=gl`（binGPU 的 GL 后端）
+  / `present=bin2d+gdi` / `present=bin2d+offscreen`；抓图三张内容一致；
+- `make pixels-bin2d`：18/18 逐像素相同（基准已按新采样口径重生成）；
+- `make pixels`：18/18 零差异（三份 GPU 后端一位没动）；
+- `make baseline-strict`：172 项完全一致；
+- `make test` 全绿；`make all` 0 警告。
+
 ## [0.26.0] - 2026-11-19 【格式 v34 不变】
 
 **bin2d 后端：`IBinUIGfx` 的一份 CPU 实现**（`src/backends/binui_bin2d.{h,cpp}`）。

@@ -189,12 +189,17 @@ binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D
 
 **还没做（P4 第二半）**：
 
-- **窗口呈现**：`present()` 现在是空操作。接法 = 把 Surface 交给
-  `bin2d::GpuCompositor::composeOne` → binGPU 交换链，`BinUIAppT` 再加一个模板参数。
-  到那时 binUI 的"呈现"也完全离开 GL/VK/D3D11 —— 这条链的每一环都已经存在
-  （bin2d 的 `GpuCompositor` 从 0.3.0 就有，binGPU 的五个后端都实现了）。
-- 三份 GPU 后端的去留：等窗口路径通了、`bin2d-vs-gl` 的差距被接受（或把基准换成 bin2d）
-  之后才能删。**现在不删** —— 它们仍是唯一能出窗口的路径。
+- ~~窗口呈现~~ —— **已落地（0.26.1 + bin2d 0.11.0）**：`BinUI2D::init(hwnd,…)` 建一台
+  `bin2d::GpuCompositor`（窗口版），`present()` → `presentSurface()` → bingpu 交换链。
+  后端按 GL → Vulkan → D3D11 找第一个能起来的；一个都没有就退回"CPU 出图 +
+  `StretchDIBits` 贴屏"。`tools/bin2d_window` 实测三条路都通（`present=gl` /
+  `present=bin2d+gdi` / `present=bin2d+offscreen`），抓图内容一致。
+- 三份 GPU 后端的去留：窗口路径通了，但**现在还不能删** ——
+  ① `BinUIAppT` 的输入/IME/拖拽只在 GL/VK 上真跑过；
+  ② 性能账还没结（见下）。
+- 性能：features 页 900×932，全屏重画 23.6 ms（脏区 120×40 只要 3.56 ms）。
+  全屏那 23.6 ms 主要是大面积圆角/渐变的覆盖率栅格，不是字形。要压下去得接
+  bin2d 的 `Scene` 缓存（静态组只贴图），那是下一步；不做也行 —— 正常 UI 有脏矩形。
 
 ### P5：纹理池 / 预滤波接上
 

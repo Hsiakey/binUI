@@ -20,6 +20,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <unordered_map>
@@ -27,6 +28,9 @@
 #include <vector>
 
 #include "bin2d/canvas.h"
+#ifndef BINUI_NO_BINGPU
+#include "bin2d/gpu.h"          // GpuCompositor：窗口呈现（present → bingpu 交换链）
+#endif
 #include "bin2d/image.h"
 #include "bin2d/paint.h"
 #include "bin2d/path.h"
@@ -40,6 +44,10 @@
 #include "binui_glyph_atlas.h"
 #include "binui_paint.h"
 #include "binui_win_image.h"
+
+#ifdef _WIN32
+#include <windows.h>
+#endif
 
 namespace binui {
 namespace {
@@ -99,6 +107,19 @@ void BlitRgbaStraightInto(bin2d::Surface& dst, int x, int y, int w, int h,
     }
 }
 
+// ------------------------------------------------------------------
+// 字形 UV（0.26.1 勘误）
+//
+// 一开始在这里做了一次"半个纹素"的 UV 补偿（把 u 反算成 u*sw-0.5 再除以 sw-1），
+// 想对齐 bin2d 的 `u*(sw-1)` 采样口径。**那是错的方向**：补偿之后 UV 不再是整纹素
+// 边界，bin2d 的 1:1 快路径（raster.cpp 的 ①b）判据就命不中了，字形只能走查表
+// 双线性 —— 既慢（25 µs/字形）又仍然是偏的。
+//
+// 正确的落点是 bin2d 的 ①b：UV 保持**整纹素边界**时，那个快路径按 `sx0 + rx`
+// 取纹素，正好等于 GPU 硬件在纹素中心采样的结果，而且只做一次查表 + 混合。
+// 所以这里不加任何补偿 —— 传原始 UV 就是对的。
+// ------------------------------------------------------------------
+
 } // namespace
 
 // ==================================================================
@@ -150,6 +171,24 @@ struct BinUI2D::Impl {
 
     bin2d::Surface surface;
     std::unique_ptr<bin2d::Canvas> canvas;
+
+    // ---- 窗口呈现（0.26.1）----
+    // 三种状态，从快到慢：
+    //   ① compositor 就绪  → Surface 上传成纹理，present 到 bingpu 交换链（GPU 上屏）
+    //   ② hwnd 非空        → Surface 反预乘成 BGRA，SetDIBitsToDevice 贴屏（无驱动兜底）
+    //   ③ 都没有           → 离屏：像素留在 surface 上（bin2d_shot 走这条）
+    // ---- 窗口呈现（0.26.1）----
+    // 三种状态，从快到慢：
+    //   ① compositor 就绪  → Surface 上传成纹理，present 到 bingpu 交换链（GPU 上屏）
+    //   ② hwnd 非空        → Surface 反预乘成 BGRA，StretchDIBits 贴屏（无驱动兜底）
+    //   ③ 都没有           → 离屏：像素留在 surface 上（bin2d_shot 走这条）
+#ifndef BINUI_NO_BINGPU
+    std::unique_ptr<bin2d::GpuCompositor> compositor;
+#endif
+    void* hwnd = nullptr;
+    const char* presentPath = "bin2d+offscreen";
+    // 反预乘用的缓冲（GDI 贴屏复用，避免每帧分配）
+    std::vector<uint8_t> gdiPixels;
 
     // ---- 状态（每次 beginFrame 都要把它们重新压进新 Canvas）----
     bool hasAffine = false;
@@ -227,19 +266,49 @@ bool BinUI2D::init(int width, int height) {
     return true;
 }
 
-bool BinUI2D::init(void* /*hwnd*/, int width, int height, bool vsync) {
+bool BinUI2D::init(void* hwnd, int width, int height, bool vsync) {
+    if (!init(width, height)) return false;
+    impl_->hwnd = hwnd;
     impl_->vsync = vsync;
-    return init(width, height);
+    impl_->presentPath = hwnd ? "bin2d+gdi" : "bin2d+offscreen";
+#ifndef BINUI_NO_BINGPU
+    // BINUI2D_NO_GPU=1 强制走 GDI 贴屏（验收兜底路径 / 隔离"慢在 CPU 还是慢在 GPU"）
+    const char* noGpu = std::getenv("BINUI2D_NO_GPU");
+    const bool gpuDisabled = noGpu && *noGpu && std::strcmp(noGpu, "0") != 0;
+    if (hwnd && !gpuDisabled) {
+        // 尝试把呈现交给 binGPU：这是 master 那条分层里"bin2d 的后端交给 binGPU"
+        // 的落点。一个后端都起不来不是失败 —— 退回 GDI 贴屏（见 present）。
+        // 顺序按"桌面平台上最稳的先试"：GL（WGL 最成熟）→ Vulkan → D3D11。
+        const BgpuBackendKind order[] = {BGPU_BACKEND_GL, BGPU_BACKEND_VULKAN,
+                                         BGPU_BACKEND_D3D11};
+        for (BgpuBackendKind k : order) {
+            if (!bingpu_backend_available(k)) continue;
+            impl_->compositor = std::make_unique<bin2d::GpuCompositor>();
+            if (impl_->compositor->createWindow(hwnd, width, height, k)) {
+                impl_->presentPath = "bin2d+gpu";
+                break;
+            }
+            impl_->compositor.reset();
+        }
+    }
+#endif
+    return true;
 }
 
 void BinUI2D::shutdown() {
+#ifndef BINUI_NO_BINGPU
+    if (impl_->compositor) { impl_->compositor->destroy(); impl_->compositor.reset(); }
+#endif
     impl_->canvas.reset();
     impl_->images.clear();
     impl_->clipMarks.clear();
     impl_->layers.clear();
+    impl_->gdiPixels.clear();
     impl_->surface = bin2d::Surface();
     impl_->ready = false;
     impl_->width = impl_->height = 0;
+    impl_->hwnd = nullptr;
+    impl_->presentPath = "bin2d+offscreen";
 }
 
 bool BinUI2D::isReady() const { return impl_->ready; }
@@ -297,8 +366,79 @@ void BinUI2D::beginFrame(const void* clipRect) {
 }
 
 void BinUI2D::present() {
-    // CPU 路径没有呈现步：像素已经在 surface 里。
-    // 窗口呈现（Surface → bin2d::GpuCompositor → binGPU 交换链）是下一步。
+    // ① GPU 上屏（bin2d 的后端交给 binGPU）：Surface → 纹理 → 交换链 present
+#ifndef BINUI_NO_BINGPU
+    if (impl_->compositor && impl_->compositor->ready()) {
+        if (impl_->compositor->presentSurface(impl_->surface)) return;
+        // 一次失败就永久退回 GDI：present 每帧都调，不能每帧重试一条坏路。
+        // 原因会留在 compositor 的 error 里（调试时看 presentBackendName 变了没）。
+        impl_->compositor->destroy();
+        impl_->compositor.reset();
+        impl_->presentPath = impl_->hwnd ? "bin2d+gdi" : "bin2d+offscreen";
+    }
+#endif
+    // ② 没有可用 GPU 后端：CPU 出图 + 系统贴屏（无显卡的机器靠这条）
+    presentViaGdi();
+}
+
+void BinUI2D::presentViaGdi() {
+#ifdef _WIN32
+    if (!impl_->hwnd || impl_->surface.empty()) return;
+    const int w = impl_->surface.width(), h = impl_->surface.height();
+    impl_->gdiPixels.resize(static_cast<size_t>(w) * static_cast<size_t>(h) * 4u);
+    // 预乘 RGBA → 直通 BGRA（BITMAPINFO 的 32bpp 是 BGRA 字节序 + 直通 alpha）
+    for (int y = 0; y < h; ++y) {
+        const uint8_t* s = impl_->surface.row(y);
+        uint8_t* d = impl_->gdiPixels.data() + static_cast<size_t>(y) * w * 4u;
+        for (int x = 0; x < w; ++x, s += 4, d += 4) {
+            const uint32_t a = s[3];
+            if (a == 0) { d[0] = d[1] = d[2] = d[3] = 0; continue; }
+            auto un = [a](uint8_t v) {
+                const uint32_t r = (static_cast<uint32_t>(v) * 255u + a / 2u) / a;
+                return static_cast<uint8_t>(r > 255u ? 255u : r);
+            };
+            d[0] = un(s[2]); d[1] = un(s[1]); d[2] = un(s[0]);
+            d[3] = static_cast<uint8_t>(a);
+        }
+    }
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = w;
+    bi.bmiHeader.biHeight = -h;          // 负 = 自上而下（与 Surface 行序一致）
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    HDC dc = GetDC(static_cast<HWND>(impl_->hwnd));
+    if (!dc) return;
+    // StretchDIBits 而不是 SetDIBitsToDevice：窗口尺寸与画布可能差一两个像素
+    // （DPI 取整 / 拖拽中间态），拉伸一条路径比"Set 完再补一块"简单且不出缝。
+    SetStretchBltMode(dc, COLORONCOLOR);
+    StretchDIBits(dc, 0, 0, w, h, 0, 0, w, h, impl_->gdiPixels.data(), &bi, DIB_RGB_COLORS,
+                  SRCCOPY);
+    ReleaseDC(static_cast<HWND>(impl_->hwnd), dc);
+#endif
+}
+
+const wchar_t* BinUI2D::appClassName() {
+    return L"BinUIApp2DWindow";
+}
+
+const char* BinUI2D::presentBackendName() const {
+#ifndef BINUI_NO_BINGPU
+    // GPU 路径带上后端名，省得日志里只看到"bin2d+gpu"却不知道是哪个
+    if (impl_->presentPath && std::strcmp(impl_->presentPath, "bin2d+gpu") == 0 &&
+        impl_->compositor)
+        return impl_->compositor->backendName();
+#endif
+    return impl_->presentPath;
+}
+
+bool BinUI2D::presentPacesFrames() const {
+    // 只有真正走交换链（且后端自己会阻塞到垂直同步）时才让外壳别再掐帧。
+    // GDI 贴屏与离屏都必须返回 false —— 它们不阻塞，外壳要按刷新率节流。
+    // 窗口版交换链建的时候没开 VSYNC 标志（见 GpuCompositor::createWindow），
+    // 所以这里保守返回 false：多掐一帧只是多睡一会儿，少掐会撕裂 + 空转。
+    return false;
 }
 
 // ------------------------------------------------------------------

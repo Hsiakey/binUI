@@ -52,6 +52,20 @@ BIN2D_DIR := ../bin2D
 BIN2D_A   := $(BIN2D_DIR)/build-mingw/libbin2d.a
 LIBS_A    := $(LIB_A) $(BIN2D_A)
 
+# binGPU（0.26.1）：窗口呈现走 bin2d::GpuCompositor → bingpu 交换链，也就是
+# master 那条分层里的 "bin2d 的后端交给 binGPU"。
+# 与 bin2D 对 binGPU 的处理一致：**有才用**。没有 libbingpu.a 时 bin2d 的 gpu.cpp
+# 根本不进库，binUI 也就只走 "CPU 出图 + GDI 贴屏" —— 窗口照样能开，只是没 GPU 上屏。
+BINGPU_DIR := ../binGPU
+BINGPU_A   := $(wildcard $(BINGPU_DIR)/build-mingw/libbingpu.a)
+ifneq ($(BINGPU_A),)
+BINGPU_INC := -I$(BINGPU_DIR)/include
+BINGPU_LNK := $(BINGPU_A) -ld3d11 -ldxgi -ldwmapi
+else
+BINGPU_INC := -DBINUI_NO_BINGPU
+BINGPU_LNK :=
+endif
+
 # 通用源规则（-Isrc：核心源里用 "backends/xxx.h" 这种相对 src/ 的路径引用后端头）
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
 	@mkdir -p $(dir $@)
@@ -92,7 +106,7 @@ $(BUILD_DIR)/binui_paint.o: $(SRC_DIR)/backends/binui_paint.cpp
 # （bin2d_shot、纯离屏出图）不该被拖上一个窗口后端。
 $(BUILD_DIR)/binui_bin2d.o: $(SRC_DIR)/backends/binui_bin2d.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include -c $< -o $@
+	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include $(BINGPU_INC) -c $< -o $@
 
 $(BIN2D_A):
 	@echo "[binui] 缺 bin2d 静态库：$(BIN2D_A)"
@@ -395,6 +409,7 @@ TOOL_BINS := \
     $(BIN_DIR)/binui_export$(EXT) \
     $(BIN_DIR)/gl_shot$(EXT) \
     $(BIN_DIR)/bin2d_shot$(EXT) \
+    $(BIN_DIR)/bin2d_window$(EXT) \
     $(BIN_DIR)/partial_shot$(EXT) \
     $(BIN_DIR)/draw_bench$(EXT) \
     $(BIN_DIR)/path_bench$(EXT) \
@@ -458,7 +473,19 @@ $(BIN_DIR)/bin2d_shot$(EXT): $(BUILD_DIR)/bin2d_shot.o $(BUILD_DIR)/binui_bin2d.
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^ -lgdiplus -lgdi32 -luser32 -lole32 \
 	    -Lthird_party/freetype/build -lfreetype \
-	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
+	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz $(BINGPU_LNK)
+
+# bin2d 后端的**真窗口**验证：窗口 + 呈现 + 帧泵。这是"能不能当窗口后端用"的证据，
+# 也是 bin2d_shot 的对照（离屏能出图 ≠ 能上屏）。
+$(BUILD_DIR)/bin2d_window.o: tools/bin2d_window.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
+
+$(BIN_DIR)/bin2d_window$(EXT): $(BUILD_DIR)/bin2d_window.o $(BUILD_DIR)/binui_bin2d.o $(LIBS_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^ -lgdiplus -lgdi32 -luser32 -lole32 \
+	    -Lthird_party/freetype/build -lfreetype \
+	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz $(BINGPU_LNK)
 
 # partial_shot：局部重绘一致性检查（hover 脏矩形 vs 整帧）。走 .o + -MMD，
 # 免得改了 binui_draw_nodes.h / binui_paint.h 之后工具还跑旧行为（这个仓库在
