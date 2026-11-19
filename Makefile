@@ -87,6 +87,13 @@ $(BUILD_DIR)/binui_paint.o: $(SRC_DIR)/backends/binui_paint.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include -c $< -o $@
 
+# bin2d 后端（0.26.0）：IBinUIGfx 的一份实现，几何全部交给 bin2d::Canvas。
+# 分开编成 .o 而不是并进核心库，理由和三个 GPU 后端一样：不带窗口的调用方
+# （bin2d_shot、纯离屏出图）不该被拖上一个窗口后端。
+$(BUILD_DIR)/binui_bin2d.o: $(SRC_DIR)/backends/binui_bin2d.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include -c $< -o $@
+
 $(BIN2D_A):
 	@echo "[binui] 缺 bin2d 静态库：$(BIN2D_A)"
 	@echo "[binui] 路径填充已经改用 bin2d 的覆盖率（P2 迁移），先跑：make -C ../bin2D lib"
@@ -387,6 +394,7 @@ TOOL_BINS := \
     $(BIN_DIR)/binui_compile$(EXT) \
     $(BIN_DIR)/binui_export$(EXT) \
     $(BIN_DIR)/gl_shot$(EXT) \
+    $(BIN_DIR)/bin2d_shot$(EXT) \
     $(BIN_DIR)/partial_shot$(EXT) \
     $(BIN_DIR)/draw_bench$(EXT) \
     $(BIN_DIR)/path_bench$(EXT) \
@@ -439,6 +447,18 @@ $(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -o $@ $< \
 	    $(BUILD_DIR)/binui_gl.o $(LIBS_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
+
+# bin2d 后端的离屏出图：**不需要窗口**（像素落在 bin2d::Surface 上，写完就存 PNG）。
+# 这是"binUI 后端交给 bin2d"最直接的验证工具 —— 无 GPU、无驱动、可进 CI。
+$(BUILD_DIR)/bin2d_shot.o: tools/bin2d_shot.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
+
+$(BIN_DIR)/bin2d_shot$(EXT): $(BUILD_DIR)/bin2d_shot.o $(BUILD_DIR)/binui_bin2d.o $(LIBS_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^ -lgdiplus -lgdi32 -luser32 -lole32 \
+	    -Lthird_party/freetype/build -lfreetype \
+	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
 # partial_shot：局部重绘一致性检查（hover 脏矩形 vs 整帧）。走 .o + -MMD，
 # 免得改了 binui_draw_nodes.h / binui_paint.h 之后工具还跑旧行为（这个仓库在
@@ -623,6 +643,58 @@ pixels-update: tools
 	@for c in $(PIXEL_CASES); do \
 	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_GOLD)/$$c.png >/dev/null 2>&1 || exit 1; \
 	    echo "更新基准: $(PIXEL_GOLD)/$$c.png"; \
+	done
+
+# =============================================
+# bin2d 后端的像素回归（0.26.0）
+#
+# 与上面三份的区别：**容差 0**。bin2d 后端是纯 CPU 光栅，没有驱动、没有 GPU、
+# 没有线程调度参与，同一份输入必须逐位相同 —— 有差异就是真回归。
+#
+# 为什么不和 docs/pixels（GL 基准）比：两条路的覆盖率 AA 实现**本质不同**
+# （bin2d 用 8× 子采样解析覆盖率，GPU 用 1px 模板环 / 条带），边缘必然差几级。
+# 那是换实现的标准差，不是 bug。跨实现的数字仍然每轮打印出来（见 bin2d-vs-gl），
+# 当作"两条路偏离多少"的仪表，而不是门禁。
+#
+# 为什么不需要窗口：bin2d 后端没有交换链，像素直接落在 Surface 上（见 tools/bin2d_shot.cpp）。
+# CI 里也能跑。
+# =============================================
+PIXEL2D_OUT  := $(BUILD_DIR)/pixels-bin2d
+PIXEL2D_GOLD := tests/pixels-bin2d
+
+.PHONY: pixels-bin2d pixels-bin2d-update bin2d-vs-gl
+pixels-bin2d: tools
+	@mkdir -p $(PIXEL2D_OUT)
+	@if [ ! -d $(PIXEL2D_GOLD) ]; then \
+	    echo "[pixels-bin2d] no baseline yet - run: make pixels-bin2d-update"; exit 1; fi
+	@fail=0; \
+	for c in $(PIXEL_CASES); do \
+	    $(BIN_DIR)/bin2d_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL2D_OUT)/$$c.png >/dev/null 2>&1 \
+	        || { echo "render failed: $$c"; fail=1; continue; }; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL2D_GOLD)/$$c.png $(PIXEL2D_OUT)/$$c.png 0 \
+	        $(PIXEL2D_OUT)/$$c.diff.png >/dev/null 2>&1 \
+	        || { echo "--- changed: $$c ---"; \
+	             $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL2D_GOLD)/$$c.png $(PIXEL2D_OUT)/$$c.png 0 \
+	                 $(PIXEL2D_OUT)/$$c.diff.png; fail=1; }; \
+	done; \
+	if [ $$fail -eq 0 ]; then echo "[pixels-bin2d] all cases pixel-identical (tolerance 0)"; fi; \
+	exit $$fail
+
+pixels-bin2d-update: tools
+	@mkdir -p $(PIXEL2D_GOLD)
+	@for c in $(PIXEL_CASES); do \
+	    $(BIN_DIR)/bin2d_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL2D_GOLD)/$$c.png >/dev/null 2>&1 || exit 1; \
+	    echo "updated baseline: $(PIXEL2D_GOLD)/$$c.png"; \
+	done
+
+# 只报告、不判失败：GL 基准（docs/pixels）与 bin2d 后端当前差多少。
+# 这张表是"两条路还差多远"的仪表 —— 收敛到能接受时再谈把权威换过来。
+bin2d-vs-gl: tools
+	@mkdir -p $(PIXEL2D_OUT)
+	@for c in $(PIXEL_CASES); do \
+	    $(BIN_DIR)/bin2d_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL2D_OUT)/$$c.png >/dev/null 2>&1 || { echo "render failed: $$c"; continue; }; \
+	    printf '%-20s ' "$$c"; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_GOLD)/$$c.png $(PIXEL2D_OUT)/$$c.png 100 2>&1 | head -1; \
 	done
 
 # =============================================

@@ -148,17 +148,60 @@ CHANGELOG 写明 + 硬门禁先绿）。
 - **待办**：聚焦编辑环（`thickness=2` 的唯一可达路径）没有像素用例 —— 它需要运行时
   焦点态，静态出图工具拍不到；目前靠共享计划单测 + 三端代码收口兜底。
 
-### P4：图层语义收口
+### P4：整份后端交给 bin2d —— 🔶 第一半已落地（0.26.0）
 
-- `pushLayer/popLayer` 的三份后端实现 → `bin2d::Canvas` 的图层栈 + `bin2d::GpuCompositor`
-  的离屏目标（`composeTo`）。GDI 后端保留逐元素近似（它没有离屏合成面，这条写进文档）。
-- **验收**：组透明度的重叠区仍是"只混一次"；三端 0 diff；`gate-migrate` 里加一个
-  "4 个图层"的场景，确认合成不退化。
+P3 之前的迁移都是"把某个原语的**几何**收口到共用头文件"，后端仍然是三份各自发射四边形。
+P4 换了个层次：**`IBinUIGfx` 直接由 bin2d 实现**，binUI 不再写图形 API。
+
+```
+binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D11
+```
+
+**已落地（0.26.0）**：`binui::BinUI2D`（`src/backends/binui_bin2d.{h,cpp}`，~700 行），
+`IBinUIGfx` 的 30 个原语全部映射到 `bin2d::Canvas`。文件里一行 `gl*` / `vk*` / D3D 调用都没有。
+
+复用（一行没改）：
+
+| 复用 | 说明 |
+|---|---|
+| `binui_glyph_atlas.h` | 只换 `IGlyphTexHost` 的实现：`glTexSubImage2D` → 写进 `bin2d::Image` |
+| `binui_paint.h` | 九宫格切分、圆角层几何，同一份数学 |
+| `binui_win_image.h` | 同一个 GDI+ 解码，BGRA 直通 → 预乘 `bin2d::Image` |
+| `drawNodesBinUI()` | 节点树遍历 |
+
+代价（如实记账）——
+
+- **覆盖率 AA 与 GPU 不同**：bin2d 用 8× 子采样解析覆盖率，GPU 用 1px 模板环 / 条带。
+  18 个像素用例里 **99.4%–100% 的差异像素落在 1px 边缘上**（`circle` 99.9%、
+  `image-round` / `image-mip` 100%）。这是换实现的标准差，不是布局或颜色错。
+  所以 `make pixels-bin2d` 用**容差 0 的自回归**（对照 `tests/pixels-bin2d/`），
+  与 GL 基准的差异用 `make bin2d-vs-gl` **只报告不判失败**。
+- **发现 GL 基准一处伪影**：`grad-angle` 第三个面板（180° 垂直渐变）在 GL 输出里 y=43
+  这一行是 `(202,0,53)`，上下两行是 `(234,0,21)` / `(191,0,64)` —— 单调渐变中间插了一行
+  偏暗的接缝。bin2d 输出 `(206,14,63)`，单调。**这条 bin2d 更正确。**
+- **已知缺口**：`setImageFilter` 未实现（`svg-filter` 用例 13.8% 差异）；
+  `pushLayerEx` 的 `drop-shadow` 未实现（blur 已走 `pushOffscreen` + `bin2d::Blur`）。
+
+**踩出来的 bin2d bug（已在 0.10.1 修）**：`Canvas::clipRect` 用裸 `state().xf` 映射，
+落像素却用 `deviceTransform()`（xf 减层原点）—— 在图层里差一个 origin，层内第一次
+`clipRect` 就把内容裁成 0×0。`opacity` 用例 48.9% → 0%。回归测试见
+`bin2D/tests/test_composite.cpp::TestClipRectInsideLayer`。
+
+**还没做（P4 第二半）**：
+
+- **窗口呈现**：`present()` 现在是空操作。接法 = 把 Surface 交给
+  `bin2d::GpuCompositor::composeOne` → binGPU 交换链，`BinUIAppT` 再加一个模板参数。
+  到那时 binUI 的"呈现"也完全离开 GL/VK/D3D11 —— 这条链的每一环都已经存在
+  （bin2d 的 `GpuCompositor` 从 0.3.0 就有，binGPU 的五个后端都实现了）。
+- 三份 GPU 后端的去留：等窗口路径通了、`bin2d-vs-gl` 的差距被接受（或把基准换成 bin2d）
+  之后才能删。**现在不删** —— 它们仍是唯一能出窗口的路径。
 
 ### P5：纹理池 / 预滤波接上
 
 - bin2d 0.4.0 的 `sampleSurface`（缩小预滤波）目前已生效；注意 binUI 的 `binui_mip.h`
   是另一套（59 行）——**只留一套**，按"上层不重复实现下层能力"删掉 binUI 那份。
+- `image-mip` 用例的 10.7% 差异就是这条：bin2d 走 `sampleSurface` 的盒式预缩小，
+  GPU 走 mip 链 + 三线性。P5 要决定留哪一种（倾向 bin2d，因为它确定、无驱动差异）。
 
 ## 3. 明确不迁
 

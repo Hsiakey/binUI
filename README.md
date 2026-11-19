@@ -633,20 +633,33 @@ DetachVideoEngine();   // 进程退出前停止全部解码/输出线程
 
 绘制后端是独立模块，可随时替换：三个 GPU 后端共享同一份节点树、交互语义与绘制代码（inui_draw_nodes.h），逐像素相同。**文本层已是跨平台实现**（FreeType + HarfBuzz，灰度/COLR 均与平台无关）；换平台时只需替换"窗口 + 事件 + 交换链"外壳（Linux 对应 X11/Wayland + OpenGL，macOS 对应 Cocoa + Metal），字体发现接 fontconfig / CoreText。
 
-## 生态：bin2d / bin3d / binGPU（同级目录；binGPU 0.2.1，bin2d 0.10.0，bin3d 0.2.0）
+## 生态：bin2d / bin3d / binGPU（同级目录；binGPU 0.5.2，bin2d 0.10.1，bin3d 0.2.0）
+
+分层（master 2026-11-19 定）：**binUI 的后端交给 bin2d / bin3d，bin2d / bin3d 的后端交给 binGPU。**
+
+```
+binUI  ──►  bin2d（2D 语义）/ bin3d（3D 语义）  ──►  binGPU  ──►  GL / Vulkan / D3D11 / CPU
+```
 
 binUI 的边界只有四件事：**布局 + 事件 + 文本 + 描述式绘制**。边界之外的三层单独做成了仓库，
 放在本仓库的**同级目录**（不在这个仓库里，GitHub 上看不到）：
 
 | 项目 | 语言 | 一句话 | 现状 |
 |---|---|---|---|
-| `../binGPU` | **C++17 / C 兼容 ABI** | 设备 / 交换链 / 资源 / 管线 / 命令 / 呈现（实现 C++17，对外 ABI 仍 C 兼容、ABI 1 不变） | v0.2.1：NULL 后端（只校验）+ **CPU 参考后端**（五种混合、采样器、离屏、float 深度、网格、反预乘回读）；573 条断言 + `abi-check`；纯色填充 420 MPix/s（0.2.1 性能轮 7.3×）；VK / D3D12 / GL 登记为未实现 |
-| `../bin2D` | C++17 | 保留模式 2D 画布：场景图 + 图层 + 合成 + 光栅数学 | 0.10.0：覆盖率 AA 填充/描边、路径、渐变、圆角模板、九宫格自动边界、颜色矩阵滤镜、盒式模糊、组透明度离屏、5 种混合、**按组缓存 + 组内脏矩形**；252 条断言；与 binGPU CPU 后端**逐像素往返 0 差**；缓存命中 1280×720/200 图元 **1.28 ms**（全量 10.45 ms） |
-| `../bin3D` | C++17 | 小型实时 3D：相机 + 裁剪 + 深度 + 光照（先软光栅） | 0.2.0：六平面齐次裁剪、1/w 透视校正、z-buffer、Lambert、**纹理 mipmap + 三线性**；266 条断言 + `make qa` 容差验收（5 场景基线 + 突变自检）；720p 一帧 ≈9.5 ms；远端地面闪烁（时间标准差）75.4 → **1.7** |
+| `../binGPU` | **C++17 / C 兼容 ABI** | 设备 / 交换链 / 资源 / 管线 / 命令 / 呈现 | v0.5.2 / ABI 2：**NULL + CPU 参考 + Vulkan + D3D11 + OpenGL 五个后端**（全部真实现）；固定管线（quad / mesh）+ 5 种混合 + 离屏 + 深度 + 采样器 + affine；`make abi-check` 用纯 C 编一遍头文件 |
+| `../bin2D` | C++17 | 保留模式 2D 画布：场景图 + 图层 + 合成 + 光栅数学 | 0.10.1：覆盖率 AA 填充/描边、路径、渐变、圆角、九宫格、颜色矩阵滤镜、盒式模糊、组透明度离屏、5 种混合、按组缓存 + 组内脏矩形；与 binGPU CPU 后端**逐像素往返 0 差**；缓存命中 1280×720/200 图元 **1.28 ms**（全量 10.45 ms） |
+| `../bin3D` | C++17 | 小型实时 3D：相机 + 裁剪 + 深度 + 光照（先软光栅） | 0.2.0：六平面齐次裁剪、1/w 透视校正、z-buffer、逐像素 Lambert、**纹理 mipmap + 三线性**；`make qa` 容差验收；720p 一帧 ≈9.5 ms；GPU 阶段待 binGPU 补固定功能光照状态 |
 
-四个仓库共用一份光栅数学的**方向**、语言分工为什么最底层是 C、以及各自的开工条件与验收线，
-都写在 [`docs/future.md`](docs/future.md)。binUI 已经在 **P2/P2b/P3** 三处真的用上了 bin2d
-（`<path>` 填充、描边、圆角模板与三端圆角图层计划；台账见
+binUI 已经在 **P2 / P2b / P3 / P4** 四处真的用上了 bin2d（`<path>` 填充、描边、圆角模板与
+三端圆角图层计划，以及 0.26.0 的**整份 bin2d 后端** `BinUI2D`；台账见
 [`docs/migrate-to-bin2d.md`](docs/migrate-to-bin2d.md)），布局与 `BINUI_VERSION` 不变；
 三个项目各自发布版本号，互不阻塞。
+
+**`BinUI2D`（0.26.0）**：`IBinUIGfx` 的一份纯 CPU 实现 —— 30 个原语全部交给 `bin2d::Canvas`，
+一行 `gl*` / `vk*` / D3D 调用都没有。它不出窗口（像素落在 `bin2d::Surface` 上），
+所以 `tools/bin2d_shot` 是**无驱动、无 GPU** 的出图工具，`make pixels-bin2d` 在 CI 也能跑。
+与三份 GPU 后端的关系：**新增的一条路，还不是替代** —— 窗口呈现（Surface →
+`bin2d::GpuCompositor` → binGPU 交换链）是下一步。两条路的逐像素差异如实记在
+[`docs/migrate-to-bin2d.md`](docs/migrate-to-bin2d.md)（99%+ 的差异像素在 1px 边缘上，
+是两种 AA 实现的固有差）。
 

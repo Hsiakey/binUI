@@ -5,6 +5,111 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.26.0] - 2026-11-19 【格式 v34 不变】
+
+**bin2d 后端：`IBinUIGfx` 的一份 CPU 实现**（`src/backends/binui_bin2d.{h,cpp}`）。
+这是 master 2026-11-19 那条分层的第一个落点：
+
+```
+binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D11
+```
+
+在此之前 binUI 有三份各自直写图形 API 的后端（GL 1985 行 / VK 4244 行 / D3D11 2193 行），
+任何一次绘制语义调整都要在三处同时改对（0.25.0 修的 VK `thickness` 就是漏改的结果）。
+`BinUI2D` 把这层边界**下移**：binUI 只负责"节点树 → 原语调用"，几何交给 bin2d 的
+覆盖率光栅（CPU 像素权威），将来上屏交给 bin2d 的 `GpuCompositor` → binGPU。
+
+### Added
+
+- `binui::BinUI2D`（`src/backends/binui_bin2d.h/.cpp`，~700 行）：`IBinUIGfx` 的完整实现。
+  30 个原语全部覆盖 —— 矩形/圆角/仿射圆角/线段/渐变/圆角描边、图片（UV 子矩形 +
+  九宫格 + tint）、文本（排版/整形/阴影）、裁剪栈、图层（组透明 + 离屏 + blur）、
+  混合模式（擦除/保留）、仿射状态、`backdropBlur`（毛玻璃）。
+  **一行图形 API 都没有**：没有 `gl*`、没有 `vk*`、没有 D3D 调用。
+- `tools/bin2d_shot.cpp`：把 UI 渲染成 PNG 的工具，**无窗口、无驱动、无 GPU**。
+  `gl_shot` / `vk_shot` / `d3d11_shot` 都要先建窗口（交换链绑窗口）、再靠 GDI 抓
+  DC（交换链图像抓不到）；bin2d 后端没有交换链，像素直接落在 `bin2d::Surface` 上，
+  写完就存 PNG —— 一台没有显卡的机器也能跑。
+- `make pixels-bin2d`（**容差 0，逐字节比对**）/ `pixels-bin2d-update` /
+  `bin2d-vs-gl`（只报告不判失败）。基准在 `tests/pixels-bin2d/`（18 个用例）。
+  为什么不和 `docs/pixels`（GL 基准）比：两条路的覆盖率 AA 实现**本质不同**
+  （bin2d 用 8× 子采样解析覆盖率，GPU 用 1px 模板环/条带），边缘必然差几级 ——
+  那是换实现的标准差，不是 bug。
+
+### 复用而不是重写
+
+文字与图片这两块**几乎没写代码**，因为它们本来就是后端无关的：
+
+| 复用 | 原来做什么 | bin2d 后端做什么 |
+|---|---|---|
+| `binui_glyph_atlas.h`（1169 行） | `IGlyphTexHost` → `glTexSubImage2D` / staging + copy | `IGlyphTexHost` → 写进 `bin2d::Image` |
+| `binui_paint.h` | 九宫格切分、圆角层几何 | 直接用（同一份切分数学） |
+| `binui_win_image.h` | GDI+ 解码 → BGRA 直通 | 同一份解码，转成预乘 `bin2d::Image` |
+| `drawNodesBinUI()` | —— | 节点树遍历，一行没改 |
+
+排版 / 字形光栅 / 整形缓存 / 文字阴影全部走同一份 `GlyphAtlas`，所以**字形位图逐字节
+相同**，差异只可能来自后面的采样（见下面的"与 GPU 基准的差异"）。
+
+### Fixed（bin2d 侧，0.10.1）
+
+- **`bin2d::Canvas::clipRect` 在图层里算错坐标系**：它用裸 `state().xf` 映射局部矩形，
+  而落像素用 `deviceTransform()`（= xf **再减掉层原点**）。两者在图层里差一个 origin，
+  结果是"层内第一次 `clipRect` 就把内容裁成 0×0"，整个层空白。
+  `clipPath` 一直用的是 `deviceTransform`，只有 `clipRect` 漏了 —— 已在 bin2d 0.10.1 修，
+  并补了回归测试 `test_composite::TestClipRectInsideLayer`（4 项断言）。
+  影响面：`opacity` 用例 48.9% → **0%**，`svg-filter` 45.3% → 13.8%。
+
+### 与 GPU 基准（`docs/pixels`）的差异 —— 如实记账
+
+`make bin2d-vs-gl`（18 个用例，阈值 8）：
+
+| 用例 | 不同像素 | 最大通道差 | 性质 |
+|---|---|---|---|
+| opacity | **0.000%** | 0 | 一致 |
+| shadow | 0.039% | 19 | 边缘 |
+| grad-angle | 0.216% | 21 | **GL 金样有伪影**（见下） |
+| radius-matrix | 0.638% | 157 | 边缘 |
+| circle | 1.823% | 82 | 边缘 |
+| display-none2 | 1.955% | 114 | 边缘 |
+| image-round | 2.214% | 82 | 边缘 |
+| probe | 2.478% | 149 | 边缘 |
+| svgpath / svggrad / svgstroke | 3.2–3.6% | 75–82 | 边缘 + 文字 |
+| svgjoin / svgaa / svgfinish | 4.1–5.0% | 78–143 | 边缘 + 文字 |
+| image-mip | 10.677% | 120 | 缩放预滤波 vs mip 链 |
+| text-shadow / -multi | 11.8% / 19.5% | 171 / 175 | 字形采样口径 |
+| svg-filter | 13.780% | 204 | **未实现**（`setImageFilter`） |
+
+按"差异像素是否落在边缘"做过分桶：**除 grad-angle / text-shadow* / svg-filter 外，
+其余全部 ≥ 99.4% 的差异像素在 1px 边缘上**（circle 99.9%、image-round 100%、
+image-mip 100%）。这是两种 AA 实现的固有差，不是布局/颜色错。
+
+两处值得单独说：
+
+- **grad-angle：bin2d 更正确**。第三个面板（180° 垂直渐变）在 GL 基准里 y=43 这一行
+  是 `(202,0,53)`，而上下两行是 `(234,0,21)` / `(191,0,64)` —— 单调渐变中间插了一行
+  偏暗的接缝（GL 条带/顶点插值的量化伪影）。bin2d 输出 `(206,14,63)`，单调递减。
+- **文字更锐**：bin2d 的 `DrawSurface` 用 `u*(sw-1)` 做纹素中心映射，GPU 硬件用
+  `u*sw-0.5` —— 半个纹素的采样偏移。视觉上 bin2d 的字略细、GL 的字略实。
+  这是两条实现的标准差；要统一就得改一方的采样口径（会影响 bin2d 现有图片测试），
+  本轮不动。
+
+### 验证
+
+- `make pixels-bin2d`：18/18 用例**逐字节相同**（自回归，容差 0）；
+- `make test`：全绿（test_css / test_elements / test_font / test_capi）；
+- bin2d `make test`：**全部通过**（9 个套件，含新增的层内裁剪回归）；
+- `make all`：0 警告。
+
+### 未做（下一轮）
+
+- **窗口呈现**：`present()` 现在是空操作，像素留在 Surface 上。接法是把这个 Surface
+  交给 `bin2d::GpuCompositor::composeOne` → binGPU 交换链，外壳（`BinUIAppT`）再加一个
+  模板参数即可 —— 那时 binUI 的"呈现"也完全离开 GL/VK/D3D11。
+- `setImageFilter`（图片滤镜，`svg-filter` 用例）—— bin2d 有 `ColorMatrix`，
+  但"按 (图, 矩阵) 分键缓存"还没接。
+- `pushLayerEx` 的 `drop-shadow` —— blur 已经走 `pushOffscreen` + `bin2d::Blur`，
+  阴影那半边还是空的。
+
 ## [0.25.0] - 2026-11-19 【格式 v34】
 
 **P3 第二半：三端的"圆角图层计划"收口到一份**（`binui_paint.h`）。在它之前，填充/描边/
