@@ -75,9 +75,9 @@ binUI 只剩一条路：`binUI ──► bin2d（+bin3d）──► binGPU ─�
 
 | 步 | 状态 | 具体做了什么 |
 |---|---|---|
-| 1. binGPU 长出 2D 图元 + GPU/CPU 两种执行体 | 未开始（只有决策面） | `bingpu_render_plan()`（0.8.0）给 backend/exec/msaa；`bingpu_pace_*`（0.9.0）把"什么时候画"也收进这一层 |
-| 2. bin2d `Canvas` 把执行交给 binGPU | 未开始 | 目前 bin2d 只把"上屏"和"节拍"交给 binGPU，光栅还在自己这里 |
-| 3. 删掉 binui_vk / binui_gl / binui_d3d11 与 BinUIAuto | 未开始 | 三份实现仍在；`BinUIAuto` 仍然是选后端的那层薄壳 |
+| 1. binGPU 长出 2D 图元 + GPU/CPU 两种执行体 | **进行中** | `bingpu_render_plan()`（0.8.0）给 backend/exec/msaa；`bingpu_pace_*`（0.9.0）收"什么时候画"；`bingpu_cmd_draw_rounded_rect(s)`（0.10.0）收**圆角矩形的九宫格几何**（AA 数学仍在 bin2d 的覆盖率模板）。执行体那一轴还是空的：binGPU 的 CPU 后端是参考实现，实测比 bin2d 的光栅慢 14×，所以"CPU 执行模式"应该由 bin2d 的光栅来当 |
+| 2. bin2d `Canvas` 把执行交给 binGPU | **起步** | `GpuCompositor::beginTarget/drawRect/drawRoundedRect(s)/endTarget`（0.16.0）已经能直接往设备目标画图元，四个后端各验一遍"设备像素 == 模板覆盖率"（逐像素精确）。**但 `Canvas` 本身还是纯 CPU 光栅** —— 要接的是"Canvas 的语义 + binGPU 的执行"，那一层还没做 |
+| 3. 删掉 binui_vk / binui_gl / binui_d3d11 与 BinUIAuto | 未开始 | 三份实现仍在；`BinUIAuto` 仍然是选后端的那层薄壳。仍然卡在第 1/2 步 |
 
 这一轮唯一动的是**节拍**：它原本也在错的那一层（外壳自己算网格 + 滞回 + 猜 present
 有没有在等垂直同步），现在按同一套"判据在设备层"的道理挪进了 binGPU。
@@ -86,3 +86,14 @@ binUI 只剩一条路：`binUI ──► bin2d（+bin3d）──► binGPU ─�
 
 第 3 步仍然卡在第 1 步：bin2d 的 GPU 执行模式没做完之前删掉那三份实现，等于把
 GPU 绘制能力直接扔掉（CPU 光栅 9 ms/帧装不下一个刷新周期）。
+### 还量出来一件事：bin2d 内部有**两套**圆角 AA 定义
+
+| 路径 | AA 做法 | 谁在用 |
+|---|---|---|
+| `Canvas::fillRounded` | 8 子采样扫描线 | binUI 的 bin2d 后端、离屏出图 |
+| `RasterizeRoundedTileCoverage` | 解析 SDF | binUI 的 GL / VK / D3D11 三端 |
+
+同一个圆角矩形的弧边差到 **48 个电平**。一直没被发现，是因为两个 golden 是分开的
+（`docs/pixels` 对 GL、`tests/pixels-bin2d` 对 bin2d 后端），**"逐像素相同"从来没跨过
+实现比**。这是"换执行体不换像素"这条原则在 bin2d 自己体内就漏掉的一处 ——
+统一到哪一套会改像素（弧边变软/变硬），需要单独批准。
