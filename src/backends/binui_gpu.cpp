@@ -990,25 +990,10 @@ struct BinUIGpu::Impl {
         dd.flags = static_cast<uint32_t>(BGPU_DEVICE_VALIDATE) |
                    (headless ? static_cast<uint32_t>(BGPU_DEVICE_HEADLESS) : 0u) |
                    (vsync ? static_cast<uint32_t>(BGPU_DEVICE_VSYNC) : 0u);
-        // MSAA：binGPU 0.14.0 起四端能真开（VK/GL 到 8×）。0.14.x 那颗"钉 1×"的钉子
-        // 是因为 `svg-filter` 页（图层 + 毛玻璃 + 合成）在 4× 下整页空白（对基线
-        // 100% 差异、最大通道差 255，1× 下同一页 0 差异）。
-        //
-        // 根因已经找到并修在 binGPU 0.15.0：帧中途销毁一张"还被命令缓冲引用着"的目标
-        // （本文件 `ensureBlurLevel` 换尺寸时就是 freeTex(旧 level7) → 建同尺寸新图），
-        // 旧版立刻 vkDestroyImage/vkFreeMemory，4× 下连 MSAA companion 一起还回去，
-        // 驱动当场报 VK_ERROR_DEVICE_LOST —— 整帧命令全丢，于是整页黑。修法是录制期间
-        // 只把句柄挂进"退役表"，等本帧提交并等完 fence 再真正释放。
-        //
-        // 修完实测（`make pixels-gpu`，18 页对 docs/pixels 基线 0.5% 容差）：
-        // VK 全部 0 像素差异（最大通道差 ≤7），svg-filter 从 100% 收到 0。
-        // GL 后端还留着同一个形状的欠账（窗口路径 4× 下 circle 94.6% / svg-filter
-        // 9.1% / shadow 95.9% 与基线不同，1× 是 0），所以 GL 继续钉 1× —— 那是 binGPU
-        // GL 后端的账，**不在 binUI 里自己补 AA**。真 mip 不受影响（逐纹理的，
-        // image-mip 页已是 0 差异）。
-        dd.msaa_samples = (kind == BGPU_BACKEND_VULKAN && plan.msaa_samples)
-                              ? plan.msaa_samples
-                              : 1u;
+        // MSAA 档由 binGPU 的 render_plan 定，见 docs/backends.md（GL 那条欠账 12
+        // 也在那里）—— 这边不再自己判断"哪个后端能开"，否则每个上层都得抄一份。
+        // 实际生效值看交换链（bingpu_swapchain_info 的 msaa_samples）。
+        dd.msaa_samples = plan.msaa_samples;
         BgpuResult r = bingpu_device_create(&dd, &dev);
         if (r != BGPU_OK) {
             WarnOnce("device_create", r);

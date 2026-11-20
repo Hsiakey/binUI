@@ -488,13 +488,20 @@ struct BinUI2D::Impl {
     bool gpuExecActive() const { return exec && exec->ready(); }
 
     // 建绘制执行体。hwnd == nullptr → HEADLESS（离屏，present 之后 readback 出像素）。
-    // 后端交给 binGPU 的 AUTO 去挑（VK → D3D11 → GL → CPU），失败返回 false 让
+    // 后端交给 binGPU 的 AUTO 去挑（VK → GL → D3D11 → CPU），失败返回 false 让
     // 调用方退回下一级 —— **不是失败**，无显卡的机器也要能开窗。
     bool openExec(void* win, int w, int h, bool vsyncOn) {
         exec = std::make_unique<bin2d::GpuExec>();
         // 节拍策略必须在 create **之前**灌：交换链的 vsync 位是建链时定的。
         if (paceText[0]) exec->setPacePolicy(ParsePace(paceText));
-        if (exec->create(win, w, h, BGPU_BACKEND_AUTO, vsyncOn)) return true;
+        if (exec->create(win, w, h, BGPU_BACKEND_AUTO, vsyncOn)) {
+            // 一行诊断：走的是哪个后端、MSAA 实际开到几×（档位由 binGPU 的
+            // render_plan 定，这里只是如实转述交换链上报的值）。排查"画质停在 1×"
+            // 时先看这一行，不要去猜环境变量。
+            std::fprintf(stderr, "[binui2d] exec: backend=%s msaa=%dx\n",
+                         exec->backendName(), exec->msaaSamples());
+            return true;
+        }
         exec.reset();
         return false;
     }

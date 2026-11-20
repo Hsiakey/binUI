@@ -816,6 +816,61 @@ bin2d-vs-gl: tools
 	done
 
 # =============================================
+# bin2d **GPU 执行体**的像素回归（2026-11-20）：binUI → bin2d → binGPU
+#
+# 这条路画出来的像素，正确的参照是 docs/pixels（当年 GL 4× MSAA 出的基线），
+# **不是** tests/pixels-bin2d —— 后者是 bin2d 的 CPU 光栅（8 子采样扫描线），
+# 拿它当参照等于在比"两个不同的滤波器"。所以判据照抄 pixels / pixels-gpu：
+# 0.5% 容差、单通道 8 级，逐页打印数字。
+#
+# BINUI2D_GPU=1 让 bin2d_shot 建一个 HEADLESS 的 bin2d::GpuExec（绘制在设备上，
+# present() 之后 readback 回 Surface），像素照样从 pixels() 出，PNG 编码不变。
+# 后端与 MSAA 档由 binGPU 的 bingpu_render_plan 定（VK → 4×，GL/D3D11 → 1×），
+# bin2d 这边不再自己写"哪个后端能开"。
+#
+# 与 pixels-gpu（binUI 自己那份 binui_gpu）的差别只有一处：**语义层怎么切图元**。
+# 两者共用同一套 binGPU 设备/管线/片元，所以"边缘 + 缩小图片"的页（circle、
+# radius-matrix、image-round、image-mip、grad-angle）应当在容差内接近 0。
+# =============================================
+PIXEL2D_GPU_OUT := $(BUILD_DIR)/pixels-bin2d-gpu
+
+# 已知会不一样的两页。**都不是质量档的账**（MSAA 1× 与 4× 给出同一组数字），
+# 而是 binUI 的 bin2d 后端在这一层的语义缺口，记在这里当欠账而不是当容差：
+#
+#   svg-filter        —— GPU 执行体下**没有离屏层**：bin2d 的 pushOffscreen 出口是
+#                        Surface，而像素在设备上，于是 `filter: blur()` / 外阴影在
+#                        binui_bin2d.cpp 的 pushLayerEx 里降级成"纯组 alpha"
+#                        （每次运行会打一条 "[binui2d] GPU 执行体下 pushOffscreen 不可用"）。
+#                        同一页走 bin2d 的 CPU 路径是 0.511%（模糊在 CPU 上算得出来），
+#                        而 GPU 执行体下那张图上所有模糊都平了 —— 12.9% 全是这笔账。
+#                        要消掉它得给 bin2d 加"设备上的离屏层"，不在这一轮。
+#
+#   text-shadow-multi —— bin2d 的文字阴影走自己的 BlurSigma（σ 语义），与 binUI 老 GL
+#                        后端的阴影模糊不是同一个核（边缘几级到十几级的差）。同一页
+#                        CPU 路径差 1.344%，GPU 执行体反而更近（1.277%）。
+#
+# 名单里的页照常打印数字，只不判失败；**任何新页越线都算红**（门禁仍然有效）。
+PIXEL2D_GPU_KNOWN := svg-filter text-shadow-multi
+
+.PHONY: pixels-bin2d-gpu
+pixels-bin2d-gpu: tools
+	@mkdir -p $(PIXEL2D_GPU_OUT)
+	@fail=0; \
+	for c in $(PIXEL_CASES); do \
+	    printf '%-20s ' "$$c"; \
+	    BINUI2D_GPU=1 $(BIN_DIR)/bin2d_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL2D_GPU_OUT)/$$c.png >/dev/null 2>&1 \
+	        || { echo "render failed"; fail=1; continue; }; \
+	    if ! $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_GOLD)/$$c.png $(PIXEL2D_GPU_OUT)/$$c.png $(PIXEL_TOL) $(PIXEL2D_GPU_OUT)/$$c.diff.png; then \
+	        if echo " $(PIXEL2D_GPU_KNOWN) " | grep -q " $$c "; then \
+	            echo "  ^ known diff (reason in Makefile)"; \
+	        else \
+	            fail=1; \
+	        fi; \
+	    fi; \
+	done; \
+	exit $$fail
+
+# =============================================
 # Vulkan 后端的像素回归（P3 起）：与 GL **逐像素**比。
 #
 # 判据：不同像素 < $(PIXEL_VK_TOL)%，单通道容差 $(PIXEL_VK_CHTOL)。
