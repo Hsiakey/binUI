@@ -20,7 +20,7 @@
 | [img/](img/) | 文档用图：默认布局渲染、字体渲染对比、伪类演示、语言绑定演示 |
 | [../tests/README.md](../tests/README.md) | **测试用例**：四个主题套件（CSS / 元素 / 字体与输入法 / C ABI）、无窗口能测什么、历史合并记录 |
 | [mockups/](mockups/) | 演示的**设计稿/对照稿**（HTML，不参与构建，允许出现未支持的写法）：`galgamechat.html`、`singlewindow.html`。以前把它们临时编成 demo（`galgamechat`/`singlewindow`/`multiwindow`/`videodemo`）的草稿程序与产物已删除，看设计稿直接开 HTML |
-| [issues/INDEX.md](issues/INDEX.md) | **用 Go + C ABI 做 GUI 时踩到的问题清单**（10 条，附复现资产与根因定位）：圆角/圆形退化、`app_destroy` 偶发崩溃（复验后更正为宿主跨线程）、`display:none` 子树泄漏、按钮默认样式、滚动条写死、`setText` 不重排、C ABI 运行期能力缺口、Go 绑定线程亲和文档纠错；**09 = GDI 标签文字被 padding 裁掉（WON'T FIX：GDI 自 0.16.17 起是遗留后端）**；**10 = 局部重绘剔除判据写反一侧（v0.16.32 修，`make partial` 守护）**；**11 = box-shadow 多层环（性能，试做已回退）**；**12 = 字体/字形该归 bin2d（提案，待拍板）**；**13 = 绘制侧还剩哪些该交 GPU（2026-11-21 复核：换执行体已完成，剩三件每像素数学 + 一处结构欠账）** |
+| [issues/INDEX.md](issues/INDEX.md) | **用 Go + C ABI 做 GUI 时踩到的问题清单**（10 条，附复现资产与根因定位）：圆角/圆形退化、`app_destroy` 偶发崩溃（复验后更正为宿主跨线程）、`display:none` 子树泄漏、按钮默认样式、滚动条写死、`setText` 不重排、C ABI 运行期能力缺口、Go 绑定线程亲和文档纠错；**09 = GDI 标签文字被 padding 裁掉（WON'T FIX：GDI 自 0.16.17 起是遗留后端）**；**10 = 局部重绘剔除判据写反一侧（v0.16.32 修，`make partial` 守护）**；**11 = box-shadow 多层环（性能，试做已回退）**；**12 = 字体/字形该归 bin2d（提案；第 1/2 步已完成，含接口草案，待拍板）**；**13 = 绘制侧还剩哪些该交 GPU（2026-11-21 复核：换执行体已完成，剩三件每像素数学 + 一处结构欠账）** |
 
 ## 图片
 
