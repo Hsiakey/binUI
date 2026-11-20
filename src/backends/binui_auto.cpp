@@ -85,6 +85,10 @@ const char* GpuBackendName(GpuBackend b) {
 
 GpuBackend ResolveGpuBackend() {
     const GpuBackend want = FromEnv(std::getenv("BINUI_GPU"));
+    // BinGpu 自己就是"问 binGPU 要计划"的那一层（BinUIGpu::init 里调 bingpu_render_plan），
+    // 所以在外面**不要再翻译一次** —— AskBinGpu 会把 AUTO 翻译成 vulkan，于是这一层
+    // 丢掉 BinGpu、直接去开老的 BinUIVK（0.36.0 第一版就是这么错的）。
+    if (want == GpuBackend::BinGpu) return GpuBackend::BinGpu;
     GpuBackend picked = GpuBackend::Cpu;
     if (!AskBinGpu(want, &picked)) return want == GpuBackend::Auto ? GpuBackend::Cpu : want;
     return picked;

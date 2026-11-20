@@ -997,6 +997,9 @@ struct BinUIGpu::Impl {
         BgpuResult r = bingpu_device_create(&dd, &dev);
         if (r != BGPU_OK) {
             WarnOnce("device_create", r);
+            std::fprintf(stderr, "[binui-gpu] 设备起不来（backend=%s, hwnd=%p, %dx%d）：%s\n",
+                         bingpu_backend_name(kind), static_cast<void*>(hwnd), winW, winH,
+                         bingpu_last_error());
             return false;
         }
         binui::ex::StartupMark(t0, "binGPU device");

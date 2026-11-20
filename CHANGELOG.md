@@ -5,6 +5,18 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.36.1] - 2026-11-20 【格式 v34 不变】
+
+**修 `BINUI_GPU=gpu` 没生效**：`ResolveGpuBackend()` 会拿 `bingpu_render_plan` 的结果再
+翻译一次 `GpuBackend`，而 `BinGpu` 送进去是 `BGPU_BACKEND_AUTO`、翻译回来是 `vulkan` ——
+于是壳子根本没开 `binui_gpu`，直接去开了老的 `binui_vk`（日志第一行还写着
+`[binui] binGPU 计划: backend=vulkan`，看起来一切正常）。`BinGpu` 本身就是要问计划的那一层，
+所以这一层不再重复翻译，直接原样返回。
+
+另外给 `BinUIGpu::init` 的设备创建失败补了一句人话（后端名 / hwnd / 尺寸 / binGPU 的
+last_error），否则失败时只会静默回退到下一个后端。
+
+
 ## [0.36.0] - 2026-11-20 【格式 v34 不变】
 
 **binUI 有了一个"没有设备层"的后端：`binui_gpu` 直接把绘制建在 binGPU 上。**
