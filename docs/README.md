@@ -42,7 +42,7 @@
 | [img/child-window.png](img/child-window.png) | 子窗口模式真机截屏：普通 Win32 宿主窗口里嵌两块独立 binUI 面板 |
 | [img/glyph-fallback.png](img/glyph-fallback.png) | 逐字形回退与豆腐块（**GL 后端真实像素**，`tools/gl_shot.exe` 离屏抓取） |
 | [font_rendering_before_after.png](font_rendering_before_after.png) | 字体渲染修正前后对比（像素对齐 + gamma + 轻量 hinting + advance 修正） |
-| [font_hinting_modes.png](font_hinting_modes.png) | `BINUI_FONT_HINT=0\|1\|2` 三种 hinting 模式对比 |
+| [font_hinting_modes.png](font_hinting_modes.png) | `BIN2D_TEXT_HINT=0\|1\|2` 三种 hinting 模式对比（0.38.x 起这个开关在 bin2d 的文字模块里；旧名 `BINUI_FONT_HINT`） |
 
 > 绑定演示图为什么是离屏渲染：OpenGL 窗口的内容抓不到（`PrintWindow` 对双缓冲 GL
 > 窗口返回全黑，`BitBlt` 只能抓被遮挡后合成到桌面的部分）。所以大部分演示图走

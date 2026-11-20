@@ -80,7 +80,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `include/binui_compiler.h` | XML / HTML5 → binUI 编译器 |
 | `include/binui_renderer.h` | binUI 解析、节点状态、命中测试、事件分发（纯 C++） |
 | `include/binui_charts.h` | 高层图表 API：HTML 空容器 + 代码填数据，`tick()` 自动驱动动画 |
-| `include/binui_font_renderer.h` | 跨平台字体服务：FreeType 光栅化（灰度 + COLR 彩色）+ HarfBuzz 整形 |
+| `bin2d/text.h`（bin2d 的可选模块） | 文字：face 加载 / 字形光栅化（灰度 + COLR 彩色）/ HarfBuzz 整形 / 图集与文字阴影。0.38.x 起**不在本仓库**，binUI 只做平台字体发现 |
 | `include/binui_link.h` | **布局链接器**：把组件布局合并进宿主（节点 id 重编号/坐标平移/各段迁移），编译期内联与运行期挂载共用 |
 | `include/binui_asset.h` | 组件文件探测：二进制优先、源码更新则优先源码（同一份规则供编译器与加载器使用） |
 | `include/binui_component.h` | 外挂组件加载（header-only）：`ex::MountAll()` 按布局里的组件引用段挂载 `.bum` |
@@ -176,8 +176,9 @@ binUI ──► bin2d / bin3d ──► binGPU ──► GL / Vulkan / D3D11
   的段落一律是那时的记录，不再代表现状。
 
 后端契约仍是同一份 `IBinUIGfx`（`src/backends/binui_gfx.h`），节点树遍历
-（`binui_draw_nodes.h`）、字形图集与排版（`binui_glyph_atlas.h`）、无边框窗口外壳
-（`binui_app.h`）都是**后端无关的一份代码** —— 三份老后端能整份删掉而 9 个示例一行不改，
+（`binui_draw_nodes.h`）、无边框窗口外壳（`binui_app.h`）都是**后端无关的一份代码**；
+字形光栅 / 整形 / 图集在 bin2d 的可选模块 `libbin2d_text`（`bin2d/text.h`），
+平台字体发现在 `src/font/binui_font_host.cpp` —— 三份老后端能整份删掉而 9 个示例一行不改，
 靠的就是这条边界。常用的验证命令：
 
 ```sh
@@ -200,9 +201,9 @@ GPU 后端绘制原语（`fillRect`/`fillRounded`/`fillLine`/`strokeRounded`/`dr
 **仿射级联（v0.16.21）：一整个元素，不是元素自己。** 上面那版只转"节点自己画的东西"，子元素还是正的 —— 和浏览器不一致（`transform` 是**换坐标系**，后代全在同一个矩阵里）。现在绘制前按 `M[i] = M[父] ∘ 平移(子原点) ∘ 自身旋转/缩放` 沿祖先链复合（矩阵工具在 `include/binui_paint.h` 并单测），一次 `setAffine(M[i])` 管住整棵子树，嵌套 `transform` 也相乘；`<line>` 分隔线同样跟随。编号很小但**不改二进制格式**（纯绘制期），老页面像素逐位不变；`renderer.anyTransformAnim()` 做快速开关，没有变换的页面零开销。
 
 D3D11 后端要点：
-- 文字渲染委托 `binui_font_renderer`（FreeType + HarfBuzz），与 Windows GDI/DirectWrite 完全解耦——同一份字体服务可直接用于 Linux/macOS/OpenGL 后端。
+- 文字渲染委托 bin2d 的可选文字模块（`libbin2d_text`：FreeType + HarfBuzz），与 Windows GDI/DirectWrite 完全解耦——同一份字体服务可直接用于 Linux/macOS 后端。0.38.x 起这份实现不在本仓库（搬到 bin2d），binUI 侧只剩 CSS 排版语义。
 - 文本：`FT_Get_Char_Index` + `FT_Load_Glyph` + `FT_Render_Glyph(FT_RENDER_MODE_NORMAL)` 把字形光栅化为 8bit alpha，白字黑底 → 预乘 alpha 进图集纹理，着色器顶点色染色。**渲染质量三件事**：
-  1. **hinting**：`≤16px` 用 `FT_LOAD_TARGET_LIGHT`（只对齐竖笔，救小字清晰度），更大字号仍 `NO_HINTING`（保持跨平台一致）。可用 `BINUI_FONT_HINT=0|1|2` 强制全关/全 light/全 full 做对比，见 [hinting 对比](docs/font_hinting_modes.png)。
+  1. **hinting**：`≤16px` 用 `FT_LOAD_TARGET_LIGHT`（只对齐竖笔，救小字清晰度），更大字号仍 `NO_HINTING`（保持跨平台一致）。可用 `BIN2D_TEXT_HINT=0|1|2` 强制全关/全 light/全 full 做对比，见 [hinting 对比](docs/font_hinting_modes.png)。
   2. **gamma 修正**：线性覆盖率直接当 alpha 会让小字偏细，光栅化时查 256 项 LUT 做 `pow(a/255, 1/1.3)`（小字号墨量 +10~13%，48px 只 +3.5%），效果见 [前后对比](docs/font_rendering_before_after.png)。
   3. **像素对齐**：字形位图按整数像素设计，`drawText` 里把起点 x 与基线 y 各 `round` 到整数，再靠整数 advance 累加 —— 整行字形都落在整数像素上，不被双线性过滤糊掉。
   
@@ -459,7 +460,7 @@ HTML5 编译规则：
 - **`image-slice`（v25 绘制附加段，v0.16.19）**：`image-slice: <内缩像素>`（也可写 `nine-slice`，四边同宽），把源图按内缩切成 9 块 —— **四角保尺寸、四边与中心拉伸**。UI 里"带边框/带圆角的贴图容器"（按钮底、卡片框、气泡）都靠它：一张 48×48 的框拉伸到 300×70 后，普通整图拉伸会把 2px 边框拉成 20px、圆角压扁，九宫格不会。切分数学在 `binui_paint.h` 的 `BuildNineSlice`（三端共用），**切分点在后端算**（它才知道源图像素尺寸），`IBinUIGfx::drawImageNine` 默认退回整图拉伸 —— GDI 这类遗留后端不必为此改。`image-slice` 与 `border-radius` 互斥（九宫格优先、圆角清 0 并告警）；百分比忽略、上限 255px、四值不等取第一个（都告警）。只支持一层内缩（四边同宽）。**中段平铺（v0.16.49）**：`border-image-repeat: stretch | repeat | round`（可写两个值分别管上下边 / 左右边，缺省 stretch）——`repeat` 按"自然尺寸 = 内缩"铺并把末块裁切（源 UV 同比例裁），`round` 把块数取整后等分；两轴都平铺时中心块也摊成网格，块数有预算护栏（超了按比例压缩块数，不会把顶点撑爆）。**`space`（v0.16.51）**：块尺寸不缩放也不裁切，余数均分成 `cnt+1` 个间隙（两端各一个 —— CSS 原话 "distributed around the tiles"，所以首末块不贴边），中段比一块还窄时唯一一块缩到中段长。模式落在 `BinUIPaintEx::flags`（原来那句"保留（恒 0）"），旧二进制的 0 正好等于 stretch → **格式号不变**。
 - **`filter`（v26 图片滤镜段，v0.16.22）**：`grayscale()` / `sepia()` / `saturate()` / `hue-rotate()` / `invert()` / `contrast()` / `brightness()`，可写多个函数、**按书写顺序**合成。前六个是"RGB 上的一次仿射变换"，顶点色乘不出来、又要避开改着色器（VK 的 SPIR-V 是预编译常量数组），所以走 **CPU 变体纹理**：编译期把函数按顺序合成成 3×3 矩阵 + 偏移写进滤镜段（`BinUIImageFilter`，52 字节/节点），后端**解码图片时**逐像素跑一遍再上传，并按 `(imageIndex, 矩阵哈希)` 缓存纹理 —— 同一张图配两种滤镜就是两份纹理，之后每帧零开销。`brightness()` 仍走 0.16.15 的灰度顶点色（只乘暗，GDI 也能吃），不进滤镜段。**已知边界**：`blur()`（v0.16.42）/ `drop-shadow()`（v0.16.43）走离屏图层，`url(#f)` 仍告警忽略；滤镜只作用于图片/视频**像素**（不作用于 CSS 背景色/边框，那要整元素离屏）；颜色矩阵在 sRGB 空间、非预乘，与 CSS 规范一致；GDI 是遗留后端，不吃这条（照常画原图）。
 - **毛玻璃 `backdrop-filter`（v29 毛玻璃段，v0.16.27）**：`backdrop-filter: blur(24px)`（含 `-webkit-` 前缀）。做法不是改着色器，而是**多级降采样**：把元素背后那块背景抓成纹理 → 缩小一半到"σ 还剩 ≥2 纹素"的那一级 → 在那一级上跑横/纵两趟加权卷积（每纹素一个抽头、覆盖 ±3σ、加法混合累加，v0.16.44 起是真高斯）→ 再用圆角条带以"直接覆盖"混合画回去，于是背景被糊掉，元素自己的半透明底色/1px 高光边叠在上面就是苹果那种毛玻璃。编译期只写一条 12 字节的毛玻璃记录（节点 + 模糊半径 + 合成圆角），VK 只是多一对"覆盖混合"的管线变体，**SPIR-V 一行没动**。典型写法：`background: rgba(255,255,255,0.38); border-radius: 28; border: 1px solid rgba(255,255,255,0.65); backdrop-filter: blur(24px)`。**材质预设（v0.16.28）**：上面这一串可以写成一句 `material: glass` —— 编译器只补**作者没写**的声明（想改哪条就写哪条），预设自带渐变高光底、1px 高光边、圆角 24、投影和颗粒；另有 `material: smoked`（深色烟熏，模糊 20px）与 `material: thin`（轻量，模糊 12px）。**颗粒 `grain()`（v0.16.28）**：`backdrop-filter: blur(24px) grain(0.7)` 会在模糊面上撒一层**确定性的 64×64 噪声**（一个噪声纹素 = 一个屏幕像素、屏幕锚定、三端同一张图），压住大块渐变背景上的 banding；强度 0..1，最大只加 1.2% 白，是"质感"而不是"噪点"。**已知边界**：只支持 `blur()`（`saturate()`/`brightness()` 需要片元运算，告警忽略）；仿射（旋转）节点不模糊；GDI 遗留后端不参与（照常画半透明底色）；每个毛玻璃节点都要抓一次背景 + 若干次半尺寸绘制，页面上几十个毛玻璃节点会有开销。
-- **文字的亚像素定位（v0.16.4，v0.16.16 换成 ¼ 像素相位）**：字形图集默认把起点/基线吸到整像素（位图 1:1 最锐利），所以"平滑移动"的文字每 2 帧跳 1px —— 旁边填充/描边都在连续滑时特别显眼。有动画的节点（绘制层按 `animGeo` 判断）走 `setTextSubpixel(true)`。**v0.16.16 起不再靠图集 LINEAR 采样换平滑**：把 x 的小数部分量化成 ¼ 像素相位，每份相位是**一张独立的字形位图**（`FT_Set_Transform` 的 delta 先把轮廓右移 phase/4，位图自己带上那 ¼ 像素），所以文字既能连续滑、字形又逐像素锐利。advance 仍是整数（测宽/换行位置一字不变），静态位置相位恒为 0 —— 所有老页面逐像素不变（`make pixels` 15 条老基准 0 差异）。纵向仍按整像素吸附：4×4 变体会让图集体积爆炸，DirectWrite/Chrome 也只做横向。`BINUI_TEXT_PHASE_OFF=1` 可退回 0.16.15 的 LINEAR 行为做 A/B。
+- **文字的亚像素定位（v0.16.4，v0.16.16 换成 ¼ 像素相位）**：字形图集默认把起点/基线吸到整像素（位图 1:1 最锐利），所以"平滑移动"的文字每 2 帧跳 1px —— 旁边填充/描边都在连续滑时特别显眼。有动画的节点（绘制层按 `animGeo` 判断）走 `setTextSubpixel(true)`。**v0.16.16 起不再靠图集 LINEAR 采样换平滑**：把 x 的小数部分量化成 ¼ 像素相位，每份相位是**一张独立的字形位图**（`FT_Set_Transform` 的 delta 先把轮廓右移 phase/4，位图自己带上那 ¼ 像素），所以文字既能连续滑、字形又逐像素锐利。advance 仍是整数（测宽/换行位置一字不变），静态位置相位恒为 0 —— 所有老页面逐像素不变（`make pixels` 15 条老基准 0 差异）。纵向仍按整像素吸附：4×4 变体会让图集体积爆炸，DirectWrite/Chrome 也只做横向。`BIN2D_TEXT_PHASE_OFF=1` 可退回 0.16.15 的 LINEAR 行为做 A/B（0.38.x 起这个开关在 bin2d 的文字模块里）。
 - **`<style>` 里的普通 CSS 规则参与级联**（不止动画）：支持 `tag` / `.class` / `#id` / `*`、**复合类**（`.btn.primary`）、**属性选择器**（`[type=text]`、`[href^=http]`、`[class~=x]`、`[lang|=zh]`）、**后代/子代/相邻兄弟/后续兄弟组合子**（`.card .title`、`.card > .title`、`h2 + p`、`h2 ~ p`）以及逗号选择器组。优先级与浏览器一致：**内联 `style` > `#id` > `.class`/属性/伪类 > `tag`**，同权重时后写的胜（`!important` 仍被忽略）。`display:none` 经 class 生效（整棵子树不生成节点）。**仍不支持**：`@media`（编译期不知道运行时尺寸，整块忽略并告警）、`@font-face` / `@import` / `<link rel=stylesheet>`（样式只能内联进 `<style>`）。
 - **运行时伪类（v11）**：`:hover` / `:active` / `:focus` / `:checked` 编译成**状态样式段**，渲染器在指针/焦点/勾选变化时把作者声明的 `background*`（`LABEL` 另有 `color`/`text-color`）、`transform: scale()`、`border-radius`、`opacity` 作为目标值切过去——声明了 `transition` 的节点走现成的过渡通道，否则瞬时。优先级（同时命中时）：**`:active` > `:focus` > `:checked` > `:hover`**。`:hover`/`:active` 对**任何元素**生效（不只控件：命中测试会把声明了该状态的普通节点纳入）；`:focus` 同时覆盖键盘焦点与正在编辑的输入框；`:checked` **由外壳维护**（核心库没有勾选控件）——`renderer.setNodeChecked(id, on)` / `isNodeChecked(id)`，点击自己控件时调用即可。未写状态样式的按钮仍走旧的 hover tint 启发式（0.12 提亮 + 1.05 放大、按下压暗）。
 - **结构伪类（编译期求值，不占运行时开销）**：`:first-child` / `:last-child` / `:only-child` / `:nth-child(An+B|odd|even|n)` / `:nth-last-child()` / `:first-of-type` / `:last-of-type` / `:only-of-type` / `:nth-of-type()` / `:nth-last-of-type()` / `:not(简单选择器)` / `:root`。兄弟序号只统计"会参与布局的元素"（`head`/`meta`/`script`/`style`/`app_window` 不计入）；`display:none` 的元素仍被计数（与浏览器一致的差异点）。伪类可与状态伪类叠加（`li:first-child:hover`）。

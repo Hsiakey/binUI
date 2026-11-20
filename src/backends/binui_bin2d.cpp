@@ -10,11 +10,11 @@
 // 走 binGPU 上屏"的路径一致 —— 换了显卡，像素不会变。
 //
 // 复用而不是重写（三件套，全部与 GL / VK / D3D11 共用同一份代码）：
-//   · binui_glyph_atlas.h  —— 排版 / 字形光栅 / 整形缓存 / 文字阴影
+//   · bin2d 的文字模块（libbin2d_text）—— 字形光栅 / 整形 / 图集 / 文字阴影
 //   · binui_paint.h        —— 九宫格切分、渐变四角色、圆角层几何
 //   · binui_win_image.h    —— 图片解码（GDI+，三端同一份）
-// 这也是为什么"文字与图片"这两块几乎不用写：它们本来就是后端无关的，唯一要做的
-// 是把**出口**从"发射四边形给驱动"换成"画进 bin2d 的 Surface"。
+// 这也是为什么"文字与图片"这两块几乎不用写：它们本来就是与绘制后端无关的，
+// 唯一要做的是把**出口**从"发射四边形给驱动"换成"画进 bin2d 的 Surface"。
 #include "binui_bin2d.h"
 
 #include <algorithm>
@@ -59,9 +59,13 @@
 #include "binui_filter.h"     // ImageFilterKey：图片滤镜的缓存键（四端同源）
 #include "binui_format.h"
 #include "binui_gfx.h"
-#include "binui_glyph_atlas.h"
 #include "binui_paint.h"
 #include "binui_win_image.h"
+
+// 文字：字形光栅 / 整形 / 图集归 bin2d 的可选模块（libbin2d_text），
+// 平台字体发现仍在 binUI 外壳（binui_font_host.cpp）；本文件只剩 CSS 语义。
+#include "bin2d/text.h"
+#include "font/binui_font_host.h"
 
 #ifdef _WIN32
 #include <windows.h>
@@ -106,37 +110,6 @@ void BlitBgraStraightInto(bin2d::Surface& dst, int x, int y, int w, int h,
     }
 }
 
-// 预乘 BGRA（字形图集用）→ 预乘 Surface：只换字节序，**不再乘一次 alpha**。
-//
-// 0.31.1 修的真 bug：字形位图从 binui_glyph_atlas.h 出来时已经是**预乘白色**
-// （`p[0]=p[1]=p[2]=p[3]=覆盖率`，见那边的 rasterGray 注释），而这里曾经走
-// `BlitBgraStraightInto`（按直通再预乘一次）。于是每个纹素变成
-// `rgb = a²/255, alpha = a`—— 覆盖率在 RGB 上被平方了。
-//
-// 症状很具体：白字压在浅底上时，字缘比底色**更暗**（白底上核心只有 191 而不是
-// 255），一眼就是"白色文本带一圈灰边"；同时整体墨量偏少，小字号拉丁看起来发虚，
-// 与笔画密的汉字放一起就显得"有的粗有的细"。三份 GPU 后端直接把字节传上纹理，
-// 所以只有 bin2d 后端有这个问题 —— 也正是它能被逐像素比对照出来的原因。
-void BlitBgraPremulInto(bin2d::Surface& dst, int x, int y, int w, int h,
-                        const uint8_t* bgra, int srcPitch) {
-    for (int row = 0; row < h; ++row) {
-        const int dy = y + row;
-        if (dy < 0 || dy >= dst.height()) continue;
-        const uint8_t* s = bgra + static_cast<size_t>(row) * static_cast<size_t>(srcPitch);
-        uint8_t* d = dst.row(dy);
-        for (int col = 0; col < w; ++col) {
-            const int dx = x + col;
-            if (dx < 0 || dx >= dst.width()) continue;
-            const uint8_t* sp = s + static_cast<size_t>(col) * 4;
-            uint8_t* dp = d + static_cast<size_t>(dx) * 4;
-            dp[0] = sp[2];   // B G R A → R G B A（分量照抄，alpha 已预乘过）
-            dp[1] = sp[1];
-            dp[2] = sp[0];
-            dp[3] = sp[3];
-        }
-    }
-}
-
 // 预乘直通 RGBA（prepareImageRaw 的输入，见 binui_gfx.h 注释）→ 预乘 Surface
 void BlitRgbaStraightInto(bin2d::Surface& dst, int x, int y, int w, int h,
                           const uint8_t* rgba) {
@@ -156,130 +129,24 @@ void BlitRgbaStraightInto(bin2d::Surface& dst, int x, int y, int w, int h,
     }
 }
 
-// ------------------------------------------------------------------
-// 字形 UV（0.26.1 勘误）
-//
-// 一开始在这里做了一次"半个纹素"的 UV 补偿（把 u 反算成 u*sw-0.5 再除以 sw-1），
-// 想对齐 bin2d 的 `u*(sw-1)` 采样口径。**那是错的方向**：补偿之后 UV 不再是整纹素
-// 边界，bin2d 的 1:1 快路径（raster.cpp 的 ①b）判据就命不中了，字形只能走查表
-// 双线性 —— 既慢（25 µs/字形）又仍然是偏的。
-//
-// 正确的落点是 bin2d 的 ①b：UV 保持**整纹素边界**时，那个快路径按 `sx0 + rx`
-// 取纹素，正好等于 GPU 硬件在纹素中心采样的结果，而且只做一次查表 + 混合。
-// 所以这里不加任何补偿 —— 传原始 UV 就是对的。
-// ------------------------------------------------------------------
+// 中文避头点：这些标点不能出现在行首（CSS line-break: normal 的常见规则）。
+// 折行时多带一个字符（允许极轻微超出 maxW）比行首孤零零一个"。"自然得多。
+// 这条规则是**排版语义**，所以留在 binUI（文字模块不认标点）。
+bool NoLineStart(uint32_t cp) {
+    switch (cp) {
+        case 0x3001: case 0x3002:                     // 、。
+        case 0xFF0C: case 0xFF1A: case 0xFF1B:        // ，：；
+        case 0xFF01: case 0xFF1F:                     // ！？
+        case 0x300B: case 0x300D: case 0x300F:        // 》」』
+        case 0x3011: case 0xFF09:                     // 】）
+        case 0x2026: case 0xFF5E:                     // …～
+            return true;
+        default:
+            return false;
+    }
+}
 
 } // namespace
-
-// ==================================================================
-// 字形宿主：把"位图 → 纹理"这一步换成"位图 → bin2d::Image"
-//
-// GL 版的宿主是 glTexSubImage2D，VK 版是 staging buffer + copy，这里就是
-// 往一张 Surface 里写。三种实现共用同一份排版/光栅/缓存（binui_glyph_atlas.h），
-// 所以字形位图逐字节相同 —— 差异只可能来自后面的采样（见 drawText 的注释）。
-//
-// 0.22.3 加的第二条路（deviceTextures）：GPU 执行体下不再用 Image/Surface，
-// 而是直接管执行体的纹理句柄 —— 与被删除的 binui_gpu.cpp 的 GpuGlyphHost 同一套做法
-// （binui_gpu.cpp 已于 0.37.x 删除，那套做法搬到了这里）。
-// （create 一次、每次只上传新格子那块矩形）。为什么必须这样：
-//   · Image 那条路的口径是"图片不变"，图集边画边改就只能整张重传（1024² = 4 MB/次），
-//     一页文字一帧要改几十个格子；
-//   · 更要命的是先后关系：GPU 的绘制命令延迟到帧尾执行，而图集是边画边贴新格子，
-//     "整张重传 + 已录进命令流的笔"之间残留的旧内容会被后面的笔采样到
-//     （实测：整页文字串格、阴影层错位）。
-// 设备纹理的上传在 binGPU 里是**同步**的（提交后等 fence），图集又只追加不改写
-// 已有格子 ⇒ 先上传还是先录笔都不改变任何一笔的采样结果。
-// CPU 光栅（没有执行体）仍然走 Image：那一边是逐像素立即落盘，本来就没有这个时序差。
-// ==================================================================
-struct GlyphHost2D : public IGlyphTexHost {
-    std::vector<std::unique_ptr<bin2d::Image>> owned;
-    // 当前帧的 Canvas（beginFrame / init 里更新）。CPU 路用它通知"图集原地改过像素"。
-    bin2d::Canvas* canvas = nullptr;
-    // true = 纹理句柄归 bin2d 的 GPU 执行体（见上面那段说明）。由 Impl 按执行体
-    // 的有无来切；切换时必须先让图集把旧宿主上的纹理销毁（见 Impl::setGlyphDeviceTextures）。
-    bool deviceTextures = false;
-    // BGRA → RGBA 的交换缓冲（执行体的纹理是 RGBA8，字形位图是预乘 BGRA）
-    std::vector<uint8_t> swz;
-
-    bool deviceMode() const { return deviceTextures && canvas != nullptr; }
-
-    static void* AsHandle(uint64_t t) {
-        return reinterpret_cast<void*>(static_cast<uintptr_t>(t));
-    }
-    static uint64_t AsTex(const void* p) {
-        return static_cast<uint64_t>(reinterpret_cast<uintptr_t>(p));
-    }
-
-    void* createTex(int w, int h) override {
-        if (w <= 0 || h <= 0) return nullptr;
-        if (deviceMode()) {
-            // 必须全 0（透明）：图集里的"空格子"会被当真字形画，未初始化的显存会画成垃圾；
-            // 执行体的 texCreate 自带零上传。
-            const uint64_t t = canvas->createTexture(w, h, /*nearest=*/false);
-            return t ? AsHandle(t) : nullptr;
-        }
-        // 必须全 0（透明）：图集里的"空格子"会被当真字形画（advance 有效、像素全透明），
-        // Surface::resize 已经保证清零（见 surface.h）。
-        auto img = std::make_unique<bin2d::Image>(w, h);
-        if (img->empty()) return nullptr;
-        void* handle = img.get();
-        owned.push_back(std::move(img));
-        return handle;
-    }
-
-    void updateTex(void* tex, int x, int y, int w, int h, const uint8_t* bgra) override {
-        if (!tex || !bgra || w <= 0 || h <= 0) return;
-        if (deviceMode()) {
-            // 只传这一块：执行体的上传是同步的、图集只追加不改写，所以先传后画/先画后传
-            // 在设备上看到的都是同一份最终内容。
-            const size_t n = static_cast<size_t>(w) * static_cast<size_t>(h);
-            swz.resize(n * 4u);
-            for (size_t i = 0; i < n; ++i) {
-                const uint8_t* s = bgra + i * 4u;
-                uint8_t* d = swz.data() + i * 4u;
-                d[0] = s[2];   // B G R A → R G B A
-                d[1] = s[1];
-                d[2] = s[0];
-                d[3] = s[3];
-            }
-            canvas->uploadTexture(AsTex(tex), bin2d::Rect(static_cast<float>(x),
-                                                          static_cast<float>(y),
-                                                          static_cast<float>(w),
-                                                          static_cast<float>(h)),
-                                  swz.data(), static_cast<uint32_t>(w) * 4u);
-            return;
-        }
-        auto* img = static_cast<bin2d::Image*>(tex);
-        // 字形位图是**预乘**的（覆盖率同时写在 RGB 和 alpha 上），别再预乘一次
-        BlitBgraPremulInto(img->surface(), x, y, w, h, bgra, w * 4);
-        // 原地改完必须作废执行体的纹理缓存（CPU 执行体上这是空操作）
-        if (canvas) canvas->imageChanged(img->surface());
-    }
-
-    void destroyTex(void* tex) override {
-        if (!tex) return;
-        if (deviceMode()) {
-            // 执行体的 destroy 是延迟的（帧尾之后才真正释放），所以帧内销毁 + 重建
-            // 不会让已经录好的笔采样到新纹理。
-            canvas->destroyTexture(AsTex(tex));
-            return;
-        }
-        for (size_t i = 0; i < owned.size(); ++i) {
-            if (owned[i].get() == tex) {
-                owned.erase(owned.begin() + static_cast<std::ptrdiff_t>(i));
-                return;
-            }
-        }
-    }
-
-    void clear() {
-        owned.clear();
-        swz.clear();
-        swz.shrink_to_fit();
-    }
-};
-
-// ==================================================================
 
 // ------------------------------------------------------------------
 // 消融测量（0.32.0，BINUI2D_SKIP=rstl）
@@ -543,7 +410,7 @@ struct BinUI2D::Impl {
             // Canvas 建好就挂上执行体：图集懒加载字形（排版测宽那一步也不在帧内）
             // 就要能建纹理，所以不能等到第一次 beginFrame。
             if (canvas) canvas->attachGpu(exec.get());
-            setGlyphDeviceTextures(true);
+            syncAtlasCanvas();   // 出口从 Image 切到执行体的纹理通道（旧纹理在内部作废）
             return true;
         }
         if (openCompositor(w, h, vsyncOn)) { presentPath = "bin2d+gpu-compositor"; return true; }
@@ -551,9 +418,10 @@ struct BinUI2D::Impl {
     }
 
     void closeGpuPath() {
-        // 先让图集按**旧**宿主把手上的纹理销毁，再拆执行体：设备句柄属于执行体，
-        // 执行体一没就既销毁不了、也不能再采样（见 setGlyphDeviceTextures）。
-        setGlyphDeviceTextures(false);
+        // 先让图集把设备纹理销毁，再拆执行体：设备句柄属于执行体，执行体一没就
+        // 既销毁不了、也不能再采样。此刻 Canvas 上的执行体还挂着，所以 clear()
+        // 走的是"设备纹理"这条出口（顺序不能反）。
+        if (atlas) atlas->clear();
         if (exec) { exec->destroy(); exec.reset(); }
         if (compositor) { compositor->destroy(); compositor.reset(); }
     }
@@ -636,8 +504,16 @@ struct BinUI2D::Impl {
     bin2d::ColorMatrix filterMatrix = bin2d::ColorMatrix::identity();
 
     // ---- 文字 ----
-    GlyphHost2D host;
-    std::unique_ptr<GlyphAtlas> atlas;
+    // 字形光栅 / 整形 / 图集打包 / 文字阴影的模糊图集全在 bin2d 的可选文字模块里；
+    // 这里只有两样东西：字体服务（face 加载与生命周期）与图集句柄。
+    // 平台字体发现由 RegisterSystemFonts 注入（见 src/font/binui_font_host.cpp）。
+    bin2d::text::Library fontLibrary;
+    std::unique_ptr<bin2d::text::Atlas> atlas;
+
+    // 图集纹理的出口：把**当前** Canvas 交给图集。CPU 路它是 Image 的宿主，
+    // GPU 路它是执行体的外部纹理通道 —— 出口切换（挂了执行体 / 执行体没了）由
+    // 图集自己按 Canvas::gpuAttached() 判断并作废旧纹理，这里不做开关。
+    void syncAtlasCanvas() { if (atlas) atlas->setCanvas(canvas.get()); }
 
     void ApplyState() {
         if (!canvas) return;
@@ -650,30 +526,11 @@ struct BinUI2D::Impl {
 
     // ---- 字形图集的纹理归属（0.22.3）----
     // 有了执行体就用**设备纹理**（句柄归执行体、每次只上传新格子那块矩形），
-    // 没有就走 Image/Surface（CPU 光栅）。切换时必须先让图集按**旧**宿主把纹理
-    // 销毁再翻标志：设备句柄属于执行体，执行体一没就销毁不了；而留在图集里的旧句柄
-    // 会被当成新纹理去采样（表现就是整页文字串格）。
-    void setGlyphDeviceTextures(bool on) {
-        if (host.deviceTextures == on) return;
-        if (atlas) atlas->clear();   // 此刻旧宿主（执行体 + Canvas）还活着
-        host.deviceTextures = on;
-    }
-
-    // 一个字形四边形：两条宿主下出口不同（设备纹理 / CPU 光栅的 Image）
-    void drawGlyphQuad(const GlyphQuad& g) {
-        if (!canvas) return;
-        const bin2d::Rect dst(g.x, g.y, g.w, g.h);
-        const bin2d::Rect uv(g.u0, g.v0, g.u1 - g.u0, g.v1 - g.v0);
-        const bin2d::Color c = ToColor(g.color);
-        if (host.deviceMode()) {
-            canvas->drawTexture(GlyphHost2D::AsTex(g.tex), dst, uv, c);
-            return;
-        }
-        auto* img = static_cast<bin2d::Image*>(g.tex);
-        if (!img || img->empty()) return;
-        canvas->drawImage(*img, dst, uv, c, bin2d::ImageFilter::Linear);
-    }
-
+    // 没有就走 Image/Surface（CPU 光栅）。这条判断现在在图集内部
+    // （bin2d::text::Atlas::setCanvas 按 Canvas::gpuAttached() 认出口）：
+    // 出口一变它会把旧纹理按**旧**出口销毁 —— 设备句柄属于执行体，执行体一没就
+    // 销毁不了；而留在图集里的旧句柄会被当成新纹理去采样（表现就是整页文字串格）。
+    // 拆执行体之前必须先调 clear()：那时旧出口还活着。
     bin2d::Image* findImage(uint16_t index) {
         auto it = images.find(index);
         if (it == images.end() || !it->second.img || it->second.img->empty()) return nullptr;
@@ -753,9 +610,12 @@ struct BinUI2D::Impl {
 };
 
 BinUI2D::BinUI2D() : impl_(std::make_unique<Impl>()) {
-    impl_->atlas = std::make_unique<GlyphAtlas>();
-    impl_->atlas->setHost(&impl_->host);
-    impl_->atlas->initFonts();
+    // 字体服务 + 图集：face 加载 / 字形光栅 / 整形 / 图集打包 / 文字阴影全在
+    // bin2d 的可选文字模块里（libbin2d_text）。平台字体发现由本仓库注入 ——
+    // bin2d 那一侧一行平台 API 都没有。
+    RegisterSystemFonts(impl_->fontLibrary);
+    impl_->atlas = std::make_unique<bin2d::text::Atlas>();
+    impl_->atlas->init(&impl_->fontLibrary);
 }
 
 BinUI2D::~BinUI2D() { shutdown(); }
@@ -782,7 +642,7 @@ bool BinUI2D::init(int width, int height) {
     impl_->height = height;
     if (!impl_->surface.resize(width, height)) return false;
     impl_->canvas = std::make_unique<bin2d::Canvas>(impl_->surface);
-    impl_->host.canvas = impl_->canvas.get();   // 图集原地改像素要通知 canvas
+    impl_->syncAtlasCanvas();   // 图集的纹理出口跟着 Canvas 走（CPU 路是 Image 的宿主）
     impl_->ready = true;
 #ifndef BINUI_NO_BINGPU
     // 离屏**默认仍然走 CPU 光栅**：Surface 是像素权威（pixels-bin2d 的 0 容差基线就是
@@ -796,7 +656,7 @@ bool BinUI2D::init(int width, int height) {
             impl_->presentPath = "bin2d+gpu";
             // 见 openGpuPath：图集在帧外（排版测宽）也可能懒加载字形，纹理必须能建。
             impl_->canvas->attachGpu(impl_->exec.get());
-            impl_->setGlyphDeviceTextures(true);
+            impl_->syncAtlasCanvas();
         } else {
             // 不刷屏也不冒充成功：调用方（出图工具）看到的是 CPU 出来的像素
             std::fprintf(stderr, "[binui2d] BINUI2D_GPU=1 但 HEADLESS 执行体起不来，"
@@ -806,9 +666,8 @@ bool BinUI2D::init(int width, int height) {
 #endif
     // 字形图集与 Canvas 无关，init 之后一直活着（换图集代数由 atlas 自己管）
     if (!impl_->atlas) {
-        impl_->atlas = std::make_unique<GlyphAtlas>();
-        impl_->atlas->setHost(&impl_->host);
-        impl_->atlas->initFonts();
+        impl_->atlas = std::make_unique<bin2d::text::Atlas>();
+        impl_->atlas->init(&impl_->fontLibrary);
     }
     return true;
 }
@@ -863,10 +722,10 @@ void BinUI2D::resize(int width, int height) {
     impl_->height = height;
     impl_->surface.resize(width, height);
     impl_->canvas = std::make_unique<bin2d::Canvas>(impl_->surface);
-    impl_->host.canvas = impl_->canvas.get();
     // 先挂再拆：closeGpuPath 要经这个 Canvas 把图集纹理销毁（没挂执行体的 Canvas
     // 上的 destroyTexture 是空操作 —— 纹理就漏了）
     if (impl_->gpuExecActive()) impl_->canvas->attachGpu(impl_->exec.get());
+    impl_->syncAtlasCanvas();   // 出口跟着新 Canvas（此刻执行体已挂好，销毁走对通道）
 #ifndef BINUI_NO_BINGPU
     // 交换链的尺寸是建链时定的：执行体存在就必须销毁重建（没有第二条路），
     // 重建之后 Canvas 要重新 attachGpu —— 否则下一帧悄悄退回 CPU 光栅，
@@ -950,15 +809,17 @@ void BinUI2D::beginFrame(const void* clipRect) {
     // 重建的代价是一次 State 拷贝（几百字节），换来的是"帧与帧之间状态绝对不串"
     // —— 上一帧漏掉的 restore 不会把这一帧的裁剪带歪（那类 bug 极难复现）。
     impl_->canvas = std::make_unique<bin2d::Canvas>(impl_->surface);
-    impl_->host.canvas = impl_->canvas.get();   // 每帧重建 Canvas：这一个指针也得跟着换
     impl_->clipMarks.clear();
     impl_->layers.clear();
 
     // 新 Canvas 不带执行体：**每帧都必须重新挂**。漏这一行的症状是"什么都不报、
-    // 画面全黑"：绘制悄悄退回 CPU 光栅（Surface 被写），而屏幕上贴的是 GPU 纹理
+    //画面全黑"：绘制悄悄退回 CPU 光栅（Surface 被写），而屏幕上贴的是 GPU 纹理
     // （从没收到过像素）。
     const bool gpu = impl_->gpuExecActive();
     if (gpu) impl_->canvas->attachGpu(impl_->exec.get());
+    // 图集出口跟着这一帧的 Canvas（CPU 路只是换个 Image 宿主，图集纹理不清；
+    // 出口从设备里掉出来时图集会自己作废旧纹理）
+    impl_->syncAtlasCanvas();
 
     bin2d::Rect area;
     const bool clipped = (clipRect != nullptr);
@@ -987,7 +848,7 @@ void BinUI2D::beginFrame(const void* clipRect) {
         impl_->canvas->clipRect(area);
     }
     impl_->ApplyState();
-    if (impl_->atlas) impl_->atlas->snapText = !impl_->subpixelText;
+    if (impl_->atlas) impl_->atlas->setSnapText(!impl_->subpixelText);
 }
 
 void BinUI2D::present() {
@@ -1431,18 +1292,68 @@ void BinUI2D::drawText(float x, float y, float size, int weight,
     ProfTimer _pt(impl_->prof, Prof::kDrawText);
     if (!impl_->canvas || utf8.empty() || !impl_->atlas) return;
     if (impl_->skipText) return;   // BINUI2D_SKIP=t
-    impl_->atlas->drawText(x, y, size, weight, utf8, color, centerH, centerV, italic,
-                           [this](const GlyphQuad& g) { impl_->drawGlyphQuad(g); });
+    bin2d::text::Atlas* a = impl_->atlas.get();
+    // "在盒子里居中"是上层的语义（它知道盒子在哪），所以滑动量在这里算好，
+    // 传给文字模块的是**基线**与左端 x —— 模块只负责"这串字怎么画"。
+    if (centerH) x -= a->textWidth(size, weight, utf8, italic) / 2.0f;
+    if (centerV) {
+        const bin2d::text::Metrics m = a->metrics(size, weight, italic);
+        y -= static_cast<float>(m.height()) / 2.0f;
+    }
+    a->drawText(x, y, size, weight, utf8, color, italic);
 }
 
+// 自动换行（CSS 语义，留在 binUI）：
+//   · 按**字形簇**推进（簇切分规则归 bin2d 的整形，上层只问簇宽与簇长）；
+//   · 避头点（标点不能出现在行首，见 NoLineStart）；
+//   · 对齐 0=左 1=居中 2=右（相对 [x, x+maxW]）；
+//   · 行高与基线偏移来自 face 度量（ascent）。
+// 这里没有一行"字形从哪来"的代码：每行就是一次 bin2d::text::Atlas::drawText。
 void BinUI2D::drawTextWrapped(float x, float y, float maxW, float size, int weight,
                               const std::string& utf8, uint32_t color, int align,
                               bool italic) {
     ProfTimer _pt(impl_->prof, Prof::kDrawTextWrapped);
     if (!impl_->canvas || utf8.empty() || !impl_->atlas) return;
     if (impl_->skipText) return;   // BINUI2D_SKIP=t
-    impl_->atlas->drawTextWrapped(x, y, maxW, size, weight, utf8, color, align, italic,
-                                  [this](const GlyphQuad& g) { impl_->drawGlyphQuad(g); });
+    bin2d::text::Atlas* a = impl_->atlas.get();
+    const bin2d::text::Metrics m = a->metrics(size, weight, italic);
+    const float ls = a->letterSpacing();
+
+    const std::vector<uint32_t> cps = bin2d::text::Utf8ToCodepoints(utf8);
+    float ly = y;
+    size_t pos = 0;
+    while (pos < cps.size()) {
+        float w = 0;
+        size_t end = pos;
+        while (end < cps.size()) {
+            const uint32_t c = cps[end];
+            if (c == '\n') break;
+            const bin2d::text::Cluster cl =
+                a->measureCluster(size, weight, cps.data() + end, cps.size() - end, italic);
+            // 换行宽度也要算上 letter-spacing（否则带间距的长标题会在最后一个字
+            // 刚好越界的地方"多挤一个"，与 textWidth 的结论不一致）
+            const float adv = cl.advance + ls;
+            if (end > pos && w + adv > maxW) break;
+            w += adv;
+            end += cl.len;
+        }
+        if (end == pos) end++;
+        // 避头点：行首那个字符不能是句读标点，把它并到本行末尾
+        if (end < cps.size() && cps[end] != '\n' && NoLineStart(cps[end])) end++;
+        const bool newline = end < cps.size() && cps[end] == '\n';
+        const size_t segEnd = (end > pos && cps[pos] != '\n') ? end : pos;
+        if (segEnd > pos) {
+            const std::string seg =
+                bin2d::text::CodepointsToUtf8(cps.data() + pos, segEnd - pos);
+            float lx = x;
+            if (align == 1)      lx = x + (maxW - w) / 2.0f;
+            else if (align == 2) lx = x + (maxW - w);
+            if (lx < x) lx = x;   // 超长行不向左溢出
+            a->drawText(lx, ly + static_cast<float>(m.ascent), size, weight, seg, color, italic);
+        }
+        ly += static_cast<float>(m.height());
+        pos = newline ? end + 1 : end;
+    }
 }
 
 float BinUI2D::textWidth(float size, int weight, const std::string& utf8, bool italic) {
@@ -1457,20 +1368,39 @@ void BinUI2D::fontMetrics(float size, int weight, int& ascent, int& lineHeight,
         lineHeight = static_cast<int>(size);
         return;
     }
-    impl_->atlas->fontMetrics(size, weight, ascent, lineHeight, italic);
+    const bin2d::text::Metrics m = impl_->atlas->metrics(size, weight, italic);
+    ascent = m.ascent;
+    lineHeight = m.height();
 }
 
 void BinUI2D::setTextSubpixel(bool on) {
     impl_->subpixelText = on;
-    if (impl_->atlas) impl_->atlas->snapText = !on;
+    if (impl_->atlas) impl_->atlas->setSnapText(!on);
 }
 
 void BinUI2D::setLetterSpacing(float px) {
     if (impl_->atlas) impl_->atlas->setLetterSpacing(px);
 }
 
+// CSS text-shadow → 文字模块的阴影层参数（这是"翻译"，不是"排版"）：
+//   · offsetX / offsetY / blur 一一对应；
+//   · 颜色原样传（0xAARRGGBB 直通，模块内部预乘）；
+//   · 层序不变（下标 0 = 最下面，与布局段的顺序一致）。
 void BinUI2D::setTextShadows(const BinUITextShadow* layers, int count) {
-    if (impl_->atlas) impl_->atlas->setTextShadows(layers, count);
+    if (!impl_->atlas) return;
+    if (!layers || count <= 0) {
+        impl_->atlas->clearTextShadow();
+        return;
+    }
+    if (count > bin2d::text::kMaxTextShadows) count = bin2d::text::kMaxTextShadows;
+    bin2d::text::ShadowLayer out[bin2d::text::kMaxTextShadows];
+    for (int i = 0; i < count; i++) {
+        out[i].dx = layers[i].offsetX;
+        out[i].dy = layers[i].offsetY;
+        out[i].blur = layers[i].blur;
+        out[i].color = layers[i].color;
+    }
+    impl_->atlas->setTextShadows(out, count);
 }
 
 void BinUI2D::setFontName(const char* name) {

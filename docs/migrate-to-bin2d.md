@@ -164,7 +164,7 @@ binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D
 
 | 复用 | 说明 |
 |---|---|
-| `binui_glyph_atlas.h` | 只换 `IGlyphTexHost` 的实现：`glTexSubImage2D` → 写进 `bin2d::Image` |
+| `binui_glyph_atlas.h` | 只换 `IGlyphTexHost` 的实现：`glTexSubImage2D` → 写进 `bin2d::Image`（**0.38.x 已整份搬进 bin2d 的可选模块 `libbin2d_text`**，见 issues/12 §5 步 3/4） |
 | `binui_paint.h` | 九宫格切分、圆角层几何，同一份数学 |
 | `binui_win_image.h` | 同一个 GDI+ 解码，BGRA 直通 → 预乘 `bin2d::Image` |
 | `drawNodesBinUI()` | 节点树遍历 |

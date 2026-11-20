@@ -1,6 +1,7 @@
 # 12 - 字体 / 字形处理该归谁：bin2d 收字形，binUI 留排版语义
 
-**状态**：**提案，已开工**（第 2 步 0.37.0 完成、§5 步 0 文档口径已于 2026-11-21 统一、步 1/2 已落地；实施中，文字实现仍全在 binUI）。
+**状态**：**已完成（2026-11-21，bin2d 0.22.7 / binUI 0.38.x）**—— §5 步 3（搬实现到 `libbin2d_text`）
+与步 4（删旧实现、不留开关）都已落地，见文末 §9「实施结果」。
 **类型**：架构 / 分层归属 · **严重度**：中（不阻塞第 2 步，但挡住"bin2d 能画字"这件事）
 **影响面**：binUI `src/backends/binui_glyph_atlas.h`（1169 行）+ `src/font/binui_font_renderer.cpp`；
 bin2d 的依赖声明与 `make layers` 边界；`docs/backend_layering.md` 第 2 步的文字部分。
@@ -129,22 +130,47 @@ public:
 
 | 步 | 做什么 | 状态 | 冒烟线 |
 |---|---|---|---|
-| 0 | **统一文档**：以 `binUI/docs/backend_layering.md:48` 为准（文字归 bin2d），把 bin2d 侧三处改成"待迁" | **未做**（bin2d `layering.md:78/96/187` 仍写"留"） | 两份文档说法一致 |
+| 0 | **统一文档**：以 `binUI/docs/backend_layering.md:48` 为准（文字归 bin2d），把 bin2d 侧三处改成"待迁" | **已完成**（bin2d `layering.md:78/96/196`，2026-11-21） | 两份文档说法一致 |
 | 1 | layering 第 2 步（`Canvas` → binGPU 执行体） | **已完成（0.37.0）** | — |
 | 2 | 接口先定：字形位图 → 设备纹理的上传通道 | **已完成（bin2D 0.22.3 的外部纹理通道）** | `GpuTexCreate/Upload/Destroy/DrawTexture` 已在用（`binui_bin2d.cpp` 的 `GlyphHost2D`） |
-| 3 | 搬实现：`libbin2d_text`（face 加载 + 光栅化 + 图集 + shaping） | **未做** | `pixels-bin2d` 0 容差 + `pixels-bin2d-gpu` 不放宽 |
-| 4 | 删 `binui_glyph_atlas.h` 与 `binui_font_renderer.cpp`，不留开关 | **未做** | 构建绿、`make test` 全过 |
+| 3 | 搬实现：`libbin2d_text`（face 加载 + 光栅化 + 图集 + shaping） | **已完成（bin2d 0.22.7）** | `pixels-bin2d` 0 容差逐页不变 + `pixels-bin2d-gpu` 数字逐页不变（含 `text-shadow` / `text-shadow-multi`） |
+| 4 | 删 `binui_glyph_atlas.h` 与 `binui_font_renderer.cpp`，不留开关 | **已完成** | 构建绿、`make test` / `make partial` 全过、`grep -r "ft2build\|harfbuzz" src include` 为空 |
 
 **为什么现在可以开工**：第 1、2 步都已落地，迁移不再被别的步堵住；而且第 2 步走的是 bin2d 的通用
 纹理通道（不是专门为字形开的接口），说明"文字模块"只需要在它上面加"从字符串到字形"这一层，
 不用再挖新管道。
 
-## 6. 需要拍板的三件事
+## 6. 需要拍板的三件事（**2026-11-21 已拍板**）
 
-- [ ] **形态**：`libbin2d_text` 可选模块 / 独立 `binfont` 仓库 / 直接并入 bin2d 核心（不推荐，破坏零依赖）
-- [ ] **shaping 进不进**：HarfBuzz 跟着字形一起进 bin2d，还是留在 binUI（留在上层则 bin2d 只收"字形序列"）
-- [ ] **字体发现接口**：bin2d 只定义"注入 face + 平台回调"的契约，具体枚举由 binUI 外壳实现（推荐），
-      还是 bin2d 自带 fontconfig/Win32 两套实现
+- [x] **形态**：`libbin2d_text` 可选静态库（不新开仓库、不并进核心库 —— 核心保持"纯 CPU、零第三方依赖"）
+- [x] **shaping 进不进**：进。HarfBuzz 跟着字形一起进 bin2d 文字模块（簇切分与字形紧邻）
+- [x] **字体发现接口**：bin2d 只定义注入契约（`bin2d::text::FaceResolver`），具体枚举（`EnumFontFamiliesEx` / fontconfig）留在 binUI 外壳
+
+## 9. 实施结果（2026-11-21）
+
+**bin2d 侧**（0.22.7）——`make all` 在**没有** FreeType/HarfBuzz 时照常成功：
+
+| 文件 | 行数 | 内容 |
+|---|---|---|
+| `include/bin2d/text.h` | 366 | 对外接口：`Library`（face 加载/生命周期、光栅化、整形）、`Atlas`（图集/缓存/文字阴影）、`Cluster`/`Metrics`/`ShadowLayer`/`FaceResolver` |
+| `src/text/font_face.cpp` | 259 | 注册表、Resolver 注入、回退链与逐字形 cmap 查询、会话与度量、豆腐块 |
+| `src/text/font_raster.cpp` | 285 | 灰度光栅（light hinting / gamma 1.3 / ¼ 相位）+ COLR/CPAL 彩色簇 |
+| `src/text/font_shaping.cpp` | 92 | HarfBuzz 整形 + 复杂脚本检测 |
+| `src/text/glyph_atlas.cpp` | 1040 | 字形/彩色/阴影三套图集、整形缓存、模糊图集、四边形发射、纹理出口（Image / 设备纹理） |
+| `src/text/text_unicode.{h,cpp}` | 63 + 75 | 簇切分（emoji ZWJ/肤色/旗帜）、不可见码点、预乘、簇哈希 |
+| `tests/test_text.cpp` | 276 | 彩色字形 / 豆腐块 / 逐字形回退 / 多层 text-shadow 四条边界 + 出口切换 |
+
+`make layers` 新增一条判据：`src/text` 与 `include/bin2d/text.h` 里出现 `binui`（不分大小写）即红。
+
+**binUI 侧**——`src/backends/binui_glyph_atlas.h`、`src/font/binui_font_renderer.cpp`、
+`include/binui_font_renderer.h` 全部删除；新增 `src/font/binui_font_host.{h,cpp}`（76 + 205 行：
+`C:/Windows/Fonts` 与各发行版路径的探测、以 `FaceResolver` 注入）。
+`binui_bin2d.cpp` 的 `drawText` / `drawTextWrapped` / `textWidth` / `fontMetrics` 只剩
+CSS 语义（居中、换行、避头点、对齐、行高、阴影参数翻译），一行字形代码都没有。
+
+**门禁数字**：`pixels-bin2d` 18/18 页 0 容差逐字节相同；`pixels-bin2d-gpu` 18 页数字与改动前
+逐页相同（`grad-angle` 0.028%/21、`text-shadow` 0.221%/13、`text-shadow-multi` 1.277%/19 等）；
+`make partial` 4/4 `diff=0`；`binUI make test` 全过（含 test_font 35 项）。
 
 ## 7. 验收线（按现在的门禁口径）
 

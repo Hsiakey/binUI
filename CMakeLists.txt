@@ -20,6 +20,11 @@ endif()
 
 # =============================================
 # 第三方：FreeType（字形解析/光栅化）+ HarfBuzz（整形）
+#
+# 0.38.x 起 binUI 自己**不再 include** 这两个库：字形光栅 / 整形 / 图集在 bin2d 的
+# 可选模块 libbin2d_text 里，binUI 只负责"平台字体发现"（src/font/binui_font_host.cpp）
+# 与 CSS 语义。这里保留 subdirectory 是为了让 Makefile 那条 `text-lib` 目标能找到
+# 静态库；CMake 侧本身通过 libbin2d_text.a 间接依赖它们。
 # =============================================
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
 set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
@@ -50,6 +55,9 @@ add_subdirectory(third_party/harfbuzz EXCLUDE_FROM_ALL)
 # 所以 bin2d 是硬依赖：先 `make -C ../bin2D lib`（或用 CMake 构建 bin2D）。
 set(BIN2D_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../bin2D")
 set(BIN2D_LIB "${BIN2D_ROOT}/build-mingw/libbin2d.a")
+# 文字模块（0.38.x）：字形光栅 / 整形 / 图集 / 文字阴影。核心库不链它，
+# binUI 的绘制后端要画字，所以这里和上面的核心库一样按"预构建的静态库"接。
+set(BIN2D_TEXT_LIB "${BIN2D_ROOT}/build-mingw/libbin2d_text.a")
 
 add_library(binui STATIC
 target_include_directories(binui PUBLIC "${BIN2D_ROOT}/include")
@@ -58,9 +66,14 @@ if(EXISTS "${BIN2D_LIB}")
 else()
     message(WARNING "bin2d 静态库不存在：${BIN2D_LIB}（先 make -C ../bin2D lib）")
 endif()
+if(EXISTS "${BIN2D_TEXT_LIB}")
+    target_link_libraries(binui PUBLIC "${BIN2D_TEXT_LIB}")
+else()
+    message(WARNING "bin2d 文字模块不存在：${BIN2D_TEXT_LIB}（先 make -C ../bin2D text-lib）")
+endif()
     src/compiler/binui_compiler.cpp
     src/renderer/binui_renderer.cpp
-    src/font/binui_font_renderer.cpp
+    src/font/binui_font_host.cpp
     src/common/binui_link.cpp
     src/binui_charts.cpp
 )

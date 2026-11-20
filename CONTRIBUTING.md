@@ -10,11 +10,13 @@ include/                # 公共头（格式 / 编译器 / 渲染器 / 字体 / 
                         #   + binui_paths.h / binui_hot_reload.h 两个 header-only 应用工具）
 src/compiler/           # XML、HTML5 → binUI 编译器（含 CSS 解析与级联）
 src/renderer/           # binUI 解析、节点状态、命中测试、事件、动画、滚动、文本编辑
-src/font/               # FreeType + HarfBuzz 字体服务（字形图集）
+src/font/               # 平台字体发现（家族名 → 字体文件路径，FaceResolver 注入）
+                        #   字形光栅 / 整形 / 图集在 bin2d 的可选模块 libbin2d_text（../bin2D/src/text）
 src/backends/           # 绘制后端：**只剩 binui_bin2d.***（binUI ──► bin2d ──► binGPU）
                         #   + 共享头：binui_app.h（无边框外壳）/ binui_draw_nodes.h（遍历）
-                        #   / binui_glyph_atlas.h（排版与图集）/ binui_gfx.h（接口）/ binui_paint.cpp
-                        #   （binui_gl / binui_vk / binui_d3d11 / binui_gpu / binui_auto 已于 0.37.x 删除）
+                        #   / binui_gfx.h（接口）/ binui_paint.cpp
+                        #   （binui_gl / binui_vk / binui_d3d11 / binui_gpu / binui_auto 已于 0.37.x 删除，
+                        #     binui_glyph_atlas.h / binui_font_renderer.cpp 已于 0.38.x 搬进 bin2d）
 src/platform/           # app_win32.*：Win32 窗口外壳 + GDI 绘制（遗留/OLD：只做后备呈现与像素基准）
 src/binui_c.cpp         # C ABI 实现（对外声明在 include/binui_c.h）
 components/             # 标准组件库（纯 HTML+CSS，<use src="…"> 编译期内联）

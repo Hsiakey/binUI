@@ -49,7 +49,12 @@ binGPU 的 CPU 执行模式**（bin2d 不再自己决定在哪算）。文字：
 纹理（binGPU 已有纹理上传），不再走"CPU 逐个字形合成"。
 这一步做完，bin2d 的像素口径与 binGPU 的图元口径合一。
 **文字归属的拆分与迁移顺序见 [issues/12-font-layer-ownership.md](issues/12-font-layer-ownership.md)**
-（bin2d 侧三处文档现在和本条相反，先统一再动代码）。
+
+**已落地（2026-11-21，bin2d 0.22.7 / binUI 0.38.x）**：字形光栅 / 整形 / 图集 / 文字阴影
+搬到 bin2d 的可选静态库 `libbin2d_text`（`bin2d/text.h`）；binUI 侧 `binui_glyph_atlas.h`
+与 `binui_font_renderer.cpp` 已删除，只剩 CSS 排版语义（换行 / 对齐 / 行高 / 阴影参数翻译）
+与平台字体发现（`src/font/binui_font_host.cpp`，以 `FaceResolver` 注入）。
+guards：`make layers` 里新增"文字模块不许出现 binui"；`grep -r "ft2build\|harfbuzz" binUI/src include` 为空。
 
 ### 第三步：删掉 binUI 的三份 GPU 后端（**已完成 2026-11-20**）
 

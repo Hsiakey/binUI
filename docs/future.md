@@ -472,7 +472,7 @@ GL 后端（900×840，同一进程同一个上下文；绘制 = 遍历 + 顶点
 | SVG 路径几何（解析 / 展平 / 包围盒 / 命中） | `include/binui_path.h`（1071 行，纯头文件，只依赖标准库） | 完整，编译期运行期共用 |
 | 填充与描边条带（纯色 / 渐变 / 圆角九宫格 / 四边边框 / 半透明逐行 AA） | `include/binui_paint.h`（1380 行，只额外依赖 `binui_format.h`） | 完整，三端共用同一份数学 |
 | 扫描线路径填充 + 3×3 覆盖 AA | `include/binui_paint.h` §路径填充 | 完整，抗锯齿已落地 |
-| 字形图集与排版 | `src/backends/binui_glyph_atlas.h` | 完整（含亚像素定位开关） |
+| 字形图集与排版 | bin2d 的可选模块 `libbin2d_text`（`../bin2D/include/bin2d/text.h`），0.38.x 起不在本仓库 | 完整（含亚像素定位开关 `BIN2D_TEXT_PHASE_OFF`） |
 | 后端契约（7 原语 + 裁剪栈） | `src/backends/binui_gfx.h` | **一份实现**：`BinUI2D`（`src/backends/binui_bin2d.cpp`）。当年那四套（GDI / GL / VK / D3D11）已依次移除：GDI 0.24.0，GL / VK / D3D11 / binGPU / BinUIAuto 0.37.x |
 | 像素基准 | `tests/pixels-bin2d/` + `docs/pixels/` | `make pixels-bin2d`（CPU 权威，0 容差）+ `make pixels-bin2d-gpu`（唯一 GPU 门禁）。`pixels` / `pixels-vk` / `pixels-d3d11` 随三份后端删除 |
 

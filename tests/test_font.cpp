@@ -1,8 +1,10 @@
-// test_font.cpp - 字体与输入法回归测试（FreeType + HarfBuzz，无窗口）
+// test_font.cpp - 文字模块（bin2d 的 libbin2d_text）+ 输入法（IME）回归测试
 //
 // 覆盖：
-//   1. 字体发现 -> 灰度光栅化（含小字号轻 hinting / gamma 修正）-> 整形度量 -> 彩色判定
+//   1. 字体发现 → 灰度光栅化（含小字号轻 hinting / gamma 修正）→ 整形度量 → 彩色判定
 //      重点守住"改了 hinting/gamma 之后字形仍然非空、度量仍然合理"这条底线。
+//      字形光栅与整形现在在 bin2d 的可选文字模块里（0.38.x），本套件通过
+//      bin2d::text::Library 使用它 —— 平台字体发现仍走 binUI 的 RegisterSystemFonts。
 //   2. 输入法（IME）桥接：Win32 侧组字串与光标索引都是 UTF-16，引擎内部是 UTF-8 字节
 //      偏移，`setCaretByUtf16Index` / `insertText` / `blur` 就是后端要走的整条链。
 //      代理对（emoji）与全角字必须落在字符边界上，否则组字窗会飘、候选框会算错位置。
@@ -14,10 +16,11 @@
 #include <vector>
 
 #include "binui_compiler.h"
-#include "binui_font_renderer.h"
 #include "binui_renderer.h"
+#include "bin2d/text.h"
+#include "font/binui_font_host.h"
 
-using namespace binui_font;
+using namespace bin2d::text;
 using namespace binui;          // 输入法桥接用例要用渲染器的编辑会话 API
 
 static int g_fail = 0;
@@ -43,7 +46,7 @@ struct InkStat {
     int  maxA = 0;      // 最大覆盖率
 };
 
-static InkStat Measure(FontEngine& fe, const char* face, float size, uint32_t cp) {
+static InkStat Measure(Library& fe, const char* face, float size, uint32_t cp) {
     InkStat s;
     GrayGlyph g;
     if (!fe.renderGlyph(face, size, cp, g)) return s;
@@ -159,17 +162,18 @@ int main() {
     // 非 Windows / 无系统字体的环境下字体检查会 skip，但这段必须一直守。
     TestImeBridge();
 
-    FontEngine fe;
-    CHECK(fe.init(), "FontEngine 初始化");
-    registerSystemFonts(fe);
-    if (fe.defaultFace().empty()) {
+    Library fe;
+    CHECK(fe.init(), "文字模块（bin2d::text::Library）初始化");
+    // 平台发现仍由 binUI 注入：模块自己不认识 C:/Windows/Fonts
+    RegisterSystemFonts(fe);
+    if (fe.defaultFace().empty() || fe.fallbackChain().empty()) {
         std::printf("[skip] 没有可用系统字体（非 Windows？），跳过光栅化检查\n");
-        return 0;
+        return g_fail ? 1 : 0;
     }
     std::printf("[info] defaultFace = %s\n", fe.defaultFace().c_str());
 
     const std::string face = fe.defaultFace();
-    const FontMetrics m = fe.metrics(face, 14.0f);
+    const Metrics m = fe.metrics(face, 14.0f);
     CHECK(m.ascent > 0 && m.descent >= 0, "度量：ascent > 0 且 descent >= 0");
     CHECK(m.ascent + m.descent >= 10, "度量：14px 行高合理（>= 10px）");
 
@@ -310,8 +314,8 @@ int main() {
     }
 
     // 7. UI 符号字形：标题栏三颗按钮 + 组件里的图标
-    //    GL/D3D 的字形图集按"非 ASCII -> 中文字体、emoji 范围 -> emoji 字体"分类，
-    //    分类错一颗字形，按钮就变成一块空白（GDI 那边有系统字体回退，看不出来）。
+    //    字形图集按"谁有字形"逐字形回退（问字体的 cmap），分类错一颗字形，
+    //    按钮就变成一块空白（GDI 那边有系统字体回退，看不出来）。
     //    这里守住底线：每个符号至少要有一个候选面画得出笔画。
     {
         struct Sym { const char* name; uint32_t cp; };
@@ -342,15 +346,16 @@ int main() {
     // 这一段守的是"缺字必须看得见"：谁有字形靠字体的 cmap 决定（不是码点区间），
     // 全都没有时必须画空心方框，而不是留白（留白会被当成引擎 bug）。
     std::printf("\n--- 逐字形回退 / 豆腐块 ---\n");
-    CHECK(!fe.fallbackChain().empty(), "回退链已由 registerSystemFonts 填好");
+    CHECK(!fe.fallbackChain().empty(), "回退链已由 RegisterSystemFonts 填好");
 
     {
-        // 未注册的面名要被静默过滤，不能凭空出现在链上
-        FontEngine probe;
+        // 未登记/Resolver 答不出的面名要被静默过滤，不能凭空出现在链上
+        Library probe;
         probe.init();
-        probe.addFont("Only", fe.defaultFace());
+        probe.addFont("Only", "/nonexistent/only.ttf");
         probe.setFallbackChain({ "Only", "NoSuchFace", "Only" });
-        CHECK(probe.fallbackChain().size() == 1, "setFallbackChain 过滤未注册 + 去重");
+        CHECK(probe.fallbackChain().size() == 1 && probe.fallbackChain()[0] == "Only",
+              "setFallbackChain 过滤未登记家族 + 去重");
     }
 
     {
@@ -420,6 +425,27 @@ int main() {
         CHECK(at(midX, midY) == 0, msg);
         std::snprintf(msg, sizeof(msg), "豆腐块 %.0fpx：边框不透明", size);
         CHECK(at(midX, 0) == 255, msg);
+    }
+
+    // 彩色字形（COLR/CPAL）：有彩色 emoji 面时才验
+    {
+        const uint32_t cps[] = { 0x1F600 };   // 😀
+        const char* emojiFace = nullptr;
+        for (const auto& n : fe.fallbackChain()) {
+            if (n == "Segoe UI Emoji" || n == "Noto Color Emoji" || n == "Apple Color Emoji") {
+                emojiFace = "Segoe UI Emoji";   // 模块内部按这个固定名找彩色面
+                break;
+            }
+        }
+        if (emojiFace) {
+            ColorGlyph cg;
+            const bool ok = fe.hasColor(emojiFace, 32.0f, cps, 1);
+            CHECK(ok, "彩色字形：hasColor(😀) = true");
+            const bool ok2 = fe.renderColorCluster(emojiFace, 32.0f, cps, 1, cg);
+            CHECK(ok2 && cg.width > 0 && cg.height > 0 && cg.bgra, "彩色字形：有预乘 BGRA 位图");
+        } else {
+            std::printf("[skip] 没有彩色 emoji 面，跳过 COLR/CPAL 检查\n");
+        }
     }
 
     std::printf("\n%s (%d failure%s)\n", g_fail ? "FAILED" : "PASSED", g_fail,

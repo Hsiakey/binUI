@@ -5,6 +5,30 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.3] - 2026-11-21 【格式 v34 不变】
+
+**binUI 把文字实现交给 bin2D 的可选文字模块（bin2D 0.22.7 的 `libbin2d_text`），自己只留 CSS 排版语义。**
+删掉 `src/backends/binui_glyph_atlas.h`（1172 行）、`src/font/binui_font_renderer.cpp`（632 行）
+与 `include/binui_font_renderer.h`；新增 `src/font/binui_font_host.{h,cpp}`（约 200 行）——
+它只做**平台字体发现**（Windows 的 `C:/Windows/Fonts`、各发行版路径），以
+`bin2d::text::FaceResolver` 的形式注入给 bin2d。
+
+分工从此是这条线：
+
+| 在 bin2d 文字模块 | 在 binUI |
+|---|---|
+| face 加载、字形光栅（hinting / gamma / ¼ 相位 / COLR·CPAL / 豆腐块）、图集与缓存（含多层 `text-shadow` 模糊图集）、shaping（HarfBuzz + 簇切分 + 逐字形回退） | `line-height`、换行与避头点、`text-align`、`text-overflow`、居中、阴影层的 CSS 参数翻译、节点树遍历 |
+
+`drawText` / `drawTextWrapped` / `textWidth` / `fontMetrics` 现在走 `bin2d::text::Atlas`；
+`binUI` 侧**不再出现任何 FreeType / HarfBuzz 的 include**（`grep -r "ft2build\|harfbuzz\|FT_FREETYPE\|hb.h" src include` 为空）。
+
+**像素逐字节不变**（这一版只搬位置）：`pixels-bin2d` 18/18 容差 0 相同；
+`pixels-bin2d-gpu` 18 页数字逐页相同（`text-shadow` 566 px / 0.221% / max 13、
+`text-shadow-multi` 3841 px / 1.277% / max 19 仍在 known 名单）；`make partial` 四点
+`diff=0 max=0`；`make test` 5 套全过。帧时持平（`buttonshow` 0.98 ms、`appshow` 1.18 ms）。
+
+至此 binUI 手里只剩"节点树 + CSS 语义 + 平台外壳"，绘制语义与字形都在 bin2D。
+
 ## [0.38.2] - 2026-11-20 【格式 v34 不变】
 
 两件事，都是"把文档里挂着的账收掉"。

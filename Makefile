@@ -39,7 +39,7 @@ endif
 LIB_OBJS := \
     $(BUILD_DIR)/compiler/binui_compiler.o \
     $(BUILD_DIR)/renderer/binui_renderer.o \
-    $(BUILD_DIR)/font/binui_font_renderer.o \
+    $(BUILD_DIR)/font/binui_font_host.o \
     $(BUILD_DIR)/common/binui_link.o \
     $(BUILD_DIR)/binui_paint.o \
     $(BUILD_DIR)/binui_charts.o
@@ -50,7 +50,11 @@ LIB_A    := $(BUILD_DIR)/libbinui.a
 # 没构建过就明确报错，而不是静默少一堆符号。先 `make -C ../bin2D lib`。
 BIN2D_DIR := ../bin2D
 BIN2D_A   := $(BIN2D_DIR)/build-mingw/libbin2d.a
-LIBS_A    := $(LIB_A) $(BIN2D_A)
+# 文字模块（0.38.x）：字形光栅 / 整形 / 图集 / 文字阴影从 binUI 搬到 bin2d 的可选
+# 静态库。核心库不链它（"纯 CPU、零第三方依赖"那条保持不变），而 binUI 的绘制
+# 后端要画字，所以这里是 binUI 的硬依赖 —— 先 `make -C ../bin2D text-lib`。
+BIN2D_TEXT_A := $(BIN2D_DIR)/build-mingw/libbin2d_text.a
+LIBS_A    := $(LIB_A) $(BIN2D_A) $(BIN2D_TEXT_A)
 
 # binGPU（0.26.1）：窗口呈现走 bin2d::GpuCompositor → bingpu 交换链，也就是
 # master 那条分层里的 "bin2d 的后端交给 binGPU"。
@@ -71,10 +75,12 @@ $(BUILD_DIR)/%.o: $(SRC_DIR)/%.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
 
-# binui_font_renderer：需要 third_party 的 FreeType/HarfBuzz 头
+# 平台字体发现（0.38.x）：只有"家族名 → 字体文件路径"这一层留在 binUI，
+# 字形光栅/整形在图集模块里（bin2d 的 libbin2d_text）。所以这个 .o **不需要**
+# FreeType/HarfBuzz 的头 —— 这正是"binUI 不再出现 ft2build/harfbuzz"的落点。
 $(BUILD_DIR)/font/%.o: $(SRC_DIR)/font/%.cpp
 	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Ithird_party/freetype/include -Ithird_party/harfbuzz/src -c $< -o $@
+	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include -c $< -o $@
 
 # 后端（src/backends/）与 Win32 外壳（src/platform/）：对象路径保持在 build-mingw 根下，
 # 演示程序的链接规则不用跟着改
@@ -103,6 +109,11 @@ $(BUILD_DIR)/binui_bin2d.o: $(SRC_DIR)/backends/binui_bin2d.cpp
 $(BIN2D_A):
 	@echo "[binui] missing bin2d static lib: $(BIN2D_A)"
 	@echo "[binui] path fill uses bin2d coverage (P2 migration); run: make -C ../bin2D lib"
+	@exit 1
+
+$(BIN2D_TEXT_A):
+	@echo "[binui] missing bin2d text module: $(BIN2D_TEXT_A)"
+	@echo "[binui] glyph raster/shaping/atlas live in libbin2d_text; run: make -C ../bin2D text-lib"
 	@exit 1
 
 # 运行期后端选择（0.33.0 的 BinUIAuto）已在 0.37.x 删除：只剩 bin2d 一条路，
@@ -162,12 +173,12 @@ $(TEST_DIR)/test_elements$(EXT): tests/test_elements.cpp $(LIBS_A)
 	@mkdir -p $(TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -I$(EXA_DIR) -o $@ $< $(LIBS_A)
 
-# test_font：字体服务（FreeType + HarfBuzz）+ 输入法（IME）的 UTF-16 光标桥接
+# test_font：字体服务（bin2d 的文字模块：FreeType 光栅 + HarfBuzz 整形）+ 输入法（IME）
+# 头文件：bin2d/text.h（模块）+ font/binui_font_host.h（平台发现）
 $(TEST_DIR)/test_font$(EXT): tests/test_font.cpp $(LIBS_A)
 	@mkdir -p $(TEST_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Ithird_party/freetype/include -Ithird_party/harfbuzz/src \
-	    -o $@ $< $(LIBS_A) -Lthird_party/freetype/build -lfreetype \
-	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include \
+	    -o $@ $< $(LIBS_A) $(FONT_LIBS)
 
 .PHONY: test
 test: $(TEST_BINS)
@@ -194,7 +205,8 @@ ifdef ComSpec
 #   imm32   ：输入法候选窗定位（ImmGetContext / ImmSetCompositionWindow）
 #   msimg32 ：AlphaBlend —— GDI 贴"预乘 alpha 位图"那条降级路径靠它
 #   dwmapi  ：全屏守卫 / 远程会话判定
-# FreeType/HarfBuzz 走静态库（字形光栅与整形在 binui_font_renderer + binui_glyph_atlas.h）。
+# FONT_LIBS 现在是 **libbin2d_text.a 的传递依赖**（字形光栅与整形在那个模块里，
+# binUI 自己的源码已经一行 ft2build/harfbuzz 都没有了）。静态链接，产物自包含。
 SHELL_LIBS := -ldwmapi -limm32 -lmsimg32
 FONT_LIBS  := -Lthird_party/freetype/build -lfreetype \
               -Lthird_party/harfbuzz/build-static/src -lharfbuzz
@@ -430,8 +442,7 @@ $(BUILD_DIR)/bin2d_shot.o: tools/bin2d_shot.cpp
 $(BIN_DIR)/bin2d_shot$(EXT): $(BUILD_DIR)/bin2d_shot.o $(BUILD_DIR)/binui_bin2d.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^ -lgdiplus -lgdi32 -luser32 -lole32 \
-	    -Lthird_party/freetype/build -lfreetype \
-	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz $(BINGPU_LNK)
+	    $(FONT_LIBS) $(BINGPU_LNK)
 
 # bin2d 后端的**真窗口**验证：窗口 + 呈现 + 帧泵。这是"能不能当窗口后端用"的证据，
 # 也是 bin2d_shot 的对照（离屏能出图 ≠ 能上屏）。
@@ -442,8 +453,7 @@ $(BUILD_DIR)/bin2d_window.o: tools/bin2d_window.cpp
 $(BIN_DIR)/bin2d_window$(EXT): $(BUILD_DIR)/bin2d_window.o $(BUILD_DIR)/binui_bin2d.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^ -lgdiplus -lgdi32 -luser32 -lole32 \
-	    -Lthird_party/freetype/build -lfreetype \
-	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz $(BINGPU_LNK)
+	    $(FONT_LIBS) $(BINGPU_LNK)
 
 # partial_shot：局部重绘一致性检查（hover 脏矩形 vs 整帧）。走 .o + -MMD，
 # 免得改了 binui_draw_nodes.h / binui_paint.h 之后工具还跑旧行为（这个仓库在

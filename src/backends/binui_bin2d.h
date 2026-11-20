@@ -148,7 +148,7 @@ public:
     void drawImageNine(uint16_t index, float x, float y, float w, float h,
                        float slice, int repX, int repY, uint32_t tint) override;
 
-    // ---- 文本（排版与光栅复用 binui_glyph_atlas.h，与已删除的三份 GPU 后端同一份）----
+    // ---- 文本（字形光栅/整形/图集在 bin2d 的可选模块 libbin2d_text，见 bin2d/text.h）----
     void drawText(float x, float y, float size, int weight,
                   const std::string& utf8, uint32_t color,
                   bool centerH = false, bool centerV = false,
