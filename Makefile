@@ -493,11 +493,18 @@ tools: $(TOOL_BINS)
 # 任何节点），只能靠这里。见 docs/issues/10-partial-redraw-cull.md。
 #
 # 0.37.x 现状（如实记账）：工具已从 GL 后端移植到离屏 BinUI2D（不需要窗口/GL），
-# 判据从"diff<=64 且 max<=1"收紧到 **0 容差**。它在 buttonshow 上是**红的**：
+# 判据从"diff<=64 且 max<=1"收紧到 **0 容差**。
+#
+# 0.38.0 起它是**绿的**（4 个 hover 点全 diff=0）。此前的红是这样一份欠账：
 #   278,222 -> diff=1825 (clip 内 39 / clip 外 1786) max=15
-# 差异绝大部分落在脏矩形**外面**，即"这一帧画到了自己的 clip 之外"（阴影/模糊图层
-# 只按元素盒裁剪）。这是 bin2d 后端的欠账，不是删除后端带来的 —— 工具留着当判据，
-# 不要靠放宽容差让它变绿。
+# 落点不在"阴影/模糊图层只按元素盒裁剪"，而在 bin2d 的**圆角矩形 CPU 快路径**：
+#   · raster.cpp FillRoundedSolidDirect：裁剪切掉形状中段时 midBegin/midEnd 倒挂，
+#     下圆角带从裁剪区**上方**开画 → 脏矩形外那条 ~12px 的半透明带（1786 个像素）；
+#   · raster.cpp CompositeRowFused：c>=1 那一支用前缀和 run 代替本像素的覆盖率，
+#     裁剪边界那一列（run 还是 0）被整列判掉 → clip 内的单列差异（39 个像素）；
+#   · canvas.cpp compositeSurface：合成只按 target 边界裁，没和当前 clipRect 求交 ——
+#     外阴影按偏移贴回时会溢出脏矩形（GPU 那条出口本来就是按 scissor 裁的）。
+# 判据本身不动：**不要靠放宽容差让它变绿**。
 PARTIAL_CASES := 278,222 358,221 99,116 830,117
 .PHONY: partial
 partial: $(BIN_DIR)/partial_shot$(EXT)
