@@ -1459,6 +1459,13 @@ inline void BinUIAppT<Gfx>::renderFrame() {
     // "放后台还占 0.6~7%" 就是这么来的。现在：有脏区立刻跑，否则最多每帧预算一次。
     if (!dirty_ && pendingW_ <= 0 && now - lastTime_ < frameBudget_) {
         lastDrew_ = false;   // 这一拍照样没活：必须清掉，否则 pump 一直认为"还有活"→ 自旋
+        // 同时把唤醒点摆到"本拍预算用完"的那一刻。**不能留着上一拍的旧值**：pump 只在
+        // "nextFrameTime_ 还在未来"时才睡，留一个过去的时刻等于不睡 —— 醒来又进这里，
+        // 一秒几十万次空转（实测就是 100% 单核、0 帧）。这是宿主时钟的节拍，不是帧节拍：
+        // 真出帧的节拍由设备层（binGPU 的 pace*）给，见 renderOnce 之后那段。
+        using Clock = std::chrono::steady_clock;
+        nextFrameTime_ = lastTime_ + frameBudget_;
+        if (nextFrameTime_ <= now) nextFrameTime_ = now + std::chrono::microseconds(1000);
         return;
     }
     float dt = std::chrono::duration<float>(now - lastTime_).count();
@@ -1505,7 +1512,35 @@ inline void BinUIAppT<Gfx>::renderFrame() {
         return;
     }
     renderOnce();
-    if (byDevice) return;   // 设备层节拍器接管，下面的网格推算不再参与
+    if (byDevice) {
+        // 设备层节拍器接管：**下一拍的唤醒点必须在这里落下来**。
+        //
+        // 以前这里直接 return，`nextFrameTime_` 就永远停在建窗那一刻。pump 的两条等待
+        // 分支都要求"下一拍还在未来"才会睡（见 pump），于是从第二拍起它全程不睡：
+        //   while (running_) pump(9) → PeekMessage → renderFrame（没脏区，秒退）→ 再一遍
+        // 一秒空转几十万次，一个核吃满 —— 而这一秒里**一帧都没画**（BINUI_PERF 的
+        // frames drawn 停在 1）。实测 buttonshow / fontshow 100%，就是这条自旋。
+        //
+        // 两种唤醒点：
+        //   · 这一拍真画了 → 问节拍器还差多久（binGPU 的 bingpu_pace_wait_us）；
+        //   · 这一拍没画（没脏区）→ 按帧预算醒来。这不是"为了画"，是为了推进宿主时钟：
+        //     动画的脏区只能在 update_ 里出现（见上面节拍闸门的注释），不醒就永远不会开始。
+        using Clock = std::chrono::steady_clock;
+        const auto endT = Clock::now();
+        long long waitUs;
+        if (lastDrew_) {
+            // 真画了一拍：**只问节拍器**。0 = "立刻可以再画"（present 已经等过垂直同步，
+            // 或这一拍已经超过目标周期）—— 这时候**不许**自己补一帧预算，否则就是双重等待：
+            // 实测 120 Hz 屏上这一下正好把 animshow 从 119.7 fps 拉到 68 fps。
+            waitUs = gfx_.paceWaitUs();
+            if (waitUs < 0) waitUs = 0;
+        } else {
+            // 这一拍没画：按帧预算醒来，只为了推进宿主时钟（见上一条注释）。
+            waitUs = static_cast<long long>(frameBudget_.count());
+        }
+        nextFrameTime_ = endT + std::chrono::microseconds(waitUs);
+        return;
+    }
 
     // 下一拍的时间点（v0.32.0：**刷新网格**，不是"现在 + 预算"）。
     //
@@ -1728,8 +1763,19 @@ inline int BinUIAppT<Gfx>::pump(int timeoutMs) {
     } else if (timeoutMs > 0) {
         // 完全没活：也睡到帧点（v0.32.0：以前 paced 时用毫秒粗睡省电，但那样醒来时刻
         // 落在 15.6ms 的 OS 节拍上，动画一开动就要多漂半拍；有空转闸门在，粗睡省不了多少）。
+        //
+        // v0.35.0：**必须保证真睡**。这条分支的旧写法是"nextFrameTime_ 在未来才睡"，
+        // 于是只要上游少更新一次唤醒点（设备层节拍器接管后漏更新，就是那个 100% 单核的
+        // bug），这里就退化成纯自旋。现在：帧点在未来就睡到帧点；帧点已经过去（不该发生，
+        // 属于上游漏更新）按调用方给的超时粗睡 —— 兜底是 ~120 次/秒，不是几十万次。
+        // 注意**不能**用"now + 一帧预算"当兜底：定时器会早醒不到 1ms，那 1ms 的早醒会让
+        // 闸门提前返回，再垫一整帧预算 → 实测 animshow 从 119.7 fps 掉到 68 fps（1.75 个
+        // 刷新周期/帧）。这里的兜底只在唤醒点真的过期时才生效。
         const auto now = std::chrono::steady_clock::now();
-        if (nextFrameTime_ > now) waitForFrame(nextFrameTime_);
+        const auto wake = nextFrameTime_ > now
+                              ? nextFrameTime_
+                              : now + std::chrono::milliseconds(timeoutMs);
+        waitForFrame(wake);
     }
 
     while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
