@@ -2,7 +2,9 @@
 
 > **状态：01–08 已修复、10 已修复**（改动见 [CHANGELOG.md](../../CHANGELOG.md)）；
 > **09 不修（WON'T FIX）**：v0.16.17 起 GDI 后端标记为**遗留（OLD）后端**，只保证不崩/不阻塞/能出基准图，
-> 新特性只做 GL / Vulkan / D3D11 三端。
+> 新特性只做 GL / Vulkan / D3D11 三端；
+> **11 = box-shadow 多层环（性能，试做已回退，等金标准策略）；12 = 字体/字形归属提案（待拍板，未实施）；
+> 13 = 绘制侧还剩哪些该交 GPU（审计：先换执行体，再搬三件每像素数学）**。
 
 复盘环境，所有条目都在同一套环境里复现：
 
@@ -29,6 +31,9 @@ Windows 11 · MinGW-w64 gcc · Go 1.26（cgo）
 | 08 | [Go 绑定文档说错「主 goroutine 天然固定线程」](08-go-binding-thread-affinity.md) | documentation | **高（踩了就必现）** | 宿主不 `LockOSThread` → 跨线程调 Win32/WGL → 随机崩或退出挂死；**02 的崩溃就是这条** |
 | 09 | [GDI 的文字矩形比节点盒小一圈，大字号被上下裁掉](09-gdi-text-clip.md) | bug（观感）→ **不修** | 低（GDI 已降级为遗留后端） | `DrawTextW` 按文字矩形裁剪；GPU 三端完整。留作记录 |
 | 10 | [局部重绘剔除判据写反了一侧（hover 后冒出"影子/边框"）](10-partial-redraw-cull.md) | bug | **高** | 四端都有；只出现在**局部重绘**路径，整帧像素基准看不见；判据收成 `PaintNodeInClip` 一份实现 + `make partial` 对拍 |
+| 11 | [box-shadow 被近似成多层环，吃掉 64% 的圆角填充像素](11-shadow-rings.md) | perf | 中（不影响正确性，挡 120 fps） | 每帧 fillRounded 的 63.8% 像素是阴影环，且环是**整块**画的（同一块 cache line 写 5 遍）。环带化实测**性能平账、像素必变**（±2 缝隙 / 页面 1.3%）→ 已回退，等金标准策略 |
+| 12 | [字体/字形处理该归谁：bin2d 收字形，binUI 留排版语义](12-font-layer-ownership.md) | 提案（架构 / 分层归属） | 中（不阻塞第 2 步，但挡"bin2d 能画字"） | 字形光栅化 / 整形 / 图集该进 bin2d（建议 `libbin2d_text` 可选模块）；CSS 排版语义留 binUI；平台字体发现由外壳注入。**动手前先统一两份互相矛盾的 layering 文档** |
+| 13 | [绘制侧还剩哪些该交给 GPU：先换执行体，再搬三件每像素数学](13-gpu-migration-candidates.md) | 审计 + 提案（performance / 架构） | 中（不阻塞，决定下一轮优化方向） | 实测 CPU 绘制只剩 36 / 19 µs/帧，**再搬任务是省微秒**；大头是 bin2d 整条 CPU 光栅换 binGPU 执行体（12.11 → 0.75 ms，16×）；真该搬的三件：颜色矩阵滤镜、SDF 阴影、SDF 线段（圆角模板 SDF 已就绪只差接线）；搬前先统一 AA 定义 |
 
 ## 修复顺序建议
 
@@ -69,4 +74,3 @@ Windows 11 · MinGW-w64 gcc · Go 1.26（cgo）
   用 IME 无关的方式注入（`WM_CHAR`）就正常。不是 `BINUI_EV_INPUT` 的问题。
 - **`go vet` 报 `possible misuse of unsafe.Pointer`** —— 在 `bindings/go/binui/binui.go`
   的上游代码里，见 07 的最后一段（顺手提了，算绑定侧的小活）。
-| 11 | [box-shadow 被近似成多层环，吃掉 64% 的圆角填充像素](11-shadow-rings.md) | perf | 中（不影响正确性，挡 120 fps） | 每帧 fillRounded 的 63.8% 像素是阴影环，且环是**整块**画的（同一块 cache line 写 5 遍）。环带化实测**性能平账、像素必变**（±2 缝隙 / 页面 1.3%）→ 已回退，等金标准策略 |
