@@ -281,7 +281,8 @@ inline void drawNodesBinUI(IBinUIGfx& gfx, const BinUIRenderer& renderer, const 
 
     // ★ 环境变量**只查一次**：下面两处调试打印原本在每个节点身上调 std::getenv，
     // 而 UCRT 的 getenv 每次都要遍历环境表（≈0.5 µs/次）。一个几千节点的页面光这一项
-    // 就要 1 ms+；同样的坑在 Vulkan 后端的 fillRect 里也踩到过（见 binui_vk.cpp）。
+    // 就要 1 ms+；同样的坑在 Vulkan 后端的 fillRect 里也踩到过（binui_vk.cpp，
+    // 该后端已于 0.37.x 整份删除，见 src/backends/binui_ui.h 顶部的清单）。
     static const bool dbgClip = std::getenv("BINUI_DEBUG_CLIP") != nullptr;
     // v0.16.33：同一类坑在 clip-path（0.16.24）/ mask（0.16.26）上又踩了一次 —— 那两个
     // 调试打印写在**节点循环里**，于是每个节点都要 std::getenv 一次。实测这是遍历时间的

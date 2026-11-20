@@ -1,20 +1,23 @@
-// binui_glyph_atlas.h - 后端无关的字形图集与文本排版（GL / Vulkan 共用）
+// binui_glyph_atlas.h - 后端无关的字形图集与文本排版
 //
-// 为什么要有这一层：文本是 UI 里几何最碎、最容易两端跑偏的东西。谁自己写一份
-// "格子边长 / advance / 基线 / 图集代" 的算法，两端的换行位置和字间距就会慢慢
+// 为什么要有这一层：文本是 UI 里几何最碎、最容易各端跑偏的东西。谁自己写一份
+// "格子边长 / advance / 基线 / 图集代" 的算法，各端的换行位置和字间距就会慢慢
 // 分叉，像素回归也就只能靠"容差"遮着。所以这里把**排版 + 光栅化 + 缓存**整份
 // 抽出来，后端只负责两件事：
 //
-//   1) IGlyphTexHost —— 把位图变成纹理（GL: glTexSubImage2D；VK: staging + vkCmdCopyBufferToImage）
+//   1) IGlyphTexHost —— 把位图变成纹理（现在唯一的实现是 binui_bin2d.cpp 的两个宿主：
+//      CPU 光栅写进 bin2d::Image、GPU 执行体写进设备纹理；当年 GL / Vulkan 后端的
+//      glTexSubImage2D / staging 拷贝已随那两份后端在 0.37.x 删除）
 //   2) 把回调给出的四边形画出来（顶点、批次、裁剪都由后端管）
 //
-// 这样 GL 与 Vulkan 的文字是**同一份像素**：像素回归里两端必须 0 差异。
+// 这条边界的历史价值就在这里：三份 GPU 后端 + bin2d 后端跑的是**同一份**排版与光栅，
+// 所以"换后端"从来不该改变换行位置与字间距 —— 像素回归里那几条 0 差异是这么来的。
 //
 // 图集格式统一 BGRA8（白字预乘 alpha + 彩色字形原样），与 GL 历来的做法一致：
 // 一个着色器、一种取样公式就能覆盖灰度字、彩色 emoji 和图片。
 // 单通道 R8 图集能省 3/4 显存，但要多一条着色器分支，属于 P4 的内存优化，不在 P3 做。
 //
-// 这份头文件只有 C++ 标准库 + binui_font_renderer 依赖，两个后端都能直接 include。
+// 这份头文件只有 C++ 标准库 + binui_font_renderer 依赖，任何后端都能直接 include。
 #ifndef BINUI_GLYPH_ATLAS_H
 #define BINUI_GLYPH_ATLAS_H
 

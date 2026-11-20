@@ -11,7 +11,7 @@
 
 namespace binui {
 
-class IBinUIGfx; // 前置声明：draw() 只认后端**接口**，不再绑死 BinUIGL
+class IBinUIGfx; // 前置声明：draw() 只认后端**接口**，不绑死任何具体后端（BinUI2D / 已删除的 GL 后端都一样）
 
 // 图表基类：定位容器 + 动画时钟 + 失效回调
 class BinUIChart {
@@ -28,7 +28,7 @@ public:
     // 应用 updateFn 每帧调用：推进动画；返回本帧是否有变化（需要重绘）
     virtual bool tick(float dt) = 0;
     // 应用 drawFn 在 drawNodesBinUI 之后调用：图表直接向后端绘制（折线等非矩形元素）。
-    // 参数是**接口**而不是 BinUIGL：这条链早就是后端无关的（只用到 fillRounded /
+    // 参数是**接口**而不是具体后端类：这条链早就是后端无关的（只用到 fillRounded /
     // fillLine 两个 IBinUIGfx 方法），绑死具体后端会让核心库反过来依赖某个后端实现。
     virtual void draw(IBinUIGfx& gfx) { (void)gfx; }
 

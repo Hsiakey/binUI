@@ -1,63 +1,45 @@
-// binui_ui.h - 示例/工具的统一入口：编译期选后端
-//
-// **默认后端是 bin2d（0.29.0 起）**。这不是换了个等价实现，而是 master 那条分层的
-// 落点：
+// binui_ui.h - 示例/工具的统一入口：**只有一条绘制路径**
 //
 //     binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D11
 //
-// binUI 这一层不该再自己拿图形 API（以前圆角/渐变/字形要分别在 GL、VK、D3D11 三处
-// 各写一遍，改一处漏两处）。现在所有 2D 语义都交给 bin2d，GPU 只负责"把 Surface
-// 送上屏"（bin2d::GpuCompositor → binGPU 交换链），没显卡时退回系统贴屏。
+// 这段分层终于在 0.37.x 收尾（docs/backend_layering.md 第 3c 步）：binUI 这一层
+// **不再有任何图形 API**、也不再有自己的 2D 光栅。binUI 只负责"节点树 → 原语调用"，
+// 2D 语义在 bin2d，设备/交换链在 binGPU。
 //
-// 三份 GPU 后端还在，但降级成**可选的对照构建**：
-//   -DBINUI_GPU_GL     → BinUIGL / BinUIAppGL     （像素参考实现，make pixels 用）
-//   -DBINUI_GPU_VK     → BinUIVK / BinUIAppVK     （make demos-vk）
-//   -DBINUI_GPU_D3D11  → BinUID3D / BinUIAppD3D   （make demos-d3d11）
-//   -DBINUI_GPU_2D     → BinUI2D / BinUIApp2D     （默认，写出来只是为了显式）
+// **已删除**（2026-11-20，三份老 GPU 后端 + 设备层那份 + 运行期选择器，共 ~12k 行）：
+//   src/backends/binui_gl.{h,cpp}      —— OpenGL 3.3 后端（含 WGL、自己的 GLSL）
+//   src/backends/binui_vk.{h,cpp}      —— Vulkan 后端（含 SPIR-V 常量表 binui_vk_shaders.h）
+//   src/backends/binui_d3d11.{h,cpp}   —— D3D11 后端（含自己的 HLSL）
+//   src/backends/binui_gpu.{h,cpp}     —— 设备层直接建在 binGPU 上的那份（binUI 终点实现的前身）
+//   src/backends/binui_auto.{h,cpp}    —— 运行期按 VK > GL > D3D11 > CPU 挑后端的选择器
+// 于是 `-DBINUI_GPU_GL|VK|D3D11|2D` 这四个编译期宏、以及 `BINUI_GPU=vk|gl|d3d11|gpu|2d`
+// 这个环境变量一起退场 —— 没有可挑的了，只剩 bin2d 这一条。
 //
-// 四个后端的契约是同一份 IBinUIGfx，所以 demo 的绘制代码（含 <canvas> 回调）不用改。
-#if !defined(BINUI_UI_H)
+// 它们的历史实现记录仍在 docs/vulkan_design.md / docs/p3b-plan.md（已标注"已删除"），
+// 但源码不再保留。
+//
+// 历史：0.29.0 起默认后端就是 bin2d；0.33.0 一度改成运行期选择（BinUIAuto）；0.37.x
+// 把另外四份删干净，UiApp / UiBackend 直接固定成 bin2d 的那一份。
+#ifndef BINUI_UI_H
 #define BINUI_UI_H
 
 #include <functional>
 
 #include "backends/binui_draw_nodes.h"   // drawNodesBinUI（后端无关遍历）
-
-// 0.33.0：**默认是运行期选择**（BinUIAuto）—— 问 binGPU 这台机器有什么，按
-// VK > GL > D3D11 > CPU 挑一个。编译期宏仍然可用，但降级成"钉住某个后端做对照/金标准"。
-#if defined(BINUI_GPU_VK)
-#include "backends/binui_vk.h"
-#elif defined(BINUI_GPU_D3D11)
-#include "backends/binui_d3d11.h"
-#elif defined(BINUI_GPU_GL)
-#include "backends/binui_gl.h"
-#elif defined(BINUI_GPU_2D)
-#include "backends/binui_bin2d.h"
-#else
-#include "backends/binui_auto.h"
-#endif
+#include "backends/binui_bin2d.h"        // BinUI2D / BinUIApp2D
 
 namespace binui {
 
-#if defined(BINUI_GPU_VK)
-using UiBackend = BinUIVK;
-using UiApp     = BinUIAppT<BinUIVK>;
-#elif defined(BINUI_GPU_D3D11)
-using UiBackend = BinUID3D;
-using UiApp     = BinUIAppT<BinUID3D>;
-#elif defined(BINUI_GPU_GL)
-using UiBackend = BinUIGL;
-using UiApp     = BinUIAppT<BinUIGL>;
-#elif defined(BINUI_GPU_2D)
+// 编制期只剩一个后端，`UiBackend` / `UiApp` 这两个名字留着是为了不动 9 个示例的源码
+// 与 tools/draw_bench.cpp 的调用点。
 using UiBackend = BinUI2D;
+#ifdef _WIN32
+// 无边框窗口外壳（BinUIAppT<Gfx>）只在 Windows 上有；非 Windows 平台只用 BinUI2D 出图。
 using UiApp     = BinUIApp2D;
-#else
-using UiBackend = BinUIAuto;
-using UiApp     = BinUIAppT<BinUIAuto>;
 #endif
 
 // <canvas> 绘制回调：参数是**接口**（IBinUIGfx），不是具体后端 —— 这样 demo 的绘制代码
-// 在三个后端之间完全通用，也满足"将来做运行期后端选择"的前置条件。
+// 与"谁在执行"完全解耦（这条契约就是三份老后端能删掉的原因之一）。
 using UiCanvasDrawFn = std::function<void(IBinUIGfx& gfx, uint16_t nodeId,
                                           float x, float y, float w, float h)>;
 
@@ -73,31 +55,11 @@ inline void drawUi(IBinUIGfx& gfx, const BinUIRenderer& renderer, const void* cl
     drawNodesBinUI(gfx, renderer, clipRect, shared);
 }
 
-// ---------------------------------------------------------------------------
-// 运行期后端选择（BINUI_GPU=vk|gl|d3d11）—— **预留接口，尚未实现**，见
-// docs/vulkan_design.md §7.5。现状是编译期选：本文件顶部的 BINUI_GPU_VK /
-// BINUI_GPU_D3D11 决定 UiBackend / UiApp，一份源码编出三个 exe。
-//
-// 要接的位置就三处（现在已把前两处清理干净了）：
-//   1. 调用方已不依赖具体类型：setDrawFn / canvas 回调都是 IBinUIGfx&；
-//   2. 遍历、图集、外壳都吃接口或模板（drawNodesBinUI / GlyphAtlas / BinUIAppT<Gfx>）；
-//   3. 缺的是 —— 一个 `IBinUIApp` 抽象（run/pump/退出/setXXX）+ 工厂
-//      `std::unique_ptr<IBinUIApp> CreateUiApp(BackendId)`，工厂里按
-//      getenv("BINUI_GPU") 选中某个 BinUIAppT<BinUIVK|BinUIGLGDgi|BinUID3D> 实例。
-//      再做这一步时，三个后端的 .o 要同时链进同一个 exe（现在是每个 exe 只链一个）。
-// ---------------------------------------------------------------------------
+// 当前后端名（日志/诊断用）。以前这里按宏返回 "vulkan"/"d3d11"/"gl"/"auto"，
+// 现在只有 bin2d；**实际生效的那一级**由 BinUI2D::presentBackendName() 报
+// （"bin2d+gpu" / "bin2d+gpu-compositor" / "bin2d+gdi" / "bin2d+offscreen"）。
 inline const char* UiBackendName() {
-#if defined(BINUI_GPU_VK)
-    return "vulkan";
-#elif defined(BINUI_GPU_D3D11)
-    return "d3d11";
-#elif defined(BINUI_GPU_GL)
-    return "gl";
-#elif defined(BINUI_GPU_2D)
     return "bin2d";
-#else
-    return "auto";   // 运行期选：真实后端看启动时那行 [binui] 后端:
-#endif
 }
 
 // 点击定位输入框光标：placeCaretAtClick(renderer, gfx, x, y) —— 模板在 binui_app.h 里，

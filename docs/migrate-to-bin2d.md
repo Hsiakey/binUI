@@ -175,7 +175,8 @@ binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D
   18 个像素用例里 **99.4%–100% 的差异像素落在 1px 边缘上**（`circle` 99.9%、
   `image-round` / `image-mip` 100%）。这是换实现的标准差，不是布局或颜色错。
   所以 `make pixels-bin2d` 用**容差 0 的自回归**（对照 `tests/pixels-bin2d/`），
-  与 GL 基准的差异用 `make bin2d-vs-gl` **只报告不判失败**。
+  与 GL 基准的差异当年用 `make bin2d-vs-gl` **只报告不判失败**
+  （那个目标随 GL 后端在 0.37.x 删除；`docs/pixels` 现在只作为 `pixels-bin2d-gpu` 的参照）。
 - **发现 GL 基准一处伪影**：`grad-angle` 第三个面板（180° 垂直渐变）在 GL 输出里 y=43
   这一行是 `(202,0,53)`，上下两行是 `(234,0,21)` / `(191,0,64)` —— 单调渐变中间插了一行
   偏暗的接缝。bin2d 输出 `(206,14,63)`，单调。**这条 bin2d 更正确。**
@@ -218,31 +219,38 @@ binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D
 
 #### 删后端的清单（0.27.0 审计：`IBinUIGfx` 之外还差什么）
 
+> **⚠ 历史记录（0.27.0 时的审计）**：这份清单在 0.29.0 ~ 0.37.x 之间逐条还清了，
+> 所列的 `binui_gl.*` / `binui_vk.*` / `binui_d3d11.*` 与 `BinUIGL` / `BinUIAppGL`
+> **已于 2026-11-20 整份删除**（清单见 [`backend_layering.md`](backend_layering.md) 第 3c 步）。
+> 下面的表格读作"当时还差什么、后来怎么补的"，不是待办。
+
 规模：`binui_gl.*` 111,793 B + `binui_vk.*` 233,825 B + `binui_d3d11.*` 117,275 B
 ≈ 452 KB。删文件本身不难，难的是下面两类。
 
-**A. 编译期硬依赖（不补就编不过）**
+**A. 编译期硬依赖（不补就编不过）** —— 下面四行已全部完成（`binui_charts.h` 改成 `IBinUIGfx&`、
+`src/binui_c.cpp` 改成 `BinUIApp2D`、`binui_ui.h` 只剩 bin2d、`Makefile` 只链 `binui_bin2d.o`）：
 
-| 位置 | 现状 | 要改成 |
+| 位置 | 现状（0.27.0 当时） | 要改成 |
 |---|---|---|
-| `include/binui_charts.h:14,31,79` | `virtual void draw(BinUIGL&)` | `IBinUIGfx&`（内部只用到 `fillLine`，本就是接口方法） |
-| `src/binui_c.cpp:52,211,216` | `std::unique_ptr<BinUIAppGL>` | `BinUIApp2D`；`Makefile:452,457`、`CMakeLists.txt:89,93` 同步 |
-| `src/backends/binui_ui.h:21-23,36-38,71-81` | 默认分支是 GL | 默认改成 2D（`-DBINUI_GPU_2D` 分支已存在） |
-| `Makefile:212-293 / 469`、`CMakeLists.txt:82-84,114-146` | 9 个 demo 全链 `binui_gl.o`；**CMake 里没有 bin2d 目标** | 新建 2D 目标（Makefile 侧 `demos-2d` 已就位） |
+| `include/binui_charts.h:14,31,79` | `virtual void draw(BinUIGL&)` | ✅ 已改 `IBinUIGfx&`（内部只用到 `fillLine`，本就是接口方法） |
+| `src/binui_c.cpp:52,211,216` | `std::unique_ptr<BinUIAppGL>` | ✅ 已改 `BinUIApp2D`（0.37.x 的 `BinUIAuto` 中间态也一并退场） |
+| `src/backends/binui_ui.h:21-23,36-38,71-81` | 默认分支是 GL | ✅ 已改：**只剩 bin2d**，按后端名分发的分支全删 |
+| `Makefile:212-293 / 469`、`CMakeLists.txt:82-84,114-146` | 9 个 demo 全链 `binui_gl.o`；**CMake 里没有 bin2d 目标** | ✅ 已改：`BACKEND_OBJS` 只有 `binui_bin2d.o` |
 
 唯一的"薄壳"：`drawNodesGL`（`binui_gl.cpp:2104`，6 行，等于 `drawNodesBinUI`）、
 `flushFrame`（只服务 `make bench-gl`）、`BinUIGLGdi/BinUIAppGLGdi` 别名（零调用者）。
-`tests/` 目录对四份后端**零引用** —— 测试层早就后端无关了。
+`tests/` 目录对四份后端**零引用** —— 测试层早就后端无关了（`tests/baseline/` 里的三端指纹
+随后端删除成为历史存档）。
 
 **B. bin2d 还缺的能力（补了才谈得上等价替换）**
 
-| 能力 | 三份 GPU 后端 | bin2d 现状 | 影响 |
+| 能力 | 三份 GPU 后端（**已删除**） | bin2d 现状 | 影响 |
 |---|---|---|---|
 | **透明分层窗** | GL `glReadPixels`→`UpdateLayeredWindow`（gl.cpp:1453-1503）/ VK 1599 / D3D 1445 | ✅ **0.28.0 已补**（`present()` 第一支 → `bin2d+layered`） | 无 |
 | `setImageFilter` | 三端都有 | ✅ **0.28.0 已补**（`ColorMatrix` + 按 (图,矩阵) 缓存变体） | 无 |
 | 图层 `drop-shadow` | 三端都有 | ✅ **0.28.0 已补**（上色轮廓 → σ 模糊 → 逆序合成到本体下面） | 无 |
-| `readbackPixels` | VK 4062 / D3D 2327（GL 没有，靠 BitBlt） | `pixels()` / `savePng()`（预乘 RGBA，语义不同） | 只影响 `vk_shot` / `d3d11_shot` 等工具，随删 |
-| VK 诊断四项 | `setCaptureReadback` / `swapchainActive` / `presentUsedGdi` / `deviceMemoryBytes` | 无 | 只影响 `vk_window` / `vk_stress`，随删 |
+| `readbackPixels` | VK 4062 / D3D 2327（GL 没有，靠 BitBlt） | `pixels()` / `savePng()`（预乘 RGBA，语义不同） | 只影响 `vk_shot` / `d3d11_shot` 等工具 —— **已随后端删除** |
+| VK 诊断四项 | `setCaptureReadback` / `swapchainActive` / `presentUsedGdi` / `deviceMemoryBytes` | 无 | 只影响 `vk_window` / `vk_stress` —— **已随后端删除** |
 | `presentPacesFrames` | 三端都有真判据 | 恒 false（保守） | 只影响帧相位，不挂功能 |
 
 MSAA 解析 / DPI / `RemoteSession` / `fullscreenPresent_` **都不是后端的事**：

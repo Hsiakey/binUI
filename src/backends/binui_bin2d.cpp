@@ -179,7 +179,8 @@ void BlitRgbaStraightInto(bin2d::Surface& dst, int x, int y, int w, int h,
 // 所以字形位图逐字节相同 —— 差异只可能来自后面的采样（见 drawText 的注释）。
 //
 // 0.22.3 加的第二条路（deviceTextures）：GPU 执行体下不再用 Image/Surface，
-// 而是直接管执行体的纹理句柄 —— 与 binui_gpu.cpp 的 GpuGlyphHost 同一套做法
+// 而是直接管执行体的纹理句柄 —— 与被删除的 binui_gpu.cpp 的 GpuGlyphHost 同一套做法
+// （binui_gpu.cpp 已于 0.37.x 删除，那套做法搬到了这里）。
 // （create 一次、每次只上传新格子那块矩形）。为什么必须这样：
 //   · Image 那条路的口径是"图片不变"，图集边画边改就只能整张重传（1024² = 4 MB/次），
 //     一页文字一帧要改几十个格子；

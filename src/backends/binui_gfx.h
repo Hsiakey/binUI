@@ -1,6 +1,7 @@
 // binui_gfx.h - 绘制后端契约（v19）
 //
-// 任何 binUI 绘制后端（GDI / D3D11 / GL / Vulkan / 将来的 Metal）都实现这一套接口：
+// 任何 binUI 绘制后端（现在只剩 binui_bin2d.cpp 一份；GDI / D3D11 / GL / Vulkan 那几份
+// 已随 0.37.x 的分层收尾删除）都实现这一套接口：
 // 节点树遍历只认这 7 个原语 + 裁剪栈，不碰任何后端私有状态。
 //
 // 六条硬约定（docs/vulkan_design.md §1）：
@@ -55,8 +56,8 @@ public:
     //   present 是 119.9 fps。判据（刷新率、present mode、present 真实耗时）全在设备层，
     //   外壳猜不出来。所以：**问后端"还差多久"，不再自己算。**
     //
-    //   `paceAvailable() == false` 的后端（仓里遗留的 gl/vk/d3d11 三份实现）仍然由
-    //   外壳的老网格兜底 —— 它们本来就要删（见 docs/backend_layering.md 第 3 步）。
+    //   `paceAvailable() == false` 的后端由外壳的老网格兜底 —— 仓里已删除的
+    //   gl/vk/d3d11 三份实现就是这种（见 docs/backend_layering.md 第 3 步，3c 已完成）。
     virtual bool paceAvailable() const { return false; }
     // 生效的目标帧间隔（ms）；0 = 不掐拍（无限制）。也用来当"宿主时钟多久推进一次"。
     virtual double paceFrameMs() const { return 0.0; }

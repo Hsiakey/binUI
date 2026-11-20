@@ -5,6 +5,55 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.0] - 2026-11-20 【格式 v34 不变】
+
+**收尾：binUI 从此只有一条绘制路径 —— `binUI ──► bin2D ──► binGPU`。** 三份老 GPU 后端
+连同过渡期那份设备层实现一起删除：**26 个文件整份删掉、-15,121 行**（`binui_gl` 2,375 /
+`binui_vk` 4,676 / `binui_d3d11` 2,559 / `binui_gpu` 1,848 / `binui_auto` 461 /
+两份着色器头 249 / 六个对照工具 1,011 / `tools/vk_shaders/` 4 份 GLSL + 4 个 .spv）。
+
+这是 0.29.0 那条迁移的真正收尾，也是 master 定的分层第一次完整成立：
+
+- binUI 决定**画什么**（节点树 → `IBinUIGfx` 原语）；
+- bin2D 决定**2D 语义**（圆角 / 渐变 / 字形 / 九宫格 / 图层 / 毛玻璃 / 裁剪 / 混合）；
+- binGPU 决定**怎么画、用什么画**（VK / GL / D3D11 × GPU / CPU、MSAA 档位、按需 mip）。
+
+### 活的路径与门禁
+
+| 用途 | 入口 | 门禁 |
+|---|---|---|
+| 窗口 | `BinUIApp2D`（`BinUIAppT<BinUI2D>`，外壳仍是 `binui_app.h`：输入 / IME / 拖边框 / DPI / 帧节流） | `make test`（`test_shell`） |
+| 离屏出图 | `BinUI2D::init(w,h)` + `savePng` | `make pixels-bin2d`（CPU 光栅，**0 容差**，像素权威） |
+| GPU 出图 | `BINUI2D_GPU=1` | `make pixels-bin2d-gpu`（18 页对 `docs/pixels`，唯一 GPU 像素门禁） |
+
+删掉的 Makefile 目标：`pixels` / `pixels-gpu` / `pixels-vk` / `pixels-d3d11` / `pixels-d3d` /
+`demos-vk` / `demos-d3d11` / `bin2d-vs-gl` / `baseline*` / `bench-gl` / `vk-window` /
+`vk-stress` / `resize-bench`。`-lopengl32` / `-ld3d11` / `-ldxgi` / `-ld3dcompiler`
+一并从链接行里退场。
+
+`src/backends/binui_ui.h` 重写成只提供 bin2d 那条路，九个 example 与 `tools/draw_bench`
+因此都只剩一个后端可选 —— 这也正是"砍掉整个 backends 目录"的意思：没有第二个选项。
+
+`tools/partial_shot.cpp` **移植**而不是删除（它守的是脏矩形语义，不该随 GL 陪葬）：
+从"隐藏窗口 + GL + BitBlt"改成离屏 `BinUI2D`，判据收紧到 0。
+
+### 已知红灯（下一版修）
+
+`make partial` 现在是**红的**：`buttonshow` 四个 hover 点差 1825 像素，其中 **1786 个在脏
+矩形之外**（max 15）。已用探针钉死机制：整帧重画两遍 diff=0（幂等）、整屏 clip 重画 diff=0、
+**脏矩形 clip 重画才泄漏** ⇒ 是"局部重绘时阴影/模糊图层画到了自己 clip 之外"（它们按 layer
+bounds 外的 pad 绘制，没有与 `canvas` 的裁剪矩形求交），不是工具口径问题。这条在 bin2d 的
+图层合成与 clip 求交那一侧，与本次删除无关（bin2d 那条路 0.37.x 起就是这样，只是以前
+`partial_shot` 走的是 GL 后端，照不到它）。
+
+### 文档
+
+`docs/backend_layering.md` 的 3c 标成**已完成**并写清删了什么、剩下什么路径；
+`vulkan_design.md` / `p3b-plan.md` / `migrate-to-bin2d.md` / `future.md` / `README.md` /
+`CONTRIBUTING.md` 里关于三份后端的段落全部标"历史 / 已删除"（`CONTRIBUTING.md` 那条
+"新特性只做 GL / VK / D3D11 三端"的硬规矩一并改掉，否则下一个人会照着往回调）。
+`versions/` 下的历史快照没动。
+
 ## [0.37.4] - 2026-11-20 【格式 v34 不变】
 
 **`svg-filter` 那 12.9% 清了**：GPU 执行体有了设备端离屏层（bin2D 0.22.5），

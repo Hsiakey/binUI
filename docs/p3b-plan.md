@@ -1,4 +1,7 @@
-> **状态：已实施（0.25.0）**。本文件保留为决策记录，里面的行号/行数已过期；
+> **状态：已实施（0.25.0）**，且文中讨论的三个后端已在 0.37.x **整份删除**
+> （见 [`backend_layering.md`](backend_layering.md) 第 3c 步）。
+> 本文件保留为决策记录，里面的行号/行数与 `binui_gl.cpp` / `binui_vk.cpp` /
+> `binui_d3d11.cpp` 的文件引用都已过期（那些文件不存在了）；
 > 实际改动、实测数字与验收见 [CHANGELOG 0.25.0](../CHANGELOG.md) 与
 > [migrate-to-bin2d.md](migrate-to-bin2d.md) 的 P3 段。
 

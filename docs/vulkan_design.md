@@ -1,5 +1,15 @@
 # Vulkan 后端设计（P1~P5）
 
+> **⚠ 历史文档（2026-11-20 之后）：本文描述的 Vulkan 后端已整份删除。**
+> `src/backends/binui_vk.{h,cpp}`、`src/backends/binui_vk_shaders.h`、
+> `tools/vk_shot.cpp` / `vk_window.cpp` / `vk_stress.cpp`、`tools/vk_shaders/` 现在都**不存在**了
+> —— binUI 只剩一条绘制路径 `binUI ──► bin2d（+bin3d）──► binGPU ──► GL / Vulkan / D3D11`，
+> Vulkan 是 **binGPU 内部**的一个后端，不再是 binUI 的后端。
+> 本文里的行号、文件路径、`BinUIVK` / `BinUIAppVK` / `-DBINUI_GPU_VK` 等名字一律按"当时"读；
+> 删除清单与理由见 [`backend_layering.md`](backend_layering.md) 第 3c 步。
+> 保留这份文件是因为它记录了"一个 GPU 后端在 binUI 这一层要付出什么代价"——
+> 那正是后来把这一层砍掉的依据。
+
 > 上游调研：[`docs/vulkan.md`](vulkan.md)（结论 NO-GO，条件见该文第 9 节）。
 > 本文是**真要做时**的落地设计：接口、模块、同步、呈现、阶段门槛、时间线、回滚点。
 > 一句话：**先花 2~3 天把三份节点遍历合成一份（P1），Vulkan 后端才变成"新增一个文件"**；

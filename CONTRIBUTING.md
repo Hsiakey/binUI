@@ -11,7 +11,10 @@ include/                # 公共头（格式 / 编译器 / 渲染器 / 字体 / 
 src/compiler/           # XML、HTML5 → binUI 编译器（含 CSS 解析与级联）
 src/renderer/           # binUI 解析、节点状态、命中测试、事件、动画、滚动、文本编辑
 src/font/               # FreeType + HarfBuzz 字体服务（字形图集）
-src/backends/           # 绘制后端：binui_gl.*（OpenGL 3.3）/ binui_vk.*（Vulkan）/ binui_d3d11.*（D3D11）
+src/backends/           # 绘制后端：**只剩 binui_bin2d.***（binUI ──► bin2d ──► binGPU）
+                        #   + 共享头：binui_app.h（无边框外壳）/ binui_draw_nodes.h（遍历）
+                        #   / binui_glyph_atlas.h（排版与图集）/ binui_gfx.h（接口）/ binui_paint.cpp
+                        #   （binui_gl / binui_vk / binui_d3d11 / binui_gpu / binui_auto 已于 0.37.x 删除）
 src/platform/           # app_win32.*：Win32 窗口外壳 + GDI 绘制（遗留/OLD：只做后备呈现与像素基准）
 src/binui_c.cpp         # C ABI 实现（对外声明在 include/binui_c.h）
 components/             # 标准组件库（纯 HTML+CSS，<use src="…"> 编译期内联）
@@ -61,11 +64,14 @@ mingw32-make SHELL=sh test
 ## 改代码的硬规矩
 
 1. **核心库不依赖平台 API**。`src/compiler`、`src/renderer`、`src/font`、`include/*`（除后端头）里
-   不许出现 `windows.h`、`<GL/…>`、`<d3d11.h>`；平台相关的都放在 `src/backends/binui_gl.*`、
-   `src/backends/binui_d3d11.*`、`src/platform/app_win32.*`。
-   **新特性只做 GL / Vulkan / D3D11 三端**：GDI（`src/platform/app_win32.*` 的 `drawNodesGDI`）是
-   遗留（OLD）后端，只保证不崩/不阻塞/能出像素基准图，不再新增能力、也不修观感类问题
-   （见 `docs/future.md` 的「后端支持级别（v0.16.17 定案）」）。
+   不许出现 `windows.h`、`<GL/…>`、`<d3d11.h>`；平台相关的都放在 `src/backends/binui_bin2d.*`、
+   `src/backends/binui_app.h`、`src/platform/app_win32.*`。
+   **新特性只做 bin2d 这一条路**（`binUI ──► bin2d ──► binGPU`）：三份 GPU 后端
+   （GL / Vulkan / D3D11）与 `binui_gpu` / `BinUIAuto` 已于 0.37.x 整份删除，不要再往回加。
+   「怎么画」的活属于 binGPU（设备 / API / 执行体 / AA 档），2D 语义属于 bin2d，
+   binUI 只决定"画什么"——见 `docs/backend_layering.md`。
+   GDI（`src/platform/app_win32.*` 的 `drawNodesGDI`）是更早的遗留（OLD）后端，已于 0.24.0 移除，
+   只剩"贴屏"这条呈现路径（`presentViaGdi`）。
 2. **改二进制布局必须升 `BINUI_VERSION`**，并在 `include/binui_format.h` 顶部注释、
    README 的「binUI 二进制布局」、CHANGELOG 三处同步。新增可选段一律「恒定写出 + 长度前缀」，
    让解析链保持确定（参考视频段、状态样式段）。

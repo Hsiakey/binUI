@@ -78,57 +78,37 @@ $(BUILD_DIR)/font/%.o: $(SRC_DIR)/font/%.cpp
 
 # 后端（src/backends/）与 Win32 外壳（src/platform/）：对象路径保持在 build-mingw 根下，
 # 演示程序的链接规则不用跟着改
-$(BUILD_DIR)/binui_gl.o: $(SRC_DIR)/backends/binui_gl.cpp
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
+#
+# 0.37.x：**只到这里为止**。binUI 的绘制路径只剩一条
+#
+#     binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D11
+#
+# 老的三份 GPU 后端（binui_gl / binui_vk / binui_d3d11）、设备层那份（binui_gpu）
+# 和运行期选择器（binui_auto）已整份删除（共 ~12k 行，含 4 份 GLSL/HLSL），
+# 所以这里没有 VK_INC、没有 D3D11_LIBS、没有 -lopengl32/-ld3dcompiler 之类的链接项。
+# 那份删除的名单与理由见 src/backends/binui_ui.h 顶部与 docs/backend_layering.md 第 3c 步。
 
-# Vulkan 后端（P2）：需要 third_party/vulkan 的头；运行期只 LoadLibrary("vulkan-1.dll")，
-# 不链接 vulkan-1.lib，所以构建不需要 Vulkan SDK。
-VK_INC   := -Ithird_party/vulkan/include
-$(BUILD_DIR)/binui_vk.o: $(SRC_DIR)/backends/binui_vk.cpp
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
-
-# D3D11 后端（P7）：与 GL / Vulkan 同构，实现同一份 IBinUIGfx。
-# 链接 d3d11 / dxgi / d3dcompiler（运行期着色器编译）；dwmapi 供全屏守卫与远程会话判定。
-D3D11_LIBS := -ld3d11 -ldxgi -ld3dcompiler -ldwmapi
-$(BUILD_DIR)/binui_d3d11.o: $(SRC_DIR)/backends/binui_d3d11.cpp
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
-
-# 路径填充：覆盖率 → 条带。**唯一**需要 bin2d 头/库的目标（P2）
+# 路径填充：覆盖率 → 条带。需要 bin2d 头/库（P2）
 $(BUILD_DIR)/binui_paint.o: $(SRC_DIR)/backends/binui_paint.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include -c $< -o $@
 
-# bin2d 后端（0.26.0）：IBinUIGfx 的一份实现，几何全部交给 bin2d::Canvas。
-# 分开编成 .o 而不是并进核心库，理由和三个 GPU 后端一样：不带窗口的调用方
-# （bin2d_shot、纯离屏出图）不该被拖上一个窗口后端。
+# bin2d 后端（0.26.0）：IBinUIGfx 的**唯一**实现，几何全部交给 bin2d::Canvas / GpuExec。
+# 分开编成 .o 而不是并进核心库：不带窗口的调用方（bin2d_shot、纯离屏出图）
+# 不该被拖上一个窗口外壳（binui_app.h）。
 $(BUILD_DIR)/binui_bin2d.o: $(SRC_DIR)/backends/binui_bin2d.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include $(BINGPU_INC) -c $< -o $@
 
 $(BIN2D_A):
-	@echo "[binui] 缺 bin2d 静态库：$(BIN2D_A)"
-	@echo "[binui] 路径填充已经改用 bin2d 的覆盖率（P2 迁移），先跑：make -C ../bin2D lib"
+	@echo "[binui] missing bin2d static lib: $(BIN2D_A)"
+	@echo "[binui] path fill uses bin2d coverage (P2 migration); run: make -C ../bin2D lib"
 	@exit 1
 
-# 运行期后端选择（0.33.0）：BinUIAuto 实现同一份 IBinUIGfx，init 时问 binGPU
-# 「这台机器有什么」，按 VK > GL > D3D11 > CPU(bin2d) 挑一个真正的后端。
-# 所以**默认演示程序要同时链四个后端**（以前一个 exe 只链一个）。
-$(BUILD_DIR)/binui_auto.o: $(SRC_DIR)/backends/binui_auto.cpp
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include $(BINGPU_INC) -c $< -o $@
+# 运行期后端选择（0.33.0 的 BinUIAuto）已在 0.37.x 删除：只剩 bin2d 一条路，
+# 没有可挑的了。所以演示程序只链**一个**后端对象。
+BACKEND_OBJS := $(BUILD_DIR)/binui_bin2d.o
 
-# binGPU 设备层（0.36.0）：binUI 的第四个 GPU 后端 —— **不建自己的设备**，
-# 直接用 binGPU（设备/交换链/管线/节拍都在那边）。所以这一份里没有任何 GLSL/HLSL：
-# 圆角 AA 是 binGPU 片元着色器里的一句距离场，binUI 这一侧一份拷贝都没有。
-$(BUILD_DIR)/binui_gpu.o: $(SRC_DIR)/backends/binui_gpu.cpp
-	@mkdir -p $(dir $@)
-	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc $(BINGPU_INC) -c $< -o $@
-
-BACKEND_OBJS := $(BUILD_DIR)/binui_auto.o $(BUILD_DIR)/binui_bin2d.o $(BUILD_DIR)/binui_gpu.o \
-                $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/binui_d3d11.o
 $(LIB_A): $(LIB_OBJS) $(BIN2D_A)
 	ar rcs $@ $(filter %.o,$^)
 
@@ -200,7 +180,7 @@ test: $(TEST_BINS)
 ifdef ComSpec
 	@echo "--- test_capi ---"
 	$(TEST_DIR)/test_capi$(EXT)
-	@echo "--- test_shell (外壳 × bin2d 后端) ---"
+	@echo "--- test_shell (shell x bin2d backend) ---"
 	$(TEST_DIR)/test_shell$(EXT)
 endif
 
@@ -209,17 +189,23 @@ endif
 # =============================================
 ifdef ComSpec
 
-# OpenGL 后端（WGL + FreeType/HarfBuzz 静态库）
-# imm32：输入法候选窗定位（ImmGetContext / ImmSetCompositionWindow）
-# msimg32：AlphaBlend —— GDI 画布的 box-shadow 靠它贴"预乘 alpha 位图"（v23）
-GL_LIBS := -lopengl32 -ldwmapi -limm32 -lmsimg32 -Lthird_party/freetype/build -lfreetype -Lthird_party/harfbuzz/build-static/src -lharfbuzz
+# 外壳/字体的链接项。0.37.x 只留 bin2d 一条路，所以这里**没有** -lopengl32 /
+# -ld3d11 / -ldxgi / -ld3dcompiler 了（那几项是 binui_gl / binui_vk / binui_d3d11 的）。
+#   imm32   ：输入法候选窗定位（ImmGetContext / ImmSetCompositionWindow）
+#   msimg32 ：AlphaBlend —— GDI 贴"预乘 alpha 位图"那条降级路径靠它
+#   dwmapi  ：全屏守卫 / 远程会话判定
+# FreeType/HarfBuzz 走静态库（字形光栅与整形在 binui_font_renderer + binui_glyph_atlas.h）。
+SHELL_LIBS := -ldwmapi -limm32 -lmsimg32
+FONT_LIBS  := -Lthird_party/freetype/build -lfreetype \
+              -Lthird_party/harfbuzz/build-static/src -lharfbuzz
 
-# C ABI 的冒烟测试（无窗口：只测编译/加载/节点查询/改文本，需链 GL 后端对象）
+# C ABI 的冒烟测试（无窗口：只测编译/加载/节点查询/改文本，需链 bin2d 后端对象）
 TEST_BINS += $(TEST_DIR)/test_capi$(EXT)
 test: $(TEST_DIR)/test_capi$(EXT)
 
 # 外壳 × bin2d 后端（0.27.0）：子窗口模式下的消息/IME/脏区/图层/裁剪栈契约。
 # 它守的是"三份 GPU 后端能不能删"——外壳只认 IBinUIGfx，换后端不该丢任何能力。
+# 0.37.x 之后它守的就是**唯一**那条路。
 # 需要一个窗口站（建的是隐藏父窗口下的子窗口），所以归在 Windows 段里。
 TEST_BINS += $(TEST_DIR)/test_shell$(EXT)
 test: $(TEST_DIR)/test_shell$(EXT)
@@ -227,14 +213,14 @@ test: $(TEST_DIR)/test_shell$(EXT)
 $(TEST_DIR)/test_shell$(EXT): tests/test_shell.cpp $(BUILD_DIR)/binui_bin2d.o $(LIBS_A)
 	@mkdir -p $(TEST_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include -o $@ $< \
-	    $(BUILD_DIR)/binui_bin2d.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
+	    $(BUILD_DIR)/binui_bin2d.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 
 # 注意：这里必须直接写 $(BUILD_DIR)/libbinui_c.a，不能写 $(BINUI_C_A) ——
 # 那个变量是后面用 := 定义的，GNU Make 在读到这一行时就展开成了空，
 # 于是 test_capi 永远只依赖 .cpp，库更新后不重链，跑的是旧二进制。
 $(TEST_DIR)/test_capi$(EXT): tests/test_capi.cpp $(BUILD_DIR)/libbinui_c.a $(LIBS_A)
 	@mkdir -p $(TEST_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(BUILD_DIR)/libbinui_c.a $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(BUILD_DIR)/libbinui_c.a $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 
 # 9 组使用示例（一组一个 exe，一组只演示一件事）：功能 / 动画 / 应用壳 / 字体与输入法 /
 # 按钮样式 / 自适应布局 / 2D 渲染 / 3D 渲染 / 纹理。产物在 $(DEMO_DIR)，与测试彻底分开。
@@ -271,7 +257,7 @@ $(BUILD_DIR)/examples/%.o: $(EXA_DIR)/%.cpp
 # 跑起来还是旧界面（只有 --ui 指到源码树才看到新界面）。
 $(DEMO_DIR)/features$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/features/main.o $(LIBS_A) $(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
 	@mkdir -p $(DEMO_DIR)/features
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/features/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/features/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/features/main.html $(DEMO_DIR)/features/main.html
 	cp -f $(EXA_DIR)/features/button.bum.html $(DEMO_DIR)/features/button.bum.html
 	cp -f $(BUILD_DIR)/assets/components/card.bum $(DEMO_DIR)/features/card.bum
@@ -279,12 +265,12 @@ $(DEMO_DIR)/features$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/features/main.
 
 $(DEMO_DIR)/animshow$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/animshow/main.o $(LIBS_A) $(EXA_DIR)/animshow/main.html
 	@mkdir -p $(DEMO_DIR)/animshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/animshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/animshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/animshow/main.html $(DEMO_DIR)/animshow/main.html
 
 $(DEMO_DIR)/appshow$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/appshow/main.o $(LIBS_A) $(EXA_DIR)/appshow/main.html $(EXA_DIR)/appshow/appshow-navitem.bum.html $(EXA_DIR)/appshow/appshow-card.bum.html $(EXA_DIR)/appshow/appshow-dialog.bum.html $(EXA_DIR)/appshow/appshow-bubble.bum.html
 	@mkdir -p $(DEMO_DIR)/appshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/appshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/appshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/appshow/main.html $(DEMO_DIR)/appshow/main.html
 	cp -f $(EXA_DIR)/appshow/appshow-navitem.bum.html $(DEMO_DIR)/appshow/appshow-navitem.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-card.bum.html $(DEMO_DIR)/appshow/appshow-card.bum.html
@@ -293,119 +279,44 @@ $(DEMO_DIR)/appshow$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/appshow/main.o 
 
 $(DEMO_DIR)/fontshow$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/fontshow/main.o $(LIBS_A) $(EXA_DIR)/fontshow/main.html
 	@mkdir -p $(DEMO_DIR)/fontshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/fontshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/fontshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/fontshow/main.html $(DEMO_DIR)/fontshow/main.html
 
 $(DEMO_DIR)/flexshow$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/flexshow/main.o $(LIBS_A) $(EXA_DIR)/flexshow/main.html
 	@mkdir -p $(DEMO_DIR)/flexshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/flexshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/flexshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/flexshow/main.html $(DEMO_DIR)/flexshow/main.html
 
 $(DEMO_DIR)/svgdemo$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/svgdemo/main.o $(LIBS_A) $(EXA_DIR)/svgdemo/main.html
 	@mkdir -p $(DEMO_DIR)/svgdemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/svgdemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/svgdemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/svgdemo/main.html $(DEMO_DIR)/svgdemo/main.html
 
 $(DEMO_DIR)/cubedemo$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/cubedemo/main.o $(LIBS_A) $(EXA_DIR)/cubedemo/main.html
 	@mkdir -p $(DEMO_DIR)/cubedemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/cubedemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/cubedemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/cubedemo/main.html $(DEMO_DIR)/cubedemo/main.html
 
 $(DEMO_DIR)/texturedemo$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/texturedemo/main.o $(LIBS_A) $(EXA_DIR)/texturedemo/main.html
 	@mkdir -p $(DEMO_DIR)/texturedemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/texturedemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/texturedemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/texturedemo/main.html $(DEMO_DIR)/texturedemo/main.html
 
 $(DEMO_DIR)/buttonshow$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/buttonshow/main.o $(LIBS_A) $(EXA_DIR)/buttonshow/main.html
 	@mkdir -p $(DEMO_DIR)/buttonshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/buttonshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/buttonshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/buttonshow/main.html $(DEMO_DIR)/buttonshow/main.html
 
 # =============================================
-# Vulkan 版示例（P5）：同一份 demo 源码 + -DBINUI_GPU_VK，链接 binui_vk.o。
-#   make demos-vk        → examples/*_vk.exe（与 GL 版并存，便于 A/B）
-#   make GPU=vk all      → 额外产出 vk 版示例（仍保留 GL 版）
-# 默认 `make all` 不受影响（GPU=gl）。
-# =============================================
-VK_DEMOS := svgdemo fontshow animshow buttonshow flexshow cubedemo texturedemo
-
-define VK_DEMO_RULE
-$(DEMO_DIR)/$(1)_vk$(EXT): $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/$(1)/main_vk.o $(LIBS_A) $(EXA_DIR)/$(1)/main.html
-	@mkdir -p $(DEMO_DIR)/$(1)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $$@ $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/$(1)/main_vk.o $(LIBS_A) \
-	    $(WINLIBS) -ldwmapi -limm32 \
-	    -Lthird_party/freetype/build -lfreetype \
-	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
-	cp -f $(EXA_DIR)/$(1)/main.html $(DEMO_DIR)/$(1)/main.html
-
-$(BUILD_DIR)/examples/$(1)/main_vk.o: examples/$(1)/main.cpp
-	@mkdir -p $(BUILD_DIR)/examples/$(1)
-	$(CXX) $(CXXFLAGS) -DBINUI_GPU_VK -I$(INC_DIR) -Isrc $(VK_INC) -c examples/$(1)/main.cpp -o $$@
-endef
-
-$(foreach d,$(VK_DEMOS),$(eval $(call VK_DEMO_RULE,$(d))))
-
-# features 的 vk 版目标文件（宏里那条只覆盖 VK_DEMOS 里的示例）
-$(BUILD_DIR)/examples/features/main_vk.o: examples/features/main.cpp
-	@mkdir -p $(BUILD_DIR)/examples/features
-	$(CXX) $(CXXFLAGS) -DBINUI_GPU_VK -I$(INC_DIR) -Isrc $(VK_INC) -c examples/features/main.cpp -o $@
-# features 有外挂组件（.bum），单独写规则：宏里那条只拷 main.html
-$(DEMO_DIR)/features_vk$(EXT): $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/features/main_vk.o $(LIBS_A) \
-		$(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
-	@mkdir -p $(DEMO_DIR)/features
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/examples/features/main_vk.o $(LIBS_A) \
-	    $(WINLIBS) -ldwmapi -limm32 \
-	    -Lthird_party/freetype/build -lfreetype \
-	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
-	cp -f $(EXA_DIR)/features/main.html $(DEMO_DIR)/features/main.html
-	cp -f $(EXA_DIR)/features/button.bum.html $(DEMO_DIR)/features/button.bum.html
-	cp -f $(BUILD_DIR)/assets/components/card.bum $(DEMO_DIR)/features/card.bum
-	cp -f $(BUILD_DIR)/assets/components/dock.bum $(DEMO_DIR)/features/dock.bum
-
-DEMO_VK_BINS := $(DEMO_DIR)/features_vk$(EXT) $(foreach d,$(VK_DEMOS),$(DEMO_DIR)/$(d)_vk$(EXT))
-
-.PHONY: demos-vk
-demos-vk: $(DEMO_VK_BINS)
-	@echo "vk demos -> $(DEMO_VK_BINS)"
-
-# =============================================
-# D3D11 版示例（P7）：同一份 demo 源码 + -DBINUI_GPU_D3D11，链接 binui_d3d11.o。
-#   make demos-d3d11     → examples/*_d3d11.exe（与 GL / VK 版并存，便于三方 A/B）
-# =============================================
-D3D11_DEMOS := svgdemo fontshow animshow buttonshow flexshow cubedemo texturedemo features
-
-define D3D11_DEMO_RULE
-$(DEMO_DIR)/$(1)_d3d11$(EXT): $(BUILD_DIR)/binui_d3d11.o $(BUILD_DIR)/examples/$(1)/main_d3d11.o $(LIBS_A) $(EXA_DIR)/$(1)/main.html
-	@mkdir -p $(DEMO_DIR)/$(1)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $$@ $(BUILD_DIR)/binui_d3d11.o $(BUILD_DIR)/examples/$(1)/main_d3d11.o $(LIBS_A) \
-	    $(WINLIBS) $(D3D11_LIBS) -limm32 \
-	    -Lthird_party/freetype/build -lfreetype \
-	    -Lthird_party/harfbuzz/build-static/src -lharfbuzz
-	cp -f $(EXA_DIR)/$(1)/main.html $(DEMO_DIR)/$(1)/main.html
-
-$(BUILD_DIR)/examples/$(1)/main_d3d11.o: examples/$(1)/main.cpp
-	@mkdir -p $(BUILD_DIR)/examples/$(1)
-	$(CXX) $(CXXFLAGS) -DBINUI_GPU_D3D11 -I$(INC_DIR) -Isrc -c examples/$(1)/main.cpp -o $$@
-endef
-
-$(foreach d,$(D3D11_DEMOS),$(eval $(call D3D11_DEMO_RULE,$(d))))
-
-DEMO_D3D11_BINS := $(foreach d,$(D3D11_DEMOS),$(DEMO_DIR)/$(d)_d3d11$(EXT))
-
-.PHONY: demos-d3d11
-demos-d3d11: $(DEMO_D3D11_BINS)
-	@echo "d3d11 demos -> $(DEMO_D3D11_BINS)"
-
-# =============================================
-# 默认示例后端 = bin2d（0.29.0）
+# 示例后端 = bin2d（唯一一条路）
 #
-# 0.27.0 曾把 bin2d 版做成并列的一套 `*_2d.exe`（`make demos-2d`）。0.29.0 起
-# **默认就是它**：`src/backends/binui_ui.h` 的默认分支已经指向 bin2d，`examples/*.exe`
-# 直接链 `binui_bin2d.o`。理由写在那个头文件里 —— binUI 这一层不该再自己拿图形 API，
-# 三份 GPU 后端降级成**可选的对照构建**（`demos-vk` / `demos-d3d11`）。
+# 0.27.0 曾把 bin2d 版做成并列的一套 `*_2d.exe`（`make demos-2d`）；0.29.0 起
+# **默认就是它**；0.37.x 把另外四份（gl / vk / d3d11 / gpu + BinUIAuto）删干净之后，
+# `examples/*.exe` 只链 `binui_bin2d.o`，`demos-vk` / `demos-d3d11` 两个对照构建
+# 连同 `-DBINUI_GPU_VK|D3D11` 宏一起退场。
 #
-# `make demos-2d` 保留成别名：脚本、文档、CI 里那批命令继续能用，产物名不再带 `_2d`
-# 后缀（`appshow.exe` 而不是 `appshow_2d.exe` —— 用户是要双击那个的）。
+# `make demos-2d` 保留成别名（脚本、文档、CI 里那批命令继续能用）。产物名从不带
+# `_2d` 后缀（`appshow.exe` 而不是 `appshow_2d.exe` —— 用户是要双击那个的）。
 # =============================================
 
 .PHONY: demos-2d
@@ -439,7 +350,7 @@ $(BINUI_C_A): $(BUILD_DIR)/binui_c.o $(BACKEND_OBJS)
 # freetype/harfbuzz 也走静态库 —— 产物除系统 DLL 外自包含
 $(BINUI_C_DLL): $(BUILD_DIR)/binui_c_dll.o $(BACKEND_OBJS) $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(LDFLAGS) $(RTLINK) -shared -o $@ $^ $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS) \
+	$(CXX) $(LDFLAGS) $(RTLINK) -shared -o $@ $^ $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS) \
 	    -Wl,--out-implib=$(BIN_DIR)/libbinui_c.dll.a
 
 .PHONY: capi
@@ -452,11 +363,17 @@ examples: $(DEMO_BINS) $(STD_LIB_STAMP)
 all: $(LIBS_A) $(TEST_BINS) $(DEMO_BINS) $(STD_LIB_STAMP) $(BINUI_C_A) $(BINUI_C_DLL)
 
 # 调试工具（可选，不入 all）：离屏渲染 / 窗口抓取 / 窗口枚举
+#
+# 0.37.x 退场的工具（都绑在被删的后端上）：
+#   gl_shot / vk_shot / d3d11_shot —— 三份后端的离屏抓图（原 `pixels` / `pixels-vk` /
+#                                    `pixels-d3d11` 三条门禁的执行体）
+#   gpu_shot                      —— binUI 自己那份 binui_gpu 的离屏抓图（原 `pixels-gpu`）
+#   vk_window / vk_stress         —— Vulkan 的交换链验收与鲁棒性压测
+# 现在出图只剩 bin2d_shot（CPU 权威）与 bin2d_window（真窗口呈现），
+# GPU 侧的像素门禁是 `pixels-bin2d-gpu`（bin2d_shot + BINUI2D_GPU=1）。
 TOOL_BINS := \
     $(BIN_DIR)/binui_compile$(EXT) \
     $(BIN_DIR)/binui_export$(EXT) \
-    $(BIN_DIR)/gl_shot$(EXT) \
-    $(BIN_DIR)/gpu_shot$(EXT) \
     $(BIN_DIR)/bin2d_shot$(EXT) \
     $(BIN_DIR)/bin2d_window$(EXT) \
     $(BIN_DIR)/partial_shot$(EXT) \
@@ -466,11 +383,7 @@ TOOL_BINS := \
     $(BIN_DIR)/enum_windows$(EXT) \
     $(BIN_DIR)/pixel_diff$(EXT) \
     $(BIN_DIR)/baseline_snapshot$(EXT) \
-    $(BIN_DIR)/check_examples$(EXT) \
-    $(BIN_DIR)/vk_shot$(EXT) \
-    $(BIN_DIR)/vk_window$(EXT) \
-    $(BIN_DIR)/vk_stress$(EXT) \
-    $(BIN_DIR)/d3d11_shot$(EXT)
+    $(BIN_DIR)/check_examples$(EXT)
 
 # 把 .bui 还原成打包前的目录结构（读同目录的 binui.res，header-only，不用链接库）
 $(BIN_DIR)/binui_export$(EXT): tools/binui_export.cpp
@@ -480,7 +393,7 @@ $(BIN_DIR)/binui_export$(EXT): tools/binui_export.cpp
 # 示例 UI 零警告检查（CMake 也会注册成 ctest 用例）
 $(BIN_DIR)/check_examples$(EXT): tools/check_examples.cpp $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIBS_A) $(GL_LIBS)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ $< $(LIBS_A) $(FONT_LIBS)
 
 # "电篱笆"版的零警告检查：每个 C++ 堆块末尾挂一个不可访问页，越界写/读已释放内存
 # 立刻崩并打印分配栈。本机 mingw 没有 libasan、也没权限开 page heap，这是替代品 ——
@@ -489,13 +402,13 @@ $(BIN_DIR)/check_examples$(EXT): tools/check_examples.cpp $(LIBS_A)
 $(BIN_DIR)/check_examples_guard$(EXT): tools/check_examples.cpp tools/guard_alloc.cpp $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -o $@ tools/check_examples.cpp \
-	    tools/guard_alloc.cpp $(LIBS_A) $(GL_LIBS)
+	    tools/guard_alloc.cpp $(LIBS_A) $(FONT_LIBS)
 
 .PHONY: check-guard
 check-guard: $(BIN_DIR)/check_examples_guard$(EXT)
 	$(BIN_DIR)/check_examples_guard$(EXT) examples
 
-# ★ 这条规则（以及下面 gl_shot/d3d11_shot 直接编译 .cpp 的几条）**没有头依赖**：
+# ★ 这条规则（以及下面几个直接编译 .cpp 的工具）**没有头依赖**：
 #   改了 include/binui_paint.h、src/backends/binui_draw_nodes.h 这类共享头之后，
 #   这些 exe 不会重编，验出来的还是旧行为（本仓库在 §7.6.4 踩过一次，0.16.13 又踩了一次）。
 #   所以离屏工具改成"先编 .o（带 -MMD）再链接"。
@@ -506,24 +419,10 @@ $(BIN_DIR)/enum_windows$(EXT): tools/enum_windows.cpp
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $< -luser32
 
-# GL 后端的离屏抓图：GL 窗口抓不到图（PrintWindow 全黑），这个直接读回离屏像素
-$(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl.o $(LIBS_A)
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -o $@ $< \
-	    $(BUILD_DIR)/binui_gl.o $(LIBS_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
-
-# binGPU 设备层的离屏抓图（0.36.0）：与 gl_shot 同一套流程，后端换成 binui_gpu。
-$(BUILD_DIR)/gpu_shot.o: tools/gpu_shot.cpp
-	@mkdir -p $(BUILD_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc $(BINGPU_INC) -c $< -o $@
-
-$(BIN_DIR)/gpu_shot$(EXT): $(BUILD_DIR)/gpu_shot.o $(BUILD_DIR)/binui_gpu.o $(LIBS_A)
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/gpu_shot.o $(BUILD_DIR)/binui_gpu.o \
-	    $(LIBS_A) -lgdiplus -lgdi32 -luser32 -lole32 $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
-
 # bin2d 后端的离屏出图：**不需要窗口**（像素落在 bin2d::Surface 上，写完就存 PNG）。
 # 这是"binUI 后端交给 bin2d"最直接的验证工具 —— 无 GPU、无驱动、可进 CI。
+# `pixels-bin2d`（CPU 权威，0 容差）与 `pixels-bin2d-gpu`（BINUI2D_GPU=1，对 docs/pixels）
+# 两条像素门禁都靠它出图。
 $(BUILD_DIR)/bin2d_shot.o: tools/bin2d_shot.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
@@ -549,14 +448,16 @@ $(BIN_DIR)/bin2d_window$(EXT): $(BUILD_DIR)/bin2d_window.o $(BUILD_DIR)/binui_bi
 # partial_shot：局部重绘一致性检查（hover 脏矩形 vs 整帧）。走 .o + -MMD，
 # 免得改了 binui_draw_nodes.h / binui_paint.h 之后工具还跑旧行为（这个仓库在
 # gl_shot 上踩过两次，见下文注释）。
+# 0.37.x：工具改成离屏 BinUI2D（原来是隐藏窗口 + GL 上下文 + BitBlt 抓像素），
+# 所以 **0 容差** —— 纯 CPU 光栅同状态必须逐位相同。
 $(BUILD_DIR)/partial_shot.o: tools/partial_shot.cpp
 	@mkdir -p $(BUILD_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc -c $< -o $@
 
-$(BIN_DIR)/partial_shot$(EXT): $(BUILD_DIR)/partial_shot.o $(BUILD_DIR)/binui_gl.o $(LIBS_A)
+$(BIN_DIR)/partial_shot$(EXT): $(BUILD_DIR)/partial_shot.o $(BUILD_DIR)/binui_bin2d.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $^ \
-	    -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
+	    -lgdiplus -lgdi32 -luser32 -lole32 $(BINGPU_LNK) $(SHELL_LIBS) $(FONT_LIBS)
 
 # draw_bench：绘制遍历的 CPU 基准（无 GPU / 无窗口 / 确定性）。
 # 不带任何后端 .o —— 遍历只认 IBinUIGfx，计数后端在工具里就地实现，
@@ -573,45 +474,7 @@ $(BIN_DIR)/draw_bench$(EXT): $(BUILD_DIR)/draw_bench.o $(LIBS_A)
 # ★ 工具的 .o 必须**单独成规则**：以前把编译写进 exe 的 recipe，于是 -MMD 生成的
 #   build-mingw/vk_window.d 谁都不依赖，结果"改了共享头（binui_draw_nodes.h 等）但工具
 #   不重编"——直接链了旧 .o，验出来的行为是旧的（本轮就在 BINUI_DRAW_PROF 上踩到）。
-$(BUILD_DIR)/vk_shot.o: tools/vk_shot.cpp
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
-$(BIN_DIR)/vk_shot$(EXT): $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIBS_A)
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_shot.o $(BUILD_DIR)/binui_vk.o $(LIBS_A) \
-		-luser32 -lgdi32 -lgdiplus -lole32 \
-		-Lthird_party/freetype/build -lfreetype \
-		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
-
-# 真实窗口 + 交换链的验收工具（P2b）：跑 N 帧，把**交换链图像**读回写 PNG
-$(BUILD_DIR)/vk_window.o: tools/vk_window.cpp
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
-$(BIN_DIR)/vk_window$(EXT): $(BUILD_DIR)/vk_window.o $(BUILD_DIR)/binui_vk.o $(LIBS_A)
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_window.o $(BUILD_DIR)/binui_vk.o $(LIBS_A) \
-		-luser32 -lgdi32 -lgdiplus -lole32 \
-		-Lthird_party/freetype/build -lfreetype \
-		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
-
-# 鲁棒性压测工具（P4）：resize 抖动 / 最小化 / 透明切换 / GDI 切换 / init-shutdown 循环 / 双实例
-$(BUILD_DIR)/vk_stress.o: tools/vk_stress.cpp
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc $(VK_INC) -c $< -o $@
-$(BIN_DIR)/vk_stress$(EXT): $(BUILD_DIR)/vk_stress.o $(BUILD_DIR)/binui_vk.o $(LIBS_A)
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/vk_stress.o $(BUILD_DIR)/binui_vk.o $(LIBS_A) \
-		-luser32 -lgdi32 -lgdiplus -lole32 -lpsapi \
-		-Lthird_party/freetype/build -lfreetype \
-		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
-
-# D3D11 出图工具（P7）：隐藏窗口跑 N 帧 + 从离屏纹理读回 → PNG。
-# 不走屏幕截屏，所以窗口被遮挡也能抓到真实像素（flip-model 交换链的 PrintWindow 是白屏）。
-$(BUILD_DIR)/d3d11_shot.o: tools/d3d11_shot.cpp
-	$(CXX) $(CXXFLAGS) -I$(INC_DIR) -Isrc -c $< -o $@
-$(BIN_DIR)/d3d11_shot$(EXT): $(BUILD_DIR)/d3d11_shot.o $(BUILD_DIR)/binui_d3d11.o $(LIBS_A)
-	@mkdir -p $(BIN_DIR)
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/d3d11_shot.o $(BUILD_DIR)/binui_d3d11.o $(LIBS_A) \
-		-luser32 -lgdi32 -lgdiplus -lole32 $(D3D11_LIBS) \
-		-Lthird_party/freetype/build -lfreetype \
-		-Lthird_party/harfbuzz/build-static/src -lharfbuzz
+#   （vk_window 本身已在 0.37.x 删除，这条教训留给剩下的工具。）
 
 $(BIN_DIR)/pixel_diff$(EXT): tools/pixel_diff.cpp
 	@mkdir -p $(BIN_DIR)
@@ -628,6 +491,13 @@ tools: $(TOOL_BINS)
 # 局部重绘一致性（P0 回归）：hover 只重画脏矩形后，画面必须与"同样状态的整帧重绘"
 # 逐像素一致。这类错在整帧像素基准里看不见（clip=整屏时剔除判据的边缘情况碰不到
 # 任何节点），只能靠这里。见 docs/issues/10-partial-redraw-cull.md。
+#
+# 0.37.x 现状（如实记账）：工具已从 GL 后端移植到离屏 BinUI2D（不需要窗口/GL），
+# 判据从"diff<=64 且 max<=1"收紧到 **0 容差**。它在 buttonshow 上是**红的**：
+#   278,222 -> diff=1825 (clip 内 39 / clip 外 1786) max=15
+# 差异绝大部分落在脏矩形**外面**，即"这一帧画到了自己的 clip 之外"（阴影/模糊图层
+# 只按元素盒裁剪）。这是 bin2d 后端的欠账，不是删除后端带来的 —— 工具留着当判据，
+# 不要靠放宽容差让它变绿。
 PARTIAL_CASES := 278,222 358,221 99,116 830,117
 .PHONY: partial
 partial: $(BIN_DIR)/partial_shot$(EXT)
@@ -636,7 +506,7 @@ partial: $(BIN_DIR)/partial_shot$(EXT)
 	    echo "--- buttonshow hover ($$x,$$y) ---"; \
 	    $(BIN_DIR)/partial_shot$(EXT) --check $(EXA_DIR)/buttonshow/main.html - $$x $$y 40 || fail=1; \
 	done; \
-	echo "--- svgdemo hover (屏内任意按钮) ---"; \
+	echo "--- svgdemo hover (any in-screen button) ---"; \
 	exit $$fail
 	@echo "tools -> $(TOOL_BINS)"
 
@@ -646,8 +516,8 @@ partial: $(BIN_DIR)/partial_shot$(EXT)
 # 以前 docs/future.md 里只有几句一次性手测数字（"约 1052 µs/帧、约 9800 个四边形"），
 # 优化完没法证明真的快了，重构也没法证明没改坏。现在：
 #   make bench-draw  → 纯 CPU 遍历（计数后端，无 GPU/无窗口/确定性，跨后端可比）
-#   make bench-gl    → 真实 GL 后端一帧：绘制(遍历+发射) + 提交+呈现 分开量
-# 两个数字相减 = 后端发射/上传开销，据此决定该优化哪一头。
+# （`make bench-gl` 已在 0.37.x 删除：它量的那一个后端 binui_gl 整份退场了。现在
+#   "一帧到底花在遍历还是发射上"的对照数字看 probe_cost 的 bin2d/GPU 两行。）
 # `draw_bench <ui> --hash` 输出整个原语流的哈希：缓存/重构前后必须一致。
 # =============================================
 BENCH_CASES := features animshow appshow fontshow flexshow svgdemo cubedemo texturedemo buttonshow
@@ -685,94 +555,39 @@ gate-migrate: $(LIB_A)
 	    -o $(BIN_DIR)/migrate_gate$(EXT) tools/migrate_gate.cpp $(LIBS_A)
 	@$(BIN_DIR)/migrate_gate$(EXT) 200
 
-.PHONY: bench-gl
-bench-gl: $(BIN_DIR)/gl_shot$(EXT)
-	@echo "--- real GL backend: emit vs submit+present ---"
-	@for d in features appshow animshow; do \
-	    $(BIN_DIR)/gl_shot$(EXT) $(EXA_DIR)/$$d/main.html - --bench 60; \
-	done
-	@$(BIN_DIR)/gl_shot$(EXT) $(BENCH_ASSET)/bench-grad.html - --bench 60
+
 
 # =============================================
 # 像素回归（本机跑，不入 CI）
 #
-# 为什么不在 CI 里：GitHub 的 Windows runner 是软件光栅化，AA 边缘与真实 GPU 不一致，
-# 同一份代码会稳定地差出百分之几；基准图只在**本机**有意义。
+# 为什么不在 CI 里：GitHub 的 Windows runner 是软件光栅化，GPU 那一条（pixels-bin2d-gpu）
+# 的 AA 边缘与真实 GPU 不一致，同一份代码会稳定地差出百分之几；基准图只在**本机**有意义。
+# （pixels-bin2d 是纯 CPU，CI 里也能跑。）
 #
-# 基准图由谁渲染（v0.24.0 起）：**GL 后端**（`gl_shot`，隐藏窗口 + 离屏 FBO）。
-# 以前是 GDI 后端（`offscreen_render` → `drawNodesGDI`）—— GDI 渲染后端已在 0.24.0 移除，
-# 见 CHANGELOG。现在的像素权威是 GL：`pixels` = GL 自回归，`pixels-vk` / `pixels-d3d11`
-# = 另两个后端与 GL 逐像素比。CPU 侧的"像素权威"只剩 bin2d（路径/圆角的覆盖率）。
+# **2026-11-20 之后只剩两条门禁**：
+#   make pixels-bin2d      CPU 权威（bin2d 的扫描线覆盖率，对 tests/pixels-bin2d，**0 容差**）
+#   make pixels-bin2d-gpu  GPU 唯一门禁（BINUI2D_GPU=1 走 binUI → bin2d → binGPU，
+#                          对 docs/pixels，0.5% / 通道 8）
 #
-# 用法：
-#   mingw32-make SHELL=sh pixels           # GL 渲染 + 与 docs/pixels 基准图比对
-#   mingw32-make SHELL=sh pixels-update    # 改完绘制/布局后重新生成基准图
+# 一起退场的三条（`pixels` / `pixels-vk` / `pixels-d3d11` / `pixels-gpu` 与它们依赖的
+# gl_shot / vk_shot / d3d11_shot / gpu_shot）：那几条是"三个后端互拍"的门禁，
+# 后端删了门禁自然没有执行体。docs/pixels 还留着，但它的角色变了 ——
+# 不再是"GL 自回归的基准"，而是 **GPU 那条路的参照图**（当年 GL 4× MSAA 出的基线）。
+# 详见 docs/backend_layering.md 第 3c 步。
 # =============================================
 PIXEL_CASES := circle display-none2 probe radius-matrix svgpath svggrad svgjoin svgstroke svgfinish svgaa opacity grad-angle shadow image-round image-mip text-shadow text-shadow-multi svg-filter
-PIXEL_OUT   := $(BUILD_DIR)/pixels
 PIXEL_GOLD  := docs/pixels
 PIXEL_TOL   ?= 0.5
 
-.PHONY: pixels pixels-update
-pixels: tools
-	@mkdir -p $(PIXEL_OUT)
-	@fail=0; \
-	for c in $(PIXEL_CASES); do \
-	    echo "--- $$c ---"; \
-	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_OUT)/$$c.png >/dev/null 2>&1 || { echo "渲染失败: $$c"; fail=1; continue; }; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_GOLD)/$$c.png $(PIXEL_OUT)/$$c.png $(PIXEL_TOL) $(PIXEL_OUT)/$$c.diff.png || fail=1; \
-	done; \
-	exit $$fail
-
-pixels-update: tools
-	@mkdir -p $(PIXEL_GOLD)
-	@for c in $(PIXEL_CASES); do \
-	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_GOLD)/$$c.png >/dev/null 2>&1 || exit 1; \
-	    echo "更新基准: $(PIXEL_GOLD)/$$c.png"; \
-	done
-
 # =============================================
-# binGPU 设备层的像素回归（0.36.0）
+# bin2d 后端的像素回归（0.26.0）—— CPU 像素权威
 #
-# 这一条回答的是"**把设备层换成 binGPU 之后，画出来的东西变没变**"：
-# 同一套基准图（docs/pixels，由 gl_shot 那个自建设备的 GL 后端渲染）拿来与
-# gpu_shot（binGPU 设备 + binGPU 的管线/片元）逐像素比。
+# **容差 0**。bin2d 后端是纯 CPU 光栅，没有驱动、没有 GPU、没有线程调度参与，
+# 同一份输入必须逐位相同 —— 有差异就是真回归。
 #
-# 判据和 `pixels` 一样（0.5% 容差、通道差 8）。已知会不一样的是两类：
-#   · 旋转/非轴对齐的**实心**几何：binUI 的老 GL 后端开 4× MSAA，binGPU 没有 MSAA；
-#   · 缩小的图片：binGPU 的 mip 链目前降级为 1 级（没有三线性）。
-# 这两条属于 binGPU 该补的能力，不该在 binUI 这一层补回来 —— 差多少会被打印出来。
-# =============================================
-PIXEL_GPU_OUT := $(BUILD_DIR)/pixels-gpu
-# 0.37.2：**名单空了，机制也删了**。以前这里挂着两页已知差异：
-#   grad-angle —— 渐变被切成 4 条带，带与带之间那一列像素归谁（最大差 17）
-#   image-mip  —— binGPU 的 mip 链降级为 1 级
-# 两条都随 binGPU 0.15.0 一起消失（真 mip 链 + 多目标 MSAA 修通之后，18 页对
-# docs/pixels 全部是 **0 像素差异**，最大通道差 ≤ 7）。所以现在任何一页有差异都算红。
-
-.PHONY: pixels-gpu
-pixels-gpu: tools
-	@mkdir -p $(PIXEL_GPU_OUT)
-	@fail=0; \
-	for c in $(PIXEL_CASES); do \
-	    echo "--- $$c ---"; \
-	    BINUI_GPUBACKEND=$(BINUI_GPUBACKEND) $(BIN_DIR)/gpu_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_GPU_OUT)/$$c.png >/dev/null 2>&1 \
-	        || { echo "渲染失败: $$c"; fail=1; continue; }; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_GOLD)/$$c.png $(PIXEL_GPU_OUT)/$$c.png $(PIXEL_TOL) $(PIXEL_GPU_OUT)/$$c.diff.png \
-	        || fail=1; \
-	done; \
-	exit $$fail
-
-# =============================================
-# bin2d 后端的像素回归（0.26.0）
-#
-# 与上面三份的区别：**容差 0**。bin2d 后端是纯 CPU 光栅，没有驱动、没有 GPU、
-# 没有线程调度参与，同一份输入必须逐位相同 —— 有差异就是真回归。
-#
-# 为什么不和 docs/pixels（GL 基准）比：两条路的覆盖率 AA 实现**本质不同**
-# （bin2d 用 8× 子采样解析覆盖率，GPU 用 1px 模板环 / 条带），边缘必然差几级。
-# 那是换实现的标准差，不是 bug。跨实现的数字仍然每轮打印出来（见 bin2d-vs-gl），
-# 当作"两条路偏离多少"的仪表，而不是门禁。
+# 为什么不和 docs/pixels 比：两条路的覆盖率 AA 实现**本质不同**
+# （bin2d 用 8× 子采样解析覆盖率，GPU 用 1px 模板/SDF），边缘必然差几级。
+# 那是换实现的标准差，不是 bug。
 #
 # 为什么不需要窗口：bin2d 后端没有交换链，像素直接落在 Surface 上（见 tools/bin2d_shot.cpp）。
 # CI 里也能跑。
@@ -780,7 +595,7 @@ pixels-gpu: tools
 PIXEL2D_OUT  := $(BUILD_DIR)/pixels-bin2d
 PIXEL2D_GOLD := tests/pixels-bin2d
 
-.PHONY: pixels-bin2d pixels-bin2d-update bin2d-vs-gl
+.PHONY: pixels-bin2d pixels-bin2d-update
 pixels-bin2d: tools
 	@mkdir -p $(PIXEL2D_OUT)
 	@if [ ! -d $(PIXEL2D_GOLD) ]; then \
@@ -805,32 +620,22 @@ pixels-bin2d-update: tools
 	    echo "updated baseline: $(PIXEL2D_GOLD)/$$c.png"; \
 	done
 
-# 只报告、不判失败：GL 基准（docs/pixels）与 bin2d 后端当前差多少。
-# 这张表是"两条路还差多远"的仪表 —— 收敛到能接受时再谈把权威换过来。
-bin2d-vs-gl: tools
-	@mkdir -p $(PIXEL2D_OUT)
-	@for c in $(PIXEL_CASES); do \
-	    $(BIN_DIR)/bin2d_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL2D_OUT)/$$c.png >/dev/null 2>&1 || { echo "render failed: $$c"; continue; }; \
-	    printf '%-20s ' "$$c"; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_GOLD)/$$c.png $(PIXEL2D_OUT)/$$c.png 100 2>&1 | head -1; \
-	done
-
 # =============================================
 # bin2d **GPU 执行体**的像素回归（2026-11-20）：binUI → bin2d → binGPU
 #
-# 这条路画出来的像素，正确的参照是 docs/pixels（当年 GL 4× MSAA 出的基线），
-# **不是** tests/pixels-bin2d —— 后者是 bin2d 的 CPU 光栅（8 子采样扫描线），
-# 拿它当参照等于在比"两个不同的滤波器"。所以判据照抄 pixels / pixels-gpu：
-# 0.5% 容差、单通道 8 级，逐页打印数字。
+# **这是 0.37.x 之后唯一的 GPU 像素门禁**。这条路画出来的像素，正确的参照是
+# docs/pixels（当年 GL 4× MSAA 出的基线），**不是** tests/pixels-bin2d —— 后者是
+# bin2d 的 CPU 光栅（8 子采样扫描线），拿它当参照等于在比"两个不同的滤波器"。
+# 所以判据沿用当年那三条跨后端门禁的口径：0.5% 容差、单通道 8 级，逐页打印数字。
 #
 # BINUI2D_GPU=1 让 bin2d_shot 建一个 HEADLESS 的 bin2d::GpuExec（绘制在设备上，
 # present() 之后 readback 回 Surface），像素照样从 pixels() 出，PNG 编码不变。
 # 后端与 MSAA 档由 binGPU 的 bingpu_render_plan 定（VK → 4×，GL/D3D11 → 1×），
 # bin2d 这边不再自己写"哪个后端能开"。
 #
-# 与 pixels-gpu（binUI 自己那份 binui_gpu）的差别只有一处：**语义层怎么切图元**。
+# 与已删除的 pixels-gpu（binUI 自己那份 binui_gpu）的差别只有一处：**语义层怎么切图元**。
 # 两者共用同一套 binGPU 设备/管线/片元，所以"边缘 + 缩小图片"的页（circle、
-# radius-matrix、image-round、image-mip、grad-angle）应当在容差内接近 0。
+# radius-matrix、image-round、image-mip、grad-angle）在容差内接近 0。
 # =============================================
 PIXEL2D_GPU_OUT := $(BUILD_DIR)/pixels-bin2d-gpu
 
@@ -868,255 +673,12 @@ pixels-bin2d-gpu: tools
 	done; \
 	exit $$fail
 
-# =============================================
-# Vulkan 后端的像素回归（P3 起）：与 GL **逐像素**比。
-#
-# 判据：不同像素 < $(PIXEL_VK_TOL)%，单通道容差 $(PIXEL_VK_CHTOL)。
-#
-# **v0.35.0 起收紧到 0% / 8 级**。以前是 1.5% / 128 级，当时留着量是因为圆角走的是
-# 各自的覆盖率模板，弧上的 AA 天生差几十级。0.35.0 把圆角换成**片元里算的距离场**之后，
-# 两端的圆角数学是同一段 GLSL，实测 18 个基准用例 + 4 个示例页 + 29 个动画中途帧
-# **全部 0 不同像素、最大通道差 ≤6**（6 来自 MSAA resolve 的舍入，不是几何差异）。
-#   · 0% 的要求很硬：任何一端多画/少画一个像素都会红；
-#   · CHTOL=8 是为了让"AA 差几级"也能被抓到（以前 128 会把这类差异整片忽略）。
-# 如果某天真的出现斜边的单采样归属差异（不同 GPU 驱动前端），把这行调回 0.05~0.5 即可。
-# =============================================
-PIXEL_VK_OUT   := $(BUILD_DIR)/pixels-vk
-PIXEL_VK_TOL   ?= 0
-PIXEL_VK_CHTOL ?= 128
-# 18 个基准页（几何为主）用的是更严的单通道容差：v0.35.0 起圆角走同一段着色器，
-# 这些页实测**全部 0 不同像素、最大通道差 ≤6**（6 = MSAA resolve 的舍入）。
-PIXEL_VK_CHTOL_STRICT ?= 8
-# 真实示例（整页 UI，不是单点卡片）：文本、图片、组件、SVG 混排
-VK_DEMO_CASES  := features fontshow svgdemo texturedemo
-# 动画中途帧（v0.11.10）：`from { transform: scale(0.77) }` → t=0 就落在**小数缩放**上，
-# 专门覆盖"几何是小数时"的路径（亚像素坐标 + 小数圆角半径 + 圆角模板重采样）。
-# 这条用例就是 VK 圆角模板从 NEAREST 改 LINEAR 的判据：改之前 252x156 区域有差异，
-# 改之后不同像素 0（最大通道差 1）。只进跨后端比对，不建 GDI 基准图。
-# roundtex-lru（v0.12.8）：一页里 >48 种圆角半径，专门压"圆角模板 LRU 淘汰"——
-# 淘汰时如果当场删纹理，本帧已经录进批次的四边形还在引用它，跨后端比对会看到某几块
-# 圆角被画成整块纯色。这条用例只进跨后端比对（GL vs VK / D3D11），不建 GDI 基准图。
-# filter-blur（v0.16.42）：五档半径 + 子树模糊 + 渐变圆角 + opacity/blur 合层 + 嵌套两层
-# + 小数坐标 + -webkit- 别名 + 贴窗口边缘。只进跨后端比对（GDI 遗留路径不模糊）。
-# 实测 GL vs VK 0 不同像素（最大通道差 59）、D3D11 vs GL 0 不同像素（最大通道差 2）；
-# drop-shadow（v0.16.43）：外阴影取元素 alpha 上色；本用例覆盖星形轮廓/文字/子树/多阴影/硬阴影/
-# 负偏移/颜色前置/opacity 同用/贴窗口边缘/blur+shadow 同写/方角图片。三端 0 不同像素。
-# 那 59 来自"层里画圆角图片"的既有单采样差异（见 docs/future.md 的工具链已知问题）。
-# blur-quality（v0.16.44）：分离高斯。小元素 + 大半径（旧实现最难看的一组：14px 圆点糊成十字、
-# 6px 细条糊成方块）+ 边缘剖面（16px 半径的水平线）+ 文字 blur(3) / drop-shadow(10) + 毛玻璃
-# 10~32px。只进跨后端比对；观感差异看 docs/issues/assets/blur-quality.png。
-# round-in-layer（v0.16.45）：1× 离屏层里的**圆角图片**（按行切细条 → 每条左右边是小数）。
-# 这条用例就是"VK 图层用了 4× MSAA 主管线"的判据：修之前弧线每行差一个像素（17 px / 通道差
-# 200+），修之后 GL/VK/D3D11 三端 0 不同像素、最大通道差 0。覆盖 opacity 层、模糊层、
-# 小数坐标、嵌套两层，以及层里的圆/渐变/细线（确认修法没波及别的图元）。
-# nine-slice（v0.16.51 扩）：九宫格中段四种填充模式 stretch / repeat / round / space 全开，
-# 含 space 的"两端也留缝"与"中段比一块还窄时缩成一块"。
-# svg-mask（v0.16.53/54 扩）：遮罩内容用**渐变**填充（横向线性 / 竖向三色标 / 径向聚光），
-# 外加 mask-type 的 luminance / alpha 对照（同一份 #808080 内容差一倍）。
-# 渐变的色标 alpha 存的是亮度，保留趟直接按渐变色带画 —— 三端同一份代码，只进跨后端比对。
-# text-shadow-multi（v0.16.50）：多层文字阴影（霓虹 3 层 / 描边 4 层 / 双色偏移 / 继承 /
-# currentColor / 贴边大模糊 / 三个不同模糊半径同时活跃 = 三张阴影图集）。三端同一份图集代码，
-# 只进跨后端比对（GDI 侧另外烘位图，基准图由它生成）。
-# layer-stroke / layer-shadow（v0.17.1）：docs/future.md「已知差异」里那两条未定位差异的判据。
-#   layer-stroke —— 裁剪层里**奇数宽度描边**（历史上 VK 每段末端多 1px）。范围拉满：w1/w2/w3/w5/w7、
-#     整数与小数 y、斜线、折线、圆、自定义路径裁剪、嵌套裁剪，外加同款"不裁剪"对照。
-#     顺带钉住真正的根因：`fillLine` 的细长四边形过 GPU 光栅化，4× MSAA 采样位置在 GL 与
-#     Vulkan 上互为镜像 → 浅斜线覆盖率差一档（62/255）。修法是描边改走 CPU 条带覆盖率，
-#     所以本页要 0 不同像素。圆描边（a 例）单测时差 320 像素 / 通道 123，修后 0。
-#   layer-shadow —— 组透明度图层里的 box-shadow（历史上差 ~34）。三条触发条件缺一不可：
-#     卡片底半透明、阴影大模糊低 alpha、底下是渐变。修后 ≤8（预乘色的 8bit 舍入）。
-ANIM_CASES := anim-midphase affine-corners roundtex-lru text-subpixel affine-text nine-slice img-filter svg-marker svg-clip svg-pattern pattern-clip svg-mask flex-scroll-shrink glass glass-multi-size grad-quad fixed sticky letter-spacing text-overflow filter-blur drop-shadow blur-quality round-in-layer text-shadow-multi svg-filter layer-stroke layer-shadow
-# 窗口模式验收（P2b）：交换链 / GDI 读回 / resize / 全屏守卫 / 透明窗
-VK_WINDOW_CASES := probe svgpath circle
-
-.PHONY: pixels-vk
-
-pixels-vk: tools
-	@mkdir -p $(PIXEL_VK_OUT)
-	@fail=0; \
-	for c in $(PIXEL_CASES); do \
-	    echo "--- $$c ---"; \
-	    $(BIN_DIR)/vk_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_VK_OUT)/$$c.png >/dev/null 2>&1 || { echo "VK 渲染失败: $$c"; fail=1; continue; }; \
-	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_VK_OUT)/$$c.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$c"; fail=1; continue; }; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/$$c.gl.png $(PIXEL_VK_OUT)/$$c.png $(PIXEL_VK_TOL) $(PIXEL_VK_OUT)/$$c.diff.png $(PIXEL_VK_CHTOL_STRICT) || fail=1; \
-	done; \
-	for d in $(VK_DEMO_CASES); do \
-	    echo "--- demo/$$d ---"; \
-	    $(BIN_DIR)/vk_shot$(EXT) examples/$$d/main.html $(PIXEL_VK_OUT)/demo-$$d.png >/dev/null 2>&1 || { echo "VK 渲染失败: $$d"; fail=1; continue; }; \
-	    $(BIN_DIR)/gl_shot$(EXT) examples/$$d/main.html $(PIXEL_VK_OUT)/demo-$$d.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$d"; fail=1; continue; }; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/demo-$$d.gl.png $(PIXEL_VK_OUT)/demo-$$d.png $(PIXEL_VK_TOL) $(PIXEL_VK_OUT)/demo-$$d.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
-	done; \
-	for a in $(ANIM_CASES); do \
-	    echo "--- anim/$$a ---"; \
-	    $(BIN_DIR)/vk_shot$(EXT) docs/issues/assets/$$a.html $(PIXEL_VK_OUT)/anim-$$a.png >/dev/null 2>&1 || { echo "VK 渲染失败: $$a"; fail=1; continue; }; \
-	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$a.html $(PIXEL_VK_OUT)/anim-$$a.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$a"; fail=1; continue; }; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/anim-$$a.gl.png $(PIXEL_VK_OUT)/anim-$$a.png 0 $(PIXEL_VK_OUT)/anim-$$a.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
-	done; \
-	exit $$fail
-
-# =============================================
-# D3D11 后端的像素回归（P7 起）：同样与 GL **逐像素**比。
-#
-# 现状（P7a）：判据放宽到 $(PIXEL_D3D_TOL)%。已知差异来源有两处，都是"D3D11 还没换成
-# 共享实现"：它自己的**圆角模板**（模板边长 max(8,4r) + 自己的覆盖率算法，而 GL/Vulkan
-# 用 binui_paint.h 的 RoundTemplateSize/BuildRoundedNineSlice）和自己的**文本光栅化**
-# （binui_font_renderer + 自带图集）。实测 circle 2.04%、svgstroke 0.28%、svgaa 0.25%，
-# 纯几何且无圆角的用例（probe / radius-matrix）是**零差异**。
-# P7b（把这两样也换成共享实现）之后这里收紧到 1.5% → 0。
-#
-# **v0.35.0：圆角这一半已经还清** —— 解析圆角（片元里算距离场）三端同一段式子之后，
-# 18 个基准用例 + 4 个示例页 + 29 个动画中途帧全部 0 不同像素、最大通道差 ≤6，
-# 所以 $(PIXEL_D3D_TOL) 从 3 直接收到 0（单通道容差也收到 8）。剩下的欠账只有
-# **文本光栅化**（D3D11 仍用自己的图集），它现在恰好也逐像素对得上。
-# =============================================
-PIXEL_D3D_OUT := $(BUILD_DIR)/pixels-d3d11
-PIXEL_D3D_TOL ?= 0
-PIXEL_D3D_CHTOL ?= 128
-PIXEL_D3D_CHTOL_STRICT ?= 8
-# 动画中途帧里有一条 drop-shadow 页至今还有 6 个像素差 >128 级（模糊核的抽头顺序），
-# 这是文本/滤镜的遗留差异、与圆角无关，单独给 0.01% 的窗口而不是放宽整条门禁。
-PIXEL_D3D_TOL_ANIM ?= 0.01
-
-.PHONY: pixels-d3d11
-
-pixels-d3d11: tools
-	@mkdir -p $(PIXEL_D3D_OUT)
-	@fail=0; for c in $(PIXEL_CASES); do \
-	    echo "--- $$c ---"; \
-	    $(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_D3D_OUT)/$$c.png >/dev/null 2>&1 || fail=1; \
-	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_D3D_OUT)/$$c.gl.png >/dev/null 2>&1 || fail=1; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/$$c.gl.png $(PIXEL_D3D_OUT)/$$c.png $(PIXEL_D3D_TOL) $(PIXEL_D3D_OUT)/$$c.diff.png $(PIXEL_D3D_CHTOL_STRICT) || fail=1; \
-	done; exit $$fail
-	@fail=0; for d in $(VK_DEMO_CASES); do \
-	    echo "--- demo/$$d ---"; \
-	    $(BIN_DIR)/d3d11_shot$(EXT) examples/$$d/main.html $(PIXEL_D3D_OUT)/demo-$$d.png >/dev/null 2>&1 || fail=1; \
-	    $(BIN_DIR)/gl_shot$(EXT) examples/$$d/main.html $(PIXEL_D3D_OUT)/demo-$$d.gl.png >/dev/null 2>&1 || fail=1; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/demo-$$d.gl.png $(PIXEL_D3D_OUT)/demo-$$d.png $(PIXEL_D3D_TOL) $(PIXEL_D3D_OUT)/demo-$$d.diff.png $(PIXEL_D3D_CHTOL) || fail=1; \
-	done; exit $$fail
-	@fail=0; for a in $(ANIM_CASES); do \
-	    echo "--- anim/$$a ---"; \
-	    $(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/$$a.html $(PIXEL_D3D_OUT)/anim-$$a.png >/dev/null 2>&1 || fail=1; \
-	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$a.html $(PIXEL_D3D_OUT)/anim-$$a.gl.png >/dev/null 2>&1 || fail=1; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/anim-$$a.gl.png $(PIXEL_D3D_OUT)/anim-$$a.png $(PIXEL_D3D_TOL_ANIM) $(PIXEL_D3D_OUT)/anim-$$a.diff.png $(PIXEL_D3D_CHTOL) || fail=1; \
-	done; exit $$fail
-	@echo "--- 脏矩形重绘 vs 全量重绘（阈值 0）---"
-	@$(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/probe.html $(PIXEL_D3D_OUT)/probe.dirty.png --frames 8 --dirty >/dev/null
-	@$(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/probe.png $(PIXEL_D3D_OUT)/probe.dirty.png 0
-	@echo "--- 强制读回 + GDI 贴屏 vs 交换链（阈值 0）---"
-	@$(BIN_DIR)/d3d11_shot$(EXT) docs/issues/assets/probe.html $(PIXEL_D3D_OUT)/probe.gdi.png --gdi >/dev/null
-	@$(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_D3D_OUT)/probe.png $(PIXEL_D3D_OUT)/probe.gdi.png 0
 
 # 注意（踩过）：recipe 的**命令文本**一律用 ASCII。mingw32-make 调 Git 的 sh 时，
 # 某些中文字符（实测「没构建设」「（）」）会让 sh 报 "unexpected EOF while looking for
 # matching `"`" —— 整行命令解析失败、目标直接不动，报错还指向 Makefile 行号，极难定位。
 # 中文只放在注释里；要在命令里输出中文，改成 ASCII（或者写进脚本文件再调用）。
 # =============================================
-# 迁移基线快照（P1，v0.20.3）
-#
-# 为什么要有它：`make pixels` / `pixels-vk` / `pixels-d3d11` 只回答"在容差内吗"，
-# 回答不了"哪一端、哪个用例动了"。迁移 `<path>` 到 bin2d 时，像素一定会动一点点，
-# 那时最需要的恰恰是"动的正好是路径相关的用例，别的一个都没动"。
-#
-# 做法：三端各把每个用例渲一遍到 build-mingw/baseline/render/<后端>/，由
-# tools/baseline_snapshot.cpp 压成一行一个 FNV-1a 64（原始 ARGB，PNG 编码器换了也不影响），
-# 连同 draw_bench 的原语流哈希、bin2d `make quality` 的数字，一起写进
-# tests/baseline/manifest.txt 并**提交进仓库**。每步迁移后对一遍。
-#
-# 判据（两级，别混）：
-#   · 硬门禁仍是 pixel_diff 的容差判据（`make pixels` 等），它管"能不能接受"；
-#   · 快照管"动了什么"：结构变化（用例增删 / 尺寸变）直接失败；哈希变化默认**只报告**，
-#     确认后跑 `make baseline` 重生成快照并在 CHANGELOG 写清为什么变；
-#     要求"这一步必须逐位相同"时用 `make baseline-strict`。
-#
-# 为什么 `draw_bench --hash` 要带 `--frames 1 --warm 0`：哈希是**跨帧累加**的，
-# 帧数不同哈希就不同（实测 --frames 1/2/5 三个值）。固定成"第一帧的原语流"最稳定。
-# =============================================
-BASELINE_DIR    := tests/baseline
-BASELINE_RAW    := $(BUILD_DIR)/baseline
-BASELINE_MANI   := $(BASELINE_DIR)/manifest.txt
-BASELINE_RENDER := $(BASELINE_RAW)/render
-BASELINE_DRAW   := $(BASELINE_RAW)/draw_bench.txt
-BASELINE_QA     := $(BASELINE_RAW)/quality.txt
-BASELINE_CASES  := $(PIXEL_CASES) $(addprefix demo-,$(VK_DEMO_CASES)) $(addprefix anim-,$(ANIM_CASES))
-# bench 用例：真实示例 + 渐变卡片压测（条带爆炸那一页）。
-# **animshow 不进快照**：它的原语流由动画时钟（wall clock）决定，同一份代码连跑两次
-# 哈希都不同（实测三次三个值），拿它当基线只会每次报"变了"。同理，任何"运行中会自己变"
-# 的页面都不该进哈希基线 —— 像素快照那边没这个问题（渲染工具是定帧的，实测两次全等）。
-BASELINE_DRAW_CASES := $(filter-out animshow,$(BENCH_CASES)) bench-grad
-
-.PHONY: baseline-render
-baseline-render: tools
-	@rm -rf $(BASELINE_RENDER)
-	@mkdir -p $(BASELINE_RENDER)/gl $(BASELINE_RENDER)/vk $(BASELINE_RENDER)/d3d11
-	@fail=0; for c in $(BASELINE_CASES); do \
-	    src=docs/issues/assets/$$c.html; \
-	    case $$c in demo-*) src=examples/$${c#demo-}/main.html ;; anim-*) src=docs/issues/assets/$${c#anim-}.html ;; esac; \
-	    $(BIN_DIR)/gl_shot$(EXT) $$src $(BASELINE_RENDER)/gl/$$c.png >/dev/null 2>&1 || { echo "render failed [gl]: $$c"; fail=1; }; \
-	    $(BIN_DIR)/vk_shot$(EXT) $$src $(BASELINE_RENDER)/vk/$$c.png >/dev/null 2>&1 || { echo "render failed [vk]: $$c"; fail=1; }; \
-	    $(BIN_DIR)/d3d11_shot$(EXT) $$src $(BASELINE_RENDER)/d3d11/$$c.png >/dev/null 2>&1 || { echo "render failed [d3d11]: $$c"; fail=1; }; \
-	done; exit $$fail
-	@: > $(BASELINE_DRAW); for d in $(BASELINE_DRAW_CASES); do \
-	    src=examples/$$d/main.html; \
-	    if [ ! -f $$src ]; then src=$(BENCH_ASSET)/$$d.html; fi; \
-	    h=$$($(BIN_DIR)/draw_bench$(EXT) $$src --frames 1 --warm 0 --hash 2>/dev/null | tail -1); \
-	    echo "draw $$d $$h" >> $(BASELINE_DRAW); \
-	done
-	# 只收 stdout：bin2d 的 quality 工具把计时行写到 stderr（0.9.1 起），而台账要逐字比较 ——
-	# 把 ms/µs 收进来，这台机器每次跑都会红一次。stdout 是确定性内容，可以逐字记账。
-	@if [ -x ../bin2D/build-mingw/out/bin2d-quality$(EXT) ]; then ../bin2D/build-mingw/out/bin2d-quality$(EXT) $(BASELINE_RAW)/quality >$(BASELINE_QA) 2>/dev/null || true; else echo "bin2d quality tool not built (run: make -C ../bin2D quality)" >$(BASELINE_QA); fi
-
-.PHONY: baseline
-baseline: baseline-render $(BIN_DIR)/baseline_snapshot$(EXT)
-	@$(BIN_DIR)/baseline_snapshot$(EXT) write $(BASELINE_MANI) $(BASELINE_RENDER) $(BASELINE_DRAW) $(BASELINE_QA)
-
-.PHONY: baseline-check
-baseline-check: baseline-render $(BIN_DIR)/baseline_snapshot$(EXT)
-	@$(BIN_DIR)/baseline_snapshot$(EXT) check $(BASELINE_MANI) $(BASELINE_RENDER) $(BASELINE_DRAW) $(BASELINE_QA)
-
-.PHONY: baseline-strict
-baseline-strict: baseline-render $(BIN_DIR)/baseline_snapshot$(EXT)
-	@$(BIN_DIR)/baseline_snapshot$(EXT) check $(BASELINE_MANI) $(BASELINE_RENDER) $(BASELINE_DRAW) $(BASELINE_QA) --strict
-
-.PHONY: vk-window
-# 窗口模式验收：拿真实窗口跑 N 帧，读回**交换链图像**与 GL 同尺寸输出比（阈值 0）。
-# 覆盖：交换链呈现 / 强制 GDI 读回 / resize 后交换链重建 / 全屏直翻转守卫 / 透明窗。
-vk-window: tools
-	@mkdir -p $(PIXEL_VK_OUT)
-	@fail=0; \
-	for c in $(VK_WINDOW_CASES); do \
-	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_VK_OUT)/$$c.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$c"; fail=1; continue; }; \
-	    for mode in "" "--gdi" "--transparent" "--dirty" "--resize"; do \
-	        tag=$$(echo "win$$mode" | tr -d '-'); \
-	        echo "--- $$c $$mode ---"; \
-	        $(BIN_DIR)/vk_window$(EXT) docs/issues/assets/$$c.html --frames 20 $$mode \
-	            --out $(PIXEL_VK_OUT)/$$c.$$tag.png >/dev/null 2>&1 || { echo "window failed: $$c $$mode"; fail=1; continue; }; \
-	        if [ "$$mode" = "--resize" ]; then continue; fi; \
-	        $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/$$c.gl.png $(PIXEL_VK_OUT)/$$c.$$tag.png $(PIXEL_VK_TOL) $(PIXEL_VK_OUT)/$$c.$$tag.diff.png $(PIXEL_VK_CHTOL) || fail=1; \
-	        if [ "$$mode" = "--dirty" ]; then \
-	            $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/$$c.png $(PIXEL_VK_OUT)/$$c.$$tag.png 0 || fail=1; \
-	        fi; \
-	    done; \
-	done; \
-	echo "--- fullscreen guard (window covers monitor) ---"; \
-	$(BIN_DIR)/vk_window$(EXT) docs/issues/assets/probe.html --frames 10 --fullscreen 2>&1 | grep -E "present=|saved|fullscreen" || fail=1; \
-	exit $$fail
-
-.PHONY: vk-stress
-
-# 鲁棒性压测（P4）：resize 抖动 / 同尺寸早退 / 最小化恢复 / 透明切换 / GDI 切换 /
-# init-shutdown 循环 / 双实例共存 / 泄漏复跑。末尾把画面读回与 GL 比（阈值 0）。
-# 判据看工具自己的 [ok]/[FAIL] 与 "后端显存记账归零"。
-vk-stress: tools
-	@mkdir -p $(PIXEL_VK_OUT)
-	@fail=0; \
-	for c in probe vkcolor; do \
-	    echo "--- stress/$$c ---"; \
-	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_VK_OUT)/$$c.gl.png >/dev/null 2>&1 || { echo "GL 渲染失败: $$c"; fail=1; continue; }; \
-	    $(BIN_DIR)/vk_stress$(EXT) docs/issues/assets/$$c.html --rounds 2 \
-	        --out $(PIXEL_VK_OUT)/stress-$$c.png 2>/dev/null || fail=1; \
-	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_VK_OUT)/$$c.gl.png $(PIXEL_VK_OUT)/stress-$$c.png 0 || fail=1; \
-	done; \
-	exit $$fail
 
 else
 
@@ -1124,28 +686,6 @@ all: $(LIBS_A) $(TEST_BINS)
 	@echo "binUI: non-Windows platform, demos skipped (lib + tests built)"
 
 endif
-
-# =============================================
-# cleanup
-# =============================================
-.PHONY: resize-bench
-# 拖边框 resize 压测（v0.19.0）：三个后端各跑一遍 BINUI_RESIZE_BENCH=60 —— 每帧把窗口
-# 宽度抖 ±40px，逼出"每个 WM_SIZE 都重建交换链/后备缓冲"这条最坏路径。判据：
-#   ① 不许出现后端报错（ResizeBuffers hr= / 交换链重建失败 / 重建目标失败 / Present hr=）；
-#   ② 打印出来的 gfx.resize 耗时要看一眼（本机基准 GL 0.4 / D3D11 0.4 / VK 4.5 ms，
-#      退化回几十 ms 说明又走了"先销毁再新建"的老路）。
-# 这条能抓住 v0.19.0 之前那两个 bug：D3D 的 ResizeBuffers 每次都返回 0x887A0001（瞬间
-# 失败，耗时看着很好），VK 每次 resize 26 ms。
-resize-bench: $(DEMO_DIR)/flexshow$(EXT) $(DEMO_DIR)/flexshow_vk$(EXT) $(DEMO_DIR)/flexshow_d3d11$(EXT)
-	@fail=0; for e in flexshow flexshow_vk flexshow_d3d11; do \
-	    echo "--- $$e ---"; \
-	    out=$$(BINUI_RESIZE_BENCH=60 $(DEMO_DIR)/$$e$(EXT) 2>&1); \
-	    echo "$$out" | grep -E '^\[resize-bench\]' || { echo "拿不到压测结果: $$e"; fail=1; continue; }; \
-	    if echo "$$out" | grep -qE 'ResizeBuffers hr=|交换链重建失败|重建目标失败|Present hr='; then \
-	        echo "$$out" | grep -E 'ResizeBuffers hr=|交换链重建失败|重建目标失败|Present hr=' | head -5; \
-	        echo "后端重建失败: $$e"; fail=1; \
-	    fi; \
-	done; exit $$fail
 
 .PHONY: clean
 clean:

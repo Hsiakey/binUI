@@ -38,8 +38,10 @@
 
 #include "binui_gfx.h"
 #ifdef _WIN32
-// 与 BinUIGL / BinUIVK / BinUID3D 三个后端**同一份**外壳模板（窗口 / 输入 / IME /
-// 拖边框 / DPI / 帧节流都在里面，后端只提供 8 个方法 + appClassName）。
+// 与外壳模板**同一份**实现（窗口 / 输入 / IME / 拖边框 / DPI / 帧节流都在
+// backends/binui_app.h 里，后端只提供 8 个方法 + appClassName）。
+// 0.37.x 起这是**唯一**在外壳里跑的 IBinUIGfx（binui_gl / binui_vk / binui_d3d11
+// 三份后端已删除）。
 // 不无条件包含：binui_bin2d.h 也被 bin2d_shot 这类**不需要窗口**的工具包含，
 // 而 binui_app.h 会拖进 windows.h。非 Windows 平台没有这个外壳。
 #include "backends/binui_app.h"
@@ -49,7 +51,7 @@ namespace binui {
 
 // 用 bin2d 的覆盖率光栅实现 IBinUIGfx 的全部原语。
 //
-// 生命周期与 BinUIGL 对齐（init → beginFrame/draw/present → shutdown），
+// 生命周期与老 GL 后端对齐（init → beginFrame/draw/present → shutdown），
 // 但**不需要窗口**：init(width, height) 就够了，像素留在内部的 bin2d::Surface 上，
 // 由 savePng() / surface() 取走。
 class BinUI2D : public IBinUIGfx {
@@ -146,7 +148,7 @@ public:
     void drawImageNine(uint16_t index, float x, float y, float w, float h,
                        float slice, int repX, int repY, uint32_t tint) override;
 
-    // ---- 文本（排版与光栅复用 binui_glyph_atlas.h，与 GL/VK/D3D11 同一份）----
+    // ---- 文本（排版与光栅复用 binui_glyph_atlas.h，与已删除的三份 GPU 后端同一份）----
     void drawText(float x, float y, float size, int weight,
                   const std::string& utf8, uint32_t color,
                   bool centerH = false, bool centerV = false,
@@ -185,9 +187,10 @@ private:
 };
 
 #ifdef _WIN32
-// 无边框窗口外壳 + bin2d 后端（与 BinUIAppGL / BinUIAppVK / BinUIAppD3D 同一份模板）。
-// 有没有这一行，决定了"三份 GPU 后端能不能删"：外壳只用到后端的 8 个方法，
-// BinUI2D 把它们全实现了，那么输入 / IME / 拖边框就不再是 GPU 后端的独占能力。
+// 无边框窗口外壳 + bin2d 后端。**0.37.x 起这是唯一的一个实例** ——
+// 三份 GPU 后端（含它们各自的 BinUIAppGL / BinUIAppVK / BinUIAppD3D 别名）已删除。
+// 外壳只用到后端的 8 个方法，BinUI2D 把它们全实现了，所以输入 / IME / 拖边框
+// 从来不是 GPU 后端的独占能力。
 using BinUIApp2D = BinUIAppT<BinUI2D>;
 #endif
 

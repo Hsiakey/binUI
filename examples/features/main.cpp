@@ -13,7 +13,7 @@
 #include "binui_compiler.h"
 #include "binui_component.h"
 #include "binui_renderer.h"
-#include "backends/binui_ui.h"   // 编译期选后端：默认 GL，-DBINUI_GPU_VK 走 Vulkan
+#include "backends/binui_ui.h"   // 唯一绘制路径：binUI -> bin2d -> binGPU
 #include "binui_paths.h"
 #include "binui_hot_reload.h"
 #include <windows.h>

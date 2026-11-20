@@ -473,8 +473,8 @@ GL 后端（900×840，同一进程同一个上下文；绘制 = 遍历 + 顶点
 | 填充与描边条带（纯色 / 渐变 / 圆角九宫格 / 四边边框 / 半透明逐行 AA） | `include/binui_paint.h`（1380 行，只额外依赖 `binui_format.h`） | 完整，三端共用同一份数学 |
 | 扫描线路径填充 + 3×3 覆盖 AA | `include/binui_paint.h` §路径填充 | 完整，抗锯齿已落地 |
 | 字形图集与排版 | `src/backends/binui_glyph_atlas.h` | 完整（含亚像素定位开关） |
-| 后端契约（7 原语 + 裁剪栈） | `src/backends/binui_gfx.h` | 四套实现：GDI / GL / VK / D3D11 |
-| 像素基准与三端 diff | `docs/pixels/` + `make pixels` / `pixels-vk` / `pixels-d3d11` | 10 个用例，GL/VK/D3D 三方比（含 `opacity` 组透明度用例） |
+| 后端契约（7 原语 + 裁剪栈） | `src/backends/binui_gfx.h` | **一份实现**：`BinUI2D`（`src/backends/binui_bin2d.cpp`）。当年那四套（GDI / GL / VK / D3D11）已依次移除：GDI 0.24.0，GL / VK / D3D11 / binGPU / BinUIAuto 0.37.x |
+| 像素基准 | `tests/pixels-bin2d/` + `docs/pixels/` | `make pixels-bin2d`（CPU 权威，0 容差）+ `make pixels-bin2d-gpu`（唯一 GPU 门禁）。`pixels` / `pixels-vk` / `pixels-d3d11` 随三份后端删除 |
 
 也就是说：**bin2d 缺的不是"画的能力"，是"组织画面的能力"**。
 
@@ -536,7 +536,7 @@ bin2d 里出现 `BinUINode`、`flex`、"节点盒"这些字眼就说明抽错了
 | 缺口 | 现状 |
 |---|---|
 | 深度附件 | 三端只有颜色附件，没有任何 depth/stencil |
-| 用户着色器 | 各端一套固定管线；VK 的 SPIR-V 是 `src/backends/binui_vk_shaders.h` 里的常量数组 |
+| 用户着色器 | 各端一套固定管线；VK 的 SPIR-V 是 `src/backends/binui_vk_shaders.h` 里的常量数组（**该文件已随 VK 后端删除**） |
 | 顶点/索引缓冲上传 | 顶点是每帧 CPU 生成的一整块常驻映射缓冲（见 `docs/vulkan_design.md` §5.1） |
 | 相机/矩阵 | 完全没有；`examples/cubedemo` 里应用自己算 MVP、用 `fillLine` 画线框 |
 | 贴图到面 | 平面上的任意四边形已有（`emitQuadUV` + `setAffine` 状态，0.16.18/0.16.21）；透视（3D 投影后）没有 —— 那是 binGPU 的事 |
@@ -581,7 +581,11 @@ POD + `uint64_t` 句柄 + 扁平函数，没有回调；C 与 C++ 都能直接 i
 
 **为什么看起来该做**：同一件事现在写了三遍，而且每一遍都是完整的一份生命周期：
 
-| 每份都要自己做的事 | 现状（`src/backends/`） |
+> **历史记录（下面这张表是 0.2x 时代的现状）**：那三份实现已在 0.37.x **整份删除**，
+> `src/backends/` 现在只剩 `binui_bin2d.*`（+ 共享头）。这张表留下的价值是"为什么这一层该由
+> binGPU 拥有"的论据，`binui_vk.cpp` / `binui_vk_shaders.h` 等文件已不存在。
+
+| 每份都要自己做的事 | 现状（当时，`src/backends/`） |
 |---|---|
 | 设备 / 上下文 / 交换链 | `wglCreateContext` 9 处、`vkCreateSwapchainKHR` 5 处、`CreateSwapChainForHwnd` 2 处 |
 | 管线 / 着色器程序 | `glCreateProgram` 4 处、`vkCreateGraphicsPipelines` 4 处、`D3DCompile` 3 处 |
@@ -604,12 +608,13 @@ present 阻塞语义这三件事在每个 `.cpp` 里各有一份，驱动差异�
 
 1. **只抽一层薄的固定管线**：2D 四边形 + 纹理 + 深度附件 + 可选顶点上传，恰好覆盖
    `IBinUIGfx` 现在需要的，再加 bin3d 将来要的 `drawMesh`。
-2. **先做 VK 实现**（照 `binui_vk.cpp` 已有的同步模型**用 C 重写**一遍，见下条），
+2. **先做 VK 实现**（照 `binui_vk.cpp` 已有的同步模型**用 C 重写**一遍，见下条；
+   `binui_vk.cpp` 本身已删除，只能从 `docs/vulkan_design.md` 与 git 历史里看），
    **D3D12 作第二实现**（替换 D3D11 那条路；D3D11 保留为老机器兜底，不迁）。
 3. **GL 不迁**：状态机抽象收益最低，而它是老驱动 / 远程桌面 / 无 GPU 环境的兜底 ——
    迁过去只会得到一份"假装自己是现代 API"的 GL 封装。
 
-**C 的额外成本要说在前面**：`binui_vk.cpp` 那 2805 行是 C++，搬进 binGPU 不是"移文件"而是
+**C 的额外成本要说在前面**：`binui_vk.cpp` 那 2805 行是 C++（已删除，见 git 历史），搬进 binGPU 不是"移文件"而是
 "按 C 重写"（没有 `std::vector` 存交换链 image、没有 RAII 管 fence、没有 `std::string` 拼错误）。
 好消息是 Vulkan 自己的结构体本来就是 C 的，`VkDevice`/`VkCommandBuffer` 那套直接就能用；
 坏消息是容器和生命周期要自己写，估计比重写一遍 D3D12 实现便宜不了太多。换回来的是一份**任何
@@ -623,13 +628,14 @@ present 阻塞语义这三件事在每个 `.cpp` 里各有一份，驱动差异�
 1. bin3d 进到 GPU 阶段 —— 那时要网格 + 深度 + 自定义着色器，binGPU 的每个实现各写一遍；
 2. 真要接第四个后端（Linux/X11、Android GLES、Metal），一次迁移要动的点超过"抄一份 `.cpp`"。
 
-**现在不做的原因**：三个后端已经过了像素验收，而**像素一致的功劳恰恰在于"三份实现各自简单
+**现在不做的原因**（写于三后端还在时）：三个后端已经过了像素验收，而**像素一致的功劳恰恰在于"三份实现各自简单
 直白"** —— 每份都只是把 `include/binui_paint.h` 算好的条带 `fillRect` 出去，出问题一眼能看出是
 哪个后端、哪一行。中间插一层设备抽象，收益是"少写第四份"，代价是所有像素 bug 多一层要排查。
-"第四份"还不存在时，这是纯亏。
+"第四份"还不存在时，这是纯亏。**后来这件事由 binGPU 接手（0.37.x）：三份实现删掉，
+"设备"这一层真的只写了一遍。**
 
-**验收线**：搬家后三端像素基准仍 0 diff；窗口 / 输入法 / 拖边框外壳（`binui_app.h`、
-`binui_gl.h`）**不认识 binGPU**，只认 `IBinUIGfx` —— 这条边界一旦被打破，这层抽象就白做了。
+**验收线**：搬家后像素基准仍 0 diff；窗口 / 输入法 / 拖边框外壳（`binui_app.h`、
+`binui_bin2d.h`）**不认识 binGPU**，只认 `IBinUIGfx` —— 这条边界一旦被打破，这层抽象就白做了。
 
 ## 四层关系
 

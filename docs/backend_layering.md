@@ -51,11 +51,11 @@ binGPU 的 CPU 执行模式**（bin2d 不再自己决定在哪算）。文字：
 **文字归属的拆分与迁移顺序见 [issues/12-font-layer-ownership.md](issues/12-font-layer-ownership.md)**
 （bin2d 侧三处文档现在和本条相反，先统一再动代码）。
 
-### 第三步：删掉 binUI 的三份 GPU 后端
+### 第三步：删掉 binUI 的三份 GPU 后端（**已完成 2026-11-20**）
 
-`binui_vk` / `binui_gl` / `binui_d3d11` 删除，`BinUIAuto` 一起删。
+`binui_vk` / `binui_gl` / `binui_d3d11` 删除，`binui_gpu`（设备层那份）与 `BinUIAuto` 一起删。
 binUI 只剩一条路：`binUI ──► bin2d（+bin3d）──► binGPU ──► VK/GL/D3D11 × GPU/CPU`。
-这才是 0.29.0 那条迁移的真正收尾。
+这才是 0.29.0 那条迁移的真正收尾。落地清单见 §5 的 3c 行。
 
 ## 4. 过渡期为什么先留着 0.33.0
 
@@ -84,10 +84,11 @@ binUI 只剩一条路：`binUI ──► bin2d（+bin3d）──► binGPU ─�
 | 2b. binUI 自己的三端 | 已完成 → **已被 3a 取代** | 0.35.0：`binui_gl` / `binui_vk` / `binui_d3d11` 的 `fillRounded` / `strokeRounded` 换成同一段 SDF，三条顶点流各自 36 字节、**不再采样圆角模板**。三端的跨后端像素门禁从 `PIXEL_VK_TOL 1.5%` / `PIXEL_D3D_TOL 3%` 收到 **0%**（单通道容差 128 → 8）。这一条是迫不得已的先手：三端各自实现，只改一端会让"后端互拍"门禁永久红。**代价是同一段 SDF 在 binUI 里躺了 3 份**（全栈 7 份拷贝），master 当场指出落错了层 —— 于是有了 3a |
 | **3a. binUI 的设备层换成 binGPU（GL 先行）** | **已完成（0.36.0）** | 新增 `src/backends/binui_gpu.{h,cpp}`：`BinUIGpu` 实现同一份 `IBinUIGfx`，但**不建自己的设备** —— 设备/交换链/管线/采样器/命令缓冲/节拍全部来自 binGPU（`bingpu_device_create` / `bingpu_swapchain_create` / `bingpu_cmd_*` / `bingpu_pace_*`）。绘制目标是一张窗口大小的持久 `canvas` 纹理，`present()` 时贴到交换链目标上；于是"抓背景做毛玻璃"与"图层合成"都退化成"把纹理的某块画成四边形"，**不需要给 binGPU 加任何拷贝命令**。结果：binUI 这条路径上**一份 AA 数学都没有** —— 圆角 / 描边 / 圆角渐变全走 `bingpu_cmd_draw_shapes`。两处口径对齐（顶点色必须是直通色、纹理必须声明 `BGPU_TEXTURE_PREMULTIPLIED`）之后，18 个像素基准里 **16 个与老 GL 后端逐像素相同**，`appshow` 整页（1280×800）0 差异、最大通道差 7 |
 | 3b. 同一份实现搬到 VK / D3D11 | **已完成（binGPU 0.13.0 / binUI 0.36.2）** | `binui_gpu.cpp` 里没有一行为某个 API 特判（命令流完全相同），差的只是 binGPU 各后端自己。VK 后端在"一帧里多次 begin/end render、把刚当渲染目标的纹理再当采样源"这条路上还不对：`circle` / `opacity` 0 差异，但 `svg-filter` 87%、`appshow` 13.7%。修在 binGPU，修好后 3a 里那颗"先钉 GL"的钉子去掉即可 |
-| 3c. 删掉 binui_vk / binui_gl / binui_d3d11 与 BinUIAuto | **未开始（前置只剩两件）** | 三份实现暂时保留：它们是像素基准的参照实现与对照工具（`gl_shot` / `vk_shot` / `d3d11_shot`）。要删得先让 binGPU 补上 **MSAA**（老 GL 后端 4×，binGPU 四端恒 1 → 旋转/非轴对齐的实心几何边缘掉 AA，`image-round` 页 0.217%、最大通道差 120）和**真正的 mip 采样**（`BGPU_TEXTURE_MIPMAPS` 现在降级为 1 级，缩小的图片退化成单级双线性，`image-mip` 页 37%），否则删掉就等于把这两项能力一起扔掉 |
+| 3c. 删掉 binui_vk / binui_gl / binui_d3d11 / binui_gpu 与 BinUIAuto | **已完成（2026-11-20）** | 前置两件（binGPU 的 **MSAA** 与**真 mip 链**）在 binGPU 0.15.0 补齐，`image-round` / `image-mip` 两页对 `docs/pixels` 归零，于是这几份可以整份退场。**删掉的源文件**（~12k 行、含 4 份 GLSL/HLSL）：`src/backends/` 的 `binui_gl.{h,cpp}`（2250 行）、`binui_vk.{h,cpp}`（4560 + SPIR-V 常量表 `binui_vk_shaders.h`）、`binui_d3d11.{h,cpp}`（2457 行）、`binui_gpu.{h,cpp}`（1714 行）、`binui_auto.{h,cpp}`（327 行），以及只被它们 include 的 `binui_gl_ext_min.h`；**删掉的工具**：`gl_shot` / `vk_shot` / `vk_window` / `vk_stress` / `d3d11_shot` / `gpu_shot` 与 `tools/vk_shaders/`（GLSL 源 + `.spv`）；**退场的门禁**：`pixels` / `pixels-vk` / `pixels-d3d11` / `pixels-gpu`（那几条是"三个后端互拍"，后端没了就没有执行体）、`bench-gl` / `vk-window` / `vk-stress` / `resize-bench` / `baseline-*`、`demos-vk` / `demos-d3d11` 与 `-DBINUI_GPU_VK\|GL\|D3D11\|2D` 四个编译期宏（`BINUI_GPU=` 环境变量一起退场）。**剩下的路径只有一条**：`src/backends/binui_bin2d.{h,cpp}`（`BinUI2D` / `BinUIApp2D`）+ `binui_app.h`（外壳）+ `binui_draw_nodes.h`（遍历）+ `binui_glyph_atlas.h`（排版/图集）+ `binui_paint.cpp`（覆盖率条带），像素门禁只剩 `pixels-bin2d`（CPU 权威，0 容差）与 `pixels-bin2d-gpu`（唯一 GPU 门禁，对 `docs/pixels`） |
 | **4. binUI 只留一条路（master 2026-11-20：「把整个 backends 目录砍掉，直接接 bin2D/3D」）** | **已完成接线（binUI 0.37.0 / bin2D 0.22.2）** | `BinUI2D` 把 canvas 挂上 `bin2d::GpuExec`：binUI 这一层不再有像素数学、不再有图形 API 调用，圆角 / 圆角描边 / 渐变 / 字形 / 九宫格 / 图层 / 毛玻璃全部由 bin2d 的语义翻成 binGPU 的图元。降级链三级（执行体 → `GpuCompositor` 贴屏 → GDI），`presentBackendName()` 如实报当前一级。帧时 `buttonshow` 1020×684 9.07 → **0.68 ms**（13.3×）、`appshow` 1280×800 8.88 → **0.74 ms**（12.0×），与 binUI 自带的 `binui_gpu`（0.64 / 0.69）**同量级** —— 可见"把 2D 语义往下一层搬"没有代价，只是少了一千八百行。为此 bin2D 0.22.2 补了三条原语：`Canvas::strokeRounded`（否则所有圆角边框整片消失）、`imageChanged`（字形图集原地改像素 ⇒ 一直采样旧内容）、`backdropBlur`（CPU 侧明确返回 false），外加 `GpuExec` 的节拍 |
 
-**卡点只剩一个了**：把 binUI 换成"先记列表 → 交给执行体"会让圆角弧边整体挪
+**卡点只剩一个了**（历史记录：这句写于 3c 之前，卡点后来由 binGPU 0.15.0 收掉）：
+把 binUI 换成"先记列表 → 交给执行体"会让圆角弧边整体挪
 （`docs/pixels` 的 GL 基准已经换成解析 SDF、`tests/pixels-bin2d` 还是扫描线，两者差 41 个电平）。
 **0.35.0 之后 binUI 的三端已经全是解析 SDF 了**，所以这一步的前置条件比之前好：剩下的分歧只在
 bin2d 的 CPU 光栅那一边。
@@ -116,23 +117,26 @@ bin2d 的 CPU 光栅那一边。
    所以 3c 的阻塞项从"补 MSAA + mip"变成"修多目标 MSAA 这一处"。这个 4× 一旦修通，
    `image-round`（旋转边）与 `image-mip` 会一起变成 0 差异 —— 那才是删老后端的时机。
 
-两件都在 binGPU 里、也只该在 binGPU 里修 —— 这正是 0.36.0 想证明的分工：
-**binUI 只决定画什么，怎么画（含 AA 质量档）由 binGPU 决定。**
+   两件都在 binGPU 里、也只该在 binGPU 里修 —— 这正是 0.36.0 想证明的分工：
+   **binUI 只决定画什么，怎么画（含 AA 质量档）由 binGPU 决定。**
+   （历史：这两项已在 **binGPU 0.15.0** 补齐并修通多目标 MSAA，所以 3c 得以落地。）
 
-`binui_gpu.cpp` 之后就是 binUI 唯一的 GPU 绘制实现：它 ~1900 行，其中没有一行着色器，
+`binui_gpu.cpp` 曾经是 binUI 唯一的 GPU 绘制实现：它 ~1900 行，其中没有一行着色器，
 对比被它取代的三份（`binui_gl` 2250 行 + `binui_vk` 5600 行 + `binui_d3d11` 2900 行，
-含 4 份 GLSL/HLSL 着色器）。
+含 4 份 GLSL/HLSL 着色器）。**这份 `binui_gpu.cpp` 本身也已在 3c 删除** ——
+它的职责被 `BinUI2D` + bin2d 的 `GpuExec` 接走（同一条"语义在 bin2d、设备在 binGPU"的边界，
+只是再往下挪了一层）。
 
 ### 圆角 AA 已经统一了（0.34.4，master 2026-11-20 定"用质量最好的那一套"）
 
 | 路径 | AA 做法 | 谁在用 |
 |---|---|---|
 | `Canvas::fillRounded` | 8 子采样扫描线 | binUI 的 bin2d 后端、离屏出图 —— **唯一的一份** |
-| `RasterizeRoundedTileCoverage` | ~~解析 SDF~~ → **调上面那份扫描线**（0.20.0） | binUI 的 GL / VK / D3D11 三端 |
+| `RasterizeRoundedTileCoverage` | ~~解析 SDF~~ → **调上面那份扫描线**（0.20.0） | ~~binUI 的 GL / VK / D3D11 三端~~（三端已删除） |
 
-以前同一个圆角矩形的弧边差到 **48 个电平**，一直没被发现，是因为两个 golden 是分开的
-（`docs/pixels` 对 GL、`tests/pixels-bin2d` 对 bin2d 后端），**"逐像素相同"从来没跨过
-实现比**。0.20.0 把模板内容换成 CPU 光栅自己的扫描线覆盖率之后：
+> 历史：以前同一个圆角矩形的弧边差到 **48 个电平**，一直没被发现，是因为两个 golden 是分开的
+> （`docs/pixels` 对 GL、`tests/pixels-bin2d` 对 bin2d 后端），**"逐像素相同"从来没跨过
+> 实现比**。0.20.0 把模板内容换成 CPU 光栅自己的扫描线覆盖率之后：
 
 - bin2d 的 `test_raster` 钉住"角片与 `Canvas::fillRounded` 逐像素相同（r=1..40）"，**max 0**；
 - bin2d 的 `test_gpu_bridge` 钉住"九宫格 vs 直填"，四端 **max 0**；

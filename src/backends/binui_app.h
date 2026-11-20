@@ -2,16 +2,17 @@
 //
 // 这份代码原来长在 binui_gl.cpp 里，叫 BinUIAppGL。P5 要做 GPU=gl|vk 时发现：
 // 整个外壳只用到后端的 8 个方法（init/shutdown/resize/beginFrame/present/presentViaGdi/
-// setTransparent/isReady），跟 GL 一点关系都没有 —— 那就模板化，让 GL 与 Vulkan 共用
-// 同一份窗口/输入/IME/拖拽/节流逻辑，两个后端不会在"拖边框"这种边角上分叉。
+// setTransparent/isReady），跟 GL 一点关系都没有 —— 那就模板化，各后端共用
+// 同一份窗口/输入/IME/拖拽/节流逻辑，不会在"拖边框"这种边角上分叉。
+// 0.37.x 之后实例只剩一个：BinUIApp2D = BinUIAppT<BinUI2D>（三份 GPU 后端已删除）。
 //
 // 后端只需要提供：
 //   · IBinUIGfx 的 8 个方法（见上）
 //   · static const wchar_t* appClassName()  —— 窗口类名（同进程两个后端并存时不冲突）
 //
-// 用法（两个后端完全一样）：
-//   BinUIAppVK app(960, 660);          // 或 BinUIAppGL
-//   app.setDrawFn([&](Gfx& g, const void* clip) { drawUi(g, renderer, clip); });
+// 用法：
+//   BinUIApp2D app(960, 660);
+//   app.setDrawFn([&](IBinUIGfx& g, const void* clip) { drawUi(g, renderer, clip); });
 //   app.run();
 //
 // 线程亲和不变：窗口 + GPU 上下文都属于建窗线程，pump/renderFrame 会显式拦截跨线程调用。
@@ -42,9 +43,10 @@
 namespace binui {
 
 // 是否远程会话（RDP / 虚拟显示器）：这种环境下 swapchain 直翻转会停帧
-// （GL 0.9.1 与 Vulkan 后端都实测过），**三个后端**据此默认走读回 + GDI 贴屏。
+// （当年的 GL 0.9.1 与 Vulkan 后端都实测过；那两份后端已在 0.37.x 删除），
+// 后端据此默认走读回 + GDI 贴屏。
 // BINUI_FORCE_REMOTE=1 可在本机模拟（本机没有 RDP 会话，否则这条分支无法验收）。
-// 放在命名空间而不是模板静态里：后端（binui_gl / binui_vk / binui_d3d11）要调它。
+// 放在命名空间而不是模板静态里：后端（现在的 binui_bin2d.cpp）要调它。
 inline bool RemoteSession() {
     static const bool remote = [] {
         const char* e = std::getenv("BINUI_FORCE_REMOTE");
@@ -283,15 +285,14 @@ inline bool caretBlinkOn();
 // 应用在 press 回调中先判此函数，命中则调用 app.beginWindowDrag()
 inline bool isTitlebarDrag(const BinUIRenderer& renderer, float x, float y);
 
-// 无边框（WS_POPUP）应用外壳：GPU 后端 + 事件循环。
-// Gfx 必须是实现了 IBinUIGfx 且带 appClassName() 的后端（BinUIGL / BinUIVK）。
+// 无边框（WS_POPUP）应用外壳：绘制后端 + 事件循环。
+// Gfx 必须是实现了 IBinUIGfx 且带 appClassName() 的后端（现在只有 BinUI2D）。
 template <class Gfx>
 class BinUIAppT {
 public:
     using UpdateFn  = std::function<void(float dt)>;
-    // 绘制回调只认**接口**（IBinUIGfx）而不是具体后端：这样同一份 draw 代码既能被
-    // GL / Vulkan / D3D11 三个编译期实例复用，将来做运行期后端选择（BINUI_GPU）时
-    // 也不必再改一遍调用方。见 docs/vulkan_design.md §7.5。
+    // 绘制回调只认**接口**（IBinUIGfx）而不是具体后端：三份老 GPU 后端能整份删掉、
+    // 而 9 个示例一行都不用改，靠的就是这条契约。
     using DrawFn    = std::function<void(IBinUIGfx&, const void* clipRect)>;
     using MoveFn    = std::function<void(float x, float y)>;
     using PressFn   = std::function<void(float x, float y)>;
@@ -1585,7 +1586,7 @@ inline bool BinUIAppT<Gfx>::pacedByPresent() const {
 // 两条路的区别只有"谁算"：
 //   · 后端能回答 paceAvailable()（= bin2D/bin3D → binGPU 的节拍器）→ 目标周期由它给，
 //     外壳只负责睡；
-//   · 不能（仓里遗留的 gl/vk/d3d11 三份实现，见 docs/backend_layering.md 第 3 步）
+//   · 不能（仓里已删除的 gl/vk/d3d11 三份实现就是这种，见 docs/backend_layering.md 第 3 步）
 //     → 外壳按刷新率兜底。
 // `frameBudget_` 同时是"宿主时钟多久推进一次"：unlimited（0ms）时它退化成 0，
 // 于是 update_ 被尽可能频繁地调用 —— 这正是"无限制"的含义。

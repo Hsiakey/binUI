@@ -15,26 +15,29 @@
 |---|---|---|---|
 | ![自适应布局](docs/img/flexshow.png) | ![按钮样式](docs/img/buttonshow.png) | ![动画](docs/img/animshow.png) | ![应用壳](docs/img/appshow.png) | ![3D](docs/img/cubedemo.png) |
 
-> **后端（0.33.0 起运行期选择）**：`binUI` 启动时问 **binGPU**「这台机器有什么」，
-> 按 **Vulkan → GL → D3D11 → CPU** 取第一个可用的；一个 GPU 后端都用不了才走 CPU 光栅
-> （bin2d，此时的落点是 `binUI ──► bin2d ──► binGPU` 把 Surface 贴上屏，没有显卡就系统贴屏）。
-> `BINUI_GPU=vk|gl|d3d11|2d` 可强制；编译期宏 `-DBINUI_GPU_VK|GL|D3D11|2D` 仍在（钉住后端做对照/金标准）。
+> **后端：只有一条绘制路径（0.37.x 起）**
 >
-> **`BINUI_GPU=gpu`（0.36.0 起）**：走 `binui_gpu` —— binUI **唯一一个没有设备层**的后端，
-> 设备/交换链/管线/节拍全部是 binGPU 的，连圆角的 AA 数学也只剩 binGPU 片元里那一句距离场
-> （binUI 侧零拷贝）。见 `src/backends/binui_gpu.h` 与 `docs/backend_layering.md` 第 3 步。
+>     binUI  ──►  bin2d / bin3d  ──►  binGPU  ──►  GL / Vulkan / D3D11
+>
+> binUI 只决定"画什么"（节点树 → 语义原语），2D 语义在 **bin2d**，设备/交换链/AA 档在
+> **binGPU**，后端矩阵（VK/GL/D3D11 × GPU/CPU）是 binGPU 内部的事。
+> 2026-11-20 收尾时**整份删除**了 binUI 自己的四份实现（`binui_gl` / `binui_vk` /
+> `binui_d3d11` / `binui_gpu`，共 ~12k 行、含 4 份 GLSL/HLSL）与运行期选择器 `BinUIAuto`：
+> 它们各自都是一套完整的 2D 光栅，正是 0.29.0 那条迁移要删的东西。
+> 于是 `BINUI_GPU=vk|gl|d3d11|gpu|2d` 这个环境变量与 `-DBINUI_GPU_VK|GL|D3D11|2D` 四个编译期宏
+> **一起退场** —— 没有可挑的了。`BinUI2D::presentBackendName()` 会如实报当前生效的那一级
+> （`bin2d+gpu` / `bin2d+gpu-compositor` / `bin2d+gdi` / `bin2d+offscreen`）。
+> 分层理由与删除清单见 [`docs/backend_layering.md`](docs/backend_layering.md) 第 3 步。
 >
 > **帧节拍（0.34.0 起可调，`BIN2D_PACE`）**：`standard`（默认，上限=刷新率，画不完就尽力多画）/
 > `unlimited` / `240` / `120` / `90` / `60` / `30`。闸门在 **binGPU**（刷新率、present mode、
 > present 真实耗时只有设备层知道），策略由 bin2D/bin3D 下传，外壳只负责睡到点。
-> buttonshow 1020×684 @120Hz 实测：VK `unlimited` **2116–2207 fps**、`standard` 114–115、
-> `60` → 58.7；D3D11 `unlimited` 1893–2491；GL `unlimited` 702–729；
-> bin2d CPU 光栅 `standard` 93–96（0.33 是 56 —— "标准"不再把装不下的帧凑整成 60）。
-> 诊断链与两个真 bug（GL 关不掉 vsync、可等待定时器晚 1 ms）见
+> buttonshow 1020×684 实测：bin2d + GPU 执行体 `standard` 下 **0.9–1.0 ms/帧**
+> （CPU 光栅同一页 ~9 ms）。诊断链与两个真 bug（GL 关不掉 vsync、可等待定时器晚 1 ms）见
 > [`docs/frame_pacing.md`](docs/frame_pacing.md) §8。
 >
-> 前三张是 `gl_shot`（GL 后端 + 隐藏窗口 + 离屏 FBO）从当前源码渲染的真实布局；第四张是 GL 真机截屏
-> —— 立方体是应用在 `<canvas>` 回调里用 `fillLine` 画的，离屏渲染跑不到那段代码。
+> 前五张截图是当年的 GL 后端离屏出图（`gl_shot`，该工具已随 GL 后端删除），作为历史布局留档；
+> 现在从源码重出图的命令是 `build-mingw/bin/bin2d_shot.exe`。
 > 其余示例（features / fontshow / svgdemo / texturedemo / 组件库）的截图见
 > [`docs/README.md`](docs/README.md#图片)，重出命令也在那里。
 
@@ -83,11 +86,11 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `include/binui_component.h` | 外挂组件加载（header-only）：`ex::MountAll()` 按布局里的组件引用段挂载 `.bum` |
 | `include/binui_srcmap.h` | 打包清单（`binui.res`）的读写（header-only）：让 `binui_export` 能把 `.bui` 逐字节还原成打包前的目录结构 |
 | `include/binui_video.h` | 可选视频编解码模块接口：FFmpeg 解码 + WASAPI 音频（`BINUI_ENABLE_VIDEO`，默认 OFF 桩实现零依赖） |
-| `src/backends/binui_app.h` | Win32 窗口外壳 + 事件/DPI/热重载 + 读回贴屏（`presentViaGdi`，拖拽/远程会话/全屏时的**呈现**路径）—— 三个 GPU 后端共用；GDI **绘制**后端已于 0.24.0 移除 |
+| `src/backends/binui_app.h` | Win32 窗口外壳 + 事件/DPI/热重载 + 读回贴屏（`presentViaGdi`，拖拽/远程会话/全屏时的**呈现**路径）—— 现在只实例化在 `BinUI2D` 上（`BinUIApp2D`）；GDI **绘制**后端已于 0.24.0 移除，三份 GPU 后端已于 0.37.x 移除 |
 | `include/binui_paths.h` | 跨平台路径解析：exe 真实路径（`GetModuleFileName`/`/proc/self/exe`）+ UI 查找顺序 + 图片资源加载（`--ui` / `$BINUI_UI`） |
 | `include/binui_hot_reload.h` | UI 热重载（`--watch`）：保存即重编译换树，保留窗口尺寸/滚动/焦点/输入内容 |
-| `src/backends/binui_gl.h/.cpp` | GPU 绘制后端：OpenGL 3.3 + 字形图集 + 顶点四边形（无边框窗口） |
-| `src/backends/binui_gpu.h/.cpp` | **设备层交给 binGPU** 的绘制后端（0.36.0）：`IBinUIGfx` 的全部原语落在 `bingpu_cmd_*` 上，圆角走 `draw_shapes`（SDF 在 binGPU 片元里）。binUI 的**终点实现** —— MSAA/mip 补齐后另三份后端删除 |
+| `src/backends/binui_bin2d.h/.cpp` | **唯一的绘制后端**：`BinUI2D` 把 `IBinUIGfx` 的全部原语交给 bin2d 的 `Canvas` / `GpuExec`，窗口呈现由 `bin2d::GpuCompositor` → binGPU 交换链负责（没有显卡就 GDI 贴屏）。binUI 侧没有任何图形 API，也没有一份 AA 数学 |
+| ~~`src/backends/binui_gl.*` / `binui_vk.*` / `binui_d3d11.*` / `binui_gpu.*` / `binui_auto.*`~~ | **已删除（0.37.x，2026-11-20）**：三份 GPU 后端 + 设备层那份 + 运行期选择器，共 ~12k 行、含 4 份 GLSL/HLSL。它们的职责现在在 `BinUI2D` → bin2d → binGPU 这条链上 |
 | `include/binui_c.h` | **C ABI**：定长 POD + 不透明句柄 + 轮询事件，给 Python/Go/Rust 等宿主语言的唯一入口（实现在 `src/binui_c.cpp`） |
 | `bindings/` | 语言绑定：`python/`（ctypes）、`go/`（cgo）、`rust/`（手写 extern "C"） |
 | `examples/features` | **功能**：伪类/扩展绘制/HTML 语义/组件化三形态/数据驱动 setText |
@@ -129,55 +132,66 @@ CMake 会直接 `add_subdirectory` 编译为静态库（MSVC/MinGW 均可）；M
 
 ## 绘制后端
 
-渲染器只产出节点树（布局/状态/事件，纯 C++），像素由可替换的绘制后端负责：
+渲染器只产出节点树（布局/状态/事件，纯 C++），像素由**一条**绘制路径负责：
 
-| 后端 | 窗口 | 绘制 | 文本 | emoji |
+```
+binUI ──► bin2d / bin3d ──► binGPU ──► GL / Vulkan / D3D11
+```
+
+| 实现 | 窗口 | 绘制 | 文本 | emoji |
 |------|------|------|------|-------|
-| D3D11（`binui_d3d11`，0.11.0 起并入共享代码） | WS_POPUP 无边框（外壳与 GL/Vulkan 共用 `binui_app.h`）；透明窗/全屏直翻转/拖拽期走读回 + GDI 贴屏 | GPU 四边形（图集/九宫格模板/**持久离屏帧缓冲**+脏矩形局部重绘），VSync 按需呈现；节点树遍历与 GL/Vulkan **同一份** `binui_draw_nodes.h` | FreeType 字形图集（灰度 8bit；≤16px 轻 hinting + gamma + 像素对齐） | 彩色（FreeType COLR/CPAL 层合成） |
-| OpenGL（`binui_gl`） | WS_POPUP 无边框 | 同 D3D11 架构：GL 3.3 core + 顶点四边形/图集/九宫格/FBO，VSync（wglSwapIntervalEXT）；拖拽 resize 期走「读回 + GDI `SetDIBitsToDevice` 贴屏」（规避 NVIDIA 驱动 SwapBuffers 崩溃），透明窗走「读回 + `UpdateLayeredWindow`」 | 同 D3D11（共享 `binui_font_renderer`） | 同 D3D11 |
-| **Vulkan**（`binui_vk`，0.10.0 起） | WS_POPUP 无边框，`VK_KHR_swapchain` 呈现；透明窗/全屏直翻转/拖拽期自动走读回 + GDI 贴屏 | 同架构：Vulkan 1.0 + 顶点四边形/图集/九宫格 + **持久 4× MSAA 累积帧**（脏矩形局部清屏；0.16.12 起有 1.3 就整条走 **dynamic rendering**，组透明度的离屏图层靠它）；只 `LoadLibrary("vulkan-1.dll")`，不链 `vulkan-1.lib`、不需要 SDK | **与 GL 共用同一份** `binui_glyph_atlas.h`（逐像素同源） | 同 GL |
-| **binGPU**（`binui_gpu`，0.36.0 起） | **没有设备层**：`bingpu_device_create` + `bingpu_swapchain_create`（窗口/透明/离屏都是 binGPU 的事） | `bingpu_cmd_*`：纯色/图片/文字 = `draw_quads`，圆角/描边 = `draw_shapes`（**SDF 在 binGPU 的片元里**，binUI 侧一份 AA 数学都没有）；绘制目标是自有的持久 `canvas` 纹理，"抓背景做毛玻璃/图层合成" = 把纹理的某块画成四边形 | 同 GL/VK（共享 `binui_glyph_atlas.h`） | 同 GL |
+| **bin2d**（`BinUI2D`，`src/backends/binui_bin2d.*`） | WS_POPUP 无边框（外壳 `binui_app.h` → `BinUIApp2D`）；透明窗走 `bin2d+layered`、拖拽/远程会话走读回 + GDI 贴屏 | 全部语义交给 bin2d：CPU 光栅（`Canvas`）或 GPU 执行体（`GpuExec` → `bingpu_cmd_*`）。binUI 侧没有图形 API、没有 AA 数学 | FreeType 字形图集（灰度 8bit；≤16px 轻 hinting + gamma + 像素对齐），经 `binui_glyph_atlas.h` | 彩色（FreeType COLR/CPAL 层合成） |
 
-### 后端支持级别（v0.24.0 起）
+> **已删除（0.37.x / 2026-11-20）**：`binui_gl`（OpenGL 3.3）、`binui_vk`（Vulkan + SPIR-V）、
+> `binui_d3d11`（D3D11 + HLSL）、`binui_gpu`（设备层直接建在 binGPU 上的那份）、`binui_auto`
+> （运行期按 VK > GL > D3D11 > CPU 挑后端）。它们各自是一套完整的 2D 光栅，
+> 与 bin2d 重复；删除后的能力（MSAA、真 mip 链、节拍）都在 binGPU 里。
+> 下表是那三份后端的**历史记录**，留着交代"当年怎么做的"，不代表现状。
 
-- **GL / Vulkan / D3D11 = 全部后端**。三端共用 `binui_draw_nodes.h` + `binui_glyph_atlas.h`
-  + `binui_paint.h`，**逐像素相同**是硬约束（门禁 = `pixels`（GL 自回归）+
-  `pixels-vk`/`pixels-d3d11`（与 GL 逐像素比））。
+| 已删除的实现（历史） | 窗口 | 绘制 | 文本 | emoji |
+|------|------|------|------|-------|
+| D3D11（`binui_d3d11`，0.11.0 起并入共享代码；**已删除**） | WS_POPUP 无边框（外壳与 GL/Vulkan 共用 `binui_app.h`）；透明窗/全屏直翻转/拖拽期走读回 + GDI 贴屏 | GPU 四边形（图集/九宫格模板/**持久离屏帧缓冲**+脏矩形局部重绘），VSync 按需呈现；节点树遍历与 GL/Vulkan **同一份** `binui_draw_nodes.h` | FreeType 字形图集（灰度 8bit；≤16px 轻 hinting + gamma + 像素对齐） | 彩色（FreeType COLR/CPAL 层合成） |
+| OpenGL（`binui_gl`；**已删除**） | WS_POPUP 无边框 | 同 D3D11 架构：GL 3.3 core + 顶点四边形/图集/九宫格/FBO，VSync（wglSwapIntervalEXT）；拖拽 resize 期走「读回 + GDI `SetDIBitsToDevice` 贴屏」（规避 NVIDIA 驱动 SwapBuffers 崩溃），透明窗走「读回 + `UpdateLayeredWindow`」 | 同 D3D11（共享 `binui_font_renderer`） | 同 D3D11 |
+| **Vulkan**（`binui_vk`，0.10.0 起；**已删除**） | WS_POPUP 无边框，`VK_KHR_swapchain` 呈现；透明窗/全屏直翻转/拖拽期自动走读回 + GDI 贴屏 | 同架构：Vulkan 1.0 + 顶点四边形/图集/九宫格 + **持久 4× MSAA 累积帧**（脏矩形局部清屏；0.16.12 起有 1.3 就整条走 **dynamic rendering**，组透明度的离屏图层靠它）；只 `LoadLibrary("vulkan-1.dll")`，不链 `vulkan-1.lib`、不需要 SDK | **与 GL 共用同一份** `binui_glyph_atlas.h`（逐像素同源） | 同 GL |
+| **binGPU 设备层**（`binui_gpu`，0.36.0 起；**已删除**） | **没有设备层**：`bingpu_device_create` + `bingpu_swapchain_create`（窗口/透明/离屏都是 binGPU 的事） | `bingpu_cmd_*`：纯色/图片/文字 = `draw_quads`，圆角/描边 = `draw_shapes`（**SDF 在 binGPU 的片元里**）；绘制目标是自有的持久 `canvas` 纹理 | 同 GL/VK（共享 `binui_glyph_atlas.h`） | 同 GL |
+
+### 后端支持级别（0.37.x 起的现状）
+
+- **只有一条路，两个像素门禁**：
+  `make pixels-bin2d`（CPU 权威，对 `tests/pixels-bin2d`，**0 容差**）与
+  `make pixels-bin2d-gpu`（唯一 GPU 门禁，`BINUI2D_GPU=1` 走 binUI → bin2d → binGPU，
+  对 `docs/pixels`，0.5% / 通道 8）。
+- `pixels` / `pixels-vk` / `pixels-d3d11` / `pixels-gpu` **已随对应后端删除** ——
+  那几条是"后端互拍"的门禁，被拍的对象不存在了。
+  `docs/pixels` 仍然保留，但角色变了：**GPU 那条路的参照图**（当年 GL 4× MSAA 出的基线）。
 - **GDI 渲染后端已于 v0.24.0 移除**（`src/platform/app_win32.*` 与
   `tools/offscreen_render` 一并删除）。原因有两条，都不含"以后再说"：
   ① 它是**像素基准图的生成者**，而它和 GL 的差距大到没法当基准 —— 18 个用例里
   `opacity` 差 **25.0%**、`text-shadow-multi` 15.6%、`svg-filter` 14.0%、
-  `image-mip` 8.1%（详见 CHANGELOG 0.24.0 的表）。基准图现在由 **GL** 出
-  （`gl_shot`，隐藏窗口 + 离屏 FBO），像素权威变成了"真实渲染路径"而不是"最省的近似"。
-  ② 它缺 alpha 合成、缺字形图集、缺 AA 填充，每补一项都是"照着 GPU 端再实现一遍"，
-  而它的独有价值（无 GPU 也能出图）已经由 `presentViaGdi` + GL 离屏覆盖。
+  `image-mip` 8.1%（详见 CHANGELOG 0.24.0 的表）。
+  ② 它缺 alpha 合成、缺字形图集、缺 AA 填充，每补一项都是"照着 GPU 端再实现一遍"。
 - **保留的 GDI 用法只有"贴屏"**：`IBinUIGfx::presentViaGdi()`（读回离屏像素 →
   `SetDIBitsToDevice`）是拖拽 resize、远程会话、全屏直翻转时的呈现路径 —— 那是
   **呈现**，不是**渲染**，不产生像素差异。历史 CHANGELOG/文档里提到"GDI 后端怎么画"
   的段落一律是那时的记录，不再代表现状。
 
-后端契约是同一份 `IBinUIGfx`（`src/backends/binui_gfx.h`），节点树遍历（`binui_draw_nodes.h`）、
-字形图集与排版（`binui_glyph_atlas.h`）、无边框窗口外壳（`binui_app.h`，模板化在具体后端上）
-都是**多后端共用的一份代码** —— 所以 GL 与 Vulkan 在像素回归里对轴对齐几何逐位相同
-（`make pixels-vk`，15 个用例，含"小数几何/旋转"回归用例）。D3D11 自 0.11.0 起也走同一份遍历与外壳（它此前是一个
-**不在构建里**的独立实现，自带一份遍历/图集/窗口外壳），`make demos-d3d11` 出
-`examples/*_d3d11.exe`；三端窗口截屏逐像素比对见 `docs/vulkan_design.md` §7.4。右键：
+后端契约仍是同一份 `IBinUIGfx`（`src/backends/binui_gfx.h`），节点树遍历
+（`binui_draw_nodes.h`）、字形图集与排版（`binui_glyph_atlas.h`）、无边框窗口外壳
+（`binui_app.h`）都是**后端无关的一份代码** —— 三份老后端能整份删掉而 9 个示例一行不改，
+靠的就是这条边界。常用的验证命令：
 
 ```sh
-mingw32-make SHELL=sh tools        # 含 vk_shot / vk_window / vk_stress
-mingw32-make SHELL=sh pixels-vk    # VK ↔ GL 逐像素回归
-mingw32-make SHELL=sh vk-window    # 窗口/交换链/GDI/透明/脏矩形/resize/全屏守卫
-mingw32-make SHELL=sh vk-stress    # 8 阶段鲁棒性压测（含泄漏复跑）
-mingw32-make SHELL=sh baseline-check  # 迁移基线快照：三端像素指纹 + 原语流哈希对一遍
-mingw32-make SHELL=sh demos-vk     # 同一份 demo 源码编出 examples/*_vk.exe
-mingw32-make SHELL=sh demos-d3d11  # 同一份 demo 源码编出 examples/*_d3d11.exe
+mingw32-make SHELL=sh all              # 库 + 9 个示例 + 测试 + C ABI
+mingw32-make SHELL=sh test             # 4 个测试套件 + test_shell（外壳 × bin2d）
+mingw32-make SHELL=sh tools            # bin2d_shot / bin2d_window / partial_shot / draw_bench ...
+mingw32-make SHELL=sh pixels-bin2d      # CPU 权威像素回归（0 容差）
+mingw32-make SHELL=sh pixels-bin2d-gpu  # GPU 像素门禁（binUI → bin2d → binGPU）
+mingw32-make SHELL=sh partial           # 局部重绘 vs 整帧（bin2d，0 容差）
 ```
 
 **迁移基线快照**（`make baseline` / `baseline-check` / `baseline-strict`，0.20.3 起）：
-`tests/baseline/manifest.txt` 里每个用例每一端一行 FNV-1a 64（原始 ARGB），外加
-`draw_bench --hash` 的原语流哈希与 bin2d 的画质数字。`pixel_diff` 只回答"在容差内吗"，
-快照回答**"哪一端、哪个用例动了"**—— 迁移路径光栅时靠它证明"动的正好是该动的那些"。
-判据与更新规则见 `tests/baseline/README.md`。
+这套机制随三份后端一起退场（`tests/baseline/manifest.txt` 是历史存档，留着可读）。
+`pixel_diff` 只回答"在容差内吗"；当年快照回答**"哪一端、哪个用例动了"**。
 
 GPU 后端绘制原语（`fillRect`/`fillRounded`/`fillLine`/`strokeRounded`/`drawText`/`drawImageEx`）：纯色与圆角矩形为顶点四边形（九宫格模板），`fillLine` 画**任意角度实心线段**（`x0,y0→x1,y1` + 线宽）—— **v0.17.1 起走 CPU 覆盖率条带**：4× MSAA 的采样子像素位置在 GL 与 Vulkan 上互为镜像，斜线交给 GPU 光栅化覆盖率会差一档（实测浅斜线 62/255、圆描边 320 个像素），所以描边与填充一样在 CPU 上算覆盖率、三端逐像素相同；仿射下仍用四边形（条带过矩阵会露缝），成本靠条带缓存压回（svgdemo 0.078 → 0.136 ms/帧）。文本走字形图集。`drawImageEx`（v0.16.15 起取代 `drawImage`）带**源图 UV 子矩形 + 染色**两个参数：圆角图片靠"横条 + UV"实现（后端不需要新的裁剪能力），`filter:brightness()` 靠顶点色乘（着色器本来就做"纹理 × 顶点色"）。**mip**：图片上传时建完整链（GL `glGenerateMipmap` / D3D11 `GenerateMips` / VK 的 CPU 2×2 链）；程序化纹理与视频帧走 `prepareImageRaw`，判据是"同一个 generation 第二次出现"——视频帧每帧换 generation 所以永远不建链（零开销），静态程序化纹理从第二帧起补链。GL 后端离屏帧缓冲为 **4× MSAA**（渲染到多采样渲染缓冲，`present()` 时 `glBlitFramebuffer` 解析到单采样离屏纹理），线条/圆角/圆的边缘全部抗锯齿；D3D 后端可直接用 `fillLine` 画线段。
 

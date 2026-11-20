@@ -78,19 +78,27 @@ add_executable(binui_export tools/binui_export.cpp)
 # Win32 演示外壳 + 示例
 # =============================================
 if(WIN32)
-    # OpenGL 渲染后端（WGL + GL 3.3 core）：无边框窗口 + 字形图集 + 顶点四边形
-    add_library(gl_shell STATIC src/backends/binui_gl.cpp)
-    target_include_directories(gl_shell PUBLIC ${CMAKE_SOURCE_DIR}/src)
-    target_link_libraries(gl_shell PUBLIC binui opengl32 gdiplus dwmapi imm32)
+    # 绘制后端（0.37.x 起**只剩一份**）：binUI ──► bin2d ──► binGPU。
+    # 以前这里是 gl_shell（src/backends/binui_gl.cpp）；那份与它的两个兄弟
+    # （binui_vk / binui_d3d11）、binui_gpu、binui_auto 已在 2026-11-20 整份删除。
+    # CMake 侧没接 binGPU 的构建，所以这里按"没有 libbingpu.a"处理（BINUI_NO_BINGPU）：
+    # CPU 出图 + GDI 贴屏，窗口照样能开；要 GPU 上屏请用 Makefile 构建。
+    add_library(bin2d_backend STATIC
+        src/backends/binui_bin2d.cpp
+        src/backends/binui_paint.cpp)
+    target_compile_definitions(bin2d_backend PRIVATE BINUI_NO_BINGPU)
+    target_include_directories(bin2d_backend PUBLIC ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(bin2d_backend PUBLIC binui gdiplus gdi32 user32
+        dwmapi imm32 msimg32 ${CMAKE_SOURCE_DIR}/../bin2D/build-mingw/libbin2d.a)
 
     # C ABI：给 Python / Go / Rust 等宿主语言的唯一入口（include/binui_c.h）。
     # 静态库给 C/C++/Rust 直接链，动态库给 ctypes / cgo（免编译，随包分发）。
     add_library(binui_c STATIC src/binui_c.cpp)
-    target_link_libraries(binui_c PUBLIC binui gl_shell)
+    target_link_libraries(binui_c PUBLIC binui bin2d_backend)
 
     add_library(binui_c_shared SHARED src/binui_c.cpp)
     target_compile_definitions(binui_c_shared PRIVATE BINUI_C_BUILD_DLL)
-    target_link_libraries(binui_c_shared PRIVATE binui gl_shell)
+    target_link_libraries(binui_c_shared PRIVATE binui bin2d_backend)
     set_target_properties(binui_c_shared PROPERTIES OUTPUT_NAME binui_c)
 
     # 6 个示例 = 6 组：功能 / 动画 / 字体 / 2D 渲染 / 3D 渲染 / 纹理
@@ -111,10 +119,10 @@ if(WIN32)
     endforeach()
     add_custom_target(components_bums ALL DEPENDS ${BINUI_COMPONENT_BUMS})
 
-    # 通用 demo 目标：链接 gl_shell，产物落 bin/examples/，UI 拷到 <exe 目录>/<name>/
-    function(add_gl_demo name)
+    # 通用 demo 目标：链接 bin2d_backend，产物落 bin/examples/，UI 拷到 <exe 目录>/<name>/
+    function(add_bin2d_demo name)
         add_executable(${name} examples/${name}/main.cpp)
-        target_link_libraries(${name} PRIVATE gl_shell)
+        target_link_libraries(${name} PRIVATE bin2d_backend)
         set_target_properties(${name} PROPERTIES
             RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin/examples")
         add_custom_command(TARGET ${name} POST_BUILD
@@ -134,16 +142,16 @@ if(WIN32)
         COMMENT "binui: components -> bin/components"
     )
 
-    add_gl_demo(animshow)
-    add_gl_demo(fontshow)
-    add_gl_demo(svgdemo)
-    add_gl_demo(cubedemo)
-    add_gl_demo(texturedemo)
-    add_gl_demo(buttonshow)
-    add_gl_demo(flexshow)   # 唯一开窗可缩放的示例（其余固定布局的示例都 window_resize="disable"）
+    add_bin2d_demo(animshow)
+    add_bin2d_demo(fontshow)
+    add_bin2d_demo(svgdemo)
+    add_bin2d_demo(cubedemo)
+    add_bin2d_demo(texturedemo)
+    add_bin2d_demo(buttonshow)
+    add_bin2d_demo(flexshow)   # 唯一开窗可缩放的示例（其余固定布局的示例都 window_resize="disable"）
 
     # features 额外需要组件文件（源码组件 + 两个 .bum）
-    add_gl_demo(features)
+    add_bin2d_demo(features)
     add_dependencies(features components_bums)
     add_custom_command(TARGET features POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
