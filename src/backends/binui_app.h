@@ -1463,7 +1463,6 @@ inline void BinUIAppT<Gfx>::renderFrame() {
         // "nextFrameTime_ 还在未来"时才睡，留一个过去的时刻等于不睡 —— 醒来又进这里，
         // 一秒几十万次空转（实测就是 100% 单核、0 帧）。这是宿主时钟的节拍，不是帧节拍：
         // 真出帧的节拍由设备层（binGPU 的 pace*）给，见 renderOnce 之后那段。
-        using Clock = std::chrono::steady_clock;
         nextFrameTime_ = lastTime_ + frameBudget_;
         if (nextFrameTime_ <= now) nextFrameTime_ = now + std::chrono::microseconds(1000);
         return;
