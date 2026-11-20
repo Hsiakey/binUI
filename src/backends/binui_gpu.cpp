@@ -960,16 +960,13 @@ struct BinUIGpu::Impl {
 
         // 后端由 binGPU 决定（BINUI_GPUBACKEND 只用于对照构建）。
         //
-        // 0.36.0 先**钉在 GL**：binGPU 的 VK 后端在"一帧里多次 begin_render/end_render、
-        // 把刚当渲染目标的纹理再当采样源"这条路上还没修好（模糊降采样链踩得到）。
-        // 实测（binUI 自己的像素基准，GL vs VK）：
-        //   circle（解析圆角 + 文字）   0 像素不同
-        //   opacity（图层离屏合成）     0 像素不同
-        //   svg-filter（模糊/外阴影）  87% 像素不同
-        //   appshow 整页（毛玻璃弹窗） 13.7% 像素不同
-        // 那是个 **binGPU 的 VK 后端缺陷**（布局/依赖），修在那边，不该在这一层绕。
-        // 修好之后把这段钉子去掉，直接让 bingpu_render_plan 决定。
-        BgpuBackendKind want = BGPU_BACKEND_GL;
+        // 0.36.0 曾经钉在 GL：当时 binGPU 的 VK 后端在"一帧里多次 begin_render/end_render、
+        // 把刚当渲染目标的纹理再当采样源"这条路上是坏的（根因是顶点流扩容时把已经录进
+        // 命令缓冲的 VkBuffer 当场销毁，见 binGPU 0.13.0）。**0.13.0 修掉之后这颗钉子
+        // 就拔了** —— 现在按 bingpu_render_plan 走（VK > GL > D3D11），实测 VK 与 GL
+        // 在 4 个对照页面上 0 像素差异（circle 0、opacity 0、svg-filter 0/max6、
+        // appshow 整页 0/max7）。
+        BgpuBackendKind want = BGPU_BACKEND_AUTO;
         if (const char* env = std::getenv("BINUI_GPUBACKEND")) {
             if (!std::strcmp(env, "gl")) want = BGPU_BACKEND_GL;
             else if (!std::strcmp(env, "vulkan") || !std::strcmp(env, "vk"))

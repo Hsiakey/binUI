@@ -5,6 +5,28 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.36.2] - 2026-11-20 【格式 v34 不变】
+
+**拔掉 0.36.0 那颗"先钉 GL"的钉子**：binGPU 0.13.0 修好了 VK 后端在"一帧里多次
+begin_render/end_render、把刚当渲染目标的纹理再当采样源"这条路上的缺陷（根因是顶点流
+扩容时把**已经录进命令缓冲**的 VkBuffer 当场销毁，显存回池后新分配拿到同一段并清零，
+于是扩容前录好的 draw 全变成"顶点在原点"的退化三角形 —— 整块内容消失且不报错）。
+`BinUIGpu` 现在回到 `bingpu_render_plan` 决定后端（**VK > GL > D3D11**），也就是
+binGPU 那句话的完整意思：怎么画、用什么画由设备层定。
+
+`pixels-gpu` 在 **VK 默认路径**上的结果（对 `docs/pixels`，0.5% 容差）：
+
+| 结果 | 页面 |
+|---|---|
+| 0 像素不同（最大通道差 ≤ 8） | 16 / 18：circle、display-none2、probe、radius-matrix、svgpath、svggrad、svgjoin、svgstroke、svgfinish、svgaa、opacity、shadow、text-shadow、text-shadow-multi、svg-filter、image-round |
+| 已知差异 | `grad-angle` 0.667%/max 17（渐变分带那一列像素的取舍）、`image-mip` 37%/max 191（binGPU 的 mip 链降级为 1 级，**还没做**） |
+
+`appshow` 整页 1280×800：GL 与 VK 都是 **0 像素不同、最大通道差 7**。
+
+剩下的两条已知差异里，`image-mip` 是纯 binGPU 欠账（真正的 mip 采样），
+`grad-angle` 是分带几何的 1px 取舍；两条都不在 binUI 这一层补。
+
+
 ## [0.36.1] - 2026-11-20 【格式 v34 不变】
 
 **修 `BINUI_GPU=gpu` 没生效**：`ResolveGpuBackend()` 会拿 `bingpu_render_plan` 的结果再
