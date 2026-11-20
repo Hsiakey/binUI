@@ -744,11 +744,11 @@ pixels-update: tools
 # 这两条属于 binGPU 该补的能力，不该在 binUI 这一层补回来 —— 差多少会被打印出来。
 # =============================================
 PIXEL_GPU_OUT := $(BUILD_DIR)/pixels-gpu
-# 已知会不一样的两页（数字每轮照打，只是不判失败）：
-#   grad-angle —— 渐变被切成 4 条带，带与带之间那一列像素归谁所有（最大差 17）
-#   image-mip  —— binGPU 的 mip 链目前降级为 1 级（没有三线性采样）
-# 两条都在 CHANGELOG 0.36.0 里记着；补上 binGPU 的 mip / 去掉这条带切法之后从名单里删。
-PIXEL_GPU_KNOWN := grad-angle
+# 0.37.2：**名单空了，机制也删了**。以前这里挂着两页已知差异：
+#   grad-angle —— 渐变被切成 4 条带，带与带之间那一列像素归谁（最大差 17）
+#   image-mip  —— binGPU 的 mip 链降级为 1 级
+# 两条都随 binGPU 0.15.0 一起消失（真 mip 链 + 多目标 MSAA 修通之后，18 页对
+# docs/pixels 全部是 **0 像素差异**，最大通道差 ≤ 7）。所以现在任何一页有差异都算红。
 
 .PHONY: pixels-gpu
 pixels-gpu: tools
@@ -758,15 +758,8 @@ pixels-gpu: tools
 	    echo "--- $$c ---"; \
 	    BINUI_GPUBACKEND=$(BINUI_GPUBACKEND) $(BIN_DIR)/gpu_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_GPU_OUT)/$$c.png >/dev/null 2>&1 \
 	        || { echo "渲染失败: $$c"; fail=1; continue; }; \
-	    known=0; \
-	    for k in $(PIXEL_GPU_KNOWN); do if [ "$$k" = "$$c" ]; then known=1; fi; done; \
-	    if $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_GOLD)/$$c.png $(PIXEL_GPU_OUT)/$$c.png $(PIXEL_TOL) $(PIXEL_GPU_OUT)/$$c.diff.png; then \
-	        :; \
-	    elif [ $$known -eq 1 ]; then \
-	        echo "known diff (see CHANGELOG 0.36.0): $$c"; \
-	    else \
-	        fail=1; \
-	    fi; \
+	    $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_GOLD)/$$c.png $(PIXEL_GPU_OUT)/$$c.png $(PIXEL_TOL) $(PIXEL_GPU_OUT)/$$c.diff.png \
+	        || fail=1; \
 	done; \
 	exit $$fail
 
