@@ -32,7 +32,12 @@ struct BgpuPacer;
 namespace binui {
 
 // 后端种类。Auto = 让 binGPU 决定。
-enum class GpuBackend { Auto, Vulkan, GL, D3D11, Cpu };
+//
+// 0.36.0 新增 `BinGpu`：binUI 把设备层整个交给 binGPU（`BinUIGpu`，见 binui_gpu.h）。
+// 它和 Vulkan/GL/D3D11 那三个**不是一回事**：那三个各自建自己的设备，BinGpu 只是
+// binGPU 的薄壳 —— 圆角 AA / 混合 / 交换链 / 节拍全部在 binGPU 里。等 binGPU 补上
+// MSAA 与 mip 采样之后（docs/backend_layering.md 第 3 步收尾），它就是唯一的后端。
+enum class GpuBackend { Auto, Vulkan, GL, D3D11, Cpu, BinGpu };
 
 // 把 Auto 解析成具体后端：先看 `BINUI_GPU`，再按 VK → GL → D3D11 问 binGPU，
 // 一个都没有才退 CPU。四次都失败返回 Cpu（CPU 永远可用）。

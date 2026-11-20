@@ -5,6 +5,76 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.36.0] - 2026-11-20 【格式 v34 不变】
+
+**binUI 有了一个"没有设备层"的后端：`binui_gpu` 直接把绘制建在 binGPU 上。**
+
+这是 master 那句「你是不是把改动都落在 binUI 里了，不是应该落在 binGPU 吗」的收口。
+0.35.0 把圆角的 AA 数学从"CPU 生成覆盖率模板"换成了"片元里算距离场"，但那三份式子
+**是抄在 binUI 里的**：全栈同一个公式 7 份拷贝（binGPU 4 份 + binUI 3 份）。
+这一版新增的 `src/backends/binui_gpu.cpp` 不再自建设备 —— 它把 binGPU 当一个设备用：
+
+| 原来 binUI 自己干的事 | 0.36.0 之后 |
+|---|---|
+| `wglCreateContext` / `vkCreateDevice` / `D3D11CreateDevice` + 交换链 | `bingpu_device_create` / `bingpu_swapchain_create` |
+| 三套自编着色器（quad / circle / shape） | binGPU 的固定管线（`BGPU_PIPE_TEXTURED` / `BGPU_PIPE_SHAPE`） |
+| 圆角 = 九宫格模板 / 上一版 = 抄一份 SDF | `bingpu_cmd_draw_shapes`（SDF 在 **binGPU 的片元**里） |
+| `glBlendFunc` / `OMSetBlendState` / 烘焙进 pipeline 的混合 | `BgpuBlend` 的 5 种模式 → 10 条 binGPU 管线 |
+| 自己的 vsync + 帧节拍 | `bingpu_pace_*`（`paceAvailable()` 第一次对 GL 路返回 true） |
+| 抓背景做毛玻璃 = `glBlitFramebuffer` / `vkCmdCopyImage` | 把 canvas 的一部分画成四边形（不需要任何拷贝命令） |
+
+于是 **binUI 的这条路径上一份 AA 数学都没有**。RTL 文字、图片解码、条带几何、
+九宫格切分这些仍然是共享头（`binui_glyph_atlas.h` / `binui_win_image.h` / `binui_paint.h`），
+一行都没重写。
+
+### 机制
+
+一张窗口大小的持久 `canvas` 纹理当绘制目标（脏区局部重绘的语义不变），`present()` 时
+把 canvas 当纹理贴到 binGPU 的交换链目标上。图层 / 毛玻璃 / 外阴影全部退化成
+"把某个纹理的某块画成四边形" —— 所以这一版**不需要给 binGPU 加任何拷贝/Blit 命令**。
+
+### 两个颜色口径的坑（记在这里，都是真踩过的）
+
+1. **顶点色是"直通"的**。binGPU 的片元是 `rgb = t.rgb * vColor.rgb * vColor.a`，
+   也就是**设备层自己乘 srcA**；而 binUI 的共享代码（字形图集、`BuildGradientQuads`）
+   交出来的是**预乘**色（另三个后端的自建着色器是 `frag = vcol`，所以它们是预乘口径）。
+   直接喂预乘色会被再乘一次 alpha —— 现象是 `opacity` 基准页整页暗一档
+   （`(127,223,127)` 变成 `(127,175,127)`，57% 像素不同）。解法：`UnPremult()` 除回去，
+   片元紧接着又乘回来，往返误差 ≤ 1 级。
+2. **纹理要声明 `BGPU_TEXTURE_PREMULTIPLIED`**。binGPU 的 upload 默认把直通数据预乘一遍；
+   字形图集里存的本来就是覆盖率预乘（`(a,a,a,a)`），不声明就被乘两次 ——
+   现象是"文字整体淡一档"（覆盖率变成 `a²`），`circle` 页文字通道差 36 级。
+
+### 像素门禁（新增 `pixels-gpu`）
+
+`gpu_shot`（binGPU 设备 + binGPU 管线）对 `docs/pixels`（老 GL 自建后端出的基准图）：
+
+| 结果 | 页面 |
+|---|---|
+| **逐像素相同**（0 差异，最大通道差 ≤ 8） | 16 / 18：circle、display-none2、probe、radius-matrix、svgpath、svggrad、svgjoin、svgstroke、svgfinish、svgaa、opacity、shadow、text-shadow、text-shadow-multi、svg-filter、image-round |
+| 超容差 | `grad-angle` 0.667%（最大 17：渐变内部分块接缝那 1 列/行的取舍不同）；`image-mip` 37%（binGPU 的 mip 链目前降级为 1 级，没有三线性采样） |
+
+整页级的对照：`appshow`（1280×800，侧栏 + 卡片 + 毛玻璃弹窗 + 图片）**0 像素不同、
+最大通道差 7**。
+
+### 已知差异（都属于 binGPU 该补的能力，不在这一层补）
+
+1. **MSAA**：binUI 的老 GL 后端用 4× MSAA，binGPU 四端 `msaa_samples` 恒为 1（这是它
+   0 差验收的前提）。受影响的是**旋转/非轴对齐的实心几何边缘**（`image-round` 页 0.217%、
+   最大通道差 120）；解析圆角不受影响（SDF 自带 AA）。
+2. **mip**：`BGPU_TEXTURE_MIPMAPS` 目前被接受但降级为 1 级，缩小的图片退化成单级双线性。
+3. **Vulkan / D3D11 暂不可用**：VK 后端在"一帧里多次 `begin_render`/`end_render`、把刚当
+   渲染目标的纹理再当采样源"这条路上有缺陷（`svg-filter` 87%、`appshow` 13.7% 差异），
+   修在 binGPU。这一版先钉在 GL，修好后去掉钉子。
+
+### 其它
+
+- `binui_auto` 新增 `GpuBackend::BinGpu`：`BINUI_GPU=gpu` 或 `BINUI_GPU=bingpu` 走这条新路（不设则行为不变）。
+- 新增工具 `tools/gpu_shot.cpp`（`gpu_shot`）与 `make pixels-gpu`。
+- `binui_gl` / `binui_vk` / `binui_d3d11` **暂时保留**：它们是像素基准的参照实现与对照工具。
+  第 3 步收尾（binGPU 补齐 MSAA/mip + VK 修好）之后整份删除，届时三份 SDF 拷贝一起消失。
+
+
 ## [0.35.0] - 2026-11-20 【格式 v34 不变】
 
 **圆角改成"在片元着色器里算距离场"：三个 GPU 后端不再生成、也不采样任何覆盖率模板。**

@@ -15,6 +15,7 @@
 #include "backends/binui_bin2d.h"
 #include "backends/binui_d3d11.h"
 #include "backends/binui_gl.h"
+#include "backends/binui_gpu.h"
 #include "backends/binui_vk.h"
 #include "bingpu.h"
 
@@ -37,7 +38,9 @@ GpuBackend FromEnv(const char* v) {
     if (!std::strcmp(v, "d3d11") || !std::strcmp(v, "d3d")) return GpuBackend::D3D11;
     if (!std::strcmp(v, "2d") || !std::strcmp(v, "bin2d") || !std::strcmp(v, "cpu"))
         return GpuBackend::Cpu;
-    std::fprintf(stderr, "[binui] BINUI_GPU=%s 不认识（用 vk|gl|d3d11|2d），按自动处理\n", v);
+    // 0.36.0：设备层直接建在 binGPU 上（圆角 AA 是那边片元里的一句距离场）
+    if (!std::strcmp(v, "gpu") || !std::strcmp(v, "bingpu")) return GpuBackend::BinGpu;
+    std::fprintf(stderr, "[binui] BINUI_GPU=%s 不认识（用 gpu|vk|gl|d3d11|2d），按自动处理\n", v);
     return GpuBackend::Auto;
 }
 
@@ -75,6 +78,7 @@ const char* GpuBackendName(GpuBackend b) {
         case GpuBackend::GL:     return "gl";
         case GpuBackend::D3D11:  return "d3d11";
         case GpuBackend::Cpu:    return "bin2d";
+        case GpuBackend::BinGpu: return "bingpu";
         default:                 return "auto";
     }
 }
@@ -97,6 +101,7 @@ bool BinUIAuto::open(GpuBackend which, void* hwnd, int width, int height, bool v
         case GpuBackend::Vulkan: made = std::make_unique<BinUIVK>(); break;
         case GpuBackend::GL:     made = std::make_unique<BinUIGL>(); break;
         case GpuBackend::D3D11:  made = std::make_unique<BinUID3D>(); break;
+        case GpuBackend::BinGpu: made = std::make_unique<BinUIGpu>(); break;
         default:                 made = std::make_unique<BinUI2D>(); break;
     }
     // 策略必须在 init **之前**转给内层：bin2d 那条路要在建交换链时按策略决定 vsync。
@@ -109,6 +114,8 @@ bool BinUIAuto::open(GpuBackend which, void* hwnd, int width, int height, bool v
         ok = static_cast<BinUIVK*>(made.get())->init(hwnd, width, height, vsync);
     } else if (which == GpuBackend::GL) {
         ok = static_cast<BinUIGL*>(made.get())->init(hwnd, width, height, vsync);
+    } else if (which == GpuBackend::BinGpu) {
+        ok = static_cast<BinUIGpu*>(made.get())->init(hwnd, width, height, vsync);
     } else {
         ok = static_cast<BinUID3D*>(made.get())->init(hwnd, width, height, vsync);
     }
@@ -145,8 +152,8 @@ bool BinUIAuto::init(void* hwnd, int width, int height, bool vsync) {
     GpuBackend want = ResolveGpuBackend();
     const char* env = std::getenv("BINUI_GPU");
     // 自动选的那一个起不来时往后退（VK → GL → D3D11 → CPU），保证总能出画面。
-    const GpuBackend order[] = {want, GpuBackend::Vulkan, GpuBackend::GL,
-                               GpuBackend::D3D11, GpuBackend::Cpu};
+    const GpuBackend order[] = {want, GpuBackend::BinGpu, GpuBackend::Vulkan,
+                               GpuBackend::GL, GpuBackend::D3D11, GpuBackend::Cpu};
     for (GpuBackend b : order) {
         if (b == GpuBackend::Auto) continue;
         if (open(b, hwnd, width, height, allowVsync)) {
@@ -167,6 +174,7 @@ void BinUIAuto::shutdown() {
     if (active_ == GpuBackend::Cpu) static_cast<BinUI2D*>(inner_.get())->shutdown();
     else if (active_ == GpuBackend::Vulkan) static_cast<BinUIVK*>(inner_.get())->shutdown();
     else if (active_ == GpuBackend::GL) static_cast<BinUIGL*>(inner_.get())->shutdown();
+    else if (active_ == GpuBackend::BinGpu) static_cast<BinUIGpu*>(inner_.get())->shutdown();
     else static_cast<BinUID3D*>(inner_.get())->shutdown();
     inner_.reset();
 }
@@ -177,6 +185,8 @@ void BinUIAuto::presentViaGdi() {
         if (active_ == GpuBackend::Cpu) static_cast<BinUI2D*>(inner_.get())->presentViaGdi();
         else if (active_ == GpuBackend::Vulkan) static_cast<BinUIVK*>(inner_.get())->presentViaGdi();
         else if (active_ == GpuBackend::GL) static_cast<BinUIGL*>(inner_.get())->presentViaGdi();
+    else if (active_ == GpuBackend::BinGpu) static_cast<BinUIGpu*>(inner_.get())->presentViaGdi();
+        else if (active_ == GpuBackend::BinGpu) static_cast<BinUIGpu*>(inner_.get())->presentViaGdi();
         else static_cast<BinUID3D*>(inner_.get())->presentViaGdi();
         return;
     }

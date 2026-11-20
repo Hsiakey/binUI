@@ -120,7 +120,14 @@ $(BUILD_DIR)/binui_auto.o: $(SRC_DIR)/backends/binui_auto.cpp
 	@mkdir -p $(dir $@)
 	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc -I$(BIN2D_DIR)/include $(BINGPU_INC) -c $< -o $@
 
-BACKEND_OBJS := $(BUILD_DIR)/binui_auto.o $(BUILD_DIR)/binui_bin2d.o \
+# binGPU 设备层（0.36.0）：binUI 的第四个 GPU 后端 —— **不建自己的设备**，
+# 直接用 binGPU（设备/交换链/管线/节拍都在那边）。所以这一份里没有任何 GLSL/HLSL：
+# 圆角 AA 是 binGPU 片元着色器里的一句距离场，binUI 这一侧一份拷贝都没有。
+$(BUILD_DIR)/binui_gpu.o: $(SRC_DIR)/backends/binui_gpu.cpp
+	@mkdir -p $(dir $@)
+	$(CXX) $(CXXFLAGS) -MMD -MP -I$(INC_DIR) -Isrc $(BINGPU_INC) -c $< -o $@
+
+BACKEND_OBJS := $(BUILD_DIR)/binui_auto.o $(BUILD_DIR)/binui_bin2d.o $(BUILD_DIR)/binui_gpu.o \
                 $(BUILD_DIR)/binui_gl.o $(BUILD_DIR)/binui_vk.o $(BUILD_DIR)/binui_d3d11.o
 $(LIB_A): $(LIB_OBJS) $(BIN2D_A)
 	ar rcs $@ $(filter %.o,$^)
@@ -449,6 +456,7 @@ TOOL_BINS := \
     $(BIN_DIR)/binui_compile$(EXT) \
     $(BIN_DIR)/binui_export$(EXT) \
     $(BIN_DIR)/gl_shot$(EXT) \
+    $(BIN_DIR)/gpu_shot$(EXT) \
     $(BIN_DIR)/bin2d_shot$(EXT) \
     $(BIN_DIR)/bin2d_window$(EXT) \
     $(BIN_DIR)/partial_shot$(EXT) \
@@ -503,6 +511,16 @@ $(BIN_DIR)/gl_shot$(EXT): tools/gl_shot.cpp $(BUILD_DIR)/binui_gl.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(CXXFLAGS) $(RTLINK) -I$(INC_DIR) -Isrc -o $@ $< \
 	    $(BUILD_DIR)/binui_gl.o $(LIBS_A) -lgdiplus -lgdi32 -luser32 -lole32 $(GL_LIBS)
+
+# binGPU 设备层的离屏抓图（0.36.0）：与 gl_shot 同一套流程，后端换成 binui_gpu。
+$(BUILD_DIR)/gpu_shot.o: tools/gpu_shot.cpp
+	@mkdir -p $(BUILD_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -MMD -MP -I$(INC_DIR) -Isrc $(BINGPU_INC) -c $< -o $@
+
+$(BIN_DIR)/gpu_shot$(EXT): $(BUILD_DIR)/gpu_shot.o $(BUILD_DIR)/binui_gpu.o $(LIBS_A)
+	@mkdir -p $(BIN_DIR)
+	$(CXX) $(CXXFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/gpu_shot.o $(BUILD_DIR)/binui_gpu.o \
+	    $(LIBS_A) -lgdiplus -lgdi32 -luser32 -lole32 $(BINGPU_LNK) $(WINLIBS) $(GL_LIBS) $(D3D11_LIBS)
 
 # bin2d 后端的离屏出图：**不需要窗口**（像素落在 bin2d::Surface 上，写完就存 PNG）。
 # 这是"binUI 后端交给 bin2d"最直接的验证工具 —— 无 GPU、无驱动、可进 CI。
@@ -712,6 +730,45 @@ pixels-update: tools
 	    $(BIN_DIR)/gl_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_GOLD)/$$c.png >/dev/null 2>&1 || exit 1; \
 	    echo "更新基准: $(PIXEL_GOLD)/$$c.png"; \
 	done
+
+# =============================================
+# binGPU 设备层的像素回归（0.36.0）
+#
+# 这一条回答的是"**把设备层换成 binGPU 之后，画出来的东西变没变**"：
+# 同一套基准图（docs/pixels，由 gl_shot 那个自建设备的 GL 后端渲染）拿来与
+# gpu_shot（binGPU 设备 + binGPU 的管线/片元）逐像素比。
+#
+# 判据和 `pixels` 一样（0.5% 容差、通道差 8）。已知会不一样的是两类：
+#   · 旋转/非轴对齐的**实心**几何：binUI 的老 GL 后端开 4× MSAA，binGPU 没有 MSAA；
+#   · 缩小的图片：binGPU 的 mip 链目前降级为 1 级（没有三线性）。
+# 这两条属于 binGPU 该补的能力，不该在 binUI 这一层补回来 —— 差多少会被打印出来。
+# =============================================
+PIXEL_GPU_OUT := $(BUILD_DIR)/pixels-gpu
+# 已知会不一样的两页（数字每轮照打，只是不判失败）：
+#   grad-angle —— 渐变被切成 4 条带，带与带之间那一列像素归谁所有（最大差 17）
+#   image-mip  —— binGPU 的 mip 链目前降级为 1 级（没有三线性采样）
+# 两条都在 CHANGELOG 0.36.0 里记着；补上 binGPU 的 mip / 去掉这条带切法之后从名单里删。
+PIXEL_GPU_KNOWN := grad-angle image-mip
+
+.PHONY: pixels-gpu
+pixels-gpu: tools
+	@mkdir -p $(PIXEL_GPU_OUT)
+	@fail=0; \
+	for c in $(PIXEL_CASES); do \
+	    echo "--- $$c ---"; \
+	    BINUI_GPUBACKEND=$(BINUI_GPUBACKEND) $(BIN_DIR)/gpu_shot$(EXT) docs/issues/assets/$$c.html $(PIXEL_GPU_OUT)/$$c.png >/dev/null 2>&1 \
+	        || { echo "渲染失败: $$c"; fail=1; continue; }; \
+	    known=0; \
+	    for k in $(PIXEL_GPU_KNOWN); do if [ "$$k" = "$$c" ]; then known=1; fi; done; \
+	    if $(BIN_DIR)/pixel_diff$(EXT) $(PIXEL_GOLD)/$$c.png $(PIXEL_GPU_OUT)/$$c.png $(PIXEL_TOL) $(PIXEL_GPU_OUT)/$$c.diff.png; then \
+	        :; \
+	    elif [ $$known -eq 1 ]; then \
+	        echo "known diff (see CHANGELOG 0.36.0): $$c"; \
+	    else \
+	        fail=1; \
+	    fi; \
+	done; \
+	exit $$fail
 
 # =============================================
 # bin2d 后端的像素回归（0.26.0）

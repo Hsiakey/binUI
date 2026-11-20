@@ -20,6 +20,10 @@
 > （bin2d，此时的落点是 `binUI ──► bin2d ──► binGPU` 把 Surface 贴上屏，没有显卡就系统贴屏）。
 > `BINUI_GPU=vk|gl|d3d11|2d` 可强制；编译期宏 `-DBINUI_GPU_VK|GL|D3D11|2D` 仍在（钉住后端做对照/金标准）。
 >
+> **`BINUI_GPU=gpu`（0.36.0 起）**：走 `binui_gpu` —— binUI **唯一一个没有设备层**的后端，
+> 设备/交换链/管线/节拍全部是 binGPU 的，连圆角的 AA 数学也只剩 binGPU 片元里那一句距离场
+> （binUI 侧零拷贝）。见 `src/backends/binui_gpu.h` 与 `docs/backend_layering.md` 第 3 步。
+>
 > **帧节拍（0.34.0 起可调，`BIN2D_PACE`）**：`standard`（默认，上限=刷新率，画不完就尽力多画）/
 > `unlimited` / `240` / `120` / `90` / `60` / `30`。闸门在 **binGPU**（刷新率、present mode、
 > present 真实耗时只有设备层知道），策略由 bin2D/bin3D 下传，外壳只负责睡到点。
@@ -83,6 +87,7 @@ third_party/        FreeType / HarfBuzz 源码（不入库，脚本拉取）
 | `include/binui_paths.h` | 跨平台路径解析：exe 真实路径（`GetModuleFileName`/`/proc/self/exe`）+ UI 查找顺序 + 图片资源加载（`--ui` / `$BINUI_UI`） |
 | `include/binui_hot_reload.h` | UI 热重载（`--watch`）：保存即重编译换树，保留窗口尺寸/滚动/焦点/输入内容 |
 | `src/backends/binui_gl.h/.cpp` | GPU 绘制后端：OpenGL 3.3 + 字形图集 + 顶点四边形（无边框窗口） |
+| `src/backends/binui_gpu.h/.cpp` | **设备层交给 binGPU** 的绘制后端（0.36.0）：`IBinUIGfx` 的全部原语落在 `bingpu_cmd_*` 上，圆角走 `draw_shapes`（SDF 在 binGPU 片元里）。binUI 的**终点实现** —— MSAA/mip 补齐后另三份后端删除 |
 | `include/binui_c.h` | **C ABI**：定长 POD + 不透明句柄 + 轮询事件，给 Python/Go/Rust 等宿主语言的唯一入口（实现在 `src/binui_c.cpp`） |
 | `bindings/` | 语言绑定：`python/`（ctypes）、`go/`（cgo）、`rust/`（手写 extern "C"） |
 | `examples/features` | **功能**：伪类/扩展绘制/HTML 语义/组件化三形态/数据驱动 setText |
@@ -131,6 +136,7 @@ CMake 会直接 `add_subdirectory` 编译为静态库（MSVC/MinGW 均可）；M
 | D3D11（`binui_d3d11`，0.11.0 起并入共享代码） | WS_POPUP 无边框（外壳与 GL/Vulkan 共用 `binui_app.h`）；透明窗/全屏直翻转/拖拽期走读回 + GDI 贴屏 | GPU 四边形（图集/九宫格模板/**持久离屏帧缓冲**+脏矩形局部重绘），VSync 按需呈现；节点树遍历与 GL/Vulkan **同一份** `binui_draw_nodes.h` | FreeType 字形图集（灰度 8bit；≤16px 轻 hinting + gamma + 像素对齐） | 彩色（FreeType COLR/CPAL 层合成） |
 | OpenGL（`binui_gl`） | WS_POPUP 无边框 | 同 D3D11 架构：GL 3.3 core + 顶点四边形/图集/九宫格/FBO，VSync（wglSwapIntervalEXT）；拖拽 resize 期走「读回 + GDI `SetDIBitsToDevice` 贴屏」（规避 NVIDIA 驱动 SwapBuffers 崩溃），透明窗走「读回 + `UpdateLayeredWindow`」 | 同 D3D11（共享 `binui_font_renderer`） | 同 D3D11 |
 | **Vulkan**（`binui_vk`，0.10.0 起） | WS_POPUP 无边框，`VK_KHR_swapchain` 呈现；透明窗/全屏直翻转/拖拽期自动走读回 + GDI 贴屏 | 同架构：Vulkan 1.0 + 顶点四边形/图集/九宫格 + **持久 4× MSAA 累积帧**（脏矩形局部清屏；0.16.12 起有 1.3 就整条走 **dynamic rendering**，组透明度的离屏图层靠它）；只 `LoadLibrary("vulkan-1.dll")`，不链 `vulkan-1.lib`、不需要 SDK | **与 GL 共用同一份** `binui_glyph_atlas.h`（逐像素同源） | 同 GL |
+| **binGPU**（`binui_gpu`，0.36.0 起） | **没有设备层**：`bingpu_device_create` + `bingpu_swapchain_create`（窗口/透明/离屏都是 binGPU 的事） | `bingpu_cmd_*`：纯色/图片/文字 = `draw_quads`，圆角/描边 = `draw_shapes`（**SDF 在 binGPU 的片元里**，binUI 侧一份 AA 数学都没有）；绘制目标是自有的持久 `canvas` 纹理，"抓背景做毛玻璃/图层合成" = 把纹理的某块画成四边形 | 同 GL/VK（共享 `binui_glyph_atlas.h`） | 同 GL |
 
 ### 后端支持级别（v0.24.0 起）
 
