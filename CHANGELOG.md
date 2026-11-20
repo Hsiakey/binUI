@@ -5,6 +5,59 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.37.0] - 2026-11-20 【格式 v34 不变】
+
+**`binUI ──► bin2d ──► binGPU` 这条线第一次真正跑起来**：`BinUI2D` 不再自己光栅，
+它把 canvas 挂到 bin2d 的 GPU 执行体上（`bin2d::GpuExec`，bin2D 0.22.2），
+于是 binUI 这一层**一份 AA 数学都没有**，也**没有任何图形 API 调用** —— 圆角、圆角描边、
+渐变、字形、九宫格、图层、毛玻璃全部由 bin2d 的语义翻成 binGPU 的图元。
+
+这就是 `docs/backend_layering.md` 第 2 步的收尾：binUI 的三份 GPU 后端从"替代品"变成
+"待删除的参照实现"（3c 仍卡在 binGPU 的 MSAA + 真 mip，见下）。
+
+帧时（60 帧中位数，vsync 关，同一棵节点树）：
+
+| 页面 | CPU 光栅（0.36.x 的 BinUI2D） | bin2d GPU 执行体 | 倍数 | 参照：binUI 自带 binGPU 后端 |
+|---|---|---|---|---|
+| `buttonshow` 1020×684 | 9.07 ms | **0.68 ms** | 13.3× | 0.64 ms |
+| `appshow` 1280×800 | 8.88 ms | **0.74 ms** | 12.0× | 0.69 ms |
+
+**和 binUI 自己那份 `binui_gpu` 同量级**，这说明 bin2d 这一层没有额外开销 —— 它是
+"把命令流搬下移一层"，不是"多套一层"。而它比 `binui_gpu` 少一千八百行：那一份是
+binUI 自己长出来的 2D 语义，现在那些语义回到 bin2d。
+
+三级降级链（`presentBackendName()` 如实报当前一级）：GPU 执行体 → `bin2d::GpuCompositor`
+（CPU 出图 + binGPU 贴屏）→ GDI 贴屏。一个后端都起不来不是失败，无显卡的机器照样开窗。
+`BINUI2D_NO_GPU=1` 强制走到第二/三级。
+
+像素对照（离屏 `BINUI2D_GPU=1` 对同一页的 CPU 光栅，18 个基准 + 2 个示例页）：
+`opacity` 与 `display-none2` 已经 0（前者修的是 `Canvas::popLayer` 缺 `syncGpu`）；
+`radius-matrix` 0.32%、`probe` 0.38%、`svgstroke` 0.35%、`svggrad` 0.53%、`svgjoin` 0.48%、
+`svgaa` 0.49%、`svgfinish` 0.62%、`circle` 1.08%、`svgpath` 0.48%；
+`grad-angle` 5.80%、`image-round` 4.88%、`shadow` 7.21%、`svg-filter` 19.27%、
+`image-mip` 49.87%、`text-shadow` 7.65%、`text-shadow-multi` 26.53%。
+示例页：`appshow` 1.38%（max 35），`buttonshow` 4.08%（max 140，且 >32 的只有 71 个像素，
+**全落在 1px 圆角环上** —— 环的 AA 定义差，见下）。
+
+**已知退化**（逐条都有归属，别当回归看）：
+
+- **1px 圆角环的 AA**：CPU 是 8 子采样扫描线、GPU 是解析 SDF，弧上差几级；`buttonshow`
+  那 71 个像素就是它。这属于第 3 步（把 CPU 光栅也换成解析式，会动全部像素基线）。
+- **`image-mip`**：binGPU 的 `BGPU_TEXTURE_MIPMAPS` 现在降级为 1 级 ⇒ 缩小的图片退化成
+  单级双线性。binUI 侧已不再有 mip 能力（它以前是 GL 后端给的），这是 3c 的两个前置之一。
+- **`svg-filter` / `shadow` / `text-shadow*`**：走路层的模糊/外阴影需要 `pushOffscreen`
+  （把层内容**交回 CPU**），GPU 模式下明确返回 false ⇒ 退化成"纯组 alpha，跳过模糊/阴影"，
+  `text-shadow*` 另外还有字形图集刷新的残差（未完全定位，见 docs/issues）。
+- **任意路径图元**（`fillPath` / `strokePath` / `clipPath`）：GPU 侧没有三角化，仍然只有
+  CPU 覆盖率。界面里的圆角边框已改走 `Canvas::strokeRounded`（bin2D 0.22.2 新增），
+  所以**不掉图元**；剩下的只有 SVG 演示页那种真路径。
+- **透明分层窗**（`setTransparent(true)`）与 GPU 执行体互斥：交换链没有逐像素 alpha，
+  整帧退回 CPU + `UpdateLayeredWindow`。
+- **窗口版 `pixels()`** 不回落读：GPU 模式下 Surface 不收像素（要像素请用离屏 + `BINUI2D_GPU=1`）。
+
+`make pixels-bin2d` 仍然**全绿、0 容差**：离屏默认还是 CPU 光栅 —— 它是像素权威，
+基线不许为了 GPU 路径挪。要看 GPU 版就 `BINUI2D_GPU=1`。
+
 ## [0.36.2] - 2026-11-20 【格式 v34 不变】
 
 **拔掉 0.36.0 那颗"先钉 GL"的钉子**：binGPU 0.13.0 修好了 VK 后端在"一帧里多次

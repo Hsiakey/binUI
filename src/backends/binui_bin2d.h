@@ -62,10 +62,16 @@ public:
     // ---- 生命周期 ----
     // 离屏初始化：只分配 bin2d::Surface 与字形图集，不碰任何图形 API。
     // 失败返回 false（尺寸非法 / 字体服务不可用不是失败 —— 文字会降级成空白）。
+    // **默认仍然走 CPU 光栅**（Surface 是像素权威，pixels-bin2d 的 0 容差基线由它出）。
+    // 只有 BINUI2D_GPU=1 时才建 HEADLESS 的 bin2d::GpuExec：那时绘制在设备上、
+    // present() 之后 readback 回 Surface，pixels()/savePng() 的行为不变。
     bool init(int width, int height);
-    // 窗口初始化：多建一台 bin2d::GpuCompositor（窗口版），present() 走
-    // bingpu 交换链。bingpu 一个可用后端都起不来时**不是失败** —— 退回
-    // "CPU 出 Surface + GDI 贴屏"，窗口照样能开（无显卡的机器也能跑）。
+    // 窗口初始化：绘制交给 bin2d::GpuExec（binUI → bin2d → binGPU），present 走它
+    // 自己的交换链。三级降级，每级都要在 presentBackendName() 里如实报出来：
+    //   ① exec 就绪        → 绘制 + 上屏都在设备上（"bin2d+gpu"）
+    //   ② compositor 就绪  → CPU 出 Surface，整张上传贴屏（"bin2d+gpu-compositor"）
+    //   ③ 都没有           → CPU 出图 + GDI 贴屏 / 离屏（"bin2d+gdi" / "bin2d+offscreen"）
+    // binGPU 一个可用后端都起不来时**不是失败** —— 退回 CPU，窗口照样能开。
     bool init(void* hwnd, int width, int height, bool vsync = true);
     void shutdown();
 
@@ -100,11 +106,18 @@ public:
     const char* pacePolicyName() const override;
 
     // 实际用上的呈现路径（诊断 / 日志用）：
-    //   "bin2d+gpu(gl)" / "bin2d+gpu(vulkan)" / "bin2d+gdi" / "bin2d+offscreen"
+    //   exec 就绪         → 报**真实后端名**（"gl" / "vulkan" / "d3d11"）
+    //   compositor 就绪   → 同上（也是真实后端名，两条路的区别看下面那条字符串）
+    //   "bin2d+gpu"        exec 在画（binUI → bin2d → binGPU）
+    //   "bin2d+gpu-compositor"  CPU 出图 + 整张上传贴屏（exec 起不来时的第二级）
+    //   "bin2d+gdi" / "bin2d+layered" / "bin2d+offscreen"
     const char* presentBackendName() const;
 
     // ---- 像素出口（bin2d 后端独有，用于出图与对拍）----
     // 预乘 RGBA8，尺寸 = width()×height()。有效期到下一次 beginFrame/shutdown。
+    // **窗口版走 exec 时 Surface 不收像素**（内容在设备里，没有逐帧回读 —— 那一下
+    // 比整帧光栅还贵）。要拿像素请用离屏 init(width,height)（+ BINUI2D_GPU=1 可以
+    // 单独验 GPU 出图，那条路 present() 会 readback）。
     const void* pixels() const;
     size_t      pixelsSize() const;
     // 反预乘后写 PNG（复用 bin2d 的编码器，与 bin2d 的其他产物同一口径）

@@ -41,6 +41,11 @@
 #include "bin2d/canvas.h"
 #ifndef BINUI_NO_BINGPU
 #include "bin2d/gpu.h"          // GpuCompositor：窗口呈现（present → bingpu 交换链）
+// GpuExec（0.22.2）：**绘制本体**交给 binGPU。这一行就是分层图里的
+//   binUI ──► bin2d ──► binGPU
+// 的最后一跳：binUI 仍然只碰 bin2d（Canvas 的 API），bin2d 把图元发给执行体，
+// 执行体落到设备上。binUI 这一侧没有一行 bingpu_*（连 include 都只有 bin2d 的头）。
+#include "bin2d/gpu_exec.h"
 #endif
 #include "bin2d/image.h"
 #include "bin2d/filter.h"       // ColorMatrix：图片滤镜（setImageFilter）
@@ -175,6 +180,9 @@ void BlitRgbaStraightInto(bin2d::Surface& dst, int x, int y, int w, int h,
 // ==================================================================
 struct GlyphHost2D : public IGlyphTexHost {
     std::vector<std::unique_ptr<bin2d::Image>> owned;
+    // 当前帧的 Canvas（beginFrame / init 里更新）。只为了把"这张图集被原地改过了"
+    // 告诉 bin2d：GPU 执行体的纹理缓存键是像素指针，原地贴新格子不改指针。
+    bin2d::Canvas* canvas = nullptr;
 
     void* createTex(int w, int h) override {
         if (w <= 0 || h <= 0) return nullptr;
@@ -192,6 +200,8 @@ struct GlyphHost2D : public IGlyphTexHost {
         auto* img = static_cast<bin2d::Image*>(tex);
         // 字形位图是**预乘**的（覆盖率同时写在 RGB 和 alpha 上），别再预乘一次
         BlitBgraPremulInto(img->surface(), x, y, w, h, bgra, w * 4);
+        // 原地改完必须作废执行体的纹理缓存（CPU 执行体上这是空操作）
+        if (canvas) canvas->imageChanged(img->surface());
     }
 
     void destroyTex(void* tex) override {
@@ -406,7 +416,27 @@ struct BinUI2D::Impl {
     //   ② hwnd 非空        → Surface 反预乘成 BGRA，StretchDIBits 贴屏（无驱动兜底）
     //   ③ 都没有           → 离屏：像素留在 surface 上（bin2d_shot 走这条）
 #ifndef BINUI_NO_BINGPU
+    // ---- 绘制执行体（0.22.2）----
+    // exec 非空 = 所有绘制都交给 bin2d::GpuExec（bin2d 的语义 + binGPU 的执行），
+    // Surface **不再收像素**；present 走 exec->present()（交换链）。
+    // 它和 compositor 的关系是"二选一，不是串起来"：一个进程一个设备 ——
+    // exec 就绪时不再建 compositor（那条路是"CPU 出 Surface + 上传贴屏"）。
+    std::unique_ptr<bin2d::GpuExec> exec;
+    // 有一条路要上传——用 "bin2d+gpu" 还是 "bin2d+gpu-compositor" 区分，见 presentBackendName()
     std::unique_ptr<bin2d::GpuCompositor> compositor;
+    bool gpuExecActive() const { return exec && exec->ready(); }
+
+    // 建绘制执行体。hwnd == nullptr → HEADLESS（离屏，present 之后 readback 出像素）。
+    // 后端交给 binGPU 的 AUTO 去挑（VK → D3D11 → GL → CPU），失败返回 false 让
+    // 调用方退回下一级 —— **不是失败**，无显卡的机器也要能开窗。
+    bool openExec(void* win, int w, int h, bool vsyncOn) {
+        exec = std::make_unique<bin2d::GpuExec>();
+        // 节拍策略必须在 create **之前**灌：交换链的 vsync 位是建链时定的。
+        if (paceText[0]) exec->setPacePolicy(ParsePace(paceText));
+        if (exec->create(win, w, h, BGPU_BACKEND_AUTO, vsyncOn)) return true;
+        exec.reset();
+        return false;
+    }
 
     // 建窗口版合成器（GL → Vulkan → D3D11，桌面平台上 WGL 最成熟所以先试）。
     // vsync 是**建链时**定的，所以换 vsync 只能重建 —— 见 setVsync。
@@ -428,9 +458,33 @@ struct BinUI2D::Impl {
         return false;
     }
 
+    // ---- 三级降级（0.22.2）----
+    // ① exec 就绪  → 绘制在 GPU 上，present 直接是交换链（binUI → bin2d → binGPU）
+    // ② compositor → CPU 出 Surface，整张上传贴屏（老的那条 GPU 呈现路）
+    // ③ 都没有     → GDI 贴屏 / 离屏（无显卡的机器靠这条）
+    // 一个进程一个设备：① 起来就不再建 ②。
+    // 两条"不走 GPU"的理由要在这里就掐掉，不然建出来也是个死设备：
+    //   · BINUI2D_NO_GPU=1（验收/隔离用）；
+    //   · transparent：分层窗要的是**Surface 里的逐像素 alpha**，交换链没有它
+    //     （见 present() 的 ⓪ 支）。
+    bool openGpuPath(int w, int h, bool vsyncOn) {
+        if (!gpuAllowed || transparent) return false;
+        if (openExec(hwnd, w, h, vsyncOn)) { presentPath = "bin2d+gpu"; return true; }
+        if (openCompositor(w, h, vsyncOn)) { presentPath = "bin2d+gpu-compositor"; return true; }
+        return false;
+    }
+
+    void closeGpuPath() {
+        if (exec) { exec->destroy(); exec.reset(); }
+        if (compositor) { compositor->destroy(); compositor.reset(); }
+    }
+
 #endif
     void* hwnd = nullptr;
     const char* presentPath = "bin2d+offscreen";
+    // GPU 路径允不允许（BINUI2D_NO_GPU=1 关掉）。init 时解析一次，resize/setVsync
+    // 重建时沿用 —— 环境变量不会中途变。
+    bool gpuAllowed = true;
     // 帧节拍策略的**原文**（"standard"/"unlimited"/"240"/...）。
     // 存字符串而不是解析后的枚举：合成的 compositor 会被 setVsync / resize 重建，
     // 每次重建都要把策略再灌一遍；而解析表只有 binGPU 那一份（bingpu_pace_policy_parse）。
@@ -612,12 +666,33 @@ bool BinUI2D::init(int width, int height) {
         impl_->prof.timing = e && std::strcmp(e, "time") == 0;
         impl_->prof.Reset();
         impl_->parseSkip(std::getenv("BINUI2D_SKIP"));
+        // BINUI2D_NO_GPU=1 强制走 CPU / GDI（验收兜底路径 / 隔离"慢在 CPU 还是慢在 GPU"）
+        const char* noGpu = std::getenv("BINUI2D_NO_GPU");
+        impl_->gpuAllowed = !(noGpu && *noGpu && std::strcmp(noGpu, "0") != 0);
     }
     impl_->width = width;
     impl_->height = height;
     if (!impl_->surface.resize(width, height)) return false;
     impl_->canvas = std::make_unique<bin2d::Canvas>(impl_->surface);
+    impl_->host.canvas = impl_->canvas.get();   // 图集原地改像素要通知 canvas
     impl_->ready = true;
+#ifndef BINUI_NO_BINGPU
+    // 离屏**默认仍然走 CPU 光栅**：Surface 是像素权威（pixels-bin2d 的 0 容差基线就是
+    // 它出的），换成 GPU 出图会让那扇门禁整个失去意义。
+    // BINUI2D_GPU=1 才建 HEADLESS 执行体 —— 那条路上 present() 会 exec->readback()，
+    // 像素照样落在 Surface 里，所以 pixels()/savePng() 的行为不变。
+    const char* gpuEnv = std::getenv("BINUI2D_GPU");
+    const bool wantGpu = gpuEnv && *gpuEnv && std::strcmp(gpuEnv, "0") != 0;
+    if (wantGpu && impl_->gpuAllowed) {
+        if (impl_->openExec(nullptr, width, height, false)) {
+            impl_->presentPath = "bin2d+gpu";
+        } else {
+            // 不刷屏也不冒充成功：调用方（出图工具）看到的是 CPU 出来的像素
+            std::fprintf(stderr, "[binui2d] BINUI2D_GPU=1 但 HEADLESS 执行体起不来，"
+                                 "这一次仍按 CPU 光栅出图\n");
+        }
+    }
+#endif
     // 字形图集与 Canvas 无关，init 之后一直活着（换图集代数由 atlas 自己管）
     if (!impl_->atlas) {
         impl_->atlas = std::make_unique<GlyphAtlas>();
@@ -633,14 +708,12 @@ bool BinUI2D::init(void* hwnd, int width, int height, bool vsync) {
     impl_->vsync = vsync;
     impl_->presentPath = hwnd ? "bin2d+gdi" : "bin2d+offscreen";
 #ifndef BINUI_NO_BINGPU
-    // BINUI2D_NO_GPU=1 强制走 GDI 贴屏（验收兜底路径 / 隔离"慢在 CPU 还是慢在 GPU"）
-    const char* noGpu = std::getenv("BINUI2D_NO_GPU");
-    const bool gpuDisabled = noGpu && *noGpu && std::strcmp(noGpu, "0") != 0;
-    if (hwnd && !gpuDisabled) {
-        // 尝试把呈现交给 binGPU：这是 master 那条分层里"bin2d 的后端交给 binGPU"
-        // 的落点。一个后端都起不来不是失败 —— 退回 GDI 贴屏（见 present）。
-        if (impl_->openCompositor(width, height, impl_->vsync))
-            impl_->presentPath = "bin2d+gpu";
+    // 离屏那一支可能已经按 BINUI2D_GPU=1 建了 HEADLESS 执行体：窗口版要把它换成
+    // 绑窗口的同一个设备（一个进程只有一个设备，绝不并存两份）。
+    impl_->closeGpuPath();
+    if (hwnd) {
+        // 三级降级的入口：exec → compositor → GDI 贴屏。一个后端都起不来不是失败。
+        impl_->openGpuPath(width, height, impl_->vsync);
     }
 #endif
     return true;
@@ -649,7 +722,7 @@ bool BinUI2D::init(void* hwnd, int width, int height, bool vsync) {
 void BinUI2D::shutdown() {
     impl_->prof.Dump("bin2d 后端原语分解");
 #ifndef BINUI_NO_BINGPU
-    if (impl_->compositor) { impl_->compositor->destroy(); impl_->compositor.reset(); }
+    impl_->closeGpuPath();
 #endif
 #ifdef _WIN32
     if (impl_->layeredDib) { DeleteObject(impl_->layeredDib); impl_->layeredDib = nullptr; }
@@ -679,6 +752,22 @@ void BinUI2D::resize(int width, int height) {
     impl_->height = height;
     impl_->surface.resize(width, height);
     impl_->canvas = std::make_unique<bin2d::Canvas>(impl_->surface);
+    impl_->host.canvas = impl_->canvas.get();
+#ifndef BINUI_NO_BINGPU
+    // 交换链的尺寸是建链时定的：执行体存在就必须销毁重建（没有第二条路），
+    // 重建之后 Canvas 要重新 attachGpu —— 否则下一帧悄悄退回 CPU 光栅，
+    // 而 Surface 又不会收到像素（黑屏）。
+    if (impl_->exec) {
+        const void* win = impl_->hwnd;
+        impl_->closeGpuPath();
+        impl_->presentPath = win ? "bin2d+gdi" : "bin2d+offscreen";
+        if (!impl_->openGpuPath(width, height, impl_->vsync)) {
+            std::fprintf(stderr, "[binui2d] resize 后 GPU 路径重建失败，退回 %s\n",
+                         impl_->presentPath);
+        }
+    }
+    if (impl_->gpuExecActive()) impl_->canvas->attachGpu(impl_->exec.get());
+#endif
     impl_->clipMarks.clear();
     impl_->layers.clear();
 }
@@ -689,16 +778,34 @@ void BinUI2D::setVsync(bool on) {
 #ifndef BINUI_NO_BINGPU
     // 交换链的 vsync 位是建链时定的，运行期改它只能重建 —— 否则 setVsync 就成了一句空话
     // （诊断里还会继续报"present 可阻塞垂直同步"，等于撒谎）。
-    if (impl_->compositor && impl_->compositor->ready() && impl_->hwnd) {
-        impl_->compositor->destroy();
-        impl_->compositor.reset();
+    if (impl_->hwnd && (impl_->exec || (impl_->compositor && impl_->compositor->ready()))) {
+        impl_->closeGpuPath();
         impl_->presentPath = "bin2d+gdi";
-        if (impl_->openCompositor(impl_->width, impl_->height, on))
-            impl_->presentPath = "bin2d+gpu";
+        if (impl_->openGpuPath(impl_->width, impl_->height, on))
+            impl_->canvas->attachGpu(impl_->gpuExecActive() ? impl_->exec.get() : nullptr);
     }
 #endif
 }
-void BinUI2D::setTransparent(bool t) { impl_->transparent = t; }
+void BinUI2D::setTransparent(bool t) {
+    if (impl_->transparent == t) return;
+    impl_->transparent = t;
+#ifndef BINUI_NO_BINGPU
+    // 分层透明窗要的是 **Surface 里的逐像素 alpha**（UpdateLayeredWindow），交换链
+    // 给不出 —— 所以打开透明就得把执行体拆掉、整帧退回 CPU 光栅。
+    // 这是一条**已知的互斥**，不是 bug：要么 GPU 出图（不透明），要么逐像素透明。
+    if (t && (impl_->exec || impl_->compositor)) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            std::fprintf(stderr,
+                         "[binui2d] transparent=true 与 GPU 出图互斥：拆执行体，"
+                         "退回 CPU 光栅 + UpdateLayeredWindow\n");
+        }
+        impl_->closeGpuPath();
+        impl_->presentPath = impl_->hwnd ? "bin2d+gdi" : "bin2d+offscreen";
+    }
+#endif
+}
 
 const void* BinUI2D::pixels() const {
     return impl_->surface.empty() ? nullptr : impl_->surface.pixels().data();
@@ -721,20 +828,47 @@ void BinUI2D::beginFrame(const void* clipRect) {
     ++impl_->prof.frames;
 #ifndef BINUI_NO_BINGPU
     // 节拍锚点 = **帧开始**（不是 present 开始）：外壳量到的帧间隔才不会跟着绘制耗时抖。
-    if (impl_->compositor && impl_->compositor->ready()) impl_->compositor->paceFrameBegin();
+    if (impl_->gpuExecActive()) impl_->exec->paceFrameBegin();
+    else if (impl_->compositor && impl_->compositor->ready())
+        impl_->compositor->paceFrameBegin();
 #endif
     // 每帧重建 Canvas：Canvas 构造绑定目标 Surface，而 Surface 只 resize 一次。
     // 重建的代价是一次 State 拷贝（几百字节），换来的是"帧与帧之间状态绝对不串"
     // —— 上一帧漏掉的 restore 不会把这一帧的裁剪带歪（那类 bug 极难复现）。
     impl_->canvas = std::make_unique<bin2d::Canvas>(impl_->surface);
+    impl_->host.canvas = impl_->canvas.get();   // 每帧重建 Canvas：这一个指针也得跟着换
     impl_->clipMarks.clear();
     impl_->layers.clear();
 
-    if (clipRect) {
+    // 新 Canvas 不带执行体：**每帧都必须重新挂**。漏这一行的症状是"什么都不报、
+    // 画面全黑"：绘制悄悄退回 CPU 光栅（Surface 被写），而屏幕上贴的是 GPU 纹理
+    // （从没收到过像素）。
+    const bool gpu = impl_->gpuExecActive();
+    if (gpu) impl_->canvas->attachGpu(impl_->exec.get());
+
+    bin2d::Rect area;
+    const bool clipped = (clipRect != nullptr);
+    if (clipped) {
         const int* r = static_cast<const int*>(clipRect);
-        const bin2d::Rect area(static_cast<float>(r[0]), static_cast<float>(r[1]),
-                               static_cast<float>(r[2] - r[0]),
-                               static_cast<float>(r[3] - r[1]));
+        area = bin2d::Rect(static_cast<float>(r[0]), static_cast<float>(r[1]),
+                           static_cast<float>(r[2] - r[0]), static_cast<float>(r[3] - r[1]));
+    }
+    if (gpu) {
+        // 开 render pass **必须在任何 canvas 绘制之前**：beginFrame 之前发图元会落进
+        // "没有 pass"的状态，执行体只能丢掉它们。
+        // clear = 只有整帧重绘（clipRect == nullptr）时才清整张 canvas；
+        // 脏矩形那一支走下面的 canvas->clear()（只换那一块，其余原地保留）。
+        impl_->exec->beginFrame(0x00000000u, /*clear=*/!clipped);
+        if (clipped) {
+            // Canvas::clear 是 Replace 语义（连 alpha 一起换），与 binUI 的
+            // beginFrame 的"只清这块矩形"是同一条口径。
+            impl_->canvas->save();
+            impl_->canvas->clipRect(area);
+            impl_->canvas->clear(bin2d::Color::trans());
+            impl_->canvas->restore();
+            impl_->canvas->clipRect(area);   // 定下本帧的绘制裁剪
+        }
+    } else if (clipped) {
         impl_->surface.clearRect(area);
         impl_->canvas->clipRect(area);
     }
@@ -753,10 +887,9 @@ void BinUI2D::present() {
 #ifdef _WIN32
     if (impl_->transparent) {
 #ifndef BINUI_NO_BINGPU
-        if (impl_->compositor) {
-            impl_->compositor->destroy();
-            impl_->compositor.reset();
-        }
+        // 分层窗与 GPU 出图互斥（见 setTransparent）：这里的兜底只是防御 ——
+        // 正常路径上 setTransparent(true) 已经把执行体拆干净了。
+        if (impl_->exec) impl_->closeGpuPath();
 #endif
         if (impl_->presentLayered()) {
             impl_->presentPath = "bin2d+layered";
@@ -769,7 +902,30 @@ void BinUI2D::present() {
         return;
     }
 #endif
-    // ① GPU 上屏（bin2d 的后端交给 binGPU）：Surface → 纹理 → 交换链 present
+    // ⓪ GPU 执行体（0.22.2）：绘制本来就在设备上，present 只是 canvas → 交换链。
+    //    离屏（HEADLESS）多一步 readback，让 pixels()/savePng() 照样取得到像素。
+#if !defined(BINUI_NO_BINGPU)
+    if (impl_->gpuExecActive()) {
+        const auto t0 = std::chrono::steady_clock::now();
+        bool ok = impl_->exec->present();
+        if (ok && impl_->hwnd == nullptr) ok = impl_->exec->readback(impl_->surface);
+        const double presentMs = std::chrono::duration<double, std::milli>(
+                                     std::chrono::steady_clock::now() - t0).count();
+        // present() 里已经收过节拍了（那边量的是交换链那一段）；这里再调一次是
+        // 空操作 —— 留着是为了让"谁收尾"这件事在调用顺序上也是自洽的，
+        // 见 bin2d::GpuExec::paceFrameEnd 的守卫。
+        impl_->exec->paceFrameEnd(presentMs);
+        if (ok) return;
+        // 一次失败就永久退回：present 每帧都调，不能每帧重试一条坏路。
+        // 注意这一帧的内容在 GPU 上，Surface 里没有像素 —— 退回去的这一帧会是空的，
+        // 下一帧 beginFrame 重新按 CPU 光栅画（canvas 不再 attachGpu）。
+        impl_->closeGpuPath();
+        impl_->presentPath = impl_->hwnd ? "bin2d+gdi" : "bin2d+offscreen";
+        std::fprintf(stderr, "[binui2d] GPU 执行体 present 失败，永久退回 %s\n",
+                     impl_->presentPath);
+    }
+#endif
+    // ① GPU 上屏（CPU 出 Surface，整张上传贴屏）
 #ifndef BINUI_NO_BINGPU
     if (impl_->compositor && impl_->compositor->ready()) {
         if (impl_->compositor->presentSurface(impl_->surface)) return;
@@ -785,6 +941,12 @@ void BinUI2D::present() {
 }
 
 void BinUI2D::presentViaGdi() {
+#ifndef BINUI_NO_BINGPU
+    // 执行体在的时候"贴屏"没有意义：这一帧的像素只在设备里，Surface 里是上一帧的
+    // 残留（或者空的）。外壳在拖拽 resize 时会直接调这个函数（为了绕开驱动的
+    // present 崩溃），那条路上也应当走交换链 —— 于是这里回到 present()。
+    if (impl_->gpuExecActive()) { present(); return; }
+#endif
 #ifdef _WIN32
     // 贴屏这条路不经过交换链 → 节拍器要由这里收尾（present_ms 传 0：它不等刷新，
     // 节拍按"从本拍开始算一格"处理）。不调的话 beginFrame 开的那一帧永远不结束，
@@ -837,8 +999,13 @@ const wchar_t* BinUI2D::appClassName() {
 
 const char* BinUI2D::presentBackendName() const {
 #ifndef BINUI_NO_BINGPU
-    // GPU 路径带上后端名，省得日志里只看到"bin2d+gpu"却不知道是哪个
-    if (impl_->presentPath && std::strcmp(impl_->presentPath, "bin2d+gpu") == 0 &&
+    // 三级降级要**如实**报到后端名上，不许撒谎：
+    //   "gl" / "vulkan" / "d3d11"        ← exec（绘制真的在设备上，binUI→bin2d→binGPU）
+    //   "gl" / "vulkan" / "d3d11"        ← compositor（CPU 出图，整张上传贴屏）
+    // 两条路的区别由 presentPath 分开（"bin2d+gpu" / "bin2d+gpu-compositor"），
+    // 但对外报的是**真正在干活的那个后端名** —— 两个都是交换链，名字一样。
+    if (impl_->gpuExecActive()) return impl_->exec->backendName();
+    if (impl_->presentPath && std::strcmp(impl_->presentPath, "bin2d+gpu-compositor") == 0 &&
         impl_->compositor)
         return impl_->compositor->backendName();
 #endif
@@ -857,6 +1024,7 @@ bool BinUI2D::presentPacesFrames() const {
     // v0.34.0 起这个值**只是诊断**：节拍已经统一交给 pace* 那组（binGPU 的节拍器），
     // 外壳不再拿它当分支条件。
 #ifndef BINUI_NO_BINGPU
+    if (impl_->gpuExecActive()) return impl_->exec->presentPacesFrames();
     if (impl_->compositor && impl_->compositor->ready())
         return impl_->compositor->presentPacesFrames();
 #endif
@@ -864,10 +1032,14 @@ bool BinUI2D::presentPacesFrames() const {
 }
 
 // ------------------------------------------------------------------
-// 帧节拍（v0.34.0）：全套转发给 bin2d::GpuCompositor → binGPU
+// 帧节拍（v0.34.0）：全套转发给 bin2d（GpuExec / GpuCompositor）→ binGPU
+//
+// **这一层不算节拍**。有执行体就问执行体，没有才问合成器；两条都没有
+// （GDI / 离屏）就老实回答"没有节拍器"，让外壳按刷新网格兜底。
 // ------------------------------------------------------------------
 bool BinUI2D::paceAvailable() const {
 #ifndef BINUI_NO_BINGPU
+    if (impl_->gpuExecActive()) return true;
     // 只有交换链那条路才有"设备层"可以问。GDI 贴屏/离屏没有 —— 那两条路
     // present 不阻塞，由外壳按刷新网格兜底（老路径，本来也是对的）。
     return impl_->compositor && impl_->compositor->ready();
@@ -878,6 +1050,7 @@ bool BinUI2D::paceAvailable() const {
 
 double BinUI2D::paceFrameMs() const {
 #ifndef BINUI_NO_BINGPU
+    if (impl_->gpuExecActive()) return impl_->exec->paceFrameMs();
     if (impl_->compositor && impl_->compositor->ready()) return impl_->compositor->paceFrameMs();
 #endif
     return 0.0;
@@ -885,6 +1058,7 @@ double BinUI2D::paceFrameMs() const {
 
 long long BinUI2D::paceWaitUs() {
 #ifndef BINUI_NO_BINGPU
+    if (impl_->gpuExecActive()) return static_cast<long long>(impl_->exec->paceWaitUs());
     if (impl_->compositor && impl_->compositor->ready())
         return static_cast<long long>(impl_->compositor->paceWaitUs());
 #endif
@@ -893,6 +1067,7 @@ long long BinUI2D::paceWaitUs() {
 
 double BinUI2D::paceRefreshMs() const {
 #ifndef BINUI_NO_BINGPU
+    if (impl_->gpuExecActive()) return impl_->exec->paceRefreshMs();
     if (impl_->compositor && impl_->compositor->ready())
         return impl_->compositor->paceRefreshMs();
 #endif
@@ -900,16 +1075,19 @@ double BinUI2D::paceRefreshMs() const {
 }
 
 void BinUI2D::setPacePolicyText(const char* text) {
-    // 存原文，等 compositor（可能被 setVsync / resize 重建）建起来时再灌。
+    // 存原文，等执行体 / 合成器（可能被 setVsync / resize 重建）建起来时再灌。
     if (!text) text = "";
     std::snprintf(impl_->paceText, sizeof(impl_->paceText), "%s", text);
 #ifndef BINUI_NO_BINGPU
+    if (impl_->exec) impl_->exec->setPacePolicy(Impl::ParsePace(impl_->paceText));
     if (impl_->compositor) impl_->compositor->setPacePolicy(Impl::ParsePace(impl_->paceText));
 #endif
 }
 
 const char* BinUI2D::pacePolicyName() const {
 #ifndef BINUI_NO_BINGPU
+    if (impl_->gpuExecActive())
+        return bingpu_pace_policy_name(impl_->exec->pacePolicy());
     if (impl_->compositor && impl_->compositor->ready())
         return bingpu_pace_policy_name(impl_->compositor->pacePolicy());
     return bingpu_pace_policy_name(Impl::ParsePace(impl_->paceText));
@@ -972,37 +1150,15 @@ void BinUI2D::strokeRounded(float x, float y, float w, float h, float radius,
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return;
     if (impl_->skipStrokeRounded) return;   // BINUI2D_SKIP=s
     if (thickness <= 0.0f) return;
-    if (radius <= 0.0f) {
-        // 直角框：四条矩形边的极限情况由下方的一般路径自然覆盖（半径会被夹到 0），
-        // 这里只处理"退化到 0 半径"的入口，避免 addRoundedRect 收到 0 半径。
-        const float t = thickness;
-        impl_->canvas->fillRect(bin2d::Rect(x, y, w, t), ToColor(color));
-        impl_->canvas->fillRect(bin2d::Rect(x, y + h - t, w, t), ToColor(color));
-        impl_->canvas->fillRect(bin2d::Rect(x, y + t, t, h - 2.0f * t), ToColor(color));
-        impl_->canvas->fillRect(bin2d::Rect(x + w - t, y + t, t, h - 2.0f * t),
-                                ToColor(color));
-        return;
-    }
-    // binUI 的描边是**向内**的同心层（每层外框缩 1px、半径减 1，见 binui_paint.h 的
-    // BuildRoundedLayer），等价于"内缩 thickness/2 的矩形 + 居中描边 thickness"。
-    // 这条等价关系是逐字节验过的（像素门禁），别改成"外扩"。
-    const float t = thickness;
-    const float in = t * 0.5f;
-    const bin2d::Rect outer(x + in, y + in, w - t, h - t);
-    if (outer.w <= 0.0f || outer.h <= 0.0f) return;
-    const float r = std::min(radius, std::min(w, h) * 0.5f) - in;
-    if (r <= 0.0f) {
-        impl_->canvas->fillRect(outer, ToColor(color));
-        return;
-    }
-    bin2d::Path path;
-    path.addRoundedRect(outer, r);
-    bin2d::StrokeStyle style;
-    style.width = t;
-    style.roundCap = false;
-    style.squareCap = false;
-    style.roundJoin = true;
-    impl_->canvas->strokePath(path, bin2d::Paint::solid(ToColor(color)), style);
+    // 0.22.2：走 bin2d 的**圆角描边原语**，不再自己拼 Path + strokePath。
+    // 为什么必须换：GPU 执行体对任意路径描边只有一句"不支持"，挂上 GPU 之后
+    // 所有圆角边框会整片消失（UI 里到处都是）。环的解析解在 GPU 上（SDF），
+    // CPU 上仍然是"外圆角 + 内圆角组成环"的路径覆盖 —— 像素与以前逐位相同。
+    //
+    // 0.22.1 以前这里的等价关系（逐字节验过，别改成"外扩"）：binUI 的描边是
+    // **向内**的同心层，等价于"内缩 thickness/2 的矩形 + 居中描边 thickness"。
+    // 那条数学现在住在 bin2d::Canvas::strokeRounded 里，只有一份。
+    impl_->canvas->strokeRounded(bin2d::Rect(x, y, w, h), radius, thickness, ToColor(color));
 }
 
 void BinUI2D::fillRoundedXf(float w, float h, float radius, bool stroke, float thickness,
@@ -1015,23 +1171,9 @@ void BinUI2D::fillRoundedXf(float w, float h, float radius, bool stroke, float t
     const bin2d::Transform saved = impl_->canvas->transform();
     impl_->canvas->setTransform(ToTransform(xf));
     if (stroke) {
-        // 描边：局部矩形是 (0,0,w,h)，内缩语义与 strokeRounded 一致
-        const float t = thickness;
-        const float in = t * 0.5f;
-        const bin2d::Rect outer(in, in, w - t, h - t);
-        if (outer.w > 0.0f && outer.h > 0.0f) {
-            const float r = std::min(radius, std::min(w, h) * 0.5f) - in;
-            if (r <= 0.0f) {
-                impl_->canvas->fillRect(outer, ToColor(color));
-            } else {
-                bin2d::Path path;
-                path.addRoundedRect(outer, r);
-                bin2d::StrokeStyle style;
-                style.width = t;
-                style.roundJoin = true;
-                impl_->canvas->strokePath(path, bin2d::Paint::solid(ToColor(color)), style);
-            }
-        }
+        // 描边：局部矩形是 (0,0,w,h)，内缩语义与 strokeRounded 一致（同一条原语）
+        impl_->canvas->strokeRounded(bin2d::Rect(0.0f, 0.0f, w, h), radius, thickness,
+                                     ToColor(color));
     } else if (radius <= 0.0f) {
         impl_->canvas->fillRect(bin2d::Rect(0.0f, 0.0f, w, h), ToColor(color));
     } else {
@@ -1044,6 +1186,26 @@ void BinUI2D::fillLine(float x0, float y0, float x1, float y1, float width,
                        uint32_t color) {
     ProfTimer _pt(impl_->prof, Prof::kFillLine);
     if (!impl_->canvas || width <= 0.0f) return;
+    // GPU 执行体没有三角化：任意路径描边在那条路上是"不支持"。而"一条线"在几何上
+    // 就是"一个旋转过的矩形"—— 平端帽、端点正好在 (x0,y0)/(x1,y1)。所以 GPU 模式下
+    // 换成"平移 + 旋转 + fillRect"，几何完全等价（AA 口径不同，见报告里的已知退化）。
+    // CPU 那条路**不动**：仍走 strokePath，像素与 0 容差的基线逐位相同。
+    if (impl_->canvas->gpuAttached()) {
+        const float dx = x1 - x0, dy = y1 - y0;
+        const float len = std::sqrt(dx * dx + dy * dy);
+        if (!(len > 0.0f)) return;
+        const bin2d::Transform saved = impl_->canvas->transform();
+        // 线段局部坐标 (u,v) ∈ [0,len]×[-w/2,w/2] 先旋转、再平移到 (x0,y0)，
+        // 最后套上**当前**变换：T = saved ∘ translate ∘ rotate（Transform::operator*
+        // 的语义是"先应用右边"）。
+        const bin2d::Transform local =
+            saved * bin2d::Transform::translate(x0, y0) *
+            bin2d::Transform::rotate(std::atan2(dy, dx));
+        impl_->canvas->setTransform(local);
+        impl_->canvas->fillRect(bin2d::Rect(0.0f, -width * 0.5f, len, width), ToColor(color));
+        impl_->canvas->setTransform(saved);
+        return;
+    }
     bin2d::Path path;
     path.moveTo(x0, y0);
     path.lineTo(x1, y1);
@@ -1271,12 +1433,18 @@ bool BinUI2D::setKeepBlend(bool on) {
 }
 
 bool BinUI2D::backdropBlur(float x, float y, float w, float h, float radius,
-                           float blurPx, float /*grain*/) {
+                           float blurPx, float grain) {
     ProfTimer _pt(impl_->prof, Prof::kBackdropBlur);
     if (!impl_->canvas || w <= 0.0f || h <= 0.0f) return false;
     if (blurPx <= 0.0f) return false;
 
     const bin2d::Rect box(x, y, w, h);
+    // GPU 执行体：整条链（抓背景 → 2× 降采样 → 分离高斯 → 圆角遮罩 → 颗粒）在
+    // bin2d 里，binUI 只负责"传参 + 判断能不能做"。CPU 执行体返回 false，
+    // 这里接着走下面那份本地的 CPU 实现。
+    if (impl_->canvas->gpuAttached()) {
+        return impl_->canvas->backdropBlur(box, radius, blurPx, grain);
+    }
     const int bx = static_cast<int>(std::floor(box.x));
     const int by = static_cast<int>(std::floor(box.y));
     const int bw = static_cast<int>(std::ceil(box.w));
@@ -1402,7 +1570,26 @@ bool BinUI2D::pushLayerEx(float x, float y, float w, float h, const LayerFx& fx)
     if (fx.shadowCount > 0 && fx.shadows)
         rec.shadows.assign(fx.shadows, fx.shadows + fx.shadowCount);
     rec.clipMark = impl_->clipMarks.size();
-    if (!impl_->canvas->pushOffscreen(bin2d::Rect(x, y, w, h))) return false;
+    if (!impl_->canvas->pushOffscreen(bin2d::Rect(x, y, w, h))) {
+        // GPU 执行体下 pushOffscreen 必然失败：那套 API 的出口是 Surface，而像素
+        // 在设备上。**降级但不丢内容**：改成普通图层（组 alpha 一次乘），跳过模糊/外阴影。
+        // 只告警一次 —— 这两类效果在每个卡片上都会出现，逐帧刷屏没有额外信息。
+        static bool warned = false;
+        if (!warned && impl_->canvas->gpuAttached()) {
+            warned = true;
+            std::fprintf(stderr,
+                         "[binui2d] GPU 执行体下 pushOffscreen 不可用："
+                         "图层模糊(blur %.1fpx)/外阴影(%d 条) 降级为纯组 alpha，"
+                         "内容照常绘制\n",
+                         static_cast<double>(fx.blurPx), fx.shadowCount);
+        }
+        rec.offscreen = false;
+        rec.blurPx = 0.0f;
+        rec.shadows.clear();
+        if (!impl_->canvas->pushLayer(bin2d::Rect(x, y, w, h), fx.alpha)) return false;
+        impl_->layers.push_back(rec);
+        return true;
+    }
     impl_->layers.push_back(rec);
     return true;
 }
