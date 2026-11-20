@@ -748,7 +748,7 @@ PIXEL_GPU_OUT := $(BUILD_DIR)/pixels-gpu
 #   grad-angle —— 渐变被切成 4 条带，带与带之间那一列像素归谁所有（最大差 17）
 #   image-mip  —— binGPU 的 mip 链目前降级为 1 级（没有三线性采样）
 # 两条都在 CHANGELOG 0.36.0 里记着；补上 binGPU 的 mip / 去掉这条带切法之后从名单里删。
-PIXEL_GPU_KNOWN := grad-angle image-mip
+PIXEL_GPU_KNOWN := grad-angle
 
 .PHONY: pixels-gpu
 pixels-gpu: tools

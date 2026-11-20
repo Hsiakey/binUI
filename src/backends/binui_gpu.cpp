@@ -990,7 +990,14 @@ struct BinUIGpu::Impl {
         dd.flags = static_cast<uint32_t>(BGPU_DEVICE_VALIDATE) |
                    (headless ? static_cast<uint32_t>(BGPU_DEVICE_HEADLESS) : 0u) |
                    (vsync ? static_cast<uint32_t>(BGPU_DEVICE_VSYNC) : 0u);
-        dd.msaa_samples = plan.msaa_samples ? plan.msaa_samples : 1u;
+        // MSAA：binGPU 0.14.0 起四端能真开（VK/GL 到 8×），但**多目标 / 图层的路径上
+        // 还没验通** —— `svg-filter` 页（图层 + 模糊 + 合成）在 4× 下整页空白，
+        // 对着 `docs/pixels` 是 100% 差异、最大通道差 255，而 1× 下同一页是 0 差异。
+        // 这个后端的定位是过渡期的参照实现（它会被 bin2d 的 GPU 执行体取代），
+        // 所以这里先钉 1×：那是 binGPU 的账（多采样 + 多目标 resolve），记在
+        // docs/backends.md 的欠账里，**不在 binUI 里自己补 AA**。
+        // 真 mip 不受影响（它是逐纹理的，image-mip 页已从 37% 收到 0 差异）。
+        dd.msaa_samples = 1u;
         BgpuResult r = bingpu_device_create(&dd, &dev);
         if (r != BGPU_OK) {
             WarnOnce("device_create", r);
