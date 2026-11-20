@@ -120,7 +120,7 @@ $(BIN2D_TEXT_A):
 # 没有可挑的了。所以演示程序只链**一个**后端对象。
 BACKEND_OBJS := $(BUILD_DIR)/binui_bin2d.o
 
-$(LIB_A): $(LIB_OBJS) $(BIN2D_A)
+$(LIB_A): $(LIB_OBJS) $(BACKEND_OBJS) $(BIN2D_A)
 	ar rcs $@ $(filter %.o,$^)
 
 # =============================================
@@ -267,56 +267,56 @@ $(BUILD_DIR)/examples/%.o: $(EXA_DIR)/%.cpp
 
 # UI 源文件也算依赖：不然改完 main.html，exe 不用重链，构建期那次 cp 不会重跑，
 # 跑起来还是旧界面（只有 --ui 指到源码树才看到新界面）。
-$(DEMO_DIR)/features$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/features/main.o $(LIBS_A) $(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
+$(DEMO_DIR)/features$(EXT): $(BUILD_DIR)/examples/features/main.o $(LIBS_A) $(COMPONENT_BUMS) $(EXA_DIR)/features/main.html $(EXA_DIR)/features/button.bum.html
 	@mkdir -p $(DEMO_DIR)/features
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/features/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/examples/features/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/features/main.html $(DEMO_DIR)/features/main.html
 	cp -f $(EXA_DIR)/features/button.bum.html $(DEMO_DIR)/features/button.bum.html
 	cp -f $(BUILD_DIR)/assets/components/card.bum $(DEMO_DIR)/features/card.bum
 	cp -f $(BUILD_DIR)/assets/components/dock.bum $(DEMO_DIR)/features/dock.bum
 
-$(DEMO_DIR)/animshow$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/animshow/main.o $(LIBS_A) $(EXA_DIR)/animshow/main.html
+$(DEMO_DIR)/animshow$(EXT): $(BUILD_DIR)/examples/animshow/main.o $(LIBS_A) $(EXA_DIR)/animshow/main.html
 	@mkdir -p $(DEMO_DIR)/animshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/animshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/examples/animshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/animshow/main.html $(DEMO_DIR)/animshow/main.html
 
-$(DEMO_DIR)/appshow$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/appshow/main.o $(LIBS_A) $(EXA_DIR)/appshow/main.html $(EXA_DIR)/appshow/appshow-navitem.bum.html $(EXA_DIR)/appshow/appshow-card.bum.html $(EXA_DIR)/appshow/appshow-dialog.bum.html $(EXA_DIR)/appshow/appshow-bubble.bum.html
+$(DEMO_DIR)/appshow$(EXT): $(BUILD_DIR)/examples/appshow/main.o $(LIBS_A) $(EXA_DIR)/appshow/main.html $(EXA_DIR)/appshow/appshow-navitem.bum.html $(EXA_DIR)/appshow/appshow-card.bum.html $(EXA_DIR)/appshow/appshow-dialog.bum.html $(EXA_DIR)/appshow/appshow-bubble.bum.html
 	@mkdir -p $(DEMO_DIR)/appshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/appshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/examples/appshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/appshow/main.html $(DEMO_DIR)/appshow/main.html
 	cp -f $(EXA_DIR)/appshow/appshow-navitem.bum.html $(DEMO_DIR)/appshow/appshow-navitem.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-card.bum.html $(DEMO_DIR)/appshow/appshow-card.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-dialog.bum.html $(DEMO_DIR)/appshow/appshow-dialog.bum.html
 	cp -f $(EXA_DIR)/appshow/appshow-bubble.bum.html $(DEMO_DIR)/appshow/appshow-bubble.bum.html
 
-$(DEMO_DIR)/fontshow$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/fontshow/main.o $(LIBS_A) $(EXA_DIR)/fontshow/main.html
+$(DEMO_DIR)/fontshow$(EXT): $(BUILD_DIR)/examples/fontshow/main.o $(LIBS_A) $(EXA_DIR)/fontshow/main.html
 	@mkdir -p $(DEMO_DIR)/fontshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/fontshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/examples/fontshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/fontshow/main.html $(DEMO_DIR)/fontshow/main.html
 
-$(DEMO_DIR)/flexshow$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/flexshow/main.o $(LIBS_A) $(EXA_DIR)/flexshow/main.html
+$(DEMO_DIR)/flexshow$(EXT): $(BUILD_DIR)/examples/flexshow/main.o $(LIBS_A) $(EXA_DIR)/flexshow/main.html
 	@mkdir -p $(DEMO_DIR)/flexshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/flexshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/examples/flexshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/flexshow/main.html $(DEMO_DIR)/flexshow/main.html
 
-$(DEMO_DIR)/svgdemo$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/svgdemo/main.o $(LIBS_A) $(EXA_DIR)/svgdemo/main.html
+$(DEMO_DIR)/svgdemo$(EXT): $(BUILD_DIR)/examples/svgdemo/main.o $(LIBS_A) $(EXA_DIR)/svgdemo/main.html
 	@mkdir -p $(DEMO_DIR)/svgdemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/svgdemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/examples/svgdemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/svgdemo/main.html $(DEMO_DIR)/svgdemo/main.html
 
-$(DEMO_DIR)/cubedemo$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/cubedemo/main.o $(LIBS_A) $(EXA_DIR)/cubedemo/main.html
+$(DEMO_DIR)/cubedemo$(EXT): $(BUILD_DIR)/examples/cubedemo/main.o $(LIBS_A) $(EXA_DIR)/cubedemo/main.html
 	@mkdir -p $(DEMO_DIR)/cubedemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/cubedemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/examples/cubedemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/cubedemo/main.html $(DEMO_DIR)/cubedemo/main.html
 
-$(DEMO_DIR)/texturedemo$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/texturedemo/main.o $(LIBS_A) $(EXA_DIR)/texturedemo/main.html
+$(DEMO_DIR)/texturedemo$(EXT): $(BUILD_DIR)/examples/texturedemo/main.o $(LIBS_A) $(EXA_DIR)/texturedemo/main.html
 	@mkdir -p $(DEMO_DIR)/texturedemo
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/texturedemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/examples/texturedemo/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/texturedemo/main.html $(DEMO_DIR)/texturedemo/main.html
 
-$(DEMO_DIR)/buttonshow$(EXT): $(BACKEND_OBJS) $(BUILD_DIR)/examples/buttonshow/main.o $(LIBS_A) $(EXA_DIR)/buttonshow/main.html
+$(DEMO_DIR)/buttonshow$(EXT): $(BUILD_DIR)/examples/buttonshow/main.o $(LIBS_A) $(EXA_DIR)/buttonshow/main.html
 	@mkdir -p $(DEMO_DIR)/buttonshow
-	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BACKEND_OBJS) $(BUILD_DIR)/examples/buttonshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
+	$(CXX) $(LDFLAGS) $(RTLINK) -o $@ $(BUILD_DIR)/examples/buttonshow/main.o $(LIBS_A) $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS)
 	cp -f $(EXA_DIR)/buttonshow/main.html $(DEMO_DIR)/buttonshow/main.html
 
 # =============================================
@@ -360,7 +360,7 @@ $(BINUI_C_A): $(BUILD_DIR)/binui_c.o $(BACKEND_OBJS)
 
 # RTLINK 同样要带上：Windows 上 libstdc++-6.dll / libgcc_s_seh-1.dll 不能指望宿主有，
 # freetype/harfbuzz 也走静态库 —— 产物除系统 DLL 外自包含
-$(BINUI_C_DLL): $(BUILD_DIR)/binui_c_dll.o $(BACKEND_OBJS) $(LIBS_A)
+$(BINUI_C_DLL): $(BUILD_DIR)/binui_c_dll.o $(LIBS_A)
 	@mkdir -p $(BIN_DIR)
 	$(CXX) $(LDFLAGS) $(RTLINK) -shared -o $@ $^ $(BINGPU_LNK) $(WINLIBS) $(SHELL_LIBS) $(FONT_LIBS) \
 	    -Wl,--out-implib=$(BIN_DIR)/libbinui_c.dll.a
