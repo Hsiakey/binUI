@@ -73,7 +73,9 @@ binUI 只剩一条路：`binUI ──► bin2d（+bin3d）──► binGPU ─�
 
 绘制侧"还剩哪些该交 GPU"的实测与候选清单见
 [issues/13-gpu-migration-candidates.md](issues/13-gpu-migration-candidates.md)
-（结论：GPU 路径上 CPU 绘制只剩 36 / 19 µs 一帧，再搬任务是省微秒；量级正确的动作就是本节的第 2/3 步）。
+（2026-11-21 复核：**换执行体已在 0.37.0 落地**（9.07 → 0.68 ms，13.3×），CPU 绘制只剩
+37.6 / 19.9 µs 一帧；剩下的最大一处是重滤镜页的整窗层纹理结构（`svg-filter` 11.4 ms），
+外加颜色矩阵滤镜 / SDF 阴影 / capsule SDF 线段三件每像素数学，以及 CPU↔GPU 的 AA 口径统一）。
 
 ## 5. 进展（0.36.0，2026-11-20）
 

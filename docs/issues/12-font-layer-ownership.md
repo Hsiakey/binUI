@@ -1,14 +1,28 @@
 # 12 - 字体 / 字形处理该归谁：bin2d 收字形，binUI 留排版语义
 
-**状态**：**提案，待拍板**（未实施；`docs/backend_layering.md` 第 2 步之前不动）。
+**状态**：**提案，待拍板**（第 2 步已于 0.37.0 完成，可以开工设计；文字实现仍全在 binUI）。
 **类型**：架构 / 分层归属 · **严重度**：中（不阻塞第 2 步，但挡住"bin2d 能画字"这件事）
 **影响面**：binUI `src/backends/binui_glyph_atlas.h`（1169 行）+ `src/font/binui_font_renderer.cpp`；
 bin2d 的依赖声明与 `make layers` 边界；`docs/backend_layering.md` 第 2 步的文字部分。
-**前置**：无。可以和 layering 第 2 步并行**设计**，但不要并行**实施**（见 §5）。
+**前置**：无（第 2 步已完成，见下）。
 
 > 一句话：**字形光栅化、整形、图集缓存该搬进 bin2d（建议做成可选模块 `libbin2d_text`）；
 > CSS 的排版语义留在 binUI；平台字体发现由外壳注入。** 动手前先把两份互相矛盾的
 > layering 文档统一成一份。
+
+## 0.38.0 复核（2026-11-21）
+
+- **第 2 步已完成**（binUI 0.37.0：`BinUI2D` 把 canvas 挂上 `bin2d::GpuExec`）—— 本文原先的
+  "第 2 步之前不动"自动解除，现在是"可以开工设计"的状态。
+- **文字实现仍全在 binUI**：`binui_glyph_atlas.h`、`binui_font_renderer.cpp` 都还在，
+  `drawText` / `drawTextWrapped` 仍由 binUI 排版 + FreeType 光栅。
+- **一个对本文有利的进展**：bin2D 0.22.3 开了**外部纹理通道**（`GpuTexCreate` / `GpuTexUpload`
+  / `GpuTexDestroy` / `GpuDrawTexture`，走 `canvas_gpu.h` 的窄接口），binUI 的字形图集已经改用它
+  （`binui_bin2d.cpp` 的 `GlyphHost2D` + `deviceTextures`，只上传新格子那块矩形）。
+  也就是说 §5 第 2 步"接口先定"**事实上发生了** —— 只是落在 bin2d 的通用纹理接口里，
+  还没有"从字符串到字形"的那一层。
+- **bin2D 侧的三处说法没变**（`layering.md:78/96/187` 仍写"文本归 binUI"），所以 §1 的矛盾**仍然存在**，
+  而且现在更微妙：bin2d 已经能接收外部字形纹理，但"字形从哪来"仍在上层。
 
 ---
 

@@ -10,7 +10,6 @@
 #include "binui_renderer.h"
 #include "binui_format.h"
 #include "binui_paint.h"     // BuildFillBands / PaintBand（渐变角度用例）
-#include "binui_mip.h"       // BuildMipChainBGRA（v0.16.20：raw 纹理的 mip 链）
 #include "binui_filter.h"    // ColorMatrix / ApplyColorMatrixBGRA（v26：CSS filter）
 #include "binui_srcmap.h"
 #include <cstdio>
@@ -740,45 +739,11 @@ static void TestIssueRegressions() {
         TEST("16.51: y 轴余数均分成缝（中心行下移 2.5px）", rowOk);
     }
 
-    // ---- 0.16.20：程序化纹理/视频帧的 mip 链（binui_mip.h）----
-    // 钉住三件事：
-    //   1. 层数：一直减半到 1×1，最多 16 级；
-    //   2. 第 l 级 = 上一级 2×2 的四舍五入平均（(a+b+c+d+2)/4）—— 这就是各后端
-    //      "硬件 GenerateMipmap 与 VK 的 CPU 盒式滤波等价"的唯一口径；
-    {
-        TEST("16.20: mip 层数（1×1 / 2×2 / 256 / 1920×1080）",
-             binui::MipLevels(1, 1) == 1 && binui::MipLevels(2, 2) == 2 &&
-             binui::MipLevels(256, 256) == 9 && binui::MipLevels(1920, 1080) == 11);
-        // 4×4 棋盘（2px 方格）：间隔取 0 / 255
-        std::vector<uint8_t> checker(4 * 4 * 4, 0);
-        for (int y = 0; y < 4; y++)
-            for (int x = 0; x < 4; x++) {
-                const uint8_t v = (((x / 2) + (y / 2)) & 1) ? 255 : 0;
-                for (int c = 0; c < 4; c++) checker[(y * 4 + x) * 4 + c] = v;
-            }
-        auto chain = binui::BuildMipChainBGRA(checker.data(), 4, 4);
-        TEST("16.20: 4×4 出 3 级（4×4 / 2×2 / 1×1）", chain.size() == 3);
-        if (chain.size() == 3) {
-            TEST("16.20: 第 0 级原样", chain[0].size() == 4 * 4 * 4 && chain[0][0] == checker[0]);
-            // 2×2 棋盘 → 每级都应该是 127 或 128（(0+0+0+255+2)/4 = 64? 不 —— 每个 2×2 块
-            // 恰好是同一色，所以第 1 级仍是 0/255；第 2 级 1×1 = (0+255+255+0+2)/4 = 128）
-            TEST("16.20: 同级色块保留", chain[1].size() == 2 * 2 * 4 &&
-                                        (chain[1][0] == 0 || chain[1][0] == 255));
-            TEST("16.20: 1×1 = 四舍五入平均（128）", chain[2].size() == 4 && chain[2][0] == 128);
-        }
-        // 3×3 奇数：第 1 级 1×1 = 左上 2×2 + 边缘夹取后的平均
-        std::vector<uint8_t> odd(3 * 3 * 4, 10);
-        for (int c = 0; c < 4; c++) odd[(1 * 3 + 1) * 4 + c] = 250;   // 中心 250
-        auto chain2 = binui::BuildMipChainBGRA(odd.data(), 3, 3);
-        TEST("16.20: 3×3 出 2 级（3×3 / 1×1）", chain2.size() == 2);
-        if (chain2.size() == 2) {
-            // 降采样点 = (0,0)=10 (1,0)=10 (0,1)=10 (1,1)=250 → (280+2)/4 = 70
-            TEST("16.20: 3×3 → 1×1 的 2×2 采样（70）", chain2[1].size() == 4 && chain2[1][0] == 70);
-        }
-        auto empty = binui::BuildMipChainBGRA(nullptr, 4, 4);
-        auto bad = binui::BuildMipChainBGRA(checker.data(), 0, 4);
-        TEST("16.20: 退化输入返回空", empty.empty() && bad.empty());
-    }
+    // ---- 0.16.20 的 mip 链用例随 binui_mip.h 一起删除（0.38.2）----
+    // 那 59 行是"三个 GPU 后端各自生成 mip"时代的产物；三份后端在 0.38.0 删掉之后，
+    // mip 链归 binGPU（`BGPU_TEXTURE_MIPMAPS`，0.14.0 起是真链），口径与用例都在
+    // binGPU 的 tests/gpu_parity.h 里。按 docs/migrate-to-bin2d.md §P5 的规矩
+    // （"上层不重复实现下层能力，只留一套"）删掉这一份，不留死代码当测试靶子。
 
     // ---- 16.21：仿射级联的矩阵工具（transform 作用于整棵子树） ----
     {

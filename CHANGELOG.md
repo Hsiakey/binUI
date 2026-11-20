@@ -5,6 +5,33 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.2] - 2026-11-20 【格式 v34 不变】
+
+两件事，都是"把文档里挂着的账收掉"。
+
+**① `make partial` 由红转绿**（根因在 bin2D 0.22.6，不是 binUI 这层）。`partial_shot`
+移植到离屏 `BinUI2D` 之后，`buttonshow` 四个 hover 点全红：差 1825 / 23 / 905 / 1373 像素，
+其中绝大多数**在脏矩形之外**。真凶是 bin2d CPU 覆盖光栅的两处越界 ——
+`FillRoundedSolidDirect` 的圆角带行区间倒挂（形状的腰被裁剪矩形从腰部往下切时
+`midEnd < midBegin`，下圆角带仍从 `midEnd` 开始画）、`CompositeRowFused` 漏掉每个 run 的
+首像素（裁剪左边界那列覆盖率全记在 `acc` 上而 `run` 还是 0）。外加
+`Canvas::compositeSurface` 没按当前裁剪落像素。修完四点全 0、0 容差。
+**这两处以前照不到**，因为 `partial_shot` 走的是 GL 后端 —— 删掉三份老后端之后才显形，
+算是这次收尾的附带收获。
+
+**② 删掉 `include/binui_mip.h`**（59 行，纯 CPU 的 2×2 盒式 mip 链生成器）与它在
+`tests/test_css.cpp` 里的 8 条用例 —— 按 `docs/migrate-to-bin2d.md` §P5 那句
+"上层不重复实现下层能力，只留一套"。它存在的理由是"三个 GPU 后端生成 mip 的路径不一样，
+要在 CPU 侧钉一条等价口径"；那三份后端在 0.38.0 已经删了，所以这份只剩一个测试在引用它：
+**死代码养着一个假靶子**。mip 链现在归 binGPU（`BGPU_TEXTURE_MIPMAPS`，0.14.0 起是真链），
+口径与用例都在 binGPU 的 `tests/gpu_parity.h`（缩小的棋盘格：1 级偏差 74.11 → 真链 0.00）。
+
+同节还写下了 P5 那个"留哪一种预滤波"的取舍，**结果与当时的倾向相反**：留 GPU 的 mip 链，
+不是 bin2d 的盒式预缩小。理由是实测 —— 真链把 `image-mip` 对 `docs/pixels` 做到
+**0.000% / max 0**，而盒式预缩小只是三线性的近似；"确定、无驱动差异"这个优点被
+"与基线逐像素相同"压过去了。bin2d 的 `sampleSurface` 保留给 CPU 执行体
+（没有纹理链的那条路仍然需要它）。
+
 ## [0.38.0] - 2026-11-20 【格式 v34 不变】
 
 **收尾：binUI 从此只有一条绘制路径 —— `binUI ──► bin2D ──► binGPU`。** 三份老 GPU 后端
