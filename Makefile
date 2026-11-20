@@ -834,23 +834,21 @@ bin2d-vs-gl: tools
 # =============================================
 PIXEL2D_GPU_OUT := $(BUILD_DIR)/pixels-bin2d-gpu
 
-# 已知会不一样的两页。**都不是质量档的账**（MSAA 1× 与 4× 给出同一组数字），
+# 已知会不一样的一页。**不是质量档的账**（MSAA 1× 与 4× 给出同一组数字），
 # 而是 binUI 的 bin2d 后端在这一层的语义缺口，记在这里当欠账而不是当容差：
-#
-#   svg-filter        —— GPU 执行体下**没有离屏层**：bin2d 的 pushOffscreen 出口是
-#                        Surface，而像素在设备上，于是 `filter: blur()` / 外阴影在
-#                        binui_bin2d.cpp 的 pushLayerEx 里降级成"纯组 alpha"
-#                        （每次运行会打一条 "[binui2d] GPU 执行体下 pushOffscreen 不可用"）。
-#                        同一页走 bin2d 的 CPU 路径是 0.511%（模糊在 CPU 上算得出来），
-#                        而 GPU 执行体下那张图上所有模糊都平了 —— 12.9% 全是这笔账。
-#                        要消掉它得给 bin2d 加"设备上的离屏层"，不在这一轮。
 #
 #   text-shadow-multi —— bin2d 的文字阴影走自己的 BlurSigma（σ 语义），与 binUI 老 GL
 #                        后端的阴影模糊不是同一个核（边缘几级到十几级的差）。同一页
 #                        CPU 路径差 1.344%，GPU 执行体反而更近（1.277%）。
 #
+# svg-filter 曾经在这张名单上（12.921% / max 204）：那时 GPU 执行体**没有离屏层**，
+# bin2d 的 pushOffscreen 出口是 Surface，于是 `filter: blur()` / 外阴影在
+# binui_bin2d.cpp 的 pushLayerEx 里降级成"纯组 alpha"。bin2d 0.22.5 补上设备侧内容层
+# （Canvas::pushContentLayer/popContentLayer + draw/fillContentLayer）之后，那一页是
+# 0.000% / max 6 —— 比 CPU 路径（0.511%）还近，于是从名单里摘掉。
+#
 # 名单里的页照常打印数字，只不判失败；**任何新页越线都算红**（门禁仍然有效）。
-PIXEL2D_GPU_KNOWN := svg-filter text-shadow-multi
+PIXEL2D_GPU_KNOWN := text-shadow-multi
 
 .PHONY: pixels-bin2d-gpu
 pixels-bin2d-gpu: tools

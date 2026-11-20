@@ -608,6 +608,9 @@ struct BinUI2D::Impl {
     // 因为 bin2d 的 pushLayer 不支持"pop 时模糊"。
     struct LayerRec {
         bool offscreen = false;
+        // true = 内容在**设备上**（0.22.5 的 pushContentLayer）：离屏层的内容没有
+        // 回到 Surface，pop 时拿到的是执行体的句柄，模糊/阴影都在设备上做。
+        bool device = false;
         float alpha = 1.0f;
         float blurPx = 0.0f;
         // 外阴影（0.27.1）：书写顺序，靠前的在上层 → 合成时逆序
@@ -1666,26 +1669,38 @@ bool BinUI2D::pushLayerEx(float x, float y, float w, float h, const LayerFx& fx)
     if (fx.shadowCount > 0 && fx.shadows)
         rec.shadows.assign(fx.shadows, fx.shadows + fx.shadowCount);
     rec.clipMark = impl_->clipMarks.size();
-    if (!impl_->canvas->pushOffscreen(bin2d::Rect(x, y, w, h))) {
-        // GPU 执行体下 pushOffscreen 必然失败：那套 API 的出口是 Surface，而像素
-        // 在设备上。**降级但不丢内容**：改成普通图层（组 alpha 一次乘），跳过模糊/外阴影。
-        // 只告警一次 —— 这两类效果在每个卡片上都会出现，逐帧刷屏没有额外信息。
-        static bool warned = false;
-        if (!warned && impl_->canvas->gpuAttached()) {
-            warned = true;
-            std::fprintf(stderr,
-                         "[binui2d] GPU 执行体下 pushOffscreen 不可用："
-                         "图层模糊(blur %.1fpx)/外阴影(%d 条) 降级为纯组 alpha，"
-                         "内容照常绘制\n",
-                         static_cast<double>(fx.blurPx), fx.shadowCount);
+
+    // ① GPU 执行体：**设备侧内容层**（0.22.5）。内容不出设备，出口是纹理句柄 ——
+    //    于是"图层模糊 / 外阴影"这一轮不用再把像素搬回 CPU 了（以前只能降级）。
+    if (impl_->canvas->gpuAttached()) {
+        if (impl_->canvas->pushContentLayer(bin2d::Rect(x, y, w, h))) {
+            rec.device = true;
+            impl_->layers.push_back(rec);
+            return true;
         }
-        rec.offscreen = false;
-        rec.blurPx = 0.0f;
-        rec.shadows.clear();
-        if (!impl_->canvas->pushLayer(bin2d::Rect(x, y, w, h), fx.alpha)) return false;
+    } else if (impl_->canvas->pushOffscreen(bin2d::Rect(x, y, w, h))) {
+        // ② CPU 执行体：离屏出像素（Surface），pop 时在 CPU 上模糊/上色
         impl_->layers.push_back(rec);
         return true;
     }
+
+    // ③ 两条都拿不到（层数超限 / 分配失败 / 后端不支持）：降级但不丢内容 ——
+    //    改成普通图层（组 alpha 一次乘），跳过模糊/外阴影。只告警一次 ——
+    //    这两类效果在每个卡片上都会出现，逐帧刷屏没有额外信息。
+    static bool warned = false;
+    if (!warned) {
+        warned = true;
+        std::fprintf(stderr, "[binui2d] %s：图层模糊(blur %.1fpx)/外阴影(%d 条) 降级为纯组 alpha，"
+                             "内容照常绘制\n",
+                     impl_->canvas->gpuAttached() ? "GPU 执行体下内容层不可用"
+                                                  : "离屏层不可用",
+                     static_cast<double>(fx.blurPx), fx.shadowCount);
+    }
+    rec.offscreen = false;
+    rec.device = false;
+    rec.blurPx = 0.0f;
+    rec.shadows.clear();
+    if (!impl_->canvas->pushLayer(bin2d::Rect(x, y, w, h), fx.alpha)) return false;
     impl_->layers.push_back(rec);
     return true;
 }
@@ -1712,6 +1727,36 @@ void BinUI2D::popLayer() {
         impl_->canvas->popLayer();
         return;
     }
+
+    // 设备侧内容层（0.22.5）：内容在纹理上，三件事全在设备上做 ——
+    // 外阴影 = "内容 alpha 当遮罩铺阴影色 + 自身模糊 + 按偏移贴回"，
+    // 本体模糊 = "先分离高斯再乘组 alpha 贴回"。与下面那条 CPU 路逐条同构，
+    // 所以两端的像素能对得上（参数语义也没变：blur 是 σ、偏移取整、阴影不乘组 alpha）。
+    if (rec.device) {
+        uint64_t handle = 0;
+        bin2d::Rect screen;
+        if (!impl_->canvas->popContentLayer(handle, screen)) return;
+
+        // ① 外阴影先铺（书写顺序里靠前的在上层 → 逆序画），本体最后画在最上面。
+        //    阴影各自从**未模糊**的层内容取轮廓：模糊只作用于本体，不叠加到影子上。
+        for (int i = static_cast<int>(rec.shadows.size()) - 1; i >= 0; --i) {
+            const BinUIFilterDropShadowEntry& sh = rec.shadows[static_cast<size_t>(i)];
+            // 偏移取整：合成四边形恒落在像素边界上，与三份老 GPU 后端同口径
+            const int sdx = static_cast<int>(std::lround(sh.dx));
+            const int sdy = static_cast<int>(std::lround(sh.dy));
+            // 与三份老 GPU 后端一致：阴影不乘组 alpha（rec.alpha 只作用于本体）。
+            impl_->canvas->fillContentLayer(
+                handle, bin2d::Rect(screen.x + sdx, screen.y + sdy, screen.w, screen.h),
+                ToColor(sh.color), sh.blur);
+        }
+
+        // ② 本体（可选整组模糊 + 组 alpha）
+        impl_->canvas->drawContentLayer(handle, screen, bin2d::Rect(0.0f, 0.0f, 1.0f, 1.0f),
+                                        bin2d::Color::white() * rec.alpha, rec.blurPx, false);
+        impl_->canvas->releaseContentLayer(handle);
+        return;
+    }
+
     bin2d::Surface content;
     int ox = 0, oy = 0;
     if (!impl_->canvas->popOffscreen(content, ox, oy)) return;
