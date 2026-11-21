@@ -164,6 +164,7 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 | — | **M1 第一步已落地（0.38.8）**：`var(--name, fallback)` 编译期展开（长度 + 颜色；祖先继承 + 自身覆盖 + 未定义无 fallback 时丢声明并告警一次）。验收：`test_css` 7 项新断言；分组对照 `diffpx=0 max=0`；样例 0 告警 | | |
 | M2 | `binui dev` + `binui-preview.js` + 热刷新 + **组件独立视图（居中 / 1x~8x / 盒边界 / 像素放大）** | 改一行保存 → 浏览器 2 秒内刷新且布局变化可见；单组件能 4× 看清 1px 描边 | 1~2 周 |
 | M3 | codemod：`{{}}`→`var()`/`data-param`、`<use>`→`data-component`、补 `px` | 存量 `examples/` + `components/` 全量迁移后像素不变 | 3~5 天 |
+| — | **M3 主体完成（0.38.10）**：`tools/binui_migrate.py` 把老 `<use>` 的展开结果写回源码（19 组件摘根、69 处 `<use>`、29 文件）。**10 个页面迁移前后 0 差异**。剩：15 个组件片段内的 `{{}}` 占位转 `data-param`/`var()`；`<use … external>` 待 `data-binui-mount` 设计 | | |
 | M4 | 语义对齐迭代（§5 表逐条）+ `binui parity` 门禁 | 示例页差异率收敛到"文字换行以内" | 1~2 月，持续 |
 | M5 | 删 legacy 语法（`{{}}`、`<use>`、无单位） | 编译器只剩一套写法 | 收尾 |
 

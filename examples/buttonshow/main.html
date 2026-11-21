@@ -135,8 +135,7 @@
 <body>
 
     <!-- 标题栏（根元素是 <titlebar>，按下可拖动窗口） -->
-    <use src="../../components/titlebar.bum.html" x="0" y="0" w="1020" icon="▣" iconw="22"
-         title="按钮样式一览" sub="语义 / 尺寸 / 圆角 / 底色 / 状态 / 形态 —— 全部是 CSS，没有一行绘制代码"/>
+    <titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:1020px;height:45px;display:flex;align-items:center;gap:6px" data-component="../../components/titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="1020" data-icon="▣" data-iconw="22" data-title="按钮样式一览" data-sub="语义 / 尺寸 / 圆角 / 底色 / 状态 / 形态 —— 全部是 CSS，没有一行绘制代码"></titlebar>
 
     <!-- ① 语义色 -->
     <div class="card" style="position:absolute;left:24;top:56;width:972;height:96">

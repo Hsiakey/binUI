@@ -70,8 +70,7 @@
     </style>
 </head>
 <body>
-    <use src="../../components/titlebar.bum.html" x="0" y="0" w="900" icon="◆" iconw="22"
-         title="功能" sub="样式 · 语义 · 组件化 · 数据驱动"/>
+    <titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:900px;height:45px;display:flex;align-items:center;gap:6px" data-component="../../components/titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="900" data-icon="◆" data-iconw="22" data-title="功能" data-sub="样式 · 语义 · 组件化 · 数据驱动"></titlebar>
 
     <!-- ① 运行时伪类 -->
     <div class="card" style="position:absolute; left:16; top:56; width:420; height:200">
@@ -123,9 +122,9 @@
         </div>
         <span class="note" style="position:absolute; left:340; top:180; width:520; height:20">同权重规则按文档序层叠；::before / ::after 的 content 会并入宿主文本</span>
         <span class="tag" data-tag="attr(data-tag)" style="position:absolute; left:340; top:206; width:140; height:20; font-size:12; color:#3E8BFF"></span>
-        <use src="../../components/tag.bum.html" x="340" y="236" w="92" text="xxx.bum.html" kind="mint"/>
-        <use src="../../components/tag.bum" x="442" y="236" w="88" text="xxx.bum" kind="amber"/>
-        <use src="../../components/tag" x="540" y="236" w="78" text="xxx" kind="gray"/>
+        <span class="bui-tag mint" style="position:absolute;left:340px;top:236px;width:92px;height:20px;font-size:12px;text-align:center" data-component="../../components/tag.bum.html" data-x="340" data-y="236" data-w="92" data-text="xxx.bum.html" data-kind="mint">xxx.bum.html</span>
+        <span class="bui-tag amber" style="position:absolute;left:442px;top:236px;width:88px;height:20px;font-size:12px;text-align:center" data-component="../../components/tag.bum" data-x="442" data-y="236" data-w="88" data-text="xxx.bum" data-kind="amber">xxx.bum</span>
+        <span class="bui-tag gray" style="position:absolute;left:540px;top:236px;width:78px;height:20px;font-size:12px;text-align:center" data-component="../../components/tag" data-x="540" data-y="236" data-w="78" data-text="xxx" data-kind="gray">xxx</span>
         <span class="note" style="position:absolute; left:628; top:240; width:232; height:16">三种 &lt;use&gt; src 写法打到同一个组件</span>
         <span class="note" style="position:absolute; left:492; top:208; width:368; height:18">属性值直接当内容：content: attr(data-tag)，编译期取值</span>
     </div>
@@ -133,17 +132,17 @@
     <!-- ④ 组件化：源码组件 -->
     <div class="card" style="position:absolute; left:16; top:572; width:428; height:180">
         <span class="card-title" style="position:absolute; left:16; top:12; width:390; height:18">④ 组件化：源码组件 .bum.html（可传参）</span>
-        <use src="button.bum.html" x="16"  y="40" w="190" label="普通按钮"/>
-        <use src="button.bum.html" x="222" y="40" w="190" label="第二个实例"/>
-        <use src="button.bum.html" x="16"  y="88" w="190" label="第三份"/>
-        <use src="button.bum.html" x="222" y="88" w="190" label="宿主改底色（bg）" bg="#2FBF9A"/>
+        <button class="cmp-btn" style="left:16px;top:40px;position:absolute;width:190px;height:40px;background:#3E8BFF" data-component="button.bum.html" data-x="16" data-y="40" data-w="190" data-label="普通按钮">普通按钮</button>
+        <button class="cmp-btn" style="left:222px;top:40px;position:absolute;width:190px;height:40px;background:#3E8BFF" data-component="button.bum.html" data-x="222" data-y="40" data-w="190" data-label="第二个实例">第二个实例</button>
+        <button class="cmp-btn" style="left:16px;top:88px;position:absolute;width:190px;height:40px;background:#3E8BFF" data-component="button.bum.html" data-x="16" data-y="88" data-w="190" data-label="第三份">第三份</button>
+        <button class="cmp-btn" style="left:222px;top:88px;position:absolute;width:190px;height:40px;background:#2FBF9A" data-component="button.bum.html" data-x="222" data-y="88" data-w="190" data-label="宿主改底色（bg）" data-bg="#2FBF9A">宿主改底色（bg）</button>
         <span class="note" style="position:absolute; left:16; top:140; width:396; height:28">参数与 &lt;use&gt; 属性合并；组件自带的 :hover 过渡一并生效</span>
     </div>
 
     <!-- ⑤ 组件化：二进制组件 + 运行期外挂 -->
     <div class="card" style="position:absolute; left:456; top:572; width:428; height:180">
         <span class="card-title" style="position:absolute; left:16; top:12; width:390; height:18">⑤ 二进制组件 .bum + 运行期外挂 external</span>
-        <use src="card.bum" x="16" y="40" w="396" action="确定"/>
+        <div style="left:16px;top:40px;width:396px;position:absolute;background:#F7FAFF;border:1px solid #DFE9F7;border-radius:14px;padding:14px" data-component="card.bum" data-x="16" data-y="40" data-w="396" data-action="确定"></div>
         <span class="note" style="position:absolute; left:16; top:150; width:396; height:28">card.bum 编译期内联、参数已固化；底部状态栏由 ex::MountAll() 运行期挂载</span>
     </div>
 

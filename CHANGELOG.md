@@ -5,6 +5,40 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.10] - 2026-11-21 【格式 v34 不变】
+
+**M3 存量迁移：`<use>` 全量迁到 `data-component`，10 个页面像素零差异**（issue 15）。
+
+做法是"把老编译器的展开结果写回源码"（新工具 `tools/binui_migrate.py`），因为老 `<use>`
+产出的替换节点 = 「组件**根元素**的标签 + 属性（参数已代入）+ 组件内部子元素」：
+
+- **组件文件摘掉根元素** → 变成片段（只留内部结构与内部选择器）；
+- **调用点** `<use src=… x= y= w= h= …/>` → `<RootTag class=… style=… data-component="…"
+  data-<参数>=…>默认文本</RootTag>`：根上的 class/style/文本按实例参数代入，几何折进
+  style（老路径走 x/y/w/h 属性，效果一样）；
+- 组件内部的 `{{name}}`（`id="{{bid}}-body"` 这种要逐实例唯一的）保留，编译器用与
+  `<use>` 同一套 `SubstituteParams` 按宿主 `data-*` 代入（`ExpandDataComponents` 里补）。
+
+规模：**19 个组件摘根、69 处 `<use>` 展开、29 个文件改写**；`components/divider.bum.html`
+的内容全部搬到了调用点（文件只剩注释），删掉并在调用点去掉 `data-component`。
+
+**验收（这是 M3 的硬门禁）**：迁移前后各出一次图对比，**10 个页面全部 0 差异**
+（animshow / appshow / buttonshow / cubedemo / features / flexshow / fontshow / svgdemo /
+texturedemo / components/preview；最大通道差 ≤1）。其余门禁：`make all` 零警告、
+`make test` 全 PASSED、`make partial` 4/4 `diff=0`、`pixels-bin2d` 0 容差、
+`check_examples examples` 18 页 0 问题。
+
+**门禁的一处必要调整**：组件片段（`.bum.*`）现在可以**没有节点、只带 `<style>`**（叶组件
+的结构和文本都在调用点上，剩下的样式规则是全局皮肤，必须留着），所以
+`check_examples` 对"`.bum.` 文件编译为空"判 OK 并注明是片段；页面（`main.html` /
+`preview.html`）为空仍然是失败。
+
+**还剩两处没迁**（都记在 issue 15 的 M3 行里）：
+1. 组件片段里的 `{{name}}` 占位（15 个文件）—— 编译期已按宿主 `data-*` 代入，行为正确，
+   但源码还不是"合法 HTML"；下一步转成 `data-param` + `var(--name, default)`；
+2. 运行期外挂（`<use … external>`，features 的 dock 状态栏）—— 新语法还没有对应写法，
+   需要 `data-binui-mount` 之类的设计，归 M5。
+
 ## [0.38.9] - 2026-11-21 【格式 v34 不变】
 
 **M1 收尾：`data-component` 内联、`data-param` 文本覆盖、窗口 `data-*`**（issue 15）。

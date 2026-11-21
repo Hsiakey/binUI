@@ -121,8 +121,7 @@
 </head>
 <body>
     <!-- 标题栏（TITLEBAR → 按下可拖动窗口） -->
-<use src="../../components/titlebar.bum.html" x="0" y="0" w="1000" icon="♻" iconw="24" title="binUI 动画实验室"
-          sub="关键帧 · 过渡 · 缓动 · 缩放/形变/旋转 · ESC 退出"/>
+<titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:1000px;height:45px;display:flex;align-items:center;gap:6px" data-component="../../components/titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="1000" data-icon="♻" data-iconw="24" data-title="binUI 动画实验室" data-sub="关键帧 · 过渡 · 缓动 · 缩放/形变/旋转 · ESC 退出"></titlebar>
 
     <!-- 第 1 行 -->
     <!-- 面板：缓动曲线（用位移演示，缩放统一放到下面「缩放 · 形变」版块） -->

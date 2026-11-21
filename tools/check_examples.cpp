@@ -52,8 +52,18 @@ int main(int argc, char** argv) {
     for (const auto& f : files) {
         binui::CompileResult r = binui::CompileBinUIFileEx(f);
         if (r.layout.empty()) {
-            std::printf("FAIL %s: 编译结果为空\n", f.c_str());
-            failed++;
+            // 组件**片段**允许空布局：issue 15 的 M3 之后，叶组件（button/tag/…）的结构与
+            // 文本都搬到调用点了，组件文件只剩 `<style>`（这点样式必须留着 —— 它是全局的
+            // 皮肤规则）。单独编译它当然没有节点；它是被 data-component 内联用的片段，
+            // 不是可独立打开的页面。页面（main.html / preview.html）为空仍然是错误。
+            const std::string name = f;
+            const bool isFragment = name.find(".bum.") != std::string::npos;
+            if (isFragment) {
+                std::printf("OK   %s: 组件片段（无独立节点，只带样式）\n", f.c_str());
+            } else {
+                std::printf("FAIL %s: 编译结果为空\n", f.c_str());
+                failed++;
+            }
             continue;
         }
         for (const auto& w : r.warnings) {

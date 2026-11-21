@@ -3820,13 +3820,18 @@ int run() {
         TEST("v14: 深底默认白色文字", tn && tn->color == 0xFFFFFFFFu);
     }
 
-    // ---- 组件源码的 HTML 写法（.bum.html）：和 .bum.html 等价 ----
+    // ---- 组件源码的 HTML 写法（.bum.html）：新语法 data-component ----
+    //   组件文件是**片段**（迁移后没有根元素），宿主元素即组件根：类型/尺寸/外观都归宿主，
+    //   组件只提供内部结构（tag 这种叶组件连内部结构都没有，全部在宿主上）。
     {
         const char* html =
             "<app_window width=\"420\" height=\"200\" bg=\"#F4F7FC\"><html><body>\n"
-            "  <use id=\"t1\" src=\"components/tag.bum.html\" x=\"16\" y=\"20\" w=\"90\"\n"
-            "       text=\"HTML 写法\" kind=\"mint\"/>\n"
-            "  <use id=\"t2\" src=\"components/tag.bum\" x=\"16\" y=\"60\" w=\"90\" text=\"裸名字\"/>\n"
+            "  <span id=\"t1\" class=\"bui-tag mint\" data-component=\"components/tag.bum.html\"\n"
+            "        style=\"position:absolute;left:16px;top:20px;width:90px;height:20px;font-size:12px;text-align:center\"\n"
+            "        data-text=\"HTML 写法\" data-kind=\"mint\">HTML 写法</span>\n"
+            "  <span id=\"t2\" class=\"bui-tag gray\" data-component=\"components/tag.bum\"\n"
+            "        style=\"position:absolute;left:16px;top:60px;width:90px;height:20px;font-size:12px;text-align:center\"\n"
+            "        data-text=\"裸名字\">裸名字</span>\n"
             "</body></html></app_window>\n";
         auto res = CompileBinUIEx(html);
         BinUIRenderer r;
@@ -3838,29 +3843,35 @@ int run() {
         };
         const auto* t1 = nodeOf(r.findNodeByName("t1"));
         const auto* t2 = nodeOf(r.findNodeByName("t2"));
-        // 根是 <span> → LABEL；参数替换 + 类名换肤都要生效
-        TEST("bum.html: 显式扩展名内联出组件根（span → LABEL）", t1 && t1->type == BINUI_LABEL);
-        TEST("bum.html: 参数 text 替换", t1 && t1->text == "HTML 写法");
-        TEST("bum.html: kind=mint 换肤", t1 && t1->color == 0xFFE3F7F1u);
+        // 宿主是 <span> → LABEL；宿主文本 / data-* / class 换肤都要生效
+        TEST("bum.html: 宿主标签决定节点类型（span → LABEL）", t1 && t1->type == BINUI_LABEL);
+        TEST("bum.html: 宿主文本就是默认值", t1 && t1->text == "HTML 写法");
+        TEST("bum.html: class 换肤生效（mint）", t1 && t1->color == 0xFFE3F7F1u);
         // src="tag.bum" 的裸名字要能落到 tag.bum.html 上（同一个候选表）
         TEST("bum.html: 裸名字 src 也命中 .bum.html", t2 && t2->text == "裸名字");
     }
 
-    // ---- v15：标准组件库 components/（根标签搬运 / 参数替换 / 插槽）----
+    // ---- v15：标准组件库 components/（新语法 data-component：宿主即组件根）----
     {
         const char* html =
             "<app_window width=\"760\" height=\"420\" bg=\"#F4F7FC\"><html><body>\n"
-            "  <use src=\"components/titlebar.bum.html\" x=\"0\" y=\"0\" w=\"760\"\n"
-            "       title=\"标题A\" sub=\"提示B\" idmin=\"imin\" idmax=\"imax\" idclose=\"iclose\"/>\n"
-            "  <use id=\"btn\" src=\"components/button.bum.html\" x=\"16\" y=\"60\"\n"
-            "       w=\"120\" h=\"36\" kind=\"secondary\" label=\"次按钮\"/>\n"
-            "  <use id=\"fld\" src=\"components/field.bum.html\" x=\"16\" y=\"110\"\n"
-            "       w=\"240\" ph=\"请输入关键字\"/>\n"
-            "  <use id=\"bdg\" src=\"components/badge.bum.html\" x=\"300\" y=\"118\"\n"
-            "       w=\"60\" text=\"在线\" kind=\"mint\"/>\n"
-            "  <use src=\"components/panel.bum.html\" x=\"16\" y=\"170\" w=\"320\" title=\"面板标题\">\n"
+            "  <titlebar class=\"bui-tb\" data-component=\"components/titlebar.bum.html\" ui_scale=\"fixed\"\n"
+            "        style=\"position:absolute;left:0px;top:0px;width:760px;height:45px;display:flex;align-items:center;gap:6px\"\n"
+            "        data-title=\"标题A\" data-sub=\"提示B\" data-idmin=\"imin\" data-idmax=\"imax\" data-idclose=\"iclose\"></titlebar>\n"
+            "  <button id=\"btn\" class=\"bui-btn secondary\" data-component=\"components/button.bum.html\"\n"
+            "        style=\"position:absolute;left:16px;top:60px;width:120px;height:36px;border-radius:10px;font-size:13px\"\n"
+            "        data-kind=\"secondary\" data-label=\"次按钮\">次按钮</button>\n"
+            "  <input id=\"fld\" data-component=\"components/field.bum.html\"\n"
+            "        style=\"position:absolute;left:16px;top:110px;width:240px;height:40px\"\n"
+            "        placeholder=\"请输入关键字\" data-ph=\"请输入关键字\"/>\n"
+            "  <span id=\"bdg\" class=\"bui-badge mint\" data-component=\"components/badge.bum.html\"\n"
+            "        style=\"position:absolute;left:300px;top:118px;width:60px;height:22px;font-size:12px\"\n"
+            "        data-kind=\"mint\" data-text=\"在线\">在线</span>\n"
+            "  <div data-component=\"components/panel.bum.html\"\n"
+            "        style=\"position:absolute;left:16px;top:170px;width:320px;height:120px;border-radius:16px;padding:16px\"\n"
+            "        data-title=\"面板标题\">\n"
             "    <span id=\"inner\" style=\"height:20; color:#66768C; font-size:12\">面板内容</span>\n"
-            "  </use>\n"
+            "  </div>\n"
             "</body></html></app_window>\n";
         auto res = CompileBinUIEx(html);
         BinUIRenderer r;

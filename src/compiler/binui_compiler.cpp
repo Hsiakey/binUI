@@ -3396,8 +3396,12 @@ static void ExpandDataComponents(std::vector<HNode>& elems, std::string& styleSh
                 } else {
                     // 打包清单存替换参数之前的原始源码（与 <use> 同口径）
                     SrcMapCollect(af.path, std::vector<uint8_t>(compSrc.begin(), compSrc.end()));
+                    // 参数替换与 <use> 完全同一套规则（`{{x}}` / `{{x=默认}}`）：老组件里的
+                    // 内部占位（尤其是 id="{{bid}}-body" 这种要逐实例唯一的）靠它落地；
+                    // 新写的片段用 data-param + var()，不经过这一步。
                     compElems = ParseElements(SubstituteParams(compSrc, params), compStyles);
-                    if (compElems.empty()) failReason = "组件 " + af.path + " 解析后没有元素";
+                    // 片段为空是合法的：叶组件（button/tag/badge…）的全部内容就是根元素
+                    // 自己的文本与样式，迁移时已经搬到宿主上，组件文件只剩 <style>。
                 }
             }
         }

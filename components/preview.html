@@ -5,42 +5,41 @@
   （浏览器直接打开**看不到布局**：这是 binUI 的布局语言，不是 HTML，原因见 README）
 -->
 <app_window width="780" height="600" bg="#F4F7FC" title="标准组件库"><html width="780" height="600" bg="#F4F7FC"><body>
-    <use src="titlebar.bum.html" x="0" y="0" w="780" icon="◆" iconw="22" title="标准组件库 components/" sub="11 个通用组件 · 纯 HTML + CSS"/>
+    <titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:780px;height:45px;display:flex;align-items:center;gap:6px" data-component="titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="780" data-icon="◆" data-iconw="22" data-title="标准组件库 components/" data-sub="11 个通用组件 · 纯 HTML + CSS"></titlebar>
 
     <!-- 按钮四态 -->
-    <use src="button.bum.html" x="20"  y="64"  w="120" h="38" label="主按钮"/>
-    <use src="button.bum.html" x="152" y="64"  w="120" h="38" kind="secondary" label="次按钮"/>
-    <use src="button.bum.html" x="284" y="64"  w="120" h="38" kind="ghost" label="幽灵"/>
-    <use src="button.bum.html" x="416" y="64"  w="120" h="38" kind="danger" label="危险"/>
+    <button class="bui-btn primary" style="position:absolute;left:20px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px" data-component="button.bum.html" data-x="20" data-y="64" data-w="120" data-h="38" data-label="主按钮">主按钮</button>
+    <button class="bui-btn secondary" style="position:absolute;left:152px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px" data-component="button.bum.html" data-x="152" data-y="64" data-w="120" data-h="38" data-kind="secondary" data-label="次按钮">次按钮</button>
+    <button class="bui-btn ghost" style="position:absolute;left:284px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px" data-component="button.bum.html" data-x="284" data-y="64" data-w="120" data-h="38" data-kind="ghost" data-label="幽灵">幽灵</button>
+    <button class="bui-btn danger" style="position:absolute;left:416px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px" data-component="button.bum.html" data-x="416" data-y="64" data-w="120" data-h="38" data-kind="danger" data-label="危险">危险</button>
 
     <!-- 输入框 + 胶囊 + 开关 -->
-    <use src="field.bum.html"  x="20"  y="118" w="240" h="38" ph="输入关键字…"/>
-    <use src="badge.bum.html"  x="276" y="126" w="60" text="在线" kind="mint"/>
-    <use src="badge.bum.html"  x="344" y="126" w="60" text="告警" kind="amber"/>
-    <use src="badge.bum.html"  x="412" y="126" w="60" text="离线" kind="gray"/>
-    <use src="toggle.bum.html" x="488" y="118" w="104" h="38" label="开关"/>
-    <use src="tag.bum.html" x="604" y="127" w="84" text=".bum.html"/>
-    <use src="tag.bum.html" x="696" y="127" w="84" text="HTML 写法" kind="mint"/>
+    <input class="bui-field" style="position:absolute;left:20px;top:118px;width:240px;height:38px;border-radius:10px;font-size:13px;padding:10px" data-component="field.bum.html" placeholder="输入关键字…" data-x="20" data-y="118" data-w="240" data-h="38" data-ph="输入关键字…"></input>
+    <span class="bui-badge mint" style="position:absolute;left:276px;top:126px;width:60px;height:22px;font-size:12px" data-component="badge.bum.html" data-x="276" data-y="126" data-w="60" data-text="在线" data-kind="mint">在线</span>
+    <span class="bui-badge amber" style="position:absolute;left:344px;top:126px;width:60px;height:22px;font-size:12px" data-component="badge.bum.html" data-x="344" data-y="126" data-w="60" data-text="告警" data-kind="amber">告警</span>
+    <span class="bui-badge gray" style="position:absolute;left:412px;top:126px;width:60px;height:22px;font-size:12px" data-component="badge.bum.html" data-x="412" data-y="126" data-w="60" data-text="离线" data-kind="gray">离线</span>
+    <button class="bui-toggle" style="position:absolute;left:488px;top:118px;width:104px;height:38px;border-radius:20px;font-size:13px" data-component="toggle.bum.html" data-x="488" data-y="118" data-w="104" data-h="38" data-label="开关">开关</button>
+    <span class="bui-tag blue" style="position:absolute;left:604px;top:127px;width:84px;height:20px;font-size:12px;text-align:center" data-component="tag.bum.html" data-x="604" data-y="127" data-w="84" data-text=".bum.html">.bum.html</span>
+    <span class="bui-tag mint" style="position:absolute;left:696px;top:127px;width:84px;height:20px;font-size:12px;text-align:center" data-component="tag.bum.html" data-x="696" data-y="127" data-w="84" data-text="HTML 写法" data-kind="mint">HTML 写法</span>
 
     <!-- 面板（宿主子元素成为内容） -->
-    <use src="panel.bum.html" x="20" y="176" w="352" title="panel：宿主子元素就是内容">
+    <div class="bui-panel" style="position:absolute;left:20px;top:176px;width:352px;height;border-radius:16px;padding:16px" data-component="panel.bum.html" data-x="20" data-y="176" data-w="352" data-title="panel：宿主子元素就是内容">
         <span style="height:22; color:#66768C; font-size:12">面板根不写 height 时会自动撑高</span>
         <span style="height:22; color:#66768C; font-size:12">内容按流式排在标题下面</span>
         <span style="height:22; color:#94A3B8; font-size:11">圆角 / 边框 / 白面来自组件自己的样式表</span>
-    </use>
+    </div>
 
     <!-- 对话气泡 -->
-    <use src="dialogue.bum.html" x="392" y="176" w="368" h="176" name="诺艾拉"
-         text="dialogue：角色名胶囊 + 自动换行正文 + 右下两个按钮，位置由参数给。"/>
+    <div class="bui-dlg" style="position:absolute;left:392px;top:176px;width:368px;height:176px;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:8px" data-component="dialogue.bum.html" data-x="392" data-y="176" data-w="368" data-h="176" data-name="诺艾拉" data-text="dialogue：角色名胶囊 + 自动换行正文 + 右下两个按钮，位置由参数给。"></div>
 
     <!-- 指标 + 头像 + 分隔线 -->
-    <use src="stat.bum.html" x="20"  y="376" w="150" k="识别帧率" v="30 fps"/>
-    <use src="stat.bum.html" x="190" y="376" w="150" k="推理延迟" v="8 ms"/>
-    <use src="stat.bum.html" x="360" y="376" w="150" k="在线设备" v="12"/>
-    <use src="avatar.bum.html" x="20" y="428" size="56"/>
+    <div style="position:absolute;left:20px;top:376px;width:150px;height:40px" data-component="stat.bum.html" data-x="20" data-y="376" data-w="150" data-k="识别帧率" data-v="30 fps"></div>
+    <div style="position:absolute;left:190px;top:376px;width:150px;height:40px" data-component="stat.bum.html" data-x="190" data-y="376" data-w="150" data-k="推理延迟" data-v="8 ms"></div>
+    <div style="position:absolute;left:360px;top:376px;width:150px;height:40px" data-component="stat.bum.html" data-x="360" data-y="376" data-w="150" data-k="在线设备" data-v="12"></div>
+    <img class="bui-avatar" style="position:absolute;left:20px;top:428px;width:56px;height:56px;border-radius:56px" data-component="avatar.bum.html" data-x="20" data-y="428" data-size="56"></img>
     <span style="position:absolute; left:92; top:440; width:520; height:20; color:#94A3B8; font-size:11">avatar：圆形头像 + 1px 描边，缺图退化成浅色圆</span>
-    <use src="divider.bum.html" x="20" y="500" len="740"/>
+    <div style="position:absolute;left:20px;top:500px;width:740px;height:1px;background:#E6EDF7" data-x="20" data-y="500" data-len="740"></div>
 
     <!-- 底部状态栏 -->
-    <use src="statusbar.bum.html" x="0" y="552" w="780" text="状态栏：左灰字 + 右两枚次要按钮"/>
+    <div class="bui-sb" style="position:absolute;left:0px;top:552px;width:780px;height:48px;display:flex;align-items:center;gap:8px" data-component="statusbar.bum.html" data-x="0" data-y="552" data-w="780" data-text="状态栏：左灰字 + 右两枚次要按钮"></div>
 </body></html></app_window>
