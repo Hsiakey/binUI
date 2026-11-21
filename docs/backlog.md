@@ -20,7 +20,7 @@
 |---|---|---|---|---|---|
 | A1 | 镜像生成器收成正式工具：`binui_preview`（输出 `out/preview/`、`--stage` 单组件视图、批量跑 `examples/*`） | 14 §5 轮1 | `components/preview.html` + 3 个示例页各出一组"镜像/真渲染"对照，肉眼可读；工具在 `tools/` 内自洽（`python tools/binui_preview.py --help`） | 0.5–1 天 | |
 | A2 | **P1 结构导出 + 布局叠层 viewer**：`draw_bench --dump-nodes` 出 JSON（id/父/type/盒/裁剪祖先/display:none/滚动内容高），单页 viewer 左树右图叠加盒框 | 14 §3 P1 | 能回答"这个盒子为什么不在那"：点树高亮盒、悬停给计算值；JSON 与引擎实际布局同源（不是猜的） | 2–3 天 | **完成 · 0.38.6**（`draw_bench --dump-nodes` + `tools/binui_nodes.py`，见 issue 14 §3） |
-| A3 | 热重载：改源码 → 浏览器自动刷新（SSE） | 14 §5 轮3 | 保存后 2 秒内刷新，A1/A2 都受益 | 0.5–1 天 | |
+| A3 | 热重载：改源码 → 浏览器自动刷新（SSE） | 14 §5 轮3 | 保存后 2 秒内刷新，A1/A2 都受益 | 0.5–1 天 | **完成 · 0.38.8**（	ools/binui_dev.py + docs/dev-server.md；touch 组件 2.63 s 收到 reload） |
 | A4 | P2 wasm 真渲染（编译+布局+CPU 光栅进 wasm，canvas 出图） | 14 §3 P2 | 同机同字体下浏览器画面与 `bin2d_shot` 一致 | 2–4 周 | 后置到 A1–A3 之后 |
 
 ## B 轨道 —— 合法 HTML（[15](issues/15-valid-html-language.md)）
@@ -28,7 +28,7 @@
 | ID | 事项 | 来源 | 验收 | 估 | 结果 |
 |---|---|---|---|---|---|
 | B1 | **M0 语法定稿 + 双跑样例**：`button` 组件用新语法重写（`var()` / `data-component` / `data-param` / `px`），同一份文件浏览器能看、`binui_compile` 能编 | 15 §6 M0 | 同一份 `button.html` 两处都成立；差异清单固化成 §5 表 | 2–3 天 | **完成 · 0.38.7**（`docs/spec/valid-html/`；§2.1 契约八条 + §5 实测列 + §7 探针） |
-| B2 | **M1 编译器接线**：`var(--name, fallback)` 解析、`data-component` 内联（复用 `<use>` 管线）、`data-param` 文本覆盖、窗口 `data-*`、legacy 告警（`--strict-html` 拒收） | 15 §3 | 新语法样例编出的 `.bui` 与旧语法**像素完全一致**（`pixels-bin2d` 0 容差） | 3–5 天 | |
+| B2 | **M1 编译器接线**：`var(--name, fallback)` 解析、`data-component` 内联（复用 `<use>` 管线）、`data-param` 文本覆盖、窗口 `data-*`、legacy 告警（`--strict-html` 拒收） | 15 §3 | 新语法样例编出的 `.bui` 与旧语法**像素完全一致**（`pixels-bin2d` 0 容差） | 3–5 天 | **进行中**：`var()` 已落地 0.38.8（长度+颜色、祖先继承、0 告警、两组 `diffpx=0`）；剩 `data-component` / `data-param` / 窗口 `data-*` |
 | B3 | M2 `binui dev`（静态服务 + 监听 + SSE）+ `binui-preview.js` + 组件独立视图（居中 / 1x~8x / 盒边界 / 像素放大） | 15 §4 | 改一行保存 → 浏览器 2 秒内刷新且布局变化可见；单组件 4× 能看清 1px 描边 | 1–2 周 | 依赖 B2 |
 | B4 | M3 codemod：`{{}}`→`var()`/`data-param`、`<use>`→`data-component`、补 `px` | 15 §6 M3 | 存量 `examples/` + `components/` 全量迁移，逐页过 `pixels-bin2d` 像素不变 | 3–5 天 | 依赖 B2 绿 |
 | B5 | M4/M5 语义对齐（§5 表逐条）+ `binui parity` 门禁 + 删 legacy 语法 | 15 §5/§6 | 示例页浏览器/binUI 差异收敛到"文字换行以内"；编译器只剩一套写法 | 1–2 月 | 持续 |

@@ -5,6 +5,51 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.8] - 2026-11-21 【格式 v34 不变】
+
+**M1 第一步：`var(--name, fallback)` 在编译期展开**（issue 15）。以前 `width:var(--w,120px)`
+是"不支持函数值 → 回退 0px"，一条声明还报两条告警；现在长度与**颜色**两个位置都认，且
+查找顺序与 CSS 一致：
+
+1. 元素自己生效的声明里的 `--x`（含内联 style，`--w:88px` 覆盖 fallback）；
+2. **祖先链**（自定义属性是继承的，`<div style="--w:200px">` 里的子元素取到 200px）；
+3. `var()` 的 fallback；
+4. 都没有且没写 fallback：告警一条并**丢掉这条声明**（对应 CSS 的
+   invalid-at-computed-value 语义 —— 别偷偷当 0，0 会让盒子塌成不可见，比报错难查）。
+
+验收（`examples/valid-html/`，同一组件两组宿主，只差"宽度写 `var()` 还是写字面 px"）：
+① 组与 ② 组的盒子都是 `120×38`，两组 PNG **逐像素 0 差异**（`diffpx=0 max=0`）；
+`binui_compile` 从"3 条告警"变成 **0 告警**，样例因此搬回 `examples/`
+（`check_examples examples` = **18 页 0 问题**），受门禁保护。
+`test_css` 加 7 项断言：fallback 生效 / 祖先继承 / 自身覆盖 / 只告警一次 / 颜色位置 /
+不再报"不支持函数值"。
+
+**这条改动踩出的一个坑值得记**：`styleOf` 变成可递归（查祖先样式）后加了按元素下标的
+记忆化，但 `elems` 在编译过程中还会增长（组件内联、伪元素合成都 append），向量只按声明处
+的尺寸分配 → **越界写把堆写坏**，症状却是别处 `std::unordered_map` 拷贝时抛
+`bad_array_new_length` / `std::bad_alloc`（`test_css` 在 `v11:` 段整段崩）。修法两条：
+记忆化向量按当前 `elems.size()` 补齐；伪元素（`_pseudo` 合成节点）不进缓存 —— 同一个元素
+下标会被"本体"和"::after 变体"分别问，两者级联结果不同。
+
+**A3：`binui dev` 热刷新**（issue 14 §5 轮3）。`tools/binui_dev.py`（纯标准库，661 行）：
+
+```sh
+python tools/binui_dev.py examples/buttonshow/main.html   # stdout 第一行就是 URL
+```
+
+- 两栏页：左结构查看器（0.38.6 的那份）+ 右 `bin2d_shot` 真渲染；`--shot-only` 退化成整图；
+- 监听页面本身 + 它引用的组件（`<use src>` / `data-component`）+ css/js，mtime 每秒轮询；
+- 变化 → 重建（shot ≈200 ms + 节点 ≈10 ms + 合成 ≈35 ms）→ SSE 推 `reload`，浏览器自动刷新；
+- 端口占用自动 +1（Windows 上 `allow_reuse_address=True` 会静默抢端口，所以显式关掉）；
+- 产物落 `out/dev/`（已 gitignore），源码树零写入。用法见 `docs/dev-server.md`。
+
+实测：touch **组件**（`components/titlebar.bum.html`）→ 2.63 s 收到 `data: reload`，
+`/api/state` 的 `builds` 1→2。坑：这台机上 `msedge --headless=new` 会挂住（>90 s），
+`--headless`（旧）1 秒出图，且 `--screenshot` 必须给绝对路径。
+
+门禁：`make all` 零警告、`make test` 全 PASSED、`make partial` 4/4 `diff=0`、
+`make pixels-bin2d` 0 容差、`make pixels-bin2d-gpu` 18 页（仅 `text-shadow-multi` 已知差异）。
+
 ## [0.38.7] - 2026-11-21 【格式 v34 不变】
 
 **合法 HTML 语法定稿（issue 15 的 M0）**：一份源码，浏览器直接打开可读、`binui_compile`

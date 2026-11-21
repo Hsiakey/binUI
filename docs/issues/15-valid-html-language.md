@@ -1,8 +1,10 @@
 # 15 - 源码成为合法 HTML：把"浏览器预览"变成语言契约
 
-**状态**：**M0 已完成（2026-11-21）**——语法定稿见 §2.1，双跑样例 `docs/spec/valid-html/`
-（规格样例；`var()` 归零后搬进 `examples/`，见 §7 门禁段），
-§5/§7 已补实测。M1~M5 未开工。（2026-11-21 master 定方向：走合法 HTML，路难但收益大）
+**状态**：**M0 已完成、M1 部分落地（2026-11-21）**——语法定稿见 §2.1，双跑样例
+`examples/valid-html/`（已归门禁，18 页 0 告警）。**M1 已做**：`var(--name, fallback)`
+在编译期展开（长度 + 颜色两个位置，含祖先继承与自身覆盖，见 §6.M1 与 0.38.8）。
+**M1 未做**：`data-component` 内联、`data-param` 文本覆盖、窗口 `data-*`。
+（2026-11-21 master 定方向：走合法 HTML，路难但收益大）
 **类型**：语言 / 工具链 / DX · **严重度**：高（决定"写 UI 是不是像写网页"）
 **影响面**：编译器（`binui_compiler.cpp`）、全部存量布局（`examples/`、`components/`、`docs/mockups/`）、
 新工具（`binui dev` + 预览运行时）。
@@ -44,7 +46,7 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 
 ### 2.1 组件契约（M0 定稿，可直接给 M1 当规格）
 
-样例：`docs/spec/valid-html/button.html`（组件）+ `docs/spec/valid-html/main.html`（宿主页）。
+样例：`examples/valid-html/button.html`（组件）+ `examples/valid-html/main.html`（宿主页）。
 | # | 规范 | 反例（旧写法 / 不合法写法） |
 |---|---|---|
 | 1 | 组件文件是**片段**：没有 `<html>/<head>/<body>`，也**不写组件自己的根标签** | `<button class="bui-btn {{kind=primary}}">…</button>`（自带根 + 模板参数） |
@@ -155,14 +157,15 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 
 | 阶段 | 做什么 | 验收 | 估算 |
 |---|---|---|---|
-| M0 | 语法定稿 + 一个"双跑"样例（`button` 组件用新语法重写：浏览器能看、`binui_compile` 能编） | 同一份 `button.html` 两处都成立 | **✅ 2026-11-21 完成**：`docs/spec/valid-html/{main,button}.html`；`binui_compile` 2188 B / exit 0，`bin2d_shot` 780×600 / exit 0，Edge headless 截图 4 个按钮全在；语法见 §2.1，实测见 §5/§7 |
+| M0 | 语法定稿 + 一个"双跑"样例（`button` 组件用新语法重写：浏览器能看、`binui_compile` 能编） | 同一份 `button.html` 两处都成立 | **✅ 2026-11-21 完成**：`examples/valid-html/{main,button}.html`；`binui_compile` 2188 B / exit 0，`bin2d_shot` 780×600 / exit 0，Edge headless 截图 4 个按钮全在；语法见 §2.1，实测见 §5/§7 |
 | M1 | 编译器：`var()`、`data-component`、`data-param`、窗口 `data-*`、legacy 告警 | 新语法样例编出的 `.bui` 与旧语法**像素完全一致**（`pixels-bin2d` 0 容差） | 3~5 天 |
+| — | **M1 第一步已落地（0.38.8）**：`var(--name, fallback)` 编译期展开（长度 + 颜色；祖先继承 + 自身覆盖 + 未定义无 fallback 时丢声明并告警一次）。验收：`test_css` 7 项新断言；分组对照 `diffpx=0 max=0`；样例 0 告警 | | |
 | M2 | `binui dev` + `binui-preview.js` + 热刷新 + **组件独立视图（居中 / 1x~8x / 盒边界 / 像素放大）** | 改一行保存 → 浏览器 2 秒内刷新且布局变化可见；单组件能 4× 看清 1px 描边 | 1~2 周 |
 | M3 | codemod：`{{}}`→`var()`/`data-param`、`<use>`→`data-component`、补 `px` | 存量 `examples/` + `components/` 全量迁移后像素不变 | 3~5 天 |
 | M4 | 语义对齐迭代（§5 表逐条）+ `binui parity` 门禁 | 示例页差异率收敛到"文字换行以内" | 1~2 月，持续 |
 | M5 | 删 legacy 语法（`{{}}`、`<use>`、无单位） | 编译器只剩一套写法 | 收尾 |
 
-## 7. 可行性探针（2026-11-21 实测，M0 样例 `docs/spec/valid-html/main.html`）
+## 7. 可行性探针（2026-11-21 实测，M0 样例 `examples/valid-html/main.html`）
 
 样例里刻意放了两组宿主：**① 目标语法**（`width:var(--w,120px)`）与 **② M0 等价写法**（`width:120px`），
 其余（组件、文案、坐标）完全相同 —— ② 组是 M1 的像素参照。
@@ -178,35 +181,25 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 
 | 今天的行为（原文） | 结论 |
 |---|---|
-| `binui_compile docs\spec\valid-html\main.html -o …` → `2188 字节`、`exit=0` | **合法 HTML 直接收**，无语法错误；产物可被 `bin2d_shot` 加载 |
-| `bin2d_shot … docs\spec\valid-html\main.html …` → `saved … (780x600)`、`exit=0` | 出图成立；780×600 来自 `html,body{width:780px;height:600px}`（见下条） |
-| `width:var(--w,120px)` → `warning: width：不支持函数值 "var(--w,120px)"（calc/min/max/clamp），已回退默认值` + `warning: 长度：不支持函数值 "var(--w,120px)"（calc/min/max/clamp），已回退默认值` | **一处声明两条告警**（宽度解析一次、节点几何再解析一次）。**回退值是 0px，不是 var() 的 fallback 120px** —— ① 组在 PNG 里宽度为 0、完全没有像素。这就是 M1 必须补的第一处 |
-| `color: var(--fg, #FFFFFF)`（组件内部） → `warning: 文字颜色：无法识别的颜色 "var(--fg, #FFFFFF)"（支持命名色/#hex/rgb()/rgba()/hsl()/transparent）` | 颜色位置同样不认 `var()` → M1 的范围要同时覆盖**颜色**解析 |
-| `data-component="button.html"` / `data-param="label"` / `data-label="确定"` | **静默忽略**：0 条告警（`data-` 前缀在属性白名单里直接跳过），`data-label` 不覆盖文本 —— ② 组渲染的仍是「次按钮」 |
-| `data-binui-window data-width="780" data-height="600" data-bg="#F4F7FC"` | 静默忽略；**窗口尺寸不是从这里来的**，而是 `<html>/<body>` 的 `width/height`（编译器无 `<app_window>` 时据此生成窗口描述段）。M1 接线后 CSS 兜底可删 |
+| `binui_compile examples\valid-html\main.html -o …` → `2188 字节`、`exit=0`、**0 条告警** | **合法 HTML 直接收**，无语法错误；产物可被 `bin2d_shot` 加载 |
+| `bin2d_shot … examples\valid-html\main.html …` → `saved … (780x600)`、`exit=0` | 出图成立；780×600 来自 `html,body{width:780px;height:600px}`（见下条） |
+| `width:var(--w,120px)` —— **0.38.8 起支持**（见 §6 M1） | ① 组与 ② 组的盒子都是 `120×38`，两组 PNG **逐像素 0 差异**（`diffpx=0 max=0`，主按钮与次按钮都比过）。曾经的"回退 0px + 一处声明两条告警"已消失 |
+| `color: var(--fg, #FFFFFF)`（组件内部） | 颜色位置同样展开（`textColorOf` 实测取到 fallback）→ M1 的颜色那条已覆盖 |
+| `data-component="button.html"` / `data-param="label"` / `data-label="确定"` | **静默忽略**：0 条告警（`data-` 前缀在属性白名单里直接跳过），`data-label` 不覆盖文本 —— ② 组渲染的仍是「次按钮」。**这是 M1 剩下的活**（`data-component` 内联 / `data-param` 文本覆盖） |
+| `data-binui-window data-width="780" data-height="600" data-bg="#F4F7FC"` | 静默忽略；**窗口尺寸不是从这里来的**，而是 `<html>/<body>` 的 `width/height`（编译器无 `<app_window>` 时据此生成窗口描述段）。M1 剩下的活 |
 | `width:120px;height:38px`（② 组） | **零改动接收**（`ParseLenPct` 本来就认 `px`）→ 语法迁移的第 3 条无成本 |
 | `lang="zh-CN"`（曾在样例里） | `warning: HTML 属性 "lang"（<html>）未实现，已忽略` —— 合法 HTML 的通用属性不在白名单；样例因此不带 `lang`（M1 要把 `lang`/`dir`/`role` 这类通用属性加进白名单或静默） |
 | 两个宿主各写一次 `var()` | 每类告警只报 **1 条**（去重键 = 整条消息）→ 不会刷屏 |
 
-**门禁影响（已处理）**：`check_examples` 对 `examples/` 下**任何告警**判失败
+**门禁影响（已解决）**：`check_examples` 对 `examples/` 下**任何告警**判失败
 （`tools/check_examples.cpp:59-62`；`CMakeLists.txt:215` 把它注册成 ctest，Windows CI 跑 ctest
-且**没有** `continue-on-error`）。样例里 `var()` 今天必然告警，实测：
+且**没有** `continue-on-error`）。`var()` 归零前，样例一度放在 `docs/spec/`（不在扫描范围）避开
+红灯；**0.38.8 让 `var()` 归零之后已搬回 `examples/valid-html/`**，现在 `check_examples examples`
+是 **18 页 0 问题**，样例因此受门禁保护。**没有给 `check_examples` 加告警白名单** ——
+零告警是既有规矩，为一个尚未支持的语法开口子，后面的告警就都能藏进去。
 
-```
-build-mingw\bin\check_examples.exe docs\spec\valid-html
-WARN …/button.html: 文字颜色：无法识别的颜色 "var(--fg, #FFFFFF)"…
-WARN …/main.html: width：不支持函数值…
-WARN …/main.html: 长度：不支持函数值…
-2 个示例 UI 检查完毕，3 处问题      → exit=1
-```
-
-**处置（2026-11-21，Lead 定）**：样例放在 `docs/spec/valid-html/`（**规格样例，不在 `examples/`
-扫描范围内**），因此门禁现在就是绿的；M1 让 `var()` 归零之后，这两个文件**搬进 `examples/`** 成为
-正式示例，届时 `check_examples` 自然覆盖它们。**不给 `check_examples` 加告警白名单** ——
-零告警是既有规矩，为一个尚未支持的语法开口子，等于让所有后续告警都能藏进去。
-
-**语法迁移本身没有拦路虎**（`px` 零成本、`data-*` 静默通过），真正的工程量在
-§4 的预览运行时、§5 的语义对齐，以及 M1 的 `var()`（含颜色位置）。
+**语法迁移本身没有拦路虎**（`px` 零成本、`data-*` 静默通过、`var()` 已落地），真正的工程量在
+§4 的预览运行时、§5 的语义对齐，以及 M1 剩下的 `data-component` / `data-param` / 窗口 `data-*`。
 
 ## 8. 风险与不做
 

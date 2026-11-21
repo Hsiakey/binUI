@@ -3951,6 +3951,43 @@ int run() {
              inner && panelTitle && inner->parentId == panelTitle->parentId);
     }
 
+    // ---- issue 15 的 M1：CSS 自定义属性 var(--x, fallback) 在编译期展开 ----
+    {
+        auto res = CompileBinUIEx(
+            "<html><head><style></style></head><body>"
+            "<div id=\"a\" style=\"width:var(--w,120px);height:38px\"></div>"
+            "<div id=\"host\" style=\"--w:200px;width:400px;height:80px\">"
+            "  <div id=\"b\" style=\"width:var(--w,120px);height:38px\"></div>"
+            "</div>"
+            "<div id=\"c\" style=\"--w:88px;width:var(--w,120px);height:38px\"></div>"
+            "<div id=\"d\" style=\"width:var(--nope);height:38px\"></div>"
+            "<div id=\"e\" style=\"color:var(--fg,#112233);width:40px;height:10px\">x</div>"
+            "</body></html>");
+        BinUIRenderer r;
+        TEST("css var: parses", !res.layout.empty() && r.loadLayout(res.layout.data(), res.layout.size()));
+        int fnWarn = 0, undefWarn = 0;
+        for (const auto& w : res.warnings) {
+            if (w.find("不支持函数值") != std::string::npos) fnWarn++;
+            if (w.find("未定义") != std::string::npos) undefWarn++;
+        }
+        TEST("css var: 不再报【不支持函数值】", fnWarn == 0);
+        const auto nodeOfId = [&](const char* name) -> const BinUIRenderer::NodeInfo* {
+            const uint16_t id = r.findNodeByName(name);
+            for (const auto& nd : r.getNodes()) if (nd.id == id) return &nd;
+            return nullptr;
+        };
+        const auto wOf = [&](const char* name) {
+            const auto* n = nodeOfId(name);
+            return n ? n->width : -1.0f;
+        };
+        TEST("css var: 未定义时用 fallback（120px）", std::fabs(wOf("a") - 120.0f) < 0.5f);
+        TEST("css var: 继承祖先的 --w（200px）", std::fabs(wOf("b") - 200.0f) < 0.5f);
+        TEST("css var: 自己的 --w 优先于 fallback（88px）", std::fabs(wOf("c") - 88.0f) < 0.5f);
+        TEST("css var: 未定义且无 fallback 只告警一次", undefWarn == 1);
+        const uint16_t eId = r.findNodeByName("e");
+        TEST("css var: 颜色位置同样展开（#112233）", eId && r.textColorOf(eId) == 0xFF112233u);
+    }
+
     TestIssueRegressions();
 
     printf("\n=== Results: %d tests failed ===\n", failed);

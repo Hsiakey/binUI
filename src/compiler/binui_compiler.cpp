@@ -3689,7 +3689,27 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
 
     // 元素生效样式 = <style> 里命中的规则（按特异性/文档序级联） + 内联 style（最高优先级）
     // ei = 元素下标（结构伪类求值用）；SIZE_MAX = 无结构信息（伪元素合成节点/包裹层）
-    auto styleOf = [&](const HNode& e, size_t ei = SIZE_MAX) -> std::unordered_map<std::string, std::string> {
+    //
+    // 为什么要 std::function + 记忆化：CSS 自定义属性（`var(--w, 120px)`，issue 15 的
+    // M1）是**继承**的 —— 展开某个元素的 var() 时要往祖先链上找 `--w`，而"祖先的声明"
+    // 就是祖先的生效样式，于是 styleOf 必须能递归调自己。按元素下标记住结果，避免同一
+    // 元素被反复级联（顺带把原来的重复计算也省掉了）。
+    // 注意：elems 在这之后还会增长（组件内联/伪元素合成都会 append），所以向量不能只按
+    // 这里的尺寸分配一次 —— 每次用到时按当前 elems.size() 补齐，否则越界写会把堆写坏
+    // （症状是别处 std::unordered_map 拷贝时抛 bad_array_new_length，极难往回追）。
+    std::vector<std::unordered_map<std::string, std::string>> styleMemo;
+    std::vector<char> styleDone;
+    std::function<std::unordered_map<std::string, std::string>(const HNode&, size_t)> styleOf;
+    styleOf = [&](const HNode& e, size_t ei) -> std::unordered_map<std::string, std::string> {
+        // 伪元素（_pseudo 合成节点）按元素下标拿不到唯一答案：同一个下标会被"本体"和
+        // "::after 变体"分别问一次，两者级联结果不同，所以它们不进缓存。
+        const bool memoable = !e.attrs.count("_pseudo");
+        if (memoable && ei < elems.size() && styleMemo.size() < elems.size()) {
+            styleMemo.resize(elems.size());
+            styleDone.resize(elems.size(), 0);
+        }
+        if (memoable && ei < styleMemo.size() && styleDone[ei]) return styleMemo[ei];
+
         // 最低层：内置 UA 默认样式（作者任何声明都会覆盖它）
         std::unordered_map<std::string, std::string> out = UaDeclsOf(e.tag);
         if (!cssRules.empty() && !e.attrs.count("_pseudo")) {
@@ -3753,6 +3773,92 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
                     putIfAbsent("box-shadow", "0 10 34 0 rgba(12,18,28,0.22)");
                 }
             }
+        }
+
+        // ---- CSS 自定义属性展开（issue 15 的 M1）----
+        //
+        // `width: var(--w, 120px)` 这类写法有两个来源：作者手写（合法 HTML 的要求），
+        // 以及组件参数（宿主写 `--w:132px` 覆盖）。binUI 的布局是**编译期**算的，
+        // 所以变量也必须在编的时候就有值 —— 这里一次性把 var() 换成具体值，后面
+        // ParseLenPct / ParseColorValue 看到的就只剩普通声明，不用认识 var()。
+        //
+        // 查找顺序与 CSS 一致：元素自己生效的声明（含内联 style）里的 `--x` →
+        // 祖先链 → var() 的 fallback。都没有且没写 fallback：警告并**丢掉这条声明**
+        // （对应 CSS 的 invalid-at-computed-value 语义，别偷偷当成 0 —— 0 会让盒子
+        // 塌成不可见，比报错更难查）。
+        {
+            std::vector<std::string> drop;
+            for (auto& kv : out) {
+                if (kv.first.rfind("--", 0) == 0) continue;      // 自定义属性本身不展开
+                std::string v = kv.second;
+                if (v.find("var(") == std::string::npos) continue;
+
+                bool bad = false;
+                for (int depth = 0; depth < 8; ++depth) {
+                    const size_t p = v.find("var(");
+                    if (p == std::string::npos) break;
+                    size_t r = p + 4;
+                    int nest = 1;
+                    for (; r < v.size(); ++r) {
+                        if (v[r] == '(') nest++;
+                        else if (v[r] == ')' && --nest == 0) break;
+                    }
+                    if (r >= v.size()) {                     // 括号不配对
+                        Warn("var() 括号不匹配：\"" + kv.second + "\"，已忽略这条声明");
+                        bad = true;
+                        break;
+                    }
+                    const std::string inner = v.substr(p + 4, r - p - 4);
+                    // 顶层逗号切 name / fallback（fallback 里可能有 rgb(…,…) 的逗号）
+                    size_t comma = std::string::npos;
+                    int cn = 0;
+                    for (size_t k = 0; k < inner.size(); ++k) {
+                        const char c = inner[k];
+                        if (c == '(') cn++;
+                        else if (c == ')') cn--;
+                        else if (c == ',' && cn == 0) { comma = k; break; }
+                    }
+                    const std::string name = TrimCopy(
+                        comma == std::string::npos ? inner : inner.substr(0, comma));
+                    const std::string fallback = (comma == std::string::npos)
+                        ? std::string() : TrimCopy(inner.substr(comma + 1));
+
+                    std::string resolved;
+                    bool found = false;
+                    if (!name.empty() && name.rfind("--", 0) == 0) {
+                        auto self = out.find(name);
+                        if (self != out.end() && self->second != kv.second) {
+                            resolved = self->second;
+                            found = true;
+                        }
+                        // 祖先链：祖先生效样式里的同名自定义属性（CSS 的继承语义）
+                        size_t cur = e.parentIdx;
+                        for (int guard = 0; cur < elems.size() && guard < 64; ++guard) {
+                            const auto pst = styleOf(elems[cur], cur);
+                            auto pit = pst.find(name);
+                            if (pit != pst.end()) { resolved = pit->second; found = true; break; }
+                            cur = elems[cur].parentIdx;
+                        }
+                    }
+                    if (!found) {
+                        if (fallback.empty()) {
+                            Warn("自定义属性 " + name + " 未定义，且 var() 没写 fallback："
+                                 "已忽略这条声明（\"" + kv.first + "\" 用默认值）");
+                            bad = true;
+                            break;
+                        }
+                        resolved = fallback;
+                    }
+                    v = v.substr(0, p) + resolved + v.substr(r + 1);
+                }
+                if (bad) drop.push_back(kv.first);
+                else kv.second = v;
+            }
+            for (const auto& k : drop) out.erase(k);
+        }
+        if (memoable && ei < styleMemo.size()) {
+            styleMemo[ei] = out;
+            styleDone[ei] = 1;
         }
         return out;
     };
