@@ -27,14 +27,14 @@
 -->
 <style>
     .bui-tb       { background:#FFFFFF; border-bottom:1px solid #E6EDF7; }
-    .bui-tb-icon  { color:#3E8BFF; font-size:18px; }
-    .bui-tb-title { color:#1F2A37; font-size:14px; font-weight:700; }
-    .bui-tb-sub   { color:#94A3B8; font-size:11px; }
-    .bui-tb-btn   { background:#EEF3FA; color:#66768C; border-radius:8; font-size:12px;
+    .bui-tb-icon  { color:#3E8BFF; font-size: 18px; }
+    .bui-tb-title { color:#1F2A37; font-size: 14px; font-weight:700; }
+    .bui-tb-sub   { color:#94A3B8; font-size: 11px; }
+    .bui-tb-btn   { background:#EEF3FA; color:#66768C; border-radius: 8px; font-size: 12px;
                     transition: background-color .15s ease; }
     .bui-tb-btn:hover  { background:#DCE5F2; }
     .bui-tb-btn:active { background:#C7D8EE; }
-    .bui-tb-close { background:#FFE9EC; color:#FF6B6B; border-radius:8; font-size:12px;
+    .bui-tb-close { background:#FFE9EC; color:#FF6B6B; border-radius: 8px; font-size: 12px;
                     transition: background-color .15s ease; }
     .bui-tb-close:hover  { background:#FFD9DE; }
     .bui-tb-close:active { background:#FFC6CE; }
@@ -45,26 +45,26 @@
     .bui-tb-bar   { background:#66768C; }
 </style>
 
-    <div style="width:{{pad=16}}; height:1; background:transparent"></div>
-    <span class="bui-tb-icon" style="width:{{iconw=1}}; height:22">{{icon=}}</span>
-    <span class="bui-tb-title" style="width:{{titlew=content}}; height:20">{{title=标题}}</span>
-    <span class="bui-tb-sub" style="flex:1; height:16">{{sub=}}</span>
+    <div style="width:var(--pad, 16px);height:1px;background:transparent"></div>
+    <span class="bui-tb-icon" style="width:var(--iconw, 1px);height:22px" data-param="icon"></span>
+    <span class="bui-tb-title" style="width:var(--titlew, content);height:20px" data-param="title">标题</span>
+    <span class="bui-tb-sub" style="flex:1;height:16px" data-param="sub"></span>
     <!-- 三颗控制图标：不用字形，直接用元素画 —— 字形墨迹宽高受字体度量摆布（横线、方块、
          ✕ 在同一个字号下差 30%），换字体/换 DPI 还会再变。元素画的图标几何完全由坐标决定：
          按钮 29×29（单数），图标 9×9（单数），横线落在正中第 14 行，方框边框落在第 10/18 行。
          按钮本身负责点击/悬停/焦点环，图标是它内部的绝对定位子节点（不参与命中测试，
          鼠标事件照样落到按钮上）。 -->
-    <button id="{{idmin=win-min}}"   class="bui-tb-btn"   style="width:{{bs=29}}; height:{{bs=29}}; padding:0">
-        <div class="bui-tb-bar" style="position:absolute; left:10; top:14; width:9; height:1"></div>
+    <button id="{{idmin=win-min}}" class="bui-tb-btn" style="width:var(--bs, 29px);height:var(--bs, 29px);padding:0px">
+        <div class="bui-tb-bar" style="position:absolute;left:10px;top:14px;width:9px;height:1px"></div>
     </button>
-    <button id="{{idmax=win-max}}"   class="bui-tb-btn"   style="width:{{bs=29}}; height:{{bs=29}}; padding:0">
-        <div class="bui-tb-sq" style="position:absolute; left:10; top:10; width:9; height:9"></div>
+    <button id="{{idmax=win-max}}" class="bui-tb-btn" style="width:var(--bs, 29px);height:var(--bs, 29px);padding:0px">
+        <div class="bui-tb-sq" style="position:absolute;left:10px;top:10px;width:9px;height:9px"></div>
     </button>
-    <button id="{{idclose=win-close}}" class="bui-tb-close" style="width:{{bs=29}}; height:{{bs=29}}; padding:0">
-        <svg style="position:absolute; left:0; top:0; width:29; height:29">
+    <button id="{{idclose=win-close}}" class="bui-tb-close" style="width:var(--bs, 29px);height:var(--bs, 29px);padding:0px">
+        <svg style="position:absolute;left:0px;top:0px;width:29px;height:29px">
             <line x1="10.5" y1="10.5" x2="18.5" y2="18.5" stroke="#FF6B6B" stroke-width="1"/>
             <line x1="18.5" y1="10.5" x2="10.5" y2="18.5" stroke="#FF6B6B" stroke-width="1"/>
         </svg>
     </button>
-    <div style="width:{{padr=12}}; height:1; background:transparent"></div>
+    <div style="width:var(--padr, 12px);height:1px;background:transparent"></div>
 

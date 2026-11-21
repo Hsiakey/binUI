@@ -8,8 +8,8 @@
        binUI 今天还不读 <div data-binui-window> 的 data-*，但它**会**读 <html>/<body>
        的 width/height（CSS 或属性）来定根尺寸 —— 于是两边都得到 780×600。 */
     html, body {
-        margin: 0;
-        padding: 0;
+        margin: 0px;
+        padding: 0px;
         width: 780px;
         height: 600px;
         background: #F4F7FC;
@@ -19,8 +19,8 @@
     }
     [data-binui-window] {
         position: absolute;
-        left: 0;
-        top: 0;
+        left: 0px;
+        top: 0px;
         width: 780px;
         height: 600px;
         background: #F4F7FC;
@@ -42,7 +42,7 @@
         border-radius: 10px;
         color: #FFFFFF;
         font-size: 13px;
-        padding: 0;
+        padding: 0px;
         overflow: hidden;
     }
     .btn:hover  { background: #5DA0FF; }
@@ -61,21 +61,17 @@
     <!-- ── 第一组：目标语法。宽度走 var(--w,120px)，参数默认值即 fallback ── -->
     <span class="cap" style="top:108px">① var() + data-component（新语法）：两组像素一致 —— M1 已落地</span>
 
-    <button class="btn" data-component="button.html" data-param="label"
-            style="position:absolute;left:20px;top:128px;width:var(--w,120px);height:38px">主按钮</button>
+    <button class="btn" data-component="button.html" data-param="label" style="position:absolute;left:20px;top:128px;width:var(--w,120px);height:38px">主按钮</button>
 
-    <button class="btn" data-component="button.html" data-param="label" data-label="确定"
-            style="position:absolute;left:152px;top:128px;width:var(--w,120px);height:38px">次按钮</button>
+    <button class="btn" data-component="button.html" data-param="label" data-label="确定" style="position:absolute;left:152px;top:128px;width:var(--w,120px);height:38px;--label:确定">次按钮</button>
 
     <!-- ── 第二组：M0 像素参照。同一组件、同一文案、同一几何，只把宽度写成字面 px。
            这组是 M1 的验收基准：M1 让第一组出来后，两组的 bin2d_shot 必须逐像素相同。 ── -->
     <span class="cap" style="top:184px">② 字面 px（M0 可编译的等价值）：M1 的像素参照</span>
 
-    <button class="btn" data-component="button.html" data-param="label"
-            style="position:absolute;left:20px;top:204px;width:120px;height:38px">主按钮</button>
+    <button class="btn" data-component="button.html" data-param="label" style="position:absolute;left:20px;top:204px;width:120px;height:38px">主按钮</button>
 
-    <button class="btn" data-component="button.html" data-param="label" data-label="确定"
-            style="position:absolute;left:152px;top:204px;width:120px;height:38px">次按钮</button>
+    <button class="btn" data-component="button.html" data-param="label" data-label="确定" style="position:absolute;left:152px;top:204px;width:120px;height:38px;--label:确定">次按钮</button>
 
 </div>
 

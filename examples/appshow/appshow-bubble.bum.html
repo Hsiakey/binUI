@@ -23,24 +23,15 @@
 
 
     <!-- 1) 本体：半透明双色渐变 + 1px 边光 -->
-    <div id="{{bid=b0}}-body"
-         style="position:absolute; left:0; top:0; width:100%; height:100%; border-radius:{{r=26}};
-                background:linear-gradient(180deg, {{c1=rgba(120,215,255,0.30)}}, {{c2=rgba(150,110,255,0.22)}});
-                border:1px solid {{rim=rgba(255,255,255,0.36)}}"></div>
+    <div id="{{bid=b0}}-body" style="position:absolute;left:0px;top:0px;width:100%;height:100%;border-radius:var(--r, 26px);background:linear-gradient(180deg, var(--c1, rgba(120,215,255,0.30)), var(--c2, rgba(150,110,255,0.22)));border:1px solid var(--rim, rgba(255,255,255,0.36))"></div>
 
     <!-- 2) 内圈细框：让组件看起来"有内容"，重叠时也能分出层次 -->
-    <div id="{{bid=b0}}-ring"
-         style="position:absolute; left:7%; top:8%; width:86%; height:84%; border-radius:{{r2=20}};
-                border:1px solid {{iris=rgba(255,255,255,0.20)}}"></div>
+    <div id="{{bid=b0}}-ring" style="position:absolute;left:7%;top:8%;width:86%;height:84%;border-radius:var(--r2, 20px);border:1px solid var(--iris, rgba(255,255,255,0.20))"></div>
 
     <!-- 3) 标题 / 副标题：文字也会跟着半透明一起被"透"过去 -->
-    <span id="{{bid=b0}}-t" class="blob-t"
-          style="position:absolute; left:12%; top:13%; width:76%; height:26%">{{t=组件}}</span>
-    <span id="{{bid=b0}}-s" class="blob-s"
-          style="position:absolute; left:12%; top:42%; width:76%; height:22%">{{s=尺寸}}</span>
+    <span id="{{bid=b0}}-t" class="blob-t" style="position:absolute;left:12%;top:13%;width:76%;height:26%" data-param="t">组件</span>
+    <span id="{{bid=b0}}-s" class="blob-s" style="position:absolute;left:12%;top:42%;width:76%;height:22%" data-param="s">尺寸</span>
 
     <!-- 4) 底部色条：宿主每帧 setStyleColor，颜色在池子里漂 -->
-    <div id="{{bid=b0}}-tint"
-         style="position:absolute; left:12%; top:74%; width:56%; height:9%; border-radius:999;
-                background:{{glow=rgba(125,255,232,0.55)}}"></div>
+    <div id="{{bid=b0}}-tint" style="position:absolute;left:12%;top:74%;width:56%;height:9%;border-radius:999px;background:var(--glow, rgba(125,255,232,0.55))"></div>
 

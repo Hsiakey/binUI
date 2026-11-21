@@ -1,6 +1,5 @@
 <!DOCTYPE html>
-<app_window width="1280" height="800" bg="#F4F7FC" title="binUI 应用壳" window_resize="disable">
-<html width="1280" height="800" bg="#F4F7FC">
+<html>
 <head>
     <meta charset="UTF-8">
     <title>binUI 应用壳 · 多页面多组件</title>
@@ -9,168 +8,169 @@
 
         /* ---- 壳：侧栏 + 内容区 ---- */
         .side { background:#FFFFFF; border-right:1px solid #E6EDF7; }
-        .brand { font-size:15; font-weight:700; color:#1F2A37; }
-        .side-cap { font-size:11; color:#94A3B8; }
-        .ind { background:#3E8BFF; border-radius:2; }
+        .brand { font-size: 15px; font-weight:700; color:#1F2A37; }
+        .side-cap { font-size: 11px; color:#94A3B8; }
+        .ind { background:#3E8BFF; border-radius: 2px; }
 
         /* ---- 页面容器：白面板，四页叠在同一位置，靠宿主切可见性 ---- */
         /* 视口：页面在这儿整块推走/顶进来，必须裁在内容区（overflow:hidden）。
            圆角与边框放在视口上，页面本身是白底方块 —— 否则滑动时能看到 4 个缺口。 */
-        .viewport { background:#FFFFFF; border:1px solid #E6EDF7; border-radius:16;
+        .viewport { background:#FFFFFF; border:1px solid #E6EDF7; border-radius: 16px;
                     box-shadow: 0 10px 30px rgba(31,42,55,0.10); }
         .page { background:#FFFFFF; }
-        .h1 { font-size:19; font-weight:700; color:#1F2A37; }
-        .h2 { font-size:12; color:#94A3B8; }
-        .body { font-size:12; color:#66768C; }
-        .kv { font-size:12; color:#66768C; }
-        .kv-v { font-size:12; font-weight:700; color:#1F2A37; }
+        .h1 { font-size: 19px; font-weight:700; color:#1F2A37; }
+        .h2 { font-size: 12px; color:#94A3B8; }
+        .body { font-size: 12px; color:#66768C; }
+        .kv { font-size: 12px; color:#66768C; }
+        .kv-v { font-size: 12px; font-weight:700; color:#1F2A37; }
         .rule { background:#E6EDF7; }
 
         /* ---- 数据行：入场时宿主按 45ms 间隔逐行淡入 ---- */
-        .row { background:#FFFFFF; border:1px solid #E6EDF7; border-radius:10; }
+        .row { background:#FFFFFF; border:1px solid #E6EDF7; border-radius: 10px; }
         .row:hover { background:#F8FAFD; }
-        .row-n { font-size:13; color:#1F2A37; }
-        .row-v { font-size:13; font-weight:700; color:#1F2A37; }
-        .row-d { font-size:11; color:#2FBF9A; }
+        .row-n { font-size: 13px; color:#1F2A37; }
+        .row-v { font-size: 13px; font-weight:700; color:#1F2A37; }
+        .row-d { font-size: 11px; color:#2FBF9A; }
 
         /* ---- 按钮 ---- */
-        .btn-p { background:#3E8BFF; color:#FFFFFF; border-radius:9; font-size:12;
+        .btn-p { background:#3E8BFF; color:#FFFFFF; border-radius: 9px; font-size: 12px;
                  box-shadow: 0 3px 8px rgba(62,139,255,0.30);
                  transition: background-color 0.18s ease; }
         .btn-p:hover  { background:#5DA0FF; }
         .btn-p:active { background:#2F79E8; }
-        .btn-s { background:#EEF3FA; color:#3E8BFF; border-radius:9; font-size:12;
+        .btn-s { background:#EEF3FA; color:#3E8BFF; border-radius: 9px; font-size: 12px;
                  box-shadow: 0 2px 6px rgba(31,42,55,0.08);
                  transition: background-color 0.18s ease; }
         .btn-s:hover  { background:#E1EBFA; }
-        .btn-d { background:#FFE9EC; color:#E24C55; border-radius:9; font-size:12;
+        .btn-d { background:#FFE9EC; color:#E24C55; border-radius: 9px; font-size: 12px;
                  box-shadow: 0 2px 6px rgba(226,76,85,0.20);
                  transition: background-color 0.18s ease; }
         .btn-d:hover  { background:#FFD6DB; }
 
         /* ---- 弹窗遮罩 / 提示条 ---- */
         .veil  { background:rgba(31,42,55,0.35); }
-        .toast { background:#1F2A37; border-radius:10; box-shadow: 0 14px 34px rgba(0,0,0,0.38); }
-        .toast-t { font-size:12; color:#FFFFFF; }
+        .toast { background:#1F2A37; border-radius: 10px; box-shadow: 0 14px 34px rgba(0,0,0,0.38); }
+        .toast-t { font-size: 12px; color:#FFFFFF; }
 
         /* ---- 设置开关 ---- */
-        .trk  { background:#DCE5F2; border-radius:14; }
-        .knb  { background:#FFFFFF; border-radius:11; }
-        .set-l { font-size:13; color:#1F2A37; }
-        .set-d { font-size:11; color:#94A3B8; }
+        .trk  { background:#DCE5F2; border-radius: 14px; }
+        .knb  { background:#FFFFFF; border-radius: 11px; }
+        .set-l { font-size: 13px; color:#1F2A37; }
+        .set-d { font-size: 11px; color:#94A3B8; }
 
         /* ---- 半透明组件池：深色底（浅底上看不出 alpha 的合成差异） ---- */
         /* 池子底板：抖动之后 24px 的色带台阶没了，渐变本身又只跨 12 个色阶（R），
            看起来就像"底板不存在"。这里把渐变拉宽一点、边框提亮一档 —— 抖动负责平滑，
            对比度负责"这块画布在"。 */
         .pool { background:linear-gradient(180deg, #0A1220, #22375A); border:1px solid #34496C;
-                border-radius:16; }
+                border-radius: 16px; }
         /* 组件里的文字：半透明组件的标题/副标题（也吃节点透明度，重叠时会被"透"过去） */
-        .blob-t { font-size:13; font-weight:700; color:rgba(255,255,255,0.92); }
-        .blob-s { font-size:11; color:rgba(255,255,255,0.62); }
+        .blob-t { font-size: 13px; font-weight:700; color:rgba(255,255,255,0.92); }
+        .blob-s { font-size: 11px; color:rgba(255,255,255,0.62); }
 
         /* ---- 可缩放元素（CSS resize）：浅底卡片，拖边/角直接改盒子 ---- */
-        .rs    { background:#F8FAFD; border:1px solid #DFE8F5; border-radius:12; }
-        .rs-t  { font-size:13; font-weight:700; color:#1F2A37; }
-        .rs-v  { font-size:15; font-weight:700; color:#3E8BFF; }
-        .rs-d  { font-size:11; color:#94A3B8; }
-        .rs-bar { background:#DCE7F7; border-radius:4; }
-        .rs-chip { background:#CFE0F8; border-radius:6; }
+        .rs    { background:#F8FAFD; border:1px solid #DFE8F5; border-radius: 12px; }
+        .rs-t  { font-size: 13px; font-weight:700; color:#1F2A37; }
+        .rs-v  { font-size: 15px; font-weight:700; color:#3E8BFF; }
+        .rs-d  { font-size: 11px; color:#94A3B8; }
+        .rs-bar { background:#DCE7F7; border-radius: 4px; }
+        .rs-chip { background:#CFE0F8; border-radius: 6px; }
     </style>
 </head>
 <body>
-    <titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:1280px;height:44px;display:flex;align-items:center;gap:6px" data-component="../../components/titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="1280" data-h="44" data-icon="◈" data-iconw="22" data-title="binUI 应用壳演示" data-sub="多页面 · 多级组件 · 页切换编排 · 弹窗相位 · 半透明重叠"></titlebar>
+<div data-binui-window data-width="1280" data-height="800" data-bg="#F4F7FC" data-title="binUI 应用壳" data-window-resize="disable">
+    <titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:1280px;height:44px;display:flex;align-items:center;gap:6px;--x:0px;--y:0px;--w:1280px;--h:44px;--icon:◈;--iconw:22px;--title:binUI 应用壳演示;--sub:多页面 · 多级组件 · 页切换编排 · 弹窗相位 · 半透明重叠" data-component="../../components/titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="1280" data-h="44" data-icon="◈" data-iconw="22" data-title="binUI 应用壳演示" data-sub="多页面 · 多级组件 · 页切换编排 · 弹窗相位 · 半透明重叠"></titlebar>
 
     <!-- ============ 侧栏 ============ -->
-    <div class="side" style="position:absolute; left:0; top:44; width:190; height:756"></div>
-    <span class="brand" style="position:absolute; left:18; top:62; width:150; height:20">控制台</span>
-    <span class="side-cap" style="position:absolute; left:18; top:84; width:150; height:14">4 个页面 · 组件化</span>
+    <div class="side" style="position:absolute;left:0px;top:44px;width:190px;height:756px"></div>
+    <span class="brand" style="position:absolute;left:18px;top:62px;width:150px;height:20px">控制台</span>
+    <span class="side-cap" style="position:absolute;left:18px;top:84px;width:150px;height:14px">4 个页面 · 组件化</span>
 
-    <div class="as-nav" style="position:absolute;left:8px;top:112px;width:174px;height:40px" data-component="appshow-navitem.bum.html" id="nav-0" data-x="8" data-y="112" data-icon="◎" data-label="概览" data-nid="nav-0"></div>
-    <div class="as-nav" style="position:absolute;left:8px;top:156px;width:174px;height:40px" data-component="appshow-navitem.bum.html" id="nav-1" data-x="8" data-y="156" data-icon="≡" data-label="数据" data-nid="nav-1"></div>
-    <div class="as-nav" style="position:absolute;left:8px;top:200px;width:174px;height:40px" data-component="appshow-navitem.bum.html" id="nav-2" data-x="8" data-y="200" data-icon="◫" data-label="组件" data-nid="nav-2"></div>
-    <div class="as-nav" style="position:absolute;left:8px;top:244px;width:174px;height:40px" data-component="appshow-navitem.bum.html" id="nav-3" data-x="8" data-y="244" data-icon="⚙" data-label="设置" data-nid="nav-3"></div>
+    <div class="as-nav" style="position:absolute;left:8px;top:112px;width:174px;height:40px;--x:8px;--y:112px;--icon:◎;--label:概览;--nid:nav-0" data-component="appshow-navitem.bum.html" id="nav-0" data-x="8" data-y="112" data-icon="◎" data-label="概览" data-nid="nav-0"></div>
+    <div class="as-nav" style="position:absolute;left:8px;top:156px;width:174px;height:40px;--x:8px;--y:156px;--icon:≡;--label:数据;--nid:nav-1" data-component="appshow-navitem.bum.html" id="nav-1" data-x="8" data-y="156" data-icon="≡" data-label="数据" data-nid="nav-1"></div>
+    <div class="as-nav" style="position:absolute;left:8px;top:200px;width:174px;height:40px;--x:8px;--y:200px;--icon:◫;--label:组件;--nid:nav-2" data-component="appshow-navitem.bum.html" id="nav-2" data-x="8" data-y="200" data-icon="◫" data-label="组件" data-nid="nav-2"></div>
+    <div class="as-nav" style="position:absolute;left:8px;top:244px;width:174px;height:40px;--x:8px;--y:244px;--icon:⚙;--label:设置;--nid:nav-3" data-component="appshow-navitem.bum.html" id="nav-3" data-x="8" data-y="244" data-icon="⚙" data-label="设置" data-nid="nav-3"></div>
 
-    <div id="ind-0" class="ind" style="position:absolute; left:10; top:118; width:3; height:28"></div>
-    <div id="ind-1" class="ind" style="position:absolute; left:10; top:162; width:3; height:28"></div>
-    <div id="ind-2" class="ind" style="position:absolute; left:10; top:206; width:3; height:28"></div>
-    <div id="ind-3" class="ind" style="position:absolute; left:10; top:250; width:3; height:28"></div>
+    <div id="ind-0" class="ind" style="position:absolute;left:10px;top:118px;width:3px;height:28px"></div>
+    <div id="ind-1" class="ind" style="position:absolute;left:10px;top:162px;width:3px;height:28px"></div>
+    <div id="ind-2" class="ind" style="position:absolute;left:10px;top:206px;width:3px;height:28px"></div>
+    <div id="ind-3" class="ind" style="position:absolute;left:10px;top:250px;width:3px;height:28px"></div>
 
-    <div style="position:absolute; left:16; top:700; width:160; height:1; background:#E6EDF7"></div>
-    <span class="side-cap" style="position:absolute; left:18; top:714; width:158; height:60">1-4 切页 · D 弹窗 ·<br>ESC 关闭 · 数字键/鼠标</span>
+    <div style="position:absolute;left:16px;top:700px;width:160px;height:1px;background:#E6EDF7"></div>
+    <span class="side-cap" style="position:absolute;left:18px;top:714px;width:158px;height:60px">1-4 切页 · D 弹窗 ·<br>ESC 关闭 · 数字键/鼠标</span>
 
     <!-- ============ 内容视口：页面在这里整块上下推 ============ -->
-    <div id="viewport" class="viewport" style="position:absolute; left:206; top:60; width:1058; height:676; overflow:hidden">
+    <div id="viewport" class="viewport" style="position:absolute;left:206px;top:60px;width:1058px;height:676px;overflow:hidden">
 
     <!-- ============ 页面：概览 ============ -->
-    <div id="page-0" class="page" style="position:absolute; left:0; top:0; width:1058; height:676">
-        <span class="h1" style="position:absolute; left:24; top:20; width:200; height:26">概览</span>
-        <span class="h2" style="position:absolute; left:24; top:48; width:600; height:16">四张卡片都是组件（appshow-card），每个卡片内部有自己的呼吸动画</span>
-        <div class="as-card" style="position:absolute;left:24px;top:80px;width:250px;height:110px" data-component="appshow-card.bum.html" data-x="24" data-y="80" data-title="在线连接" data-value="1,284" data-unit="路 / 峰值 2,910" data-trend="+12%" data-tone="blue"></div>
-        <div class="as-card" style="position:absolute;left:286px;top:80px;width:250px;height:110px" data-component="appshow-card.bum.html" data-x="286" data-y="80" data-title="平均延迟" data-value="18" data-unit="毫秒 / P99 41ms" data-trend="-6%" data-tone="mint"></div>
-        <div class="as-card" style="position:absolute;left:548px;top:80px;width:250px;height:110px" data-component="appshow-card.bum.html" data-x="548" data-y="80" data-title="吞吐" data-value="93.4" data-unit="MB/s / 上限 120" data-trend="+3%" data-tone="amber"></div>
-        <div class="as-card" style="position:absolute;left:810px;top:80px;width:250px;height:110px" data-component="appshow-card.bum.html" data-x="810" data-y="80" data-title="错误率" data-value="0.02" data-unit="% / 近 24h" data-trend="-1%" data-tone="coral"></div>
+    <div id="page-0" class="page" style="position:absolute;left:0px;top:0px;width:1058px;height:676px">
+        <span class="h1" style="position:absolute;left:24px;top:20px;width:200px;height:26px">概览</span>
+        <span class="h2" style="position:absolute;left:24px;top:48px;width:600px;height:16px">四张卡片都是组件（appshow-card），每个卡片内部有自己的呼吸动画</span>
+        <div class="as-card" style="position:absolute;left:24px;top:80px;width:250px;height:110px;--x:24px;--y:80px;--title:在线连接;--value:1,284;--unit:路 / 峰值 2,910;--trend:+12%;--tone:blue" data-component="appshow-card.bum.html" data-x="24" data-y="80" data-title="在线连接" data-value="1,284" data-unit="路 / 峰值 2,910" data-trend="+12%" data-tone="blue"></div>
+        <div class="as-card" style="position:absolute;left:286px;top:80px;width:250px;height:110px;--x:286px;--y:80px;--title:平均延迟;--value:18px;--unit:毫秒 / P99 41ms;--trend:-6%;--tone:mint" data-component="appshow-card.bum.html" data-x="286" data-y="80" data-title="平均延迟" data-value="18" data-unit="毫秒 / P99 41ms" data-trend="-6%" data-tone="mint"></div>
+        <div class="as-card" style="position:absolute;left:548px;top:80px;width:250px;height:110px;--x:548px;--y:80px;--title:吞吐;--value:93.4px;--unit:MB/s / 上限 120px;--trend:+3%;--tone:amber" data-component="appshow-card.bum.html" data-x="548" data-y="80" data-title="吞吐" data-value="93.4" data-unit="MB/s / 上限 120" data-trend="+3%" data-tone="amber"></div>
+        <div class="as-card" style="position:absolute;left:810px;top:80px;width:250px;height:110px;--x:810px;--y:80px;--title:错误率;--value:0.02px;--unit:% / 近 24h;--trend:-1%;--tone:coral" data-component="appshow-card.bum.html" data-x="810" data-y="80" data-title="错误率" data-value="0.02" data-unit="% / 近 24h" data-trend="-1%" data-tone="coral"></div>
 
-        <div class="row" style="position:absolute; left:24; top:214; width:1010; height:132"></div>
-        <span class="kv" style="position:absolute; left:44; top:232; width:200; height:16">这个页面演示什么</span>
-        <span class="body" style="position:absolute; left:44; top:256; width:960; height:18">· 组件级微动画：卡片里的圆点在组件自己的 @keyframes 里呼吸，和页面切换无关</span>
-        <span class="body" style="position:absolute; left:44; top:278; width:960; height:18">· 页面级编排：整页淡入淡出由宿主逐帧设值（binUI 没有"整棵子树一起淡"的属性）</span>
-        <span class="body" style="position:absolute; left:44; top:300; width:960; height:18">· 多级：壳 → 页面 → 卡片 → 圆点，四层，每层只负责自己那层的事</span>
+        <div class="row" style="position:absolute;left:24px;top:214px;width:1010px;height:132px"></div>
+        <span class="kv" style="position:absolute;left:44px;top:232px;width:200px;height:16px">这个页面演示什么</span>
+        <span class="body" style="position:absolute;left:44px;top:256px;width:960px;height:18px">· 组件级微动画：卡片里的圆点在组件自己的 @keyframes 里呼吸，和页面切换无关</span>
+        <span class="body" style="position:absolute;left:44px;top:278px;width:960px;height:18px">· 页面级编排：整页淡入淡出由宿主逐帧设值（binUI 没有"整棵子树一起淡"的属性）</span>
+        <span class="body" style="position:absolute;left:44px;top:300px;width:960px;height:18px">· 多级：壳 → 页面 → 卡片 → 圆点，四层，每层只负责自己那层的事</span>
 
-        <button id="btn-open" class="btn-p" style="position:absolute; left:24; top:368; width:120; height:32">打开弹窗</button>
-        <button id="btn-toast" class="btn-s" style="position:absolute; left:156; top:368; width:120; height:32">弹个提示</button>
-        <span class="h2" style="position:absolute; left:292; top:376; width:600; height:16">弹窗 = 遮罩 + 面板两层，面板比遮罩晚 40ms 进场</span>
+        <button id="btn-open" class="btn-p" style="position:absolute;left:24px;top:368px;width:120px;height:32px">打开弹窗</button>
+        <button id="btn-toast" class="btn-s" style="position:absolute;left:156px;top:368px;width:120px;height:32px">弹个提示</button>
+        <span class="h2" style="position:absolute;left:292px;top:376px;width:600px;height:16px">弹窗 = 遮罩 + 面板两层，面板比遮罩晚 40ms 进场</span>
 
         <!-- 布局与重排：内容太多，概览里塞不下 → 干脆做成子页面，按钮触发、从右边切入。
              子页面 = 视口横向滚动 1058px（竖页带整条滑出去，子页面从右边顶进来）。 -->
-        <div id="rs-entry" class="rs" style="position:absolute; left:24; top:424; width:1010; height:196; padding:22">
-            <span class="rs-t" style="width:100%; height:22">布局与重排 · 子页面</span>
-            <span class="rs-d" style="width:100%; font-size:12">拖卡片的边/角 → 引擎按新内容盒重排：文字折行、flex 重新分配、百分比 / auto / min·max 一起走。</span>
-            <span class="rs-d" style="width:100%; font-size:12; margin-top:6">子页面里有四块，空间够了：① 流式+折行+flex ② min/max 钳制 ③ 百分比/auto ④ 只开对角。从右边滑进来。</span>
-            <button id="btn-sub" class="btn-p" style="width:180; height:34; margin-top:16">进入 → 布局与重排</button>
+        <div id="rs-entry" class="rs" style="position:absolute;left:24px;top:424px;width:1010px;height:196px;padding:22px">
+            <span class="rs-t" style="width:100%;height:22px">布局与重排 · 子页面</span>
+            <span class="rs-d" style="width:100%;font-size:12px">拖卡片的边/角 → 引擎按新内容盒重排：文字折行、flex 重新分配、百分比 / auto / min·max 一起走。</span>
+            <span class="rs-d" style="width:100%;font-size:12px;margin-top:6px">子页面里有四块，空间够了：① 流式+折行+flex ② min/max 钳制 ③ 百分比/auto ④ 只开对角。从右边滑进来。</span>
+            <button id="btn-sub" class="btn-p" style="width:180px;height:34px;margin-top:16px">进入 → 布局与重排</button>
         </div>
 
-        <span class="h2" style="position:absolute; left:24; top:650; width:1010; height:16">子页面用视口 X 滚动切入（和上下切页同一个 scrollTo，只是轴不同）；返回按钮滑回去。</span>
+        <span class="h2" style="position:absolute;left:24px;top:650px;width:1010px;height:16px">子页面用视口 X 滚动切入（和上下切页同一个 scrollTo，只是轴不同）；返回按钮滑回去。</span>
     </div>
 
     <!-- ============ 页面：数据 ============ -->
-    <div id="page-1" class="page" style="position:absolute; left:0; top:676; width:1058; height:676">
-        <span class="h1" style="position:absolute; left:24; top:20; width:200; height:26">数据</span>
-        <span class="h2" style="position:absolute; left:24; top:48; width:700; height:16">六行按 45ms 间隔逐行淡入 —— 交错是宿主排的时间片，不是 CSS</span>
+    <div id="page-1" class="page" style="position:absolute;left:0px;top:676px;width:1058px;height:676px">
+        <span class="h1" style="position:absolute;left:24px;top:20px;width:200px;height:26px">数据</span>
+        <span class="h2" style="position:absolute;left:24px;top:48px;width:700px;height:16px">六行按 45ms 间隔逐行淡入 —— 交错是宿主排的时间片，不是 CSS</span>
 
-        <div id="row-0" class="row" style="position:absolute; left:24; top:80;  width:1010; height:46">
-            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">华东 / 上海一区</span>
-            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">12,930 次</span>
-            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">+8.2%</span>
+        <div id="row-0" class="row" style="position:absolute;left:24px;top:80px;width:1010px;height:46px">
+            <span class="row-n" style="position:absolute;left:16px;top:14px;width:300px;height:18px">华东 / 上海一区</span>
+            <span class="row-v" style="position:absolute;left:420px;top:14px;width:160px;height:18px">12,930 次</span>
+            <span class="row-d" style="position:absolute;left:900px;top:15px;width:90px;height:16px">+8.2%</span>
         </div>
-        <div id="row-1" class="row" style="position:absolute; left:24; top:134; width:1010; height:46">
-            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">华北 / 北京二区</span>
-            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">9,412 次</span>
-            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">+3.1%</span>
+        <div id="row-1" class="row" style="position:absolute;left:24px;top:134px;width:1010px;height:46px">
+            <span class="row-n" style="position:absolute;left:16px;top:14px;width:300px;height:18px">华北 / 北京二区</span>
+            <span class="row-v" style="position:absolute;left:420px;top:14px;width:160px;height:18px">9,412 次</span>
+            <span class="row-d" style="position:absolute;left:900px;top:15px;width:90px;height:16px">+3.1%</span>
         </div>
-        <div id="row-2" class="row" style="position:absolute; left:24; top:188; width:1010; height:46">
-            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">华南 / 广州一区</span>
-            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">7,206 次</span>
-            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">-1.4%</span>
+        <div id="row-2" class="row" style="position:absolute;left:24px;top:188px;width:1010px;height:46px">
+            <span class="row-n" style="position:absolute;left:16px;top:14px;width:300px;height:18px">华南 / 广州一区</span>
+            <span class="row-v" style="position:absolute;left:420px;top:14px;width:160px;height:18px">7,206 次</span>
+            <span class="row-d" style="position:absolute;left:900px;top:15px;width:90px;height:16px">-1.4%</span>
         </div>
-        <div id="row-3" class="row" style="position:absolute; left:24; top:242; width:1010; height:46">
-            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">西南 / 成都一区</span>
-            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">5,881 次</span>
-            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">+0.6%</span>
+        <div id="row-3" class="row" style="position:absolute;left:24px;top:242px;width:1010px;height:46px">
+            <span class="row-n" style="position:absolute;left:16px;top:14px;width:300px;height:18px">西南 / 成都一区</span>
+            <span class="row-v" style="position:absolute;left:420px;top:14px;width:160px;height:18px">5,881 次</span>
+            <span class="row-d" style="position:absolute;left:900px;top:15px;width:90px;height:16px">+0.6%</span>
         </div>
-        <div id="row-4" class="row" style="position:absolute; left:24; top:296; width:1010; height:46">
-            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">海外 / 新加坡</span>
-            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">3,014 次</span>
-            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">+2.8%</span>
+        <div id="row-4" class="row" style="position:absolute;left:24px;top:296px;width:1010px;height:46px">
+            <span class="row-n" style="position:absolute;left:16px;top:14px;width:300px;height:18px">海外 / 新加坡</span>
+            <span class="row-v" style="position:absolute;left:420px;top:14px;width:160px;height:18px">3,014 次</span>
+            <span class="row-d" style="position:absolute;left:900px;top:15px;width:90px;height:16px">+2.8%</span>
         </div>
-        <div id="row-5" class="row" style="position:absolute; left:24; top:350; width:1010; height:46">
-            <span class="row-n" style="position:absolute; left:16; top:14; width:300; height:18">海外 / 法兰克福</span>
-            <span class="row-v" style="position:absolute; left:420; top:14; width:160; height:18">1,772 次</span>
-            <span class="row-d" style="position:absolute; left:900; top:15; width:90; height:16">-0.9%</span>
+        <div id="row-5" class="row" style="position:absolute;left:24px;top:350px;width:1010px;height:46px">
+            <span class="row-n" style="position:absolute;left:16px;top:14px;width:300px;height:18px">海外 / 法兰克福</span>
+            <span class="row-v" style="position:absolute;left:420px;top:14px;width:160px;height:18px">1,772 次</span>
+            <span class="row-d" style="position:absolute;left:900px;top:15px;width:90px;height:16px">-0.9%</span>
         </div>
 
-        <button id="btn-query" class="btn-p"  style="position:absolute; left:24;  top:420; width:150; height:32">查询悬停节点</button>
-        <button id="btn-replay" class="btn-s" style="position:absolute; left:186; top:420; width:150; height:32">重播列表入场</button>
+        <button id="btn-query" class="btn-p" style="position:absolute;left:24px;top:420px;width:150px;height:32px">查询悬停节点</button>
+        <button id="btn-replay" class="btn-s" style="position:absolute;left:186px;top:420px;width:150px;height:32px">重播列表入场</button>
     </div>
 
     <!-- ============ 页面：组件 · 半透明重叠 ============ -->
@@ -179,139 +179,136 @@
          合成算出来（不是加色）；叠的顺序 = 文档顺序（后声明的压在先声明的上面）。
          位置/速度/不透明度/色相全在宿主，组件只负责"长什么样"。位移按整像素取整
          （填充是硬边条带、描边是 AA，亚像素位移两者会各吸各的像素 —— 见 0.16.2）。 -->
-    <div id="page-2" class="page" style="position:absolute; left:0; top:1352; width:1058; height:676">
-        <span class="h1" style="position:absolute; left:24; top:20; width:280; height:26">组件 · 半透明重叠</span>
-        <span class="h2" style="position:absolute; left:24; top:48; width:960; height:16">20 块半透明组件在飘：重叠处是普通 alpha 合成（不是加色），绘制顺序 = 文档顺序</span>
+    <div id="page-2" class="page" style="position:absolute;left:0px;top:1352px;width:1058px;height:676px">
+        <span class="h1" style="position:absolute;left:24px;top:20px;width:280px;height:26px">组件 · 半透明重叠</span>
+        <span class="h2" style="position:absolute;left:24px;top:48px;width:960px;height:16px">20 块半透明组件在飘：重叠处是普通 alpha 合成（不是加色），绘制顺序 = 文档顺序</span>
 
-        <div id="pool" class="pool" style="position:absolute; left:24; top:84; width:1010; height:498; overflow:hidden">
-            <div style="position:absolute;left:40px;top:50px;width:190px;height:120px" data-component="appshow-bubble.bum.html" id="b0" data-bid="b0" data-x="40" data-y="50" data-w="190" data-h="120" data-r="30" data-t="块 01" data-s="190×120" data-c1="rgba(90,210,255,0.30)" data-c2="rgba(60,120,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(120,255,240,0.55)"></div>
-            <div style="position:absolute;left:170px;top:90px;width:150px;height:96px" data-component="appshow-bubble.bum.html" id="b1" data-bid="b1" data-x="170" data-y="90" data-w="150" data-h="96" data-r="24" data-t="块 02" data-s="150×96" data-c1="rgba(255,110,200,0.30)" data-c2="rgba(150,90,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,180,120,0.55)"></div>
-            <div style="position:absolute;left:380px;top:30px;width:120px;height:160px" data-component="appshow-bubble.bum.html" id="b2" data-bid="b2" data-x="380" data-y="30" data-w="120" data-h="160" data-r="28" data-t="块 03" data-s="120×160" data-c1="rgba(255,190,90,0.30)" data-c2="rgba(255,120,60,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(140,200,255,0.55)"></div>
-            <div style="position:absolute;left:450px;top:60px;width:210px;height:90px" data-component="appshow-bubble.bum.html" id="b3" data-bid="b3" data-x="450" data-y="60" data-w="210" data-h="90" data-r="22" data-t="块 04" data-s="210×90" data-c1="rgba(160,255,120,0.30)" data-c2="rgba(60,220,180,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,150,220,0.55)"></div>
-            <div style="position:absolute;left:700px;top:40px;width:100px;height:100px" data-component="appshow-bubble.bum.html" id="b4" data-bid="b4" data-x="700" data-y="40" data-w="100" data-h="100" data-r="50" data-t="块 05" data-s="100×100" data-c1="rgba(255,120,150,0.30)" data-c2="rgba(190,90,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(120,220,255,0.55)"></div>
-            <div style="position:absolute;left:760px;top:80px;width:170px;height:140px" data-component="appshow-bubble.bum.html" id="b5" data-bid="b5" data-x="760" data-y="80" data-w="170" data-h="140" data-r="34" data-t="块 06" data-s="170×140" data-c1="rgba(120,190,255,0.30)" data-c2="rgba(90,100,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,230,140,0.55)"></div>
-            <div style="position:absolute;left:40px;top:210px;width:130px;height:80px" data-component="appshow-bubble.bum.html" id="b6" data-bid="b6" data-x="40" data-y="210" data-w="130" data-h="80" data-r="20" data-t="块 07" data-s="130×80" data-c1="rgba(90,240,220,0.30)" data-c2="rgba(70,170,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,150,190,0.55)"></div>
-            <div style="position:absolute;left:120px;top:250px;width:230px;height:70px" data-component="appshow-bubble.bum.html" id="b7" data-bid="b7" data-x="120" data-y="250" data-w="230" data-h="70" data-r="18" data-t="块 08" data-s="230×70" data-c1="rgba(170,120,255,0.30)" data-c2="rgba(255,110,190,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(140,255,220,0.55)"></div>
-            <div style="position:absolute;left:390px;top:200px;width:150px;height:150px" data-component="appshow-bubble.bum.html" id="b8" data-bid="b8" data-x="390" data-y="200" data-w="150" data-h="150" data-r="40" data-t="块 09" data-s="150×150" data-c1="rgba(90,210,255,0.30)" data-c2="rgba(255,120,200,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,200,120,0.55)"></div>
-            <div style="position:absolute;left:500px;top:240px;width:110px;height:120px" data-component="appshow-bubble.bum.html" id="b9" data-bid="b9" data-x="500" data-y="240" data-w="110" data-h="120" data-r="26" data-t="块 10" data-s="110×120" data-c1="rgba(255,190,90,0.30)" data-c2="rgba(150,90,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(120,240,255,0.55)"></div>
-            <div style="position:absolute;left:680px;top:230px;width:180px;height:110px" data-component="appshow-bubble.bum.html" id="b10" data-bid="b10" data-x="680" data-y="230" data-w="180" data-h="110" data-r="28" data-t="块 11" data-s="180×110" data-c1="rgba(160,255,120,0.30)" data-c2="rgba(60,120,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,140,200,0.55)"></div>
-            <div style="position:absolute;left:820px;top:260px;width:90px;height:90px" data-component="appshow-bubble.bum.html" id="b11" data-bid="b11" data-x="820" data-y="260" data-w="90" data-h="90" data-r="45" data-t="块 12" data-s="90×90" data-c1="rgba(255,120,150,0.30)" data-c2="rgba(60,220,180,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(150,200,255,0.55)"></div>
-            <div style="position:absolute;left:30px;top:350px;width:200px;height:120px" data-component="appshow-bubble.bum.html" id="b12" data-bid="b12" data-x="30" data-y="350" data-w="200" data-h="120" data-r="30" data-t="块 13" data-s="200×120" data-c1="rgba(120,190,255,0.30)" data-c2="rgba(255,110,190,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,230,140,0.55)"></div>
-            <div style="position:absolute;left:180px;top:390px;width:140px;height:90px" data-component="appshow-bubble.bum.html" id="b13" data-bid="b13" data-x="180" data-y="390" data-w="140" data-h="90" data-r="22" data-t="块 14" data-s="140×90" data-c1="rgba(90,240,220,0.30)" data-c2="rgba(190,90,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,160,190,0.55)"></div>
-            <div style="position:absolute;left:360px;top:360px;width:160px;height:120px" data-component="appshow-bubble.bum.html" id="b14" data-bid="b14" data-x="360" data-y="360" data-w="160" data-h="120" data-r="30" data-t="块 15" data-s="160×120" data-c1="rgba(170,120,255,0.30)" data-c2="rgba(70,170,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(140,255,220,0.55)"></div>
-            <div style="position:absolute;left:470px;top:390px;width:120px;height:70px" data-component="appshow-bubble.bum.html" id="b15" data-bid="b15" data-x="470" data-y="390" data-w="120" data-h="70" data-r="18" data-t="块 16" data-s="120×70" data-c1="rgba(255,190,90,0.30)" data-c2="rgba(255,120,150,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(120,220,255,0.55)"></div>
-            <div style="position:absolute;left:640px;top:350px;width:210px;height:130px" data-component="appshow-bubble.bum.html" id="b16" data-bid="b16" data-x="640" data-y="350" data-w="210" data-h="130" data-r="32" data-t="块 17" data-s="210×130" data-c1="rgba(90,210,255,0.30)" data-c2="rgba(160,255,120,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,180,120,0.55)"></div>
-            <div style="position:absolute;left:840px;top:340px;width:100px;height:140px" data-component="appshow-bubble.bum.html" id="b17" data-bid="b17" data-x="840" data-y="340" data-w="100" data-h="140" data-r="26" data-t="块 18" data-s="100×140" data-c1="rgba(255,110,200,0.30)" data-c2="rgba(120,190,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(150,255,200,0.55)"></div>
-            <div style="position:absolute;left:560px;top:120px;width:180px;height:90px" data-component="appshow-bubble.bum.html" id="b18" data-bid="b18" data-x="560" data-y="120" data-w="180" data-h="90" data-r="24" data-t="块 19" data-s="180×90" data-c1="rgba(255,190,90,0.30)" data-c2="rgba(150,90,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(120,240,255,0.55)"></div>
-            <div style="position:absolute;left:300px;top:300px;width:130px;height:130px" data-component="appshow-bubble.bum.html" id="b19" data-bid="b19" data-x="300" data-y="300" data-w="130" data-h="130" data-r="38" data-t="块 20" data-s="130×130" data-c1="rgba(160,255,120,0.30)" data-c2="rgba(255,120,150,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(200,160,255,0.55)"></div>
+        <div id="pool" class="pool" style="position:absolute;left:24px;top:84px;width:1010px;height:498px;overflow:hidden">
+            <div style="position:absolute;left:40px;top:50px;width:190px;height:120px;--bid:b0;--x:40px;--y:50px;--w:190px;--h:120px;--r:30px;--t:块 01px;--s:190×120;--c1:rgba(90,210,255,0.30);--c2:rgba(60,120,255,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(120,255,240,0.55)" data-component="appshow-bubble.bum.html" id="b0" data-bid="b0" data-x="40" data-y="50" data-w="190" data-h="120" data-r="30" data-t="块 01" data-s="190×120" data-c1="rgba(90,210,255,0.30)" data-c2="rgba(60,120,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(120,255,240,0.55)"></div>
+            <div style="position:absolute;left:170px;top:90px;width:150px;height:96px;--bid:b1;--x:170px;--y:90px;--w:150px;--h:96px;--r:24px;--t:块 02px;--s:150×96;--c1:rgba(255,110,200,0.30);--c2:rgba(150,90,255,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(255,180,120,0.55)" data-component="appshow-bubble.bum.html" id="b1" data-bid="b1" data-x="170" data-y="90" data-w="150" data-h="96" data-r="24" data-t="块 02" data-s="150×96" data-c1="rgba(255,110,200,0.30)" data-c2="rgba(150,90,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,180,120,0.55)"></div>
+            <div style="position:absolute;left:380px;top:30px;width:120px;height:160px;--bid:b2;--x:380px;--y:30px;--w:120px;--h:160px;--r:28px;--t:块 03px;--s:120×160;--c1:rgba(255,190,90,0.30);--c2:rgba(255,120,60,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(140,200,255,0.55)" data-component="appshow-bubble.bum.html" id="b2" data-bid="b2" data-x="380" data-y="30" data-w="120" data-h="160" data-r="28" data-t="块 03" data-s="120×160" data-c1="rgba(255,190,90,0.30)" data-c2="rgba(255,120,60,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(140,200,255,0.55)"></div>
+            <div style="position:absolute;left:450px;top:60px;width:210px;height:90px;--bid:b3;--x:450px;--y:60px;--w:210px;--h:90px;--r:22px;--t:块 04px;--s:210×90;--c1:rgba(160,255,120,0.30);--c2:rgba(60,220,180,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(255,150,220,0.55)" data-component="appshow-bubble.bum.html" id="b3" data-bid="b3" data-x="450" data-y="60" data-w="210" data-h="90" data-r="22" data-t="块 04" data-s="210×90" data-c1="rgba(160,255,120,0.30)" data-c2="rgba(60,220,180,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,150,220,0.55)"></div>
+            <div style="position:absolute;left:700px;top:40px;width:100px;height:100px;--bid:b4;--x:700px;--y:40px;--w:100px;--h:100px;--r:50px;--t:块 05px;--s:100×100;--c1:rgba(255,120,150,0.30);--c2:rgba(190,90,255,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(120,220,255,0.55)" data-component="appshow-bubble.bum.html" id="b4" data-bid="b4" data-x="700" data-y="40" data-w="100" data-h="100" data-r="50" data-t="块 05" data-s="100×100" data-c1="rgba(255,120,150,0.30)" data-c2="rgba(190,90,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(120,220,255,0.55)"></div>
+            <div style="position:absolute;left:760px;top:80px;width:170px;height:140px;--bid:b5;--x:760px;--y:80px;--w:170px;--h:140px;--r:34px;--t:块 06px;--s:170×140;--c1:rgba(120,190,255,0.30);--c2:rgba(90,100,255,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(255,230,140,0.55)" data-component="appshow-bubble.bum.html" id="b5" data-bid="b5" data-x="760" data-y="80" data-w="170" data-h="140" data-r="34" data-t="块 06" data-s="170×140" data-c1="rgba(120,190,255,0.30)" data-c2="rgba(90,100,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,230,140,0.55)"></div>
+            <div style="position:absolute;left:40px;top:210px;width:130px;height:80px;--bid:b6;--x:40px;--y:210px;--w:130px;--h:80px;--r:20px;--t:块 07px;--s:130×80;--c1:rgba(90,240,220,0.30);--c2:rgba(70,170,255,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(255,150,190,0.55)" data-component="appshow-bubble.bum.html" id="b6" data-bid="b6" data-x="40" data-y="210" data-w="130" data-h="80" data-r="20" data-t="块 07" data-s="130×80" data-c1="rgba(90,240,220,0.30)" data-c2="rgba(70,170,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,150,190,0.55)"></div>
+            <div style="position:absolute;left:120px;top:250px;width:230px;height:70px;--bid:b7;--x:120px;--y:250px;--w:230px;--h:70px;--r:18px;--t:块 08px;--s:230×70;--c1:rgba(170,120,255,0.30);--c2:rgba(255,110,190,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(140,255,220,0.55)" data-component="appshow-bubble.bum.html" id="b7" data-bid="b7" data-x="120" data-y="250" data-w="230" data-h="70" data-r="18" data-t="块 08" data-s="230×70" data-c1="rgba(170,120,255,0.30)" data-c2="rgba(255,110,190,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(140,255,220,0.55)"></div>
+            <div style="position:absolute;left:390px;top:200px;width:150px;height:150px;--bid:b8;--x:390px;--y:200px;--w:150px;--h:150px;--r:40px;--t:块 09px;--s:150×150;--c1:rgba(90,210,255,0.30);--c2:rgba(255,120,200,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(255,200,120,0.55)" data-component="appshow-bubble.bum.html" id="b8" data-bid="b8" data-x="390" data-y="200" data-w="150" data-h="150" data-r="40" data-t="块 09" data-s="150×150" data-c1="rgba(90,210,255,0.30)" data-c2="rgba(255,120,200,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,200,120,0.55)"></div>
+            <div style="position:absolute;left:500px;top:240px;width:110px;height:120px;--bid:b9;--x:500px;--y:240px;--w:110px;--h:120px;--r:26px;--t:块 10px;--s:110×120;--c1:rgba(255,190,90,0.30);--c2:rgba(150,90,255,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(120,240,255,0.55)" data-component="appshow-bubble.bum.html" id="b9" data-bid="b9" data-x="500" data-y="240" data-w="110" data-h="120" data-r="26" data-t="块 10" data-s="110×120" data-c1="rgba(255,190,90,0.30)" data-c2="rgba(150,90,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(120,240,255,0.55)"></div>
+            <div style="position:absolute;left:680px;top:230px;width:180px;height:110px;--bid:b10;--x:680px;--y:230px;--w:180px;--h:110px;--r:28px;--t:块 11px;--s:180×110;--c1:rgba(160,255,120,0.30);--c2:rgba(60,120,255,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(255,140,200,0.55)" data-component="appshow-bubble.bum.html" id="b10" data-bid="b10" data-x="680" data-y="230" data-w="180" data-h="110" data-r="28" data-t="块 11" data-s="180×110" data-c1="rgba(160,255,120,0.30)" data-c2="rgba(60,120,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,140,200,0.55)"></div>
+            <div style="position:absolute;left:820px;top:260px;width:90px;height:90px;--bid:b11;--x:820px;--y:260px;--w:90px;--h:90px;--r:45px;--t:块 12px;--s:90×90;--c1:rgba(255,120,150,0.30);--c2:rgba(60,220,180,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(150,200,255,0.55)" data-component="appshow-bubble.bum.html" id="b11" data-bid="b11" data-x="820" data-y="260" data-w="90" data-h="90" data-r="45" data-t="块 12" data-s="90×90" data-c1="rgba(255,120,150,0.30)" data-c2="rgba(60,220,180,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(150,200,255,0.55)"></div>
+            <div style="position:absolute;left:30px;top:350px;width:200px;height:120px;--bid:b12;--x:30px;--y:350px;--w:200px;--h:120px;--r:30px;--t:块 13px;--s:200×120;--c1:rgba(120,190,255,0.30);--c2:rgba(255,110,190,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(255,230,140,0.55)" data-component="appshow-bubble.bum.html" id="b12" data-bid="b12" data-x="30" data-y="350" data-w="200" data-h="120" data-r="30" data-t="块 13" data-s="200×120" data-c1="rgba(120,190,255,0.30)" data-c2="rgba(255,110,190,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,230,140,0.55)"></div>
+            <div style="position:absolute;left:180px;top:390px;width:140px;height:90px;--bid:b13;--x:180px;--y:390px;--w:140px;--h:90px;--r:22px;--t:块 14px;--s:140×90;--c1:rgba(90,240,220,0.30);--c2:rgba(190,90,255,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(255,160,190,0.55)" data-component="appshow-bubble.bum.html" id="b13" data-bid="b13" data-x="180" data-y="390" data-w="140" data-h="90" data-r="22" data-t="块 14" data-s="140×90" data-c1="rgba(90,240,220,0.30)" data-c2="rgba(190,90,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,160,190,0.55)"></div>
+            <div style="position:absolute;left:360px;top:360px;width:160px;height:120px;--bid:b14;--x:360px;--y:360px;--w:160px;--h:120px;--r:30px;--t:块 15px;--s:160×120;--c1:rgba(170,120,255,0.30);--c2:rgba(70,170,255,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(140,255,220,0.55)" data-component="appshow-bubble.bum.html" id="b14" data-bid="b14" data-x="360" data-y="360" data-w="160" data-h="120" data-r="30" data-t="块 15" data-s="160×120" data-c1="rgba(170,120,255,0.30)" data-c2="rgba(70,170,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(140,255,220,0.55)"></div>
+            <div style="position:absolute;left:470px;top:390px;width:120px;height:70px;--bid:b15;--x:470px;--y:390px;--w:120px;--h:70px;--r:18px;--t:块 16px;--s:120×70;--c1:rgba(255,190,90,0.30);--c2:rgba(255,120,150,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(120,220,255,0.55)" data-component="appshow-bubble.bum.html" id="b15" data-bid="b15" data-x="470" data-y="390" data-w="120" data-h="70" data-r="18" data-t="块 16" data-s="120×70" data-c1="rgba(255,190,90,0.30)" data-c2="rgba(255,120,150,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(120,220,255,0.55)"></div>
+            <div style="position:absolute;left:640px;top:350px;width:210px;height:130px;--bid:b16;--x:640px;--y:350px;--w:210px;--h:130px;--r:32px;--t:块 17px;--s:210×130;--c1:rgba(90,210,255,0.30);--c2:rgba(160,255,120,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(255,180,120,0.55)" data-component="appshow-bubble.bum.html" id="b16" data-bid="b16" data-x="640" data-y="350" data-w="210" data-h="130" data-r="32" data-t="块 17" data-s="210×130" data-c1="rgba(90,210,255,0.30)" data-c2="rgba(160,255,120,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(255,180,120,0.55)"></div>
+            <div style="position:absolute;left:840px;top:340px;width:100px;height:140px;--bid:b17;--x:840px;--y:340px;--w:100px;--h:140px;--r:26px;--t:块 18px;--s:100×140;--c1:rgba(255,110,200,0.30);--c2:rgba(120,190,255,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(150,255,200,0.55)" data-component="appshow-bubble.bum.html" id="b17" data-bid="b17" data-x="840" data-y="340" data-w="100" data-h="140" data-r="26" data-t="块 18" data-s="100×140" data-c1="rgba(255,110,200,0.30)" data-c2="rgba(120,190,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(150,255,200,0.55)"></div>
+            <div style="position:absolute;left:560px;top:120px;width:180px;height:90px;--bid:b18;--x:560px;--y:120px;--w:180px;--h:90px;--r:24px;--t:块 19px;--s:180×90;--c1:rgba(255,190,90,0.30);--c2:rgba(150,90,255,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(120,240,255,0.55)" data-component="appshow-bubble.bum.html" id="b18" data-bid="b18" data-x="560" data-y="120" data-w="180" data-h="90" data-r="24" data-t="块 19" data-s="180×90" data-c1="rgba(255,190,90,0.30)" data-c2="rgba(150,90,255,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(120,240,255,0.55)"></div>
+            <div style="position:absolute;left:300px;top:300px;width:130px;height:130px;--bid:b19;--x:300px;--y:300px;--w:130px;--h:130px;--r:38px;--t:块 20px;--s:130×130;--c1:rgba(160,255,120,0.30);--c2:rgba(255,120,150,0.22);--rim:rgba(255,255,255,0.36);--iris:rgba(255,255,255,0.20);--glow:rgba(200,160,255,0.55)" data-component="appshow-bubble.bum.html" id="b19" data-bid="b19" data-x="300" data-y="300" data-w="130" data-h="130" data-r="38" data-t="块 20" data-s="130×130" data-c1="rgba(160,255,120,0.30)" data-c2="rgba(255,120,150,0.22)" data-rim="rgba(255,255,255,0.36)" data-iris="rgba(255,255,255,0.20)" data-glow="rgba(200,160,255,0.55)"></div>
         </div>
 
-        <button id="btn-gust"   class="btn-p" style="position:absolute; left:24;  top:600; width:120; height:32">吹一口气</button>
-        <button id="btn-clump"  class="btn-s" style="position:absolute; left:156; top:600; width:120; height:32">叠在一起</button>
-        <button id="btn-pause"  class="btn-s" style="position:absolute; left:288; top:600; width:110; height:32">暂停漂浮</button>
-        <button id="btn-reset"  class="btn-s" style="position:absolute; left:410; top:600; width:110; height:32">重排池子</button>
-        <span id="bub-read" class="h2" style="position:absolute; left:536; top:608; width:500; height:18">块 20 · 已戳破 0</span>
-        <span class="h2" style="position:absolute; left:24; top:648; width:1000; height:18">半透明 = 底色的 alpha；重叠处后面的透过来，颜色按普通 alpha 合成，不是"越叠越亮"。</span>
+        <button id="btn-gust" class="btn-p" style="position:absolute;left:24px;top:600px;width:120px;height:32px">吹一口气</button>
+        <button id="btn-clump" class="btn-s" style="position:absolute;left:156px;top:600px;width:120px;height:32px">叠在一起</button>
+        <button id="btn-pause" class="btn-s" style="position:absolute;left:288px;top:600px;width:110px;height:32px">暂停漂浮</button>
+        <button id="btn-reset" class="btn-s" style="position:absolute;left:410px;top:600px;width:110px;height:32px">重排池子</button>
+        <span id="bub-read" class="h2" style="position:absolute;left:536px;top:608px;width:500px;height:18px">块 20 · 已戳破 0</span>
+        <span class="h2" style="position:absolute;left:24px;top:648px;width:1000px;height:18px">半透明 = 底色的 alpha；重叠处后面的透过来，颜色按普通 alpha 合成，不是"越叠越亮"。</span>
     </div>
 
     <!-- ============ 页面：设置 ============ -->
-    <div id="page-3" class="page" style="position:absolute; left:0; top:2028; width:1058; height:676">
-        <span class="h1" style="position:absolute; left:24; top:20; width:200; height:26">设置</span>
-        <span class="h2" style="position:absolute; left:24; top:48; width:700; height:16">开关的状态迁移写在宿主：引擎只提供 setVisible / setStyleColor</span>
+    <div id="page-3" class="page" style="position:absolute;left:0px;top:2028px;width:1058px;height:676px">
+        <span class="h1" style="position:absolute;left:24px;top:20px;width:200px;height:26px">设置</span>
+        <span class="h2" style="position:absolute;left:24px;top:48px;width:700px;height:16px">开关的状态迁移写在宿主：引擎只提供 setVisible / setStyleColor</span>
 
-        <span class="set-l" style="position:absolute; left:24; top:92;  width:300; height:18">自动刷新</span>
-        <span class="set-d" style="position:absolute; left:24; top:110; width:300; height:16">每 5 秒拉一次数据</span>
-        <div id="tr-0" class="trk" style="position:absolute; left:900; top:98; width:56; height:28"></div>
-        <div id="kf-0" class="knb" style="position:absolute; left:904; top:101; width:22; height:22"></div>
-        <div id="kn-0" class="knb" style="position:absolute; left:930; top:101; width:22; height:22"></div>
+        <span class="set-l" style="position:absolute;left:24px;top:92px;width:300px;height:18px">自动刷新</span>
+        <span class="set-d" style="position:absolute;left:24px;top:110px;width:300px;height:16px">每 5 秒拉一次数据</span>
+        <div id="tr-0" class="trk" style="position:absolute;left:900px;top:98px;width:56px;height:28px"></div>
+        <div id="kf-0" class="knb" style="position:absolute;left:904px;top:101px;width:22px;height:22px"></div>
+        <div id="kn-0" class="knb" style="position:absolute;left:930px;top:101px;width:22px;height:22px"></div>
 
-        <span class="set-l" style="position:absolute; left:24; top:148; width:300; height:18">桌面通知</span>
-        <span class="set-d" style="position:absolute; left:24; top:166; width:300; height:16">异常时弹出系统提醒</span>
-        <div id="tr-1" class="trk" style="position:absolute; left:900; top:154; width:56; height:28"></div>
-        <div id="kf-1" class="knb" style="position:absolute; left:904; top:157; width:22; height:22"></div>
-        <div id="kn-1" class="knb" style="position:absolute; left:930; top:157; width:22; height:22"></div>
+        <span class="set-l" style="position:absolute;left:24px;top:148px;width:300px;height:18px">桌面通知</span>
+        <span class="set-d" style="position:absolute;left:24px;top:166px;width:300px;height:16px">异常时弹出系统提醒</span>
+        <div id="tr-1" class="trk" style="position:absolute;left:900px;top:154px;width:56px;height:28px"></div>
+        <div id="kf-1" class="knb" style="position:absolute;left:904px;top:157px;width:22px;height:22px"></div>
+        <div id="kn-1" class="knb" style="position:absolute;left:930px;top:157px;width:22px;height:22px"></div>
 
-        <span class="set-l" style="position:absolute; left:24; top:204; width:300; height:18">高分屏渲染</span>
-        <span class="set-d" style="position:absolute; left:24; top:222; width:300; height:16">按设备像素比放大画布</span>
-        <div id="tr-2" class="trk" style="position:absolute; left:900; top:210; width:56; height:28"></div>
-        <div id="kf-2" class="knb" style="position:absolute; left:904; top:213; width:22; height:22"></div>
-        <div id="kn-2" class="knb" style="position:absolute; left:930; top:213; width:22; height:22"></div>
+        <span class="set-l" style="position:absolute;left:24px;top:204px;width:300px;height:18px">高分屏渲染</span>
+        <span class="set-d" style="position:absolute;left:24px;top:222px;width:300px;height:16px">按设备像素比放大画布</span>
+        <div id="tr-2" class="trk" style="position:absolute;left:900px;top:210px;width:56px;height:28px"></div>
+        <div id="kf-2" class="knb" style="position:absolute;left:904px;top:213px;width:22px;height:22px"></div>
+        <div id="kn-2" class="knb" style="position:absolute;left:930px;top:213px;width:22px;height:22px"></div>
 
-        <span class="set-l" style="position:absolute; left:24; top:260; width:300; height:18">诊断日志</span>
-        <span class="set-d" style="position:absolute; left:24; top:278; width:300; height:16">控制台输出帧率与命中信息</span>
-        <div id="tr-3" class="trk" style="position:absolute; left:900; top:266; width:56; height:28"></div>
-        <div id="kf-3" class="knb" style="position:absolute; left:904; top:269; width:22; height:22"></div>
-        <div id="kn-3" class="knb" style="position:absolute; left:930; top:269; width:22; height:22"></div>
+        <span class="set-l" style="position:absolute;left:24px;top:260px;width:300px;height:18px">诊断日志</span>
+        <span class="set-d" style="position:absolute;left:24px;top:278px;width:300px;height:16px">控制台输出帧率与命中信息</span>
+        <div id="tr-3" class="trk" style="position:absolute;left:900px;top:266px;width:56px;height:28px"></div>
+        <div id="kf-3" class="knb" style="position:absolute;left:904px;top:269px;width:22px;height:22px"></div>
+        <div id="kn-3" class="knb" style="position:absolute;left:930px;top:269px;width:22px;height:22px"></div>
 
-        <div class="rule" style="position:absolute; left:24; top:330; width:1010; height:1"></div>
-        <button id="btn-danger" class="btn-d" style="position:absolute; left:24; top:352; width:150; height:34">清空全部数据</button>
-        <span class="h2" style="position:absolute; left:190; top:360; width:600; height:16">会弹一个需要确认的弹窗（同样的组件，不同文案）</span>
+        <div class="rule" style="position:absolute;left:24px;top:330px;width:1010px;height:1px"></div>
+        <button id="btn-danger" class="btn-d" style="position:absolute;left:24px;top:352px;width:150px;height:34px">清空全部数据</button>
+        <span class="h2" style="position:absolute;left:190px;top:360px;width:600px;height:16px">会弹一个需要确认的弹窗（同样的组件，不同文案）</span>
     </div>
 
     <!-- ============ 子页面：布局与重排（从右边切入） ============ -->
     <!-- 排在页带右边（left:1058）：视口 X 滚动 1058px 就把它从右边顶进来，
          竖页带整条滑出去再换回来。和上下切页是同一个 scrollTo，只是轴不同。 -->
-    <div id="sub-page" style="position:absolute; left:1058; top:0; width:1058; height:676; background:#FFFFFF">
-        <button id="btn-back" class="btn-s" style="position:absolute; left:24; top:18; width:96; height:30">← 返回</button>
-        <span class="h1" style="position:absolute; left:136; top:16; width:500; height:26">布局与重排</span>
-        <span class="h2" style="position:absolute; left:136; top:46; width:900; height:16">拖卡片的边/角：文字折行、flex 重新分配、百分比与 min·max 钳制都在同一帧里重算</span>
+    <div id="sub-page" style="position:absolute;left:1058px;top:0px;width:1058px;height:676px;background:#FFFFFF">
+        <button id="btn-back" class="btn-s" style="position:absolute;left:24px;top:18px;width:96px;height:30px">← 返回</button>
+        <span class="h1" style="position:absolute;left:136px;top:16px;width:500px;height:26px">布局与重排</span>
+        <span class="h2" style="position:absolute;left:136px;top:46px;width:900px;height:16px">拖卡片的边/角：文字折行、flex 重新分配、百分比与 min·max 钳制都在同一帧里重算</span>
 
-        <div id="pg-card" class="rs" style="position:absolute; left:24; top:84; width:640; height:296; overflow:hidden; resize:both; padding:20">
-            <span class="rs-t" style="width:100%; height:20">① 流式 + 折行 + flex-wrap</span>
-            <span id="pg-sz" class="rs-v" style="width:100%; height:26">640 × 296</span>
-            <span id="pg-para" class="rs-d" style="width:100%; font-size:12">这段正文没有写 height：卡片一变窄它就折行、节点跟着变高，下面那行 flex 子项和两条百分比色条一起重排。四边四角都能拖，拖左边时右边界不动。</span>
-            <div id="pg-chips" style="width:100%; display:flex; flex-wrap:wrap; gap:10; margin-top:10">
-                <div class="rs-chip" style="flex:1 1 120; min-width:56; height:34"></div>
-                <div class="rs-chip" style="flex:1 1 120; min-width:56; height:34"></div>
-                <div class="rs-chip" style="flex:1 1 120; min-width:56; height:34"></div>
-                <div class="rs-chip" style="flex:1 1 120; min-width:56; height:34"></div>
+        <div id="pg-card" class="rs" style="position:absolute;left:24px;top:84px;width:640px;height:296px;overflow:hidden;resize:both;padding:20px">
+            <span class="rs-t" style="width:100%;height:20px">① 流式 + 折行 + flex-wrap</span>
+            <span id="pg-sz" class="rs-v" style="width:100%;height:26px">640 × 296</span>
+            <span id="pg-para" class="rs-d" style="width:100%;font-size:12px">这段正文没有写 height：卡片一变窄它就折行、节点跟着变高，下面那行 flex 子项和两条百分比色条一起重排。四边四角都能拖，拖左边时右边界不动。</span>
+            <div id="pg-chips" style="width:100%;display:flex;flex-wrap:wrap;gap:10px;margin-top:10px">
+                <div class="rs-chip" style="flex:1 1 120;min-width:56px;height:34px"></div>
+                <div class="rs-chip" style="flex:1 1 120;min-width:56px;height:34px"></div>
+                <div class="rs-chip" style="flex:1 1 120;min-width:56px;height:34px"></div>
+                <div class="rs-chip" style="flex:1 1 120;min-width:56px;height:34px"></div>
             </div>
-            <span id="pg-flex" class="rs-d" style="width:100%; height:16; font-size:12; margin-top:8">flex 1 行</span>
-            <div class="rs-bar" style="width:72%; height:10; margin-top:12"></div>
-            <div class="rs-bar" style="width:44%; height:10; margin-top:8"></div>
+            <span id="pg-flex" class="rs-d" style="width:100%;height:16px;font-size:12px;margin-top:8px">flex 1 行</span>
+            <div class="rs-bar" style="width:72%;height:10px;margin-top:12px"></div>
+            <div class="rs-bar" style="width:44%;height:10px;margin-top:8px"></div>
         </div>
 
-        <div id="pg-clamp" class="rs" style="position:absolute; left:690; top:84; width:344; height:296; overflow:hidden; resize:both; padding:18; min-width:220; max-width:420">
-            <span class="rs-t" style="width:100%; height:20">② min/max 钳制</span>
-            <span id="pg-sz2" class="rs-v" style="width:100%; height:26">344 × 296</span>
-            <span class="rs-d" style="width:100%; font-size:12">min-width:220 / max-width:420：往两边拖过头会被钳住，用的就是窗口 resize 那条 ClampSize。</span>
-            <div class="rs-bar" style="width:100%; height:10; margin-top:12"></div>
+        <div id="pg-clamp" class="rs" style="position:absolute;left:690px;top:84px;width:344px;height:296px;overflow:hidden;resize:both;padding:18px;min-width:220px;max-width:420px">
+            <span class="rs-t" style="width:100%;height:20px">② min/max 钳制</span>
+            <span id="pg-sz2" class="rs-v" style="width:100%;height:26px">344 × 296</span>
+            <span class="rs-d" style="width:100%;font-size:12px">min-width:220 / max-width:420：往两边拖过头会被钳住，用的就是窗口 resize 那条 ClampSize。</span>
+            <div class="rs-bar" style="width:100%;height:10px;margin-top:12px"></div>
         </div>
 
-        <div id="pg-pct" class="rs" style="position:absolute; left:24; top:400; width:640; height:240; overflow:hidden; resize:both; padding:18">
-            <span class="rs-t" style="width:100%; height:20">③ 百分比 / auto 宽度</span>
-            <span id="pg-sz3" class="rs-v" style="width:100%; height:26">640 × 240</span>
-            <span class="rs-d" style="width:100%; font-size:12">三条分别是 30% / 60% / 100%，拖宽拖窄都按内容盒重算。</span>
-            <div class="rs-bar" style="width:30%; height:10; margin-top:12"></div>
-            <div class="rs-bar" style="width:60%; height:10; margin-top:8"></div>
-            <div class="rs-bar" style="width:100%; height:10; margin-top:8"></div>
+        <div id="pg-pct" class="rs" style="position:absolute;left:24px;top:400px;width:640px;height:240px;overflow:hidden;resize:both;padding:18px">
+            <span class="rs-t" style="width:100%;height:20px">③ 百分比 / auto 宽度</span>
+            <span id="pg-sz3" class="rs-v" style="width:100%;height:26px">640 × 240</span>
+            <span class="rs-d" style="width:100%;font-size:12px">三条分别是 30% / 60% / 100%，拖宽拖窄都按内容盒重算。</span>
+            <div class="rs-bar" style="width:30%;height:10px;margin-top:12px"></div>
+            <div class="rs-bar" style="width:60%;height:10px;margin-top:8px"></div>
+            <div class="rs-bar" style="width:100%;height:10px;margin-top:8px"></div>
         </div>
 
-        <div id="pg-corner" class="rs" style="position:absolute; left:690; top:400; width:344; height:240; overflow:hidden; resize:top-left bottom-right; padding:18">
-            <span class="rs-t" style="width:100%; height:20">④ 只开两个对角</span>
-            <span id="pg-sz4" class="rs-v" style="width:100%; height:26">344 × 240</span>
-            <span class="rs-d" style="width:100%; font-size:12">位图里只开了 top-left / bottom-right：两条边的中间段不响应。</span>
-            <div class="rs-bar" style="width:80%; height:10; margin-top:12"></div>
+        <div id="pg-corner" class="rs" style="position:absolute;left:690px;top:400px;width:344px;height:240px;overflow:hidden;resize:top-left bottom-right;padding:18px">
+            <span class="rs-t" style="width:100%;height:20px">④ 只开两个对角</span>
+            <span id="pg-sz4" class="rs-v" style="width:100%;height:26px">344 × 240</span>
+            <span class="rs-d" style="width:100%;font-size:12px">位图里只开了 top-left / bottom-right：两条边的中间段不响应。</span>
+            <div class="rs-bar" style="width:80%;height:10px;margin-top:12px"></div>
         </div>
 
-        <span class="h2" style="position:absolute; left:24; top:652; width:1010; height:16">子页面 = 视口 X 滚动 1058px：竖页带滑出去，子页面从右边顶进来；返回按钮把它滑回去。</span>
+        <span class="h2" style="position:absolute;left:24px;top:652px;width:1010px;height:16px">子页面 = 视口 X 滚动 1058px：竖页带滑出去，子页面从右边顶进来；返回按钮把它滑回去。</span>
     </div>
 
     </div><!-- /viewport -->
 
     <!-- ============ 状态栏：被动查询的读数 ============ -->
-    <span id="status" class="h2" style="position:absolute; left:206; top:748; width:1058; height:18">就绪</span>
+    <span id="status" class="h2" style="position:absolute;left:206px;top:748px;width:1058px;height:18px">就绪</span>
 
     <!-- ============ 遮罩 + 弹窗 + 提示条 ============ -->
-    <div id="veil" class="veil" style="position:absolute; left:0; top:0; width:1280; height:800"></div>
-    <div class="as-dlg" style="position:absolute;left:440px;top:230px;width:400px;height:300px" data-component="appshow-dialog.bum.html" id="dlg-root" data-x="440" data-y="230" data-w="400" data-h="300"></div>
+    <div id="veil" class="veil" style="position:absolute;left:0px;top:0px;width:1280px;height:800px"></div>
+    <div class="as-dlg" style="position:absolute;left:440px;top:230px;width:400px;height:300px;--x:440px;--y:230px;--w:400px;--h:300px" data-component="appshow-dialog.bum.html" id="dlg-root" data-x="440" data-y="230" data-w="400" data-h="300"></div>
 
-    <div id="toast" class="toast" style="position:absolute; left:930; top:690; width:330; height:38">
-        <span id="toast-txt" class="toast-t" style="position:absolute; left:16; top:11; width:300; height:18">已保存</span>
+    <div id="toast" class="toast" style="position:absolute;left:930px;top:690px;width:330px;height:38px">
+        <span id="toast-txt" class="toast-t" style="position:absolute;left:16px;top:11px;width:300px;height:18px">已保存</span>
     </div>
+</div>
 </body>
 </html>
-</app_window>
-
-
-

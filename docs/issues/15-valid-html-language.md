@@ -1,11 +1,10 @@
 # 15 - 源码成为合法 HTML：把"浏览器预览"变成语言契约
 
-**状态**：**M0 完成、M1 完成（2026-11-21）**——语法定稿见 §2.1；双跑样例
-`examples/valid-html/` 已归门禁（18 页 0 告警）。**M1 四项全落地（0.38.8 / 0.38.9）**：
-`var(--name, fallback)` 编译期展开、`data-component` 内联（宿主即组件根）、`data-param`
-文本覆盖、窗口 `data-*`。**M2 部分有**（`tools/binui_dev.py` 已能热刷新 + 看结构，
-缺 `binui-preview.js` 与组件独立视图）；M3 存量迁移、M4 语义对齐未开工。
-（2026-11-21 master 定方向：走合法 HTML，路难但收益大）
+**状态**：**M0 / M1 / M3 完成（2026-11-21，0.38.7 ~ 0.38.11）** —— 存量布局已全量迁移，
+**源码可以直接用浏览器打开**（截图见 §6 的 M3 行）。M2 的浏览器侧运行时（`binui-preview.js`
+展开 `data-component`、组件独立视图）与 M4 的语义对齐迭代未开工；M5 收尾两种非 HTML 写法
+（属性插值、`<use … external>`）。
+
 **类型**：语言 / 工具链 / DX · **严重度**：高（决定"写 UI 是不是像写网页"）
 **影响面**：编译器（`binui_compiler.cpp`）、全部存量布局（`examples/`、`components/`、`docs/mockups/`）、
 新工具（`binui dev` + 预览运行时）。
@@ -38,7 +37,7 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 |---|---|---|---|---|
 | 1 | `style="width:{{w=132}}"` | `style="width:var(--w,132px)"` | 原生支持 CSS 变量，默认 132px | 解析 `var(--name, fallback)`：宿主给了 `--w` 就用，否则用 fallback |
 | 2 | 文本 `{{label=按钮}}` | 直接写默认文本 `按钮` + `data-param="label"` | 显示"按钮" | 宿主有 `data-label="确定"` 时覆盖文本 |
-| 3 | 无单位 `width:120` | `width:120px` | 原生（浏览器本来就要求单位） | **今天就收 `px`**（`ParseLenPct`），零改动 |
+| 3 | 无单位 `width:120` | `width:120px` | 原生（浏览器本来就要求单位） | ✅ **已全量迁移**（0.38.11）：25 个文件补 `px`（`line-height` 除外 —— 无单位是倍数） |
 | 4 | 组件 `<use src="x.bum.html" x="20" y="64" w="120" label="确定"/>` | `<button data-component="button.html" style="position:absolute;left:20px;top:64px;--w:120px" data-label="确定">确定</button>` | 显示宿主元素本身（默认文本/尺寸），JS 负责把组件内容填进来 | `data-component` 走现有 `<use>` 内联管线（同一个 `MergeLayout`） |
 | 5 | 根 `<binui width="780" height="600" bg="#F4F7FC">` / `<app_window>` | `<html><body>` + `<div data-binui-window data-width="780" data-height="600" data-bg="#F4F7FC">` | 浏览器按视口渲染，`data-*` 被忽略 | 窗口描述段从 `data-*` 读（M1；今天忽略，尺寸暂由 `<html>/<body>` 的 width/height 兜底，见 §7） |
 
@@ -58,6 +57,9 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 | 6 | 长度一律带 `px`；`%` / `auto` / `content` 照常用 | `width:120` |
 | 7 | 窗口：`<div data-binui-window data-width data-height data-bg>` 包住页面内容 | `<binui width…>` / `<app_window width…>` |
 | 8 | 组件实例的参数以 `data-*` 传递（`data-label`），不占普通属性名 | `<use label="确定">` 的裸属性 |
+
+| 9 | **属性插值只允许在 `id` / `class` 上**：`id="{{bid}}-body"`、`class="dot {{tone=blue}}"`；其余属性的值必须是字面值 | 在 `style` 里写 `{{w}}`（那是 M1 之前的老写法，已全量改成 `var()`） |
+| 10 | 组件的内部结构由**编译器**（binUI）与 **`binui-preview.js`**（浏览器，M2）分别展开；浏览器不装脚本时看到的是"宿主元素的退化形态"，这是设计内的行为 | 指望浏览器自己认 `data-component` |
 
 **同一实例的两种写法对照**（M0 样例里都跑过）：
 
@@ -164,7 +166,7 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 | — | **M1 第一步已落地（0.38.8）**：`var(--name, fallback)` 编译期展开（长度 + 颜色；祖先继承 + 自身覆盖 + 未定义无 fallback 时丢声明并告警一次）。验收：`test_css` 7 项新断言；分组对照 `diffpx=0 max=0`；样例 0 告警 | | |
 | M2 | `binui dev` + `binui-preview.js` + 热刷新 + **组件独立视图（居中 / 1x~8x / 盒边界 / 像素放大）** | 改一行保存 → 浏览器 2 秒内刷新且布局变化可见；单组件能 4× 看清 1px 描边 | 1~2 周 |
 | M3 | codemod：`{{}}`→`var()`/`data-param`、`<use>`→`data-component`、补 `px` | 存量 `examples/` + `components/` 全量迁移后像素不变 | 3~5 天 |
-| — | **M3 主体完成（0.38.10）**：`tools/binui_migrate.py` 把老 `<use>` 的展开结果写回源码（19 组件摘根、69 处 `<use>`、29 文件）。**10 个页面迁移前后 0 差异**。剩：15 个组件片段内的 `{{}}` 占位转 `data-param`/`var()`；`<use … external>` 待 `data-binui-mount` 设计 | | |
+| — | **M3 完成（0.38.10 + 0.38.11）**：`tools/binui_migrate*.py` 三步 —— ① 老 `<use>` 的展开结果写回源码（19 组件摘根 / 69 处 / 29 文件，10 页 **0 差异**）；② 片段里的参数占位转 `var()` + `data-param`；③ 无单位长度补 `px`（25 文件）+ 窗口壳拍平（10 页）。**源码可直接用 Edge 打开**：`docs/img/browser-buttonshow.png`、`docs/img/browser-features.png`。剩：属性插值 14 处（`id`/`class`）与 `<use … external>`，归 M5 | | |
 | M4 | 语义对齐迭代（§5 表逐条）+ `binui parity` 门禁 | 示例页差异率收敛到"文字换行以内" | 1~2 月，持续 |
 | M5 | 删 legacy 语法（`{{}}`、`<use>`、无单位） | 编译器只剩一套写法 | 收尾 |
 

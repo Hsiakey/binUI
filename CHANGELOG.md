@@ -5,6 +5,42 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.11] - 2026-11-21 【格式 v34 不变】
+
+**M3 收尾：源码真的能在浏览器里打开了**（issue 15）。分三步，全部走 codemod
+（`tools/binui_migrate_frag.py` / `_px.py` / `_window.py`），逐步验证像素不变：
+
+1. **组件片段里的参数占位**：`style` 里的 `{{w=120}}` → `var(--w, 120px)`（宿主 style 里
+   自动补 `--w:120px`，片段里的 `var()` 从祖先继承）；纯文本 `{{label=按钮}}` →
+   默认文本 + `data-param="label"`（宿主 `data-label` 覆盖）。
+2. **无单位长度补 `px`**：25 个文件。这是"浏览器里散架"的第 3 条根因 —— binUI 一直把
+   无单位当 px，而 CSS 里非 0 无单位是非法值、**整条声明被丢掉**。`line-height` 特意排除
+   （无单位是倍数，补 px 会变）。
+3. **窗口壳拍平**：10 个页面从 `<!DOCTYPE html><app_window …><html><head>…</head><body>…`
+   改成合法结构 `<html><head>…</head><body><div data-binui-window data-width …>…`。
+   原来那种嵌套连浏览器都不认（`<html>` 嵌在自定义标签里），head/style 会被挪走，
+   整页只剩纯文本堆叠。
+
+**效果（Edge headless 直接打开源码文件，不经任何工具）**：
+
+![buttonshow 在浏览器里直接打开](docs/img/browser-buttonshow.png)
+![features 在浏览器里直接打开](docs/img/browser-features.png)
+
+按钮、卡片、圆角、渐变、状态样式、排版全部对得上；**边界与以前一样明确**：
+`data-component` 的内部结构仍要 JS 展开（M2 的 `binui-preview.js`），所以组件内部
+（如标题栏、④⑤ 两张卡）在浏览器里是"宿主元素的退化形态"，这正是 §4 写的"无 JS 退化"。
+
+**验收**：迁移前后各出一次图，**10 个页面全部 0 差异**（最大通道差 ≤1），
+`make all` 零警告、`make test` 全 PASSED、`make partial` 4/4 `diff=0`、
+`pixels-bin2d` 0 容差、`check_examples examples` 18 页 0 问题。
+
+**还剩的两种非 HTML 写法**（都记在 issue 15）：
+1. **属性插值**：`id="{{bid}}-body"` / `class="… {{tone=blue}}"` 共 14 处（appshow 的
+   气泡/弹窗、titlebar 的窗口按钮）。这是**功能**不是老语法 —— 逐实例唯一的 id 与变体类
+   靠它，浏览器里只是 id 字面量，不影响渲染。要换成合法写法需要新语法（如宿主 id 前缀化），
+   归 M5；
+2. **运行期外挂** `<use … external>`（features 的 dock 状态栏）—— 需要 `data-binui-mount`。
+
 ## [0.38.10] - 2026-11-21 【格式 v34 不变】
 
 **M3 存量迁移：`<use>` 全量迁到 `data-component`，10 个页面像素零差异**（issue 15）。

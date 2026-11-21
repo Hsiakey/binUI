@@ -7,8 +7,8 @@
     action   按钮文字（透传给嵌套的 button 组件）
 -->
 
-    <span style="height:18; color:#1F2A37; font-size:13; font-weight:700">{{heading=卡片组件}}</span>
-    <span style="height:18; color:#66768C; font-size:11">{{body=编译成 .bum 后参数已固化}}</span>
-    <span style="height:8"></span>
-    <button class="cmp-btn" style="position:absolute;width:120px;height:40px;background:#3E8BFF" data-component="button.bum.html" data-w="120" data-label="{{action=确定}}">{{action=确定}}</button>
+    <span style="height:18px;color:#1F2A37;font-size:13px;font-weight:700" data-param="heading">卡片组件</span>
+    <span style="height:18px;color:#66768C;font-size:11px" data-param="body">编译成 .bum 后参数已固化</span>
+    <span style="height:8px"></span>
+    <button class="cmp-btn" style="position:absolute;width:120px;height:40px;background:#3E8BFF;--w:120px" data-component="button.bum.html" data-w="120" data-label="{{action=确定}}" data-param="action">确定</button>
 

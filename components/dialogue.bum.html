@@ -9,23 +9,23 @@
 -->
 <style>
     .bui-dlg        { background:#FFFFFF; border:1px solid #E6EDF7; }
-    .bui-dlg-name   { background:#E8F1FF; color:#2F79E8; border-radius:12; font-size:13px;
+    .bui-dlg-name   { background:#E8F1FF; color:#2F79E8; border-radius: 12px; font-size: 13px;
                       font-weight:700; }
-    .bui-dlg-text   { color:#1F2A37; font-size:14px; line-height:170%; }
-    .bui-dlg-ok     { background:#3E8BFF; color:#FFFFFF; border-radius:10; font-size:13px;
+    .bui-dlg-text   { color:#1F2A37; font-size: 14px; line-height:170%; }
+    .bui-dlg-ok     { background:#3E8BFF; color:#FFFFFF; border-radius: 10px; font-size: 13px;
                       transition: background-color .18s ease; }
     .bui-dlg-ok:hover  { background:#5DA0FF; }
     .bui-dlg-ok:active { background:#2F79E8; }
-    .bui-dlg-cancel { background:#EEF3FA; color:#3E8BFF; border-radius:10; font-size:13px;
+    .bui-dlg-cancel { background:#EEF3FA; color:#3E8BFF; border-radius: 10px; font-size: 13px;
                       transition: background-color .18s ease; }
     .bui-dlg-cancel:hover  { background:#E1EBFA; }
     .bui-dlg-cancel:active { background:#D2E2F8; }
 </style>
 
-    <span class="bui-dlg-name" style="width:{{namew=84}}; height:24">{{name=角色}}</span>
-    <span class="bui-dlg-text" style="flex:1">{{text=正文}}</span>
-    <div style="height:{{btnh=32}}; display:flex; justify-content:flex-end; gap:8">
-        <button class="bui-dlg-ok" style="width:{{bw=80}}; height:{{btnh=32}}">{{ok=确定}}</button>
-        <button class="bui-dlg-cancel" style="width:{{bw=80}}; height:{{btnh=32}}">{{cancel=取消}}</button>
+    <span class="bui-dlg-name" style="width:var(--namew, 84px);height:24px" data-param="name">角色</span>
+    <span class="bui-dlg-text" style="flex:1" data-param="text">正文</span>
+    <div style="height:var(--btnh, 32px);display:flex;justify-content:flex-end;gap:8px">
+        <button class="bui-dlg-ok" style="width:var(--bw, 80px);height:var(--btnh, 32px)" data-param="ok">确定</button>
+        <button class="bui-dlg-cancel" style="width:var(--bw, 80px);height:var(--btnh, 32px)" data-param="cancel">取消</button>
     </div>
 

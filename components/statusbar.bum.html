@@ -5,17 +5,17 @@
 -->
 <style>
     .bui-sb       { background:#FFFFFF; border-top:1px solid #E6EDF7; }
-    .bui-sb-text  { color:#66768C; font-size:12px; }
+    .bui-sb-text  { color:#66768C; font-size: 12px; }
     .bui-sb-btn   { background:#EEF3FA; color:#3E8BFF; border:1px solid #DFE9F7;
-                    border-radius:8; font-size:12px;
+                    border-radius: 8px; font-size: 12px;
                     transition: background-color .15s ease; }
     .bui-sb-btn:hover  { background:#E1EBFA; }
     .bui-sb-btn:active { background:#D2E2F8; }
 </style>
 
-    <div style="width:16; height:1; background:transparent"></div>
-    <span class="bui-sb-text" style="flex:1; height:18">{{text=状态}}</span>
-    <button class="bui-sb-btn" style="width:{{bw=80}}; height:28">{{b1=设置}}</button>
-    <button class="bui-sb-btn" style="width:{{bw=80}}; height:28">{{b2=日志}}</button>
-    <div style="width:12; height:1; background:transparent"></div>
+    <div style="width:16px;height:1px;background:transparent"></div>
+    <span class="bui-sb-text" style="flex:1;height:18px" data-param="text">状态</span>
+    <button class="bui-sb-btn" style="width:var(--bw, 80px);height:28px" data-param="b1">设置</button>
+    <button class="bui-sb-btn" style="width:var(--bw, 80px);height:28px" data-param="b2">日志</button>
+    <div style="width:12px;height:1px;background:transparent"></div>
 

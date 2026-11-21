@@ -3,10 +3,10 @@
   参数：k 标签 / v 数值 / w 宽 / h 高（默认 40）
 -->
 <style>
-    .bui-stat-k { color:#94A3B8; font-size:11px; }
-    .bui-stat-v { color:#1F2A37; font-size:15px; font-weight:700; }
+    .bui-stat-k { color:#94A3B8; font-size: 11px; }
+    .bui-stat-v { color:#1F2A37; font-size: 15px; font-weight:700; }
 </style>
 
-    <span class="bui-stat-k" style="position:absolute; left:0; top:0; width:{{w=120}}; height:16">{{k=标签}}</span>
-    <span class="bui-stat-v" style="position:absolute; left:0; top:18; width:{{w=120}}; height:20">{{v=0}}</span>
+    <span class="bui-stat-k" style="position:absolute;left:0px;top:0px;width:var(--w, 120px);height:16px" data-param="k">标签</span>
+    <span class="bui-stat-v" style="position:absolute;left:0px;top:18px;width:var(--w, 120px);height:20px" data-param="v">0</span>
 

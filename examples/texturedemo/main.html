@@ -1,55 +1,55 @@
 <!DOCTYPE html>
-<app_window width="900" height="640" bg="#F4F7FC" title="纹理演示" window_resize="disable" ui_scale="proportional">
-<html width="900" height="640" bg="#F4F7FC">
+<html>
 <head>
     <meta charset="UTF-8">
     <title>纹理：updateImageRaw 运行期上传</title>
     <style>
         body { font-size: 13px; color: #1F2A37; }
-        .card { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16; }
+        .card { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16px; }
         .card-title { font-size: 13px; font-weight: 700; color: #1F2A37; }
         .note { font-size: 11px; color: #94A3B8; }
         .lab { font-size: 11px; color: #66768C; }
     </style>
 </head>
 <body>
-    <titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:900px;height:45px;display:flex;align-items:center;gap:6px" data-component="../../components/titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="900" data-icon="▦" data-iconw="22" data-title="纹理" data-sub="updateImageRaw · 运行期上传 · 同一张纹理多尺寸采样"></titlebar>
+<div data-binui-window data-width="900" data-height="640" data-bg="#F4F7FC" data-title="纹理演示" data-window-resize="disable" data-ui-scale="proportional">
+    <titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:900px;height:45px;display:flex;align-items:center;gap:6px;--x:0px;--y:0px;--w:900px;--icon:▦;--iconw:22px;--title:纹理;--sub:updateImageRaw · 运行期上传 · 同一张纹理多尺寸采样" data-component="../../components/titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="900" data-icon="▦" data-iconw="22" data-title="纹理" data-sub="updateImageRaw · 运行期上传 · 同一张纹理多尺寸采样"></titlebar>
 
     <!-- 同一张纹理，四种尺寸 -->
-    <div class="card" style="position:absolute; left:16; top:56; width:432; height:340">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:400; height:18">① 同一张纹理的四种尺寸（最近点采样）</span>
-        <img src="tex/proc.png" style="position:absolute; left:16;  top:40;  width:256; height:256; background:linear-gradient(135deg, #E8F1FF, #DDEBFB); border:1px solid #DCE5F2; border-radius:12"/>
-        <img src="tex/proc.png" style="position:absolute; left:288; top:40;  width:128; height:128; background:linear-gradient(135deg, #E8F1FF, #DDEBFB); border:1px solid #DCE5F2; border-radius:10"/>
-        <img src="tex/proc.png" style="position:absolute; left:288; top:176; width:64;  height:64;  background:linear-gradient(135deg, #E8F1FF, #DDEBFB); border:1px solid #DCE5F2; border-radius:8"/>
-        <span class="lab" style="position:absolute; left:360; top:196; width:60; height:16">64×64</span>
-        <span class="lab" style="position:absolute; left:288; top:246; width:128; height:16">128×128</span>
-        <span class="lab" style="position:absolute; left:16; top:296; width:200; height:16">256×256（源尺寸）</span>
-        <span class="note" style="position:absolute; left:16; top:314; width:400; height:16">纹理内容由 C++ 每帧生成，与 HTML 里写的路径无关</span>
+    <div class="card" style="position:absolute;left:16px;top:56px;width:432px;height:340px">
+        <span class="card-title" style="position:absolute;left:16px;top:12px;width:400px;height:18px">① 同一张纹理的四种尺寸（最近点采样）</span>
+        <img src="tex/proc.png" style="position:absolute;left:16px;top:40px;width:256px;height:256px;background:linear-gradient(135deg, #E8F1FF, #DDEBFB);border:1px solid #DCE5F2;border-radius:12px"/>
+        <img src="tex/proc.png" style="position:absolute;left:288px;top:40px;width:128px;height:128px;background:linear-gradient(135deg, #E8F1FF, #DDEBFB);border:1px solid #DCE5F2;border-radius:10px"/>
+        <img src="tex/proc.png" style="position:absolute;left:288px;top:176px;width:64px;height:64px;background:linear-gradient(135deg, #E8F1FF, #DDEBFB);border:1px solid #DCE5F2;border-radius:8px"/>
+        <span class="lab" style="position:absolute;left:360px;top:196px;width:60px;height:16px">64×64</span>
+        <span class="lab" style="position:absolute;left:288px;top:246px;width:128px;height:16px">128×128</span>
+        <span class="lab" style="position:absolute;left:16px;top:296px;width:200px;height:16px">256×256（源尺寸）</span>
+        <span class="note" style="position:absolute;left:16px;top:314px;width:400px;height:16px">纹理内容由 C++ 每帧生成，与 HTML 里写的路径无关</span>
     </div>
 
     <!-- 拉伸与说明 -->
-    <div class="card" style="position:absolute; left:452; top:56; width:432; height:340">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:400; height:18">② 拉伸到非等比矩形 / 与 UI 混排</span>
-        <img src="tex/proc.png" style="position:absolute; left:16; top:40; width:400; height:96; background:linear-gradient(135deg, #E8F1FF, #DDEBFB); border:1px solid #DCE5F2; border-radius:10"/>
-        <img src="tex/proc.png" style="position:absolute; left:16; top:148; width:88; height:88; background:linear-gradient(135deg, #E8F1FF, #DDEBFB); border:1px solid #DCE5F2; border-radius:44"/>
-        <span class="lab" style="position:absolute; left:116; top:152; width:300; height:18">圆形：靠 border-radius 裁</span>
-        <span class="note" style="position:absolute; left:116; top:172; width:300; height:32">图片节点本身不裁剪子节点，圆角/描边由节点自己的绘制负责；透明像素会透出底色。</span>
-        <div style="position:absolute; left:16; top:244; width:400; height:1; background:#E6EDF7"></div>
-        <span class="card-title" style="position:absolute; left:16; top:252; width:300; height:18">每帧只重画这两块矩形</span>
-        <span class="note" style="position:absolute; left:16; top:274; width:400; height:48">updateImageRaw 会自增该槽版本号，纹理缓存随之失效；外壳只 invalidate 图片矩形。</span>
+    <div class="card" style="position:absolute;left:452px;top:56px;width:432px;height:340px">
+        <span class="card-title" style="position:absolute;left:16px;top:12px;width:400px;height:18px">② 拉伸到非等比矩形 / 与 UI 混排</span>
+        <img src="tex/proc.png" style="position:absolute;left:16px;top:40px;width:400px;height:96px;background:linear-gradient(135deg, #E8F1FF, #DDEBFB);border:1px solid #DCE5F2;border-radius:10px"/>
+        <img src="tex/proc.png" style="position:absolute;left:16px;top:148px;width:88px;height:88px;background:linear-gradient(135deg, #E8F1FF, #DDEBFB);border:1px solid #DCE5F2;border-radius:44px"/>
+        <span class="lab" style="position:absolute;left:116px;top:152px;width:300px;height:18px">圆形：靠 border-radius 裁</span>
+        <span class="note" style="position:absolute;left:116px;top:172px;width:300px;height:32px">图片节点本身不裁剪子节点，圆角/描边由节点自己的绘制负责；透明像素会透出底色。</span>
+        <div style="position:absolute;left:16px;top:244px;width:400px;height:1px;background:#E6EDF7"></div>
+        <span class="card-title" style="position:absolute;left:16px;top:252px;width:300px;height:18px">每帧只重画这两块矩形</span>
+        <span class="note" style="position:absolute;left:16px;top:274px;width:400px;height:48px">updateImageRaw 会自增该槽版本号，纹理缓存随之失效；外壳只 invalidate 图片矩形。</span>
     </div>
 
     <!-- 底部状态 -->
-    <div class="card" style="position:absolute; left:16; top:408; width:868; height:104">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:400; height:18">③ 运行期状态（C++ 每帧写入）</span>
-        <span id="tex-state" style="position:absolute; left:16; top:40; width:820; height:20; font-size:12; color:#38445A">等待第一帧…</span>
-        <span id="tex-note" style="position:absolute; left:16; top:64; width:820; height:18; font-size:11; color:#94A3B8">RGBA8 · 行序从上到下</span>
+    <div class="card" style="position:absolute;left:16px;top:408px;width:868px;height:104px">
+        <span class="card-title" style="position:absolute;left:16px;top:12px;width:400px;height:18px">③ 运行期状态（C++ 每帧写入）</span>
+        <span id="tex-state" style="position:absolute;left:16px;top:40px;width:820px;height:20px;font-size:12px;color:#38445A">等待第一帧…</span>
+        <span id="tex-note" style="position:absolute;left:16px;top:64px;width:820px;height:18px;font-size:11px;color:#94A3B8">RGBA8 · 行序从上到下</span>
     </div>
 
-    <div class="card" style="position:absolute; left:16; top:524; width:868; height:88">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:400; height:18">④ 和 &lt;video&gt; 共用一条通路</span>
-        <span class="note" style="position:absolute; left:16; top:36; width:820; height:40">视频帧走的也是 updateImageRaw：解码器只交付 RGBA 像素，上传与脏矩形由渲染器统一处理 —— 程序化纹理和视频帧在渲染器眼里是同一件事。</span>
+    <div class="card" style="position:absolute;left:16px;top:524px;width:868px;height:88px">
+        <span class="card-title" style="position:absolute;left:16px;top:12px;width:400px;height:18px">④ 和 &lt;video&gt; 共用一条通路</span>
+        <span class="note" style="position:absolute;left:16px;top:36px;width:820px;height:40px">视频帧走的也是 updateImageRaw：解码器只交付 RGBA 像素，上传与脏矩形由渲染器统一处理 —— 程序化纹理和视频帧在渲染器眼里是同一件事。</span>
     </div>
+</div>
 </body>
 </html>
-</app_window>

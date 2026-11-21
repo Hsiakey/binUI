@@ -1,6 +1,5 @@
 <!DOCTYPE html>
-<app_window width="960" height="560" bg="#F4F7FC" title="SVG / Canvas" window_resize="disable" ui_scale="proportional">
-<html width="960" height="560" bg="#F4F7FC">
+<html>
 <head>
     <meta charset="UTF-8">
     <title>SVG Canvas 演示</title>
@@ -10,7 +9,7 @@
            琥珀 #F2B544 / 珊瑚 #FF8A65 / 天蓝 #38BDF8 */
         body { font-family: Segoe UI; font-size: 13px; color: #1F2A37; }
 
-        .panel { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16; }
+        .panel { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16px; }
         .panel-title { font-size: 13px; font-weight: 700; color: #1F2A37; }
         .desc { font-size: 12px; color: #38445A; }
         .note { font-size: 11px; color: #94A3B8; }
@@ -24,12 +23,13 @@
     </style>
 </head>
 <body>
-<titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:960px;height:45px;display:flex;align-items:center;gap:6px" data-component="../../components/titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="960" data-icon="✏" data-iconw="24" data-title="SVG / Canvas 演示" data-sub="SVG 声明式矩量 · Canvas 命令式绘制 · ESC 退出"></titlebar>
+<div data-binui-window data-width="960" data-height="560" data-bg="#F4F7FC" data-title="SVG / Canvas" data-window-resize="disable" data-ui-scale="proportional">
+<titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:960px;height:45px;display:flex;align-items:center;gap:6px;--x:0px;--y:0px;--w:960px;--icon:✏;--iconw:24px;--title:SVG / Canvas 演示;--sub:SVG 声明式矩量 · Canvas 命令式绘制 · ESC 退出" data-component="../../components/titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="960" data-icon="✏" data-iconw="24" data-title="SVG / Canvas 演示" data-sub="SVG 声明式矩量 · Canvas 命令式绘制 · ESC 退出"></titlebar>
 
     <!-- SVG 卡片：声明式矢量图（rect/circle/line/polyline/polygon） -->
-    <div class="panel" style="position:absolute; left:16; top:56; width:456; height:284">
-        <span class="panel-title" style="position:absolute; left:20; top:12; width:200; height:18">SVG 声明式矢量图</span>
-        <svg style="position:absolute; left:16; top:40; width:424; height:232">
+    <div class="panel" style="position:absolute;left:16px;top:56px;width:456px;height:284px">
+        <span class="panel-title" style="position:absolute;left:20px;top:12px;width:200px;height:18px">SVG 声明式矢量图</span>
+        <svg style="position:absolute;left:16px;top:40px;width:424px;height:232px">
             <!-- 网格横线 -->
             <line x1="0" y1="40" x2="424" y2="40" stroke="#DCE5F2" stroke-width="1"/>
             <line x1="0" y1="116" x2="424" y2="116" stroke="#DCE5F2" stroke-width="1"/>
@@ -56,37 +56,36 @@
     </div>
 
     <!-- Canvas 卡片：命令式绘制面（cpp 回调按帧画频谱） -->
-    <div class="panel" style="position:absolute; left:488; top:56; width:456; height:284">
-        <span class="panel-title" style="position:absolute; left:20; top:12; width:200; height:18">Canvas 命令式绘制面</span>
-        <canvas id="cvEq" style="position:absolute; left:16; top:40; width:424; height:232; background:#EEF3FA; border:1px solid #DCE5F2; border-radius:12"></canvas>
+    <div class="panel" style="position:absolute;left:488px;top:56px;width:456px;height:284px">
+        <span class="panel-title" style="position:absolute;left:20px;top:12px;width:200px;height:18px">Canvas 命令式绘制面</span>
+        <canvas id="cvEq" style="position:absolute;left:16px;top:40px;width:424px;height:232px;background:#EEF3FA;border:1px solid #DCE5F2;border-radius:12px"></canvas>
     </div>
 
     <!-- 图标条：现成素材（Lucide/Feather 的 path 直接粘）+ viewBox 缩放 -->
-    <div class="panel" style="position:absolute; left:16; top:348; width:928; height:96">
-        <span class="panel-title" style="position:absolute; left:20; top:10; width:420; height:18">SVG 图标：现成素材直接粘（&lt;path d&gt; + viewBox）</span>
+    <div class="panel" style="position:absolute;left:16px;top:348px;width:928px;height:96px">
+        <span class="panel-title" style="position:absolute;left:20px;top:10px;width:420px;height:18px">SVG 图标：现成素材直接粘（&lt;path d&gt; + viewBox）</span>
         <!-- 32px 显示、viewBox 24：坐标自动等比放大，stroke-width 也跟着放大 -->
-        <svg style="position:absolute; left:24; top:34; width:32; height:32" viewBox="0 0 24 24">
+        <svg style="position:absolute;left:24px;top:34px;width:32px;height:32px" viewBox="0 0 24 24">
             <!-- v17：描边也能用渐变（stroke="url(#…)"），方头端帽 stroke-linecap="square" 生效 -->
             <path d="M19 14c1.49-1.46 3-3.21 3-5.5A5.5 5.5 0 0 0 16.5 3c-1.76 0-3 .5-4.5 2-1.5-1.5-2.74-2-4.5-2A5.5 5.5 0 0 0 2 8.5c0 2.3 1.5 4.05 3 5.5l7 7Z"
                   fill="none" stroke="url(#hs)" stroke-width="2" stroke-linecap="square"/>
         </svg>
         <!-- 星形图标：shape-rendering="auto" 打开边缘抗锯齿（默认是硬边，见 docs/svg.md §13） -->
-        <svg style="position:absolute; left:88; top:34; width:32; height:32" viewBox="0 0 24 24"
-             shape-rendering="auto">
+        <svg style="position:absolute;left:88px;top:34px;width:32px;height:32px" viewBox="0 0 24 24" shape-rendering="auto">
             <path d="M11.525 2.295a.53.53 0 0 1 .95 0l2.31 4.679a2.123 2.123 0 0 0 1.595 1.16l5.166.756a.53.53 0 0 1 .294.904l-3.736 3.638a2.123 2.123 0 0 0-.611 1.878l.882 5.14a.53.53 0 0 1-.771.56l-4.623-2.43a2.123 2.123 0 0 0-1.973 0L6.385 20.01a.53.53 0 0 1-.77-.56l.881-5.139a2.122 2.122 0 0 0-.611-1.879L2.15 8.795a.53.53 0 0 1 .294-.906l5.165-.755a2.122 2.122 0 0 0 1.597-1.16z"
                   fill="#F2B544"/>
         </svg>
-        <svg style="position:absolute; left:152; top:34; width:32; height:32" viewBox="0 0 24 24">
+        <svg style="position:absolute;left:152px;top:34px;width:32px;height:32px" viewBox="0 0 24 24">
             <path d="M20 6 9 17l-5-5" fill="none" stroke="#2FBF9A" stroke-width="2"/>
         </svg>
-        <svg style="position:absolute; left:216; top:34; width:32; height:32" viewBox="0 0 24 24">
+        <svg style="position:absolute;left:216px;top:34px;width:32px;height:32px" viewBox="0 0 24 24">
             <path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" fill="none" stroke="#3E8BFF" stroke-width="2"/>
         </svg>
-        <svg style="position:absolute; left:280; top:34; width:32; height:32" viewBox="0 0 24 24">
+        <svg style="position:absolute;left:280px;top:34px;width:32px;height:32px" viewBox="0 0 24 24">
             <path d="M12 3a4 4 0 1 0 0 8a4 4 0 1 0 0-8" fill="none" stroke="#66768C" stroke-width="2"/>
             <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2" fill="none" stroke="#66768C" stroke-width="2"/>
         </svg>
-        <svg style="position:absolute; left:344; top:34; width:32; height:32" viewBox="0 0 24 24">
+        <svg style="position:absolute;left:344px;top:34px;width:32px;height:32px" viewBox="0 0 24 24">
             <path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z" fill="#38BDF8" stroke="#1F2A37" stroke-width="1"/>
         </svg>
         <!-- 渐变样例：线性 45° 三色标 / 径向 / spreadMethod=repeat / gradientTransform 旋转 -->
@@ -118,28 +117,28 @@
                 <stop offset="1" stop-color="#FF6B6B"/>
             </linearGradient>
         </defs>
-        <svg style="position:absolute; left:404; top:30; width:112; height:44" viewBox="0 0 100 44">
+        <svg style="position:absolute;left:404px;top:30px;width:112px;height:44px" viewBox="0 0 100 44">
             <path d="M4 4 H96 V40 H4 Z" fill="url(#d1)"/>
         </svg>
-        <svg style="position:absolute; left:524; top:30; width:112; height:44" viewBox="0 0 100 44">
+        <svg style="position:absolute;left:524px;top:30px;width:112px;height:44px" viewBox="0 0 100 44">
             <path d="M4 4 H96 V40 H4 Z" fill="url(#d2)"/>
         </svg>
-        <svg style="position:absolute; left:644; top:30; width:112; height:44" viewBox="0 0 100 44">
+        <svg style="position:absolute;left:644px;top:30px;width:112px;height:44px" viewBox="0 0 100 44">
             <path d="M4 4 H96 V40 H4 Z" fill="url(#d3)"/>
         </svg>
-        <svg style="position:absolute; left:764; top:30; width:120; height:44" viewBox="0 0 100 44">
+        <svg style="position:absolute;left:764px;top:30px;width:120px;height:44px" viewBox="0 0 100 44">
             <path d="M4 4 H96 V40 H4 Z" fill="url(#d4)"/>
         </svg>
-        <span class="note" style="position:absolute; left:404; top:80; width:490; height:14">三色标 45° · 径向 · repeat 条纹 · 旋转渐变（oBB / userSpaceOnUse）</span>
+        <span class="note" style="position:absolute;left:404px;top:80px;width:490px;height:14px">三色标 45° · 径向 · repeat 条纹 · 旋转渐变（oBB / userSpaceOnUse）</span>
     </div>
 
     <!-- 底部说明 -->
-    <div class="panel" style="position:absolute; left:16; top:452; width:928; height:72">
-        <span class="desc" style="position:absolute; left:20; top:14; width:470; height:18">SVG 子图形 = 普通节点：path · ellipse · line · polyline · polygon · circle · rect</span>
-        <span class="note" style="position:absolute; left:20; top:36; width:470; height:16; font-size:10">渐变：填充与描边都能用（fill/stroke=url(#…)），编译期折成归一化坐标，运行时逐条带取色</span>
-        <span class="desc" style="position:absolute; left:500; top:14; width:420; height:18">&lt;canvas&gt; 空绘制面：drawNodesGL 回调应用，已裁剪到画布矩形</span>
-        <span class="note" style="position:absolute; left:500; top:36; width:400; height:16">应用 updateFn 每帧更新数据 + invalidateRect → 帧内回调重绘（立即式）</span>
+    <div class="panel" style="position:absolute;left:16px;top:452px;width:928px;height:72px">
+        <span class="desc" style="position:absolute;left:20px;top:14px;width:470px;height:18px">SVG 子图形 = 普通节点：path · ellipse · line · polyline · polygon · circle · rect</span>
+        <span class="note" style="position:absolute;left:20px;top:36px;width:470px;height:16px;font-size:10px">渐变：填充与描边都能用（fill/stroke=url(#…)），编译期折成归一化坐标，运行时逐条带取色</span>
+        <span class="desc" style="position:absolute;left:500px;top:14px;width:420px;height:18px">&lt;canvas&gt; 空绘制面：drawNodesGL 回调应用，已裁剪到画布矩形</span>
+        <span class="note" style="position:absolute;left:500px;top:36px;width:400px;height:16px">应用 updateFn 每帧更新数据 + invalidateRect → 帧内回调重绘（立即式）</span>
     </div>
+</div>
 </body>
 </html>
-</app_window>

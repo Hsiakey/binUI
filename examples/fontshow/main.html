@@ -1,23 +1,11 @@
 <!DOCTYPE html>
-<!--
-  fontshow：字体与输入法（IME）演示。
-
-  ①–④ 是字体能力（字号 / 字重 / 斜体 / 装饰 / 行高 / 混排与缺字回退），
-  ⑤ 是输入法：组字串内联在光标处、候选框贴着光标、选词上屏成中文。
-  两件事放一组是因为它们共用同一条度量链——切字号的输入框（24px 那个）
-  正好用来验证"组字字体与光标高度是否跟随行高"（这里曾经是 bug）。
-
-  ⑤ 里两个输入框字号/高度不同，是为了看候选框会不会跟着光标跳。
-  已知限制：组字期间点别处，这一下会被输入法吃掉（先把拼音提交上屏），要再点一次。
--->
-<app_window width="900" height="760" bg="#F4F7FC" title="字体与输入法" window_resize="disable" ui_scale="proportional">
-<html width="900" height="760" bg="#F4F7FC">
+<html>
 <head>
     <meta charset="UTF-8">
     <title>字体与输入法：字号 / 字重 / 行高 / 装饰 / 混排 / IME</title>
     <style>
         body { font-size: 13px; color: #1F2A37; }
-        .card { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16; }
+        .card { background: #FFFFFF; border: 1px solid #E6EDF7; border-radius: 16px; }
         .card-title { font-size: 13px; font-weight: 700; color: #1F2A37; }
         .note { font-size: 11px; color: #94A3B8; }
         .lab { font-size: 11px; color: #66768C; }
@@ -27,89 +15,88 @@
         .field {
             background: #F7FAFF;
             border: 1px solid #E1E9F5;
-            border-radius: 10;
-            padding: 9;
-            font-size: 13;
+            border-radius: 10px;
+            padding: 9px;
+            font-size: 13px;
             color: #1F2A37;
         }
-        .field-big { font-size: 24; }   /* 行高明显更大：组字字体与光标高度应跟着变 */
+        .field-big { font-size: 24px; }   /* 行高明显更大：组字字体与光标高度应跟着变 */
         .mono { font-family: Consolas; font-size: 13px; color: #3E8BFF; }
         .dim  { font-family: Consolas; font-size: 11px; color: #94A3B8; }
     </style>
 </head>
 <body>
-    <titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:900px;height:45px;display:flex;align-items:center;gap:6px" data-component="../../components/titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="900" data-icon="A" data-iconw="22" data-title="字体与输入法" data-sub="字号 · 字重 · 行高 · 装饰 · 混排 · IME"></titlebar>
+<div data-binui-window data-width="900" data-height="760" data-bg="#F4F7FC" data-title="字体与输入法" data-window-resize="disable" data-ui-scale="proportional">
+    <titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:900px;height:45px;display:flex;align-items:center;gap:6px;--x:0px;--y:0px;--w:900px;--icon:A;--iconw:22px;--title:字体与输入法;--sub:字号 · 字重 · 行高 · 装饰 · 混排 · IME" data-component="../../components/titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="900" data-icon="A" data-iconw="22" data-title="字体与输入法" data-sub="字号 · 字重 · 行高 · 装饰 · 混排 · IME"></titlebar>
 
     <!-- ① 字号阶梯 -->
-    <div class="card" style="position:absolute; left:16; top:56; width:432; height:236">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:300; height:18">① 字号阶梯（px，编译期定，无需运行时测量）</span>
-        <span style="position:absolute; left:16; top:38; width:60; height:16" class="lab">32px</span>
-        <span style="position:absolute; left:76; top:32; width:340; height:40; font-size:32">大肥鱼 binUI</span>
-        <span style="position:absolute; left:16; top:80; width:60; height:16" class="lab">24px</span>
-        <span style="position:absolute; left:76; top:76; width:340; height:32; font-size:24">大肥鱼 binUI</span>
-        <span style="position:absolute; left:16; top:118; width:60; height:16" class="lab">18px</span>
-        <span style="position:absolute; left:76; top:114; width:340; height:26; font-size:18">大肥鱼 binUI</span>
-        <span style="position:absolute; left:16; top:150; width:60; height:16" class="lab">14px</span>
-        <span style="position:absolute; left:76; top:148; width:340; height:22; font-size:14">大肥鱼 binUI</span>
-        <span style="position:absolute; left:16; top:176; width:60; height:16" class="lab">12px</span>
-        <span style="position:absolute; left:76; top:174; width:340; height:18; font-size:12">大肥鱼 binUI</span>
-        <div class="rule" style="position:absolute; left:16; top:200; width:400; height:1"></div>
-        <span class="note" style="position:absolute; left:16; top:208; width:400; height:20">中文按 em 宽度估排、西文 0.52em；换行阈值 = 框宽 × 1.2</span>
+    <div class="card" style="position:absolute;left:16px;top:56px;width:432px;height:236px">
+        <span class="card-title" style="position:absolute;left:16px;top:12px;width:300px;height:18px">① 字号阶梯（px，编译期定，无需运行时测量）</span>
+        <span style="position:absolute;left:16px;top:38px;width:60px;height:16px" class="lab">32px</span>
+        <span style="position:absolute;left:76px;top:32px;width:340px;height:40px;font-size:32px">大肥鱼 binUI</span>
+        <span style="position:absolute;left:16px;top:80px;width:60px;height:16px" class="lab">24px</span>
+        <span style="position:absolute;left:76px;top:76px;width:340px;height:32px;font-size:24px">大肥鱼 binUI</span>
+        <span style="position:absolute;left:16px;top:118px;width:60px;height:16px" class="lab">18px</span>
+        <span style="position:absolute;left:76px;top:114px;width:340px;height:26px;font-size:18px">大肥鱼 binUI</span>
+        <span style="position:absolute;left:16px;top:150px;width:60px;height:16px" class="lab">14px</span>
+        <span style="position:absolute;left:76px;top:148px;width:340px;height:22px;font-size:14px">大肥鱼 binUI</span>
+        <span style="position:absolute;left:16px;top:176px;width:60px;height:16px" class="lab">12px</span>
+        <span style="position:absolute;left:76px;top:174px;width:340px;height:18px;font-size:12px">大肥鱼 binUI</span>
+        <div class="rule" style="position:absolute;left:16px;top:200px;width:400px;height:1px"></div>
+        <span class="note" style="position:absolute;left:16px;top:208px;width:400px;height:20px">中文按 em 宽度估排、西文 0.52em；换行阈值 = 框宽 × 1.2</span>
     </div>
 
     <!-- ② 字重与斜体 -->
-    <div class="card" style="position:absolute; left:452; top:56; width:432; height:236">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:300; height:18">② 字重 400–800 / 斜体 / 文字装饰</span>
-        <span style="position:absolute; left:16; top:40; width:400; height:20; font-size:14; font-weight:400">400 常规 Regular</span>
-        <span style="position:absolute; left:16; top:64; width:400; height:20; font-size:14; font-weight:500">500 中等 Medium</span>
-        <span style="position:absolute; left:16; top:88; width:400; height:20; font-size:14; font-weight:600">600 半粗 Semibold</span>
-        <span style="position:absolute; left:16; top:112; width:400; height:20; font-size:14; font-weight:700">700 粗体 Bold</span>
-        <span style="position:absolute; left:16; top:136; width:400; height:20; font-size:14; font-weight:800">800 特粗 Extrabold</span>
-        <div class="rule" style="position:absolute; left:16; top:164; width:400; height:1"></div>
-        <span style="position:absolute; left:16; top:172; width:190; height:20; font-size:14; font-style:italic">斜体 italic · i / em</span>
-        <span style="position:absolute; left:16; top:196; width:190; height:20; font-size:14; text-decoration:underline">下划线 underline</span>
-        <span style="position:absolute; left:216; top:172; width:190; height:20; font-size:14; text-decoration:line-through">删除线 line-through</span>
-        <span style="position:absolute; left:216; top:196; width:190; height:20; font-size:14; text-decoration:overline">上划线 overline</span>
+    <div class="card" style="position:absolute;left:452px;top:56px;width:432px;height:236px">
+        <span class="card-title" style="position:absolute;left:16px;top:12px;width:300px;height:18px">② 字重 400–800 / 斜体 / 文字装饰</span>
+        <span style="position:absolute;left:16px;top:40px;width:400px;height:20px;font-size:14px;font-weight:400">400 常规 Regular</span>
+        <span style="position:absolute;left:16px;top:64px;width:400px;height:20px;font-size:14px;font-weight:500">500 中等 Medium</span>
+        <span style="position:absolute;left:16px;top:88px;width:400px;height:20px;font-size:14px;font-weight:600">600 半粗 Semibold</span>
+        <span style="position:absolute;left:16px;top:112px;width:400px;height:20px;font-size:14px;font-weight:700">700 粗体 Bold</span>
+        <span style="position:absolute;left:16px;top:136px;width:400px;height:20px;font-size:14px;font-weight:800">800 特粗 Extrabold</span>
+        <div class="rule" style="position:absolute;left:16px;top:164px;width:400px;height:1px"></div>
+        <span style="position:absolute;left:16px;top:172px;width:190px;height:20px;font-size:14px;font-style:italic">斜体 italic · i / em</span>
+        <span style="position:absolute;left:16px;top:196px;width:190px;height:20px;font-size:14px;text-decoration:underline">下划线 underline</span>
+        <span style="position:absolute;left:216px;top:172px;width:190px;height:20px;font-size:14px;text-decoration:line-through">删除线 line-through</span>
+        <span style="position:absolute;left:216px;top:196px;width:190px;height:20px;font-size:14px;text-decoration:overline">上划线 overline</span>
     </div>
 
     <!-- ③ 行高 -->
-    <div class="card" style="position:absolute; left:16; top:308; width:432; height:200">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:300; height:18">③ 行高 line-height（多行正文）</span>
-        <span class="lab" style="position:absolute; left:16; top:36; width:60; height:16">100%</span>
-        <span style="position:absolute; left:76; top:34; width:340; height:56; font-size:12; line-height:100%; color:#66768C">行高等于字号，密排。适合表格与紧凑列表，长段落会显得挤。</span>
-        <span class="lab" style="position:absolute; left:16; top:96; width:60; height:16">170%</span>
-        <span style="position:absolute; left:76; top:94; width:340; height:90; font-size:12; line-height:170%; color:#66768C">1.7 倍行高，正文默认值附近的观感。中文长段落用这个行高最舒服，读起来不累。</span>
+    <div class="card" style="position:absolute;left:16px;top:308px;width:432px;height:200px">
+        <span class="card-title" style="position:absolute;left:16px;top:12px;width:300px;height:18px">③ 行高 line-height（多行正文）</span>
+        <span class="lab" style="position:absolute;left:16px;top:36px;width:60px;height:16px">100%</span>
+        <span style="position:absolute;left:76px;top:34px;width:340px;height:56px;font-size:12px;line-height:100%;color:#66768C">行高等于字号，密排。适合表格与紧凑列表，长段落会显得挤。</span>
+        <span class="lab" style="position:absolute;left:16px;top:96px;width:60px;height:16px">170%</span>
+        <span style="position:absolute;left:76px;top:94px;width:340px;height:90px;font-size:12px;line-height:170%;color:#66768C">1.7 倍行高，正文默认值附近的观感。中文长段落用这个行高最舒服，读起来不累。</span>
     </div>
 
     <!-- ④ 中英混排 / emoji / 符号 -->
-    <div class="card" style="position:absolute; left:452; top:308; width:432; height:200">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:300; height:18">④ 混排与符号（缺字会静默空白 → 已加回退断言）</span>
-        <span style="position:absolute; left:16; top:40; width:400; height:22; font-size:15; font-weight:700">中文 English 混排 123 ABC</span>
-        <span style="position:absolute; left:16; top:68; width:400; height:22; font-size:15">符号：− □ ✕ ◆ ♻ ✏ ✱ → ● ★ ▲ ◎</span>
-        <span style="position:absolute; left:16; top:96; width:400; height:22; font-size:15">Emoji：🐟 🎨 🚀 ✅ ⚠️</span>
-        <span style="position:absolute; left:16; top:124; width:400; height:22; font-size:15; color:#3E8BFF">链接色 #3E8BFF 与正文对比</span>
-        <span class="note" style="position:absolute; left:16; top:156; width:400; height:32">图集分类：ASCII → Segoe UI、非 ASCII → 雅黑、emoji → emoji 字体；emoji 是代理对，IME 光标换算按 UTF-16 单元走（test_font 守着）。</span>
+    <div class="card" style="position:absolute;left:452px;top:308px;width:432px;height:200px">
+        <span class="card-title" style="position:absolute;left:16px;top:12px;width:300px;height:18px">④ 混排与符号（缺字会静默空白 → 已加回退断言）</span>
+        <span style="position:absolute;left:16px;top:40px;width:400px;height:22px;font-size:15px;font-weight:700">中文 English 混排 123 ABC</span>
+        <span style="position:absolute;left:16px;top:68px;width:400px;height:22px;font-size:15px">符号：− □ ✕ ◆ ♻ ✏ ✱ → ● ★ ▲ ◎</span>
+        <span style="position:absolute;left:16px;top:96px;width:400px;height:22px;font-size:15px">Emoji：🐟 🎨 🚀 ✅ ⚠️</span>
+        <span style="position:absolute;left:16px;top:124px;width:400px;height:22px;font-size:15px;color:#3E8BFF">链接色 #3E8BFF 与正文对比</span>
+        <span class="note" style="position:absolute;left:16px;top:156px;width:400px;height:32px">图集分类：ASCII → Segoe UI、非 ASCII → 雅黑、emoji → emoji 字体；emoji 是代理对，IME 光标换算按 UTF-16 单元走（test_font 守着）。</span>
     </div>
 
     <!-- ⑤ 输入法（IME） -->
-    <div class="card" style="position:absolute; left:16; top:524; width:868; height:220">
-        <span class="card-title" style="position:absolute; left:16; top:12; width:420; height:18">⑤ 输入法（IME）：组字 → 候选 → 上屏</span>
-        <button style="position:absolute; left:700; top:8; width:152; height:26; background:#3E8BFF; border-radius:8; font-size:12; color:#FFFFFF">按钮文字居中</button>
+    <div class="card" style="position:absolute;left:16px;top:524px;width:868px;height:220px">
+        <span class="card-title" style="position:absolute;left:16px;top:12px;width:420px;height:18px">⑤ 输入法（IME）：组字 → 候选 → 上屏</span>
+        <button style="position:absolute;left:700px;top:8px;width:152px;height:26px;background:#3E8BFF;border-radius:8px;font-size:12px;color:#FFFFFF">按钮文字居中</button>
 
-        <span class="lab" style="position:absolute; left:16; top:40; width:300; height:16">大号输入框 24px（组字字体与光标高度跟随行高）</span>
-        <input id="in1" class="field field-big" style="position:absolute; left:16; top:60; width:420; height:64"
-               placeholder="在这里打拼音，例如 nihao" />
+        <span class="lab" style="position:absolute;left:16px;top:40px;width:300px;height:16px">大号输入框 24px（组字字体与光标高度跟随行高）</span>
+        <input id="in1" class="field field-big" style="position:absolute;left:16px;top:60px;width:420px;height:64px" placeholder="在这里打拼音，例如 nihao"/>
 
-        <span class="lab" style="position:absolute; left:452; top:40; width:300; height:16">普通输入框 13px（候选框应跳到这个光标处）</span>
-        <input id="in2" class="field" style="position:absolute; left:452; top:60; width:400; height:64"
-               placeholder="再点这里打，候选框要跟着跳" />
+        <span class="lab" style="position:absolute;left:452px;top:40px;width:300px;height:16px">普通输入框 13px（候选框应跳到这个光标处）</span>
+        <input id="in2" class="field" style="position:absolute;left:452px;top:60px;width:400px;height:64px" placeholder="再点这里打，候选框要跟着跳"/>
 
-        <div class="rule" style="position:absolute; left:16; top:128; width:836; height:1"></div>
-        <span id="echo" class="mono" style="position:absolute; left:16; top:134; width:836; height:20">最后收到的字符：—</span>
-        <span id="codepoint" class="dim" style="position:absolute; left:16; top:156; width:836; height:18">码点：—</span>
-        <span id="stats" class="dim" style="position:absolute; left:16; top:176; width:836; height:18">输入框① 0 字符 · 输入框② 0 字符</span>
-        <span class="note" style="position:absolute; left:16; top:194; width:836; height:16">拼音在组字阶段不会进到这里——只有选词上屏的字符才会；组字期间点别处那一下会被输入法吃掉</span>
+        <div class="rule" style="position:absolute;left:16px;top:128px;width:836px;height:1px"></div>
+        <span id="echo" class="mono" style="position:absolute;left:16px;top:134px;width:836px;height:20px">最后收到的字符：—</span>
+        <span id="codepoint" class="dim" style="position:absolute;left:16px;top:156px;width:836px;height:18px">码点：—</span>
+        <span id="stats" class="dim" style="position:absolute;left:16px;top:176px;width:836px;height:18px">输入框① 0 字符 · 输入框② 0 字符</span>
+        <span class="note" style="position:absolute;left:16px;top:194px;width:836px;height:16px">拼音在组字阶段不会进到这里——只有选词上屏的字符才会；组字期间点别处那一下会被输入法吃掉</span>
     </div>
+</div>
 </body>
 </html>
-</app_window>

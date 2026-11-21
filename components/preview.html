@@ -1,45 +1,45 @@
-<!--
-  preview.html —— 标准组件库总览页（也是冒烟测试：改动组件后先跑这一页）
-  用 binUI 的离屏渲染出图：
-      build-mingw/bin/bin2d_shot components/preview.html docs/img/std-components.png
-  （浏览器直接打开**看不到布局**：这是 binUI 的布局语言，不是 HTML，原因见 README）
--->
-<app_window width="780" height="600" bg="#F4F7FC" title="标准组件库"><html width="780" height="600" bg="#F4F7FC"><body>
-    <titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:780px;height:45px;display:flex;align-items:center;gap:6px" data-component="titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="780" data-icon="◆" data-iconw="22" data-title="标准组件库 components/" data-sub="11 个通用组件 · 纯 HTML + CSS"></titlebar>
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body>
+<div data-binui-window data-width="780" data-height="600" data-bg="#F4F7FC" data-title="标准组件库">
+    <titlebar class="bui-tb" style="position:absolute;left:0px;top:0px;width:780px;height:45px;display:flex;align-items:center;gap:6px;--x:0px;--y:0px;--w:780px;--icon:◆;--iconw:22px;--title:标准组件库 components/;--sub:11px 个通用组件 · 纯 HTML + CSS" data-component="titlebar.bum.html" ui_scale="fixed" data-x="0" data-y="0" data-w="780" data-icon="◆" data-iconw="22" data-title="标准组件库 components/" data-sub="11 个通用组件 · 纯 HTML + CSS"></titlebar>
 
     <!-- 按钮四态 -->
-    <button class="bui-btn primary" style="position:absolute;left:20px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px" data-component="button.bum.html" data-x="20" data-y="64" data-w="120" data-h="38" data-label="主按钮">主按钮</button>
-    <button class="bui-btn secondary" style="position:absolute;left:152px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px" data-component="button.bum.html" data-x="152" data-y="64" data-w="120" data-h="38" data-kind="secondary" data-label="次按钮">次按钮</button>
-    <button class="bui-btn ghost" style="position:absolute;left:284px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px" data-component="button.bum.html" data-x="284" data-y="64" data-w="120" data-h="38" data-kind="ghost" data-label="幽灵">幽灵</button>
-    <button class="bui-btn danger" style="position:absolute;left:416px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px" data-component="button.bum.html" data-x="416" data-y="64" data-w="120" data-h="38" data-kind="danger" data-label="危险">危险</button>
+    <button class="bui-btn primary" style="position:absolute;left:20px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px;--x:20px;--y:64px;--w:120px;--h:38px;--label:主按钮" data-component="button.bum.html" data-x="20" data-y="64" data-w="120" data-h="38" data-label="主按钮">主按钮</button>
+    <button class="bui-btn secondary" style="position:absolute;left:152px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px;--x:152px;--y:64px;--w:120px;--h:38px;--kind:secondary;--label:次按钮" data-component="button.bum.html" data-x="152" data-y="64" data-w="120" data-h="38" data-kind="secondary" data-label="次按钮">次按钮</button>
+    <button class="bui-btn ghost" style="position:absolute;left:284px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px;--x:284px;--y:64px;--w:120px;--h:38px;--kind:ghost;--label:幽灵" data-component="button.bum.html" data-x="284" data-y="64" data-w="120" data-h="38" data-kind="ghost" data-label="幽灵">幽灵</button>
+    <button class="bui-btn danger" style="position:absolute;left:416px;top:64px;width:120px;height:38px;border-radius:10px;font-size:13px;--x:416px;--y:64px;--w:120px;--h:38px;--kind:danger;--label:危险" data-component="button.bum.html" data-x="416" data-y="64" data-w="120" data-h="38" data-kind="danger" data-label="危险">危险</button>
 
     <!-- 输入框 + 胶囊 + 开关 -->
-    <input class="bui-field" style="position:absolute;left:20px;top:118px;width:240px;height:38px;border-radius:10px;font-size:13px;padding:10px" data-component="field.bum.html" placeholder="输入关键字…" data-x="20" data-y="118" data-w="240" data-h="38" data-ph="输入关键字…"></input>
-    <span class="bui-badge mint" style="position:absolute;left:276px;top:126px;width:60px;height:22px;font-size:12px" data-component="badge.bum.html" data-x="276" data-y="126" data-w="60" data-text="在线" data-kind="mint">在线</span>
-    <span class="bui-badge amber" style="position:absolute;left:344px;top:126px;width:60px;height:22px;font-size:12px" data-component="badge.bum.html" data-x="344" data-y="126" data-w="60" data-text="告警" data-kind="amber">告警</span>
-    <span class="bui-badge gray" style="position:absolute;left:412px;top:126px;width:60px;height:22px;font-size:12px" data-component="badge.bum.html" data-x="412" data-y="126" data-w="60" data-text="离线" data-kind="gray">离线</span>
-    <button class="bui-toggle" style="position:absolute;left:488px;top:118px;width:104px;height:38px;border-radius:20px;font-size:13px" data-component="toggle.bum.html" data-x="488" data-y="118" data-w="104" data-h="38" data-label="开关">开关</button>
-    <span class="bui-tag blue" style="position:absolute;left:604px;top:127px;width:84px;height:20px;font-size:12px;text-align:center" data-component="tag.bum.html" data-x="604" data-y="127" data-w="84" data-text=".bum.html">.bum.html</span>
-    <span class="bui-tag mint" style="position:absolute;left:696px;top:127px;width:84px;height:20px;font-size:12px;text-align:center" data-component="tag.bum.html" data-x="696" data-y="127" data-w="84" data-text="HTML 写法" data-kind="mint">HTML 写法</span>
+    <input class="bui-field" style="position:absolute;left:20px;top:118px;width:240px;height:38px;border-radius:10px;font-size:13px;padding:10px;--x:20px;--y:118px;--w:240px;--h:38px;--ph:输入关键字…" data-component="field.bum.html" placeholder="输入关键字…" data-x="20" data-y="118" data-w="240" data-h="38" data-ph="输入关键字…"></input>
+    <span class="bui-badge mint" style="position:absolute;left:276px;top:126px;width:60px;height:22px;font-size:12px;--x:276px;--y:126px;--w:60px;--text:在线;--kind:mint" data-component="badge.bum.html" data-x="276" data-y="126" data-w="60" data-text="在线" data-kind="mint">在线</span>
+    <span class="bui-badge amber" style="position:absolute;left:344px;top:126px;width:60px;height:22px;font-size:12px;--x:344px;--y:126px;--w:60px;--text:告警;--kind:amber" data-component="badge.bum.html" data-x="344" data-y="126" data-w="60" data-text="告警" data-kind="amber">告警</span>
+    <span class="bui-badge gray" style="position:absolute;left:412px;top:126px;width:60px;height:22px;font-size:12px;--x:412px;--y:126px;--w:60px;--text:离线;--kind:gray" data-component="badge.bum.html" data-x="412" data-y="126" data-w="60" data-text="离线" data-kind="gray">离线</span>
+    <button class="bui-toggle" style="position:absolute;left:488px;top:118px;width:104px;height:38px;border-radius:20px;font-size:13px;--x:488px;--y:118px;--w:104px;--h:38px;--label:开关" data-component="toggle.bum.html" data-x="488" data-y="118" data-w="104" data-h="38" data-label="开关">开关</button>
+    <span class="bui-tag blue" style="position:absolute;left:604px;top:127px;width:84px;height:20px;font-size:12px;text-align:center;--x:604px;--y:127px;--w:84px;--text:.bum.html" data-component="tag.bum.html" data-x="604" data-y="127" data-w="84" data-text=".bum.html">.bum.html</span>
+    <span class="bui-tag mint" style="position:absolute;left:696px;top:127px;width:84px;height:20px;font-size:12px;text-align:center;--x:696px;--y:127px;--w:84px;--text:HTML 写法;--kind:mint" data-component="tag.bum.html" data-x="696" data-y="127" data-w="84" data-text="HTML 写法" data-kind="mint">HTML 写法</span>
 
     <!-- 面板（宿主子元素成为内容） -->
-    <div class="bui-panel" style="position:absolute;left:20px;top:176px;width:352px;height;border-radius:16px;padding:16px" data-component="panel.bum.html" data-x="20" data-y="176" data-w="352" data-title="panel：宿主子元素就是内容">
-        <span style="height:22; color:#66768C; font-size:12">面板根不写 height 时会自动撑高</span>
-        <span style="height:22; color:#66768C; font-size:12">内容按流式排在标题下面</span>
-        <span style="height:22; color:#94A3B8; font-size:11">圆角 / 边框 / 白面来自组件自己的样式表</span>
+    <div class="bui-panel" style="position:absolute;left:20px;top:176px;width:352px;height;border-radius:16px;padding:16px;--x:20px;--y:176px;--w:352px;--title:panel：宿主子元素就是内容" data-component="panel.bum.html" data-x="20" data-y="176" data-w="352" data-title="panel：宿主子元素就是内容">
+        <span style="height:22px;color:#66768C;font-size:12px">面板根不写 height 时会自动撑高</span>
+        <span style="height:22px;color:#66768C;font-size:12px">内容按流式排在标题下面</span>
+        <span style="height:22px;color:#94A3B8;font-size:11px">圆角 / 边框 / 白面来自组件自己的样式表</span>
     </div>
 
     <!-- 对话气泡 -->
-    <div class="bui-dlg" style="position:absolute;left:392px;top:176px;width:368px;height:176px;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:8px" data-component="dialogue.bum.html" data-x="392" data-y="176" data-w="368" data-h="176" data-name="诺艾拉" data-text="dialogue：角色名胶囊 + 自动换行正文 + 右下两个按钮，位置由参数给。"></div>
+    <div class="bui-dlg" style="position:absolute;left:392px;top:176px;width:368px;height:176px;border-radius:16px;padding:16px;display:flex;flex-direction:column;gap:8px;--x:392px;--y:176px;--w:368px;--h:176px;--name:诺艾拉;--text:dialogue：角色名胶囊 + 自动换行正文 + 右下两个按钮，位置由参数给。" data-component="dialogue.bum.html" data-x="392" data-y="176" data-w="368" data-h="176" data-name="诺艾拉" data-text="dialogue：角色名胶囊 + 自动换行正文 + 右下两个按钮，位置由参数给。"></div>
 
     <!-- 指标 + 头像 + 分隔线 -->
-    <div style="position:absolute;left:20px;top:376px;width:150px;height:40px" data-component="stat.bum.html" data-x="20" data-y="376" data-w="150" data-k="识别帧率" data-v="30 fps"></div>
-    <div style="position:absolute;left:190px;top:376px;width:150px;height:40px" data-component="stat.bum.html" data-x="190" data-y="376" data-w="150" data-k="推理延迟" data-v="8 ms"></div>
-    <div style="position:absolute;left:360px;top:376px;width:150px;height:40px" data-component="stat.bum.html" data-x="360" data-y="376" data-w="150" data-k="在线设备" data-v="12"></div>
-    <img class="bui-avatar" style="position:absolute;left:20px;top:428px;width:56px;height:56px;border-radius:56px" data-component="avatar.bum.html" data-x="20" data-y="428" data-size="56"></img>
-    <span style="position:absolute; left:92; top:440; width:520; height:20; color:#94A3B8; font-size:11">avatar：圆形头像 + 1px 描边，缺图退化成浅色圆</span>
+    <div style="position:absolute;left:20px;top:376px;width:150px;height:40px;--x:20px;--y:376px;--w:150px;--k:识别帧率;--v:30px fps" data-component="stat.bum.html" data-x="20" data-y="376" data-w="150" data-k="识别帧率" data-v="30 fps"></div>
+    <div style="position:absolute;left:190px;top:376px;width:150px;height:40px;--x:190px;--y:376px;--w:150px;--k:推理延迟;--v:8px ms" data-component="stat.bum.html" data-x="190" data-y="376" data-w="150" data-k="推理延迟" data-v="8 ms"></div>
+    <div style="position:absolute;left:360px;top:376px;width:150px;height:40px;--x:360px;--y:376px;--w:150px;--k:在线设备;--v:12px" data-component="stat.bum.html" data-x="360" data-y="376" data-w="150" data-k="在线设备" data-v="12"></div>
+    <img class="bui-avatar" style="position:absolute;left:20px;top:428px;width:56px;height:56px;border-radius:56px;--x:20px;--y:428px;--size:56px" data-component="avatar.bum.html" data-x="20" data-y="428" data-size="56"></img>
+    <span style="position:absolute;left:92px;top:440px;width:520px;height:20px;color:#94A3B8;font-size:11px">avatar：圆形头像 + 1px 描边，缺图退化成浅色圆</span>
     <div style="position:absolute;left:20px;top:500px;width:740px;height:1px;background:#E6EDF7" data-x="20" data-y="500" data-len="740"></div>
 
     <!-- 底部状态栏 -->
-    <div class="bui-sb" style="position:absolute;left:0px;top:552px;width:780px;height:48px;display:flex;align-items:center;gap:8px" data-component="statusbar.bum.html" data-x="0" data-y="552" data-w="780" data-text="状态栏：左灰字 + 右两枚次要按钮"></div>
-</body></html></app_window>
+    <div class="bui-sb" style="position:absolute;left:0px;top:552px;width:780px;height:48px;display:flex;align-items:center;gap:8px;--x:0px;--y:552px;--w:780px;--text:状态栏：左灰字 + 右两枚次要按钮" data-component="statusbar.bum.html" data-x="0" data-y="552" data-w="780" data-text="状态栏：左灰字 + 右两枚次要按钮"></div>
+</div>
+</body>
+</html>
