@@ -1,9 +1,10 @@
 # 15 - 源码成为合法 HTML：把"浏览器预览"变成语言契约
 
-**状态**：**M0 已完成、M1 部分落地（2026-11-21）**——语法定稿见 §2.1，双跑样例
-`examples/valid-html/`（已归门禁，18 页 0 告警）。**M1 已做**：`var(--name, fallback)`
-在编译期展开（长度 + 颜色两个位置，含祖先继承与自身覆盖，见 §6.M1 与 0.38.8）。
-**M1 未做**：`data-component` 内联、`data-param` 文本覆盖、窗口 `data-*`。
+**状态**：**M0 完成、M1 完成（2026-11-21）**——语法定稿见 §2.1；双跑样例
+`examples/valid-html/` 已归门禁（18 页 0 告警）。**M1 四项全落地（0.38.8 / 0.38.9）**：
+`var(--name, fallback)` 编译期展开、`data-component` 内联（宿主即组件根）、`data-param`
+文本覆盖、窗口 `data-*`。**M2 部分有**（`tools/binui_dev.py` 已能热刷新 + 看结构，
+缺 `binui-preview.js` 与组件独立视图）；M3 存量迁移、M4 语义对齐未开工。
 （2026-11-21 master 定方向：走合法 HTML，路难但收益大）
 **类型**：语言 / 工具链 / DX · **严重度**：高（决定"写 UI 是不是像写网页"）
 **影响面**：编译器（`binui_compiler.cpp`）、全部存量布局（`examples/`、`components/`、`docs/mockups/`）、
@@ -159,6 +160,7 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 |---|---|---|---|
 | M0 | 语法定稿 + 一个"双跑"样例（`button` 组件用新语法重写：浏览器能看、`binui_compile` 能编） | 同一份 `button.html` 两处都成立 | **✅ 2026-11-21 完成**：`examples/valid-html/{main,button}.html`；`binui_compile` 2188 B / exit 0，`bin2d_shot` 780×600 / exit 0，Edge headless 截图 4 个按钮全在；语法见 §2.1，实测见 §5/§7 |
 | M1 | 编译器：`var()`、`data-component`、`data-param`、窗口 `data-*`、legacy 告警 | 新语法样例编出的 `.bui` 与旧语法**像素完全一致**（`pixels-bin2d` 0 容差） | 3~5 天 |
+| — | **M1 完成（0.38.8 + 0.38.9）**：`var()`（0.38.8）、`data-component` 内联 / `data-param` 文本覆盖 / 窗口 `data-*`（0.38.9）。`test_css` 共 17 项新断言；样例两组 `diffpx=0 max=0`；`check_examples examples` 18 页 0 问题。legacy 语法仍在（打告警）→ 归 M5 | | |
 | — | **M1 第一步已落地（0.38.8）**：`var(--name, fallback)` 编译期展开（长度 + 颜色；祖先继承 + 自身覆盖 + 未定义无 fallback 时丢声明并告警一次）。验收：`test_css` 7 项新断言；分组对照 `diffpx=0 max=0`；样例 0 告警 | | |
 | M2 | `binui dev` + `binui-preview.js` + 热刷新 + **组件独立视图（居中 / 1x~8x / 盒边界 / 像素放大）** | 改一行保存 → 浏览器 2 秒内刷新且布局变化可见；单组件能 4× 看清 1px 描边 | 1~2 周 |
 | M3 | codemod：`{{}}`→`var()`/`data-param`、`<use>`→`data-component`、补 `px` | 存量 `examples/` + `components/` 全量迁移后像素不变 | 3~5 天 |
@@ -185,8 +187,8 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 | `bin2d_shot … examples\valid-html\main.html …` → `saved … (780x600)`、`exit=0` | 出图成立；780×600 来自 `html,body{width:780px;height:600px}`（见下条） |
 | `width:var(--w,120px)` —— **0.38.8 起支持**（见 §6 M1） | ① 组与 ② 组的盒子都是 `120×38`，两组 PNG **逐像素 0 差异**（`diffpx=0 max=0`，主按钮与次按钮都比过）。曾经的"回退 0px + 一处声明两条告警"已消失 |
 | `color: var(--fg, #FFFFFF)`（组件内部） | 颜色位置同样展开（`textColorOf` 实测取到 fallback）→ M1 的颜色那条已覆盖 |
-| `data-component="button.html"` / `data-param="label"` / `data-label="确定"` | **静默忽略**：0 条告警（`data-` 前缀在属性白名单里直接跳过），`data-label` 不覆盖文本 —— ② 组渲染的仍是「次按钮」。**这是 M1 剩下的活**（`data-component` 内联 / `data-param` 文本覆盖） |
-| `data-binui-window data-width="780" data-height="600" data-bg="#F4F7FC"` | 静默忽略；**窗口尺寸不是从这里来的**，而是 `<html>/<body>` 的 `width/height`（编译器无 `<app_window>` 时据此生成窗口描述段）。M1 剩下的活 |
+| `data-component="button.html"` / `data-param="label"` / `data-label="确定"` | **0.38.9 起内联**：宿主标签与尺寸原样保留，组件的片段元素挂成宿主子节点；`data-param="label"` 的内部元素文本取 `data-label`，没有就取宿主标签里的文本（宿主文本被消费后清空，不重复画）。编译产物 2188 → 2761 字节 |
+| `data-binui-window data-width="780" data-height="600" data-bg="#F4F7FC"` | **0.38.9 起生效**：`NormalizeHtmlWindow` 把它换成编译期窗口包裹层（不进节点树），`data-width/height/bg/title/resizable/transparent/aspect/window-resize/ui-scale` 翻成同名属性，窗口描述段照旧写；`<html>/<body>` 的 CSS 兜底可以删了 |
 | `width:120px;height:38px`（② 组） | **零改动接收**（`ParseLenPct` 本来就认 `px`）→ 语法迁移的第 3 条无成本 |
 | `lang="zh-CN"`（曾在样例里） | `warning: HTML 属性 "lang"（<html>）未实现，已忽略` —— 合法 HTML 的通用属性不在白名单；样例因此不带 `lang`（M1 要把 `lang`/`dir`/`role` 这类通用属性加进白名单或静默） |
 | 两个宿主各写一次 `var()` | 每类告警只报 **1 条**（去重键 = 整条消息）→ 不会刷屏 |

@@ -5,6 +5,41 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.9] - 2026-11-21 【格式 v34 不变】
+
+**M1 收尾：`data-component` 内联、`data-param` 文本覆盖、窗口 `data-*`**（issue 15）。
+至此"源码就是合法 HTML"在**编译器侧**成立：一份文件浏览器能看、`binui_compile` 能编，
+新语法编出来的东西与旧语法逐像素一致。
+
+1. **`data-component` 内联**（`ExpandDataComponents`）。与旧 `<use src>` 的处理形状不同 ——
+   **宿主元素即组件根**：宿主原样留在元素表里（标签/属性/样式都不动，语义由宿主标签给），
+   组件文件是**片段**（没有自己的根标签），它的顶层元素挂成宿主的子节点。两个入口互相
+   可嵌套（片段里还能再写 `data-component` 或 `<use>`），深度上限 8。
+2. **`data-param` 文本覆盖**：组件里带 `data-param="X"` 的元素，文本取宿主的 `data-X`，
+   没有就用宿主标签里的文本；**宿主文本被消费后清空**，否则宿主和内部 span 各画一遍、
+   文字重复。
+3. **窗口 `data-*`**（`NormalizeHtmlWindow`）：`<div data-binui-window data-width data-height
+   data-bg …>` 被换成编译期窗口包裹层（不进节点树），`data-width/height/bg/title/resizable/
+   transparent/aspect/window-resize/ui-scale` 翻成同名属性，后面的窗口描述段原样复用。
+   顺带修了"包裹层只认顶层"的判定 —— 新语法的包裹层通常包在 `<body>` 里，现在允许祖先
+   只有 `html`/`body` 这类文档壳。
+
+样例 `examples/valid-html/`：编译产物 **2188 → 2761 字节**（组件内部结构真的进来了），
+① var() 组与 ② 字面 px 组的按钮**仍然逐像素 0 差异**（`diffpx=0 max=0`），
+`binui_compile` **0 告警**，`check_examples examples` = 18 页 0 问题。
+节点树实测（13 个节点）：`button#b1` 保留 `BINUI_BUTTON` 语义与 `100×30` 宿主尺寸，
+内部 `span.btn__label` 挂在它下面、文本是 `data-label` 给的「确定」，
+第二个按钮没给 `data-label` → 取宿主标签文本「主按钮」。
+
+`test_css` 加 10 项断言（宿主标签保留 / 宿主尺寸 / 宿主文本不重复 / data-label 覆盖 /
+缺省取宿主文本 / 子元素挂宿主 / 窗口尺寸来自 data-* / 窗口底色来自 data-bg / 零告警）。
+
+门禁：`make all` 零警告、`make test` 全 PASSED、`make partial` 4/4 `diff=0`、
+`make pixels-bin2d` 0 容差、`check_examples examples` 18 页 0 问题。
+**还剩的**（不在这版）：M2 的浏览器侧运行时（`binui-preview.js`、组件独立视图）、
+M3 存量迁移（18 个文件带 `{{}}`、15 个带 `<use>`）、M4 语义对齐与 `binui parity`、
+M5 删 legacy 语法。
+
 ## [0.38.8] - 2026-11-21 【格式 v34 不变】
 
 **M1 第一步：`var(--name, fallback)` 在编译期展开**（issue 15）。以前 `width:var(--w,120px)`

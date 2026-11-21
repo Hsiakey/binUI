@@ -3123,8 +3123,13 @@ static std::string RebaseToHost(const std::string& hostDir, const std::string& p
     return s.empty() ? path : s;
 }
 
+// data-component（新语法）与 <use src>（旧语法）互相可以嵌套，两个入口互相调用
+static void ExpandDataComponents(std::vector<HNode>& elems, std::string& styleSheets,
+                                 const std::string& baseDir, int depth);
+
 static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets,
-                             const std::string& baseDir, int depth) {    bool any = false;
+                             const std::string& baseDir, int depth) {
+    bool any = false;
     for (const auto& e : elems)
         if (e.tag == "use" || e.tag == "component") { any = true; break; }
     if (!any) return;
@@ -3315,6 +3320,166 @@ static void ExpandComponents(std::vector<HNode>& elems, std::string& styleSheets
         styleSheets += compStyles;
     }
     elems.swap(out);
+}
+
+// ============================================================
+// 新语法（issue 15 §2.1）：`<button data-component="button.html" data-param="label"
+//                                  data-label="确定" style="…">次按钮</button>`
+//
+// **宿主元素即组件根**，所以这里与 <use> 的处理形状不同：
+//   · 宿主原样留在元素表里（标签/属性/样式都不动 —— 语义由宿主标签给），
+//   · 组件文件是**片段**（没有自己的根标签），它的顶层元素挂成宿主的子节点；
+//   · 组件里带 `data-param="X"` 的元素，文本取宿主的 `data-X`，没有就用宿主标签里的
+//     文本；宿主文本被参数消费掉之后清空，否则宿主与内部 span 各画一遍、文字重复；
+//   · 组件的 <style> 并进样式表（只对内部选择器生效，宿主的外形仍由宿主页的样式给）。
+//
+// 浏览器里同一份文件不需要这些：`<button>` 本来就显示默认文本，组件内容由
+// binui-preview.js（M2）填。编译器这边做的是"把组件内部结构真的展开出来"。
+// ============================================================
+static void ExpandDataComponents(std::vector<HNode>& elems, std::string& styleSheets,
+                                 const std::string& baseDir, int depth) {
+    if (depth > 8) {
+        Warn("data-component 嵌套超过 8 层，疑似循环引用，已停止展开");
+        return;
+    }
+    bool any = false;
+    for (const auto& e : elems)
+        if (e.attrs.count("data-component")) { any = true; break; }
+    if (!any) return;
+
+    std::vector<HNode> out;
+    out.reserve(elems.size() * 3);
+    std::vector<size_t> remap(elems.size(), SIZE_MAX);
+
+    for (size_t oi = 0; oi < elems.size(); ++oi) {
+        HNode& e = elems[oi];
+        auto cit = e.attrs.find("data-component");
+        if (cit == e.attrs.end()) {
+            HNode copy = e;
+            copy.parentIdx = (copy.parentIdx == SIZE_MAX) ? SIZE_MAX : remap[copy.parentIdx];
+            remap[oi] = out.size();
+            out.push_back(std::move(copy));
+            continue;
+        }
+
+        const std::string srcRel = TrimCopy(cit->second);
+        const std::string label = e.attrs.count("id") ? ("#" + e.attrs.at("id"))
+                                                      : ("<" + e.tag + ">");
+        // 参数：data-<name>=value 是正式写法；宿主的普通属性也收（兼容旧 {{x}} 组件）
+        std::unordered_map<std::string, std::string> params;
+        for (const auto& kv : e.attrs) {
+            if (kv.first == "data-component") continue;
+            if (kv.first.rfind("data-", 0) == 0) params[kv.first.substr(5)] = kv.second;
+            params[kv.first] = kv.second;
+        }
+
+        std::string hostText = e.text;
+        std::vector<HNode> compElems;
+        std::string compStyles;
+        std::string compDir = baseDir;
+        std::string failReason;
+        const AssetFile af = ProbeAsset(baseDir, srcRel);
+        if (srcRel.empty()) {
+            failReason = "缺少 data-component 的值";
+        } else if (!af.valid()) {
+            failReason = "读不到组件文件「" + srcRel + "」";
+        } else {
+            compDir = std::filesystem::path(af.path).parent_path().generic_string();
+            const bool binary = (af.kind == AssetKind::BinaryLayout);
+            if (binary)
+                Warn("data-component " + label + "：组件是二进制布局（" + srcRel +
+                     "），新语法只支持源码组件，已按空容器处理");
+            else {
+                std::string compSrc;
+                if (!ReadWholeFile(af.path, compSrc)) {
+                    failReason = "读不到组件文件 " + af.path;
+                } else {
+                    // 打包清单存替换参数之前的原始源码（与 <use> 同口径）
+                    SrcMapCollect(af.path, std::vector<uint8_t>(compSrc.begin(), compSrc.end()));
+                    compElems = ParseElements(SubstituteParams(compSrc, params), compStyles);
+                    if (compElems.empty()) failReason = "组件 " + af.path + " 解析后没有元素";
+                }
+            }
+        }
+        if (!failReason.empty())
+            Warn("data-component 内联 " + label + "：" + failReason + "（已按空容器处理）");
+
+        // ---- 参数文本落地：data-param="X" 的元素取宿主的 data-X / 宿主文本 ----
+        for (auto& ce : compElems) {
+            auto pit = ce.attrs.find("data-param");
+            if (pit == ce.attrs.end()) continue;
+            const std::string name = TrimCopy(pit->second);
+            auto vit = params.find(name);
+            if (vit != params.end() && !vit->second.empty()) {
+                ce.text = vit->second;
+                hostText.clear();
+            } else if (!hostText.empty()) {
+                ce.text = hostText;      // 默认值 = 宿主标签里的文本
+                hostText.clear();
+            }
+        }
+        e.text = hostText;               // 没被参数消费就留在宿主上（宿主即根）
+
+        // ---- 组件内相对资源路径 → 宿主相对路径（与 <use> 同规则）----
+        for (auto& ce : compElems) {
+            if (ce.tag != "img" && ce.tag != "video") continue;
+            auto sit = ce.attrs.find("src");
+            if (sit == ce.attrs.end() || sit->second.empty() || baseDir.empty()) continue;
+            if (compDir == baseDir) continue;
+            std::error_code ec;
+            const auto rel = std::filesystem::relative(
+                std::filesystem::path(compDir) / sit->second,
+                std::filesystem::path(baseDir), ec);
+            if (!ec) sit->second = rel.generic_string();
+        }
+
+        // ---- 嵌套：片段里还能再有 data-component / <use> ----
+        if (!compElems.empty()) {
+            ExpandDataComponents(compElems, compStyles, compDir, depth + 1);
+            ExpandComponents(compElems, compStyles, compDir, depth + 1);
+        }
+
+        // ---- 落地：宿主 + 组件顶层元素（父索引按局部表重映射）----
+        remap[oi] = out.size();
+        e.parentIdx = (e.parentIdx == SIZE_MAX) ? SIZE_MAX : remap[e.parentIdx];
+        const size_t hostIdx = out.size();
+        out.push_back(e);
+        std::vector<size_t> cremap(compElems.size(), SIZE_MAX);
+        for (size_t k = 0; k < compElems.size(); ++k) {
+            HNode ce = compElems[k];
+            if (ce.parentIdx == SIZE_MAX) ce.parentIdx = hostIdx;
+            else ce.parentIdx = cremap[ce.parentIdx];
+            cremap[k] = out.size();
+            out.push_back(std::move(ce));
+        }
+        styleSheets += compStyles;
+    }
+    elems.swap(out);
+}
+
+// 新语法：`<div data-binui-window data-width="780" data-height="600" data-bg="#F4F7FC">`
+// 当**编译期窗口包裹层**用（等价于旧的 `<app_window>` / `<binui>`）：把标签改成
+// app_window、data-* 翻成同名属性，后面「不进节点树 / 子元素挂根 / 写窗口描述段」
+// 那一整套既有逻辑原样复用，不另开一条解析路径。
+static void NormalizeHtmlWindow(std::vector<HNode>& elems) {
+    static const struct { const char* from; const char* to; } kMap[] = {
+        {"data-width", "width"},       {"data-height", "height"},
+        {"data-bg", "bg"},             {"data-title", "title"},
+        {"data-resizable", "resizable"}, {"data-transparent", "transparent"},
+        {"data-aspect", "aspect"},     {"data-window-resize", "window_resize"},
+        {"data-ui-scale", "ui_scale"},
+    };
+    for (auto& e : elems) {
+        if (!e.attrs.count("data-binui-window")) continue;
+        if (e.attrs.count("_binui_window_done")) continue;
+        e.attrs["_binui_window_done"] = "1";
+        e.tag = "app_window";
+        for (const auto& m : kMap) {
+            auto it = e.attrs.find(m.from);
+            if (it != e.attrs.end() && !it->second.empty() && !e.attrs.count(m.to))
+                e.attrs[m.to] = it->second;
+        }
+    }
 }
 // ============================================================
 // SVG 引用展开：<defs>/<symbol> 当模板，<use href="#id"> 克隆一份
@@ -3524,7 +3689,12 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     std::string styleSheets; // <style> 文本（@keyframes 与 transition/animation 规则）
     std::vector<HNode> elems = ParseElements(ApplyParamDefaults(html), styleSheets);
 
-    // ---- 1.5 组件内联：<use src="x.bum.html"> 展开成真实元素 ----
+    // ---- 1.5 组件内联 ----
+    //   · 新语法：<button data-component="button.html" data-label="确定">次按钮</button>
+    //     （宿主即组件根；先做，因为它的片段里可以再写 <use>）
+    //   · 旧语法：<use src="x.bum.html"> 展开成真实元素
+    NormalizeHtmlWindow(elems);          // <div data-binui-window …> → 编译期窗口包裹层
+    ExpandDataComponents(elems, styleSheets, tl_uiBaseDir, 0);
     ExpandComponents(elems, styleSheets, tl_uiBaseDir, 0);
     // ---- 1.6 SVG 引用：<defs>/<symbol> 打模板标记，<use href="#id"> 展开成克隆 ----
     MarkSvgDefinitions(elems);
@@ -4633,13 +4803,24 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         elemCtx[k].attrs = &elems[k].attrs;
 
     // ---- 3. 根尺寸 ----
-    // <app_window>：编译期窗口包裹层（不进节点树），其属性定义窗口描述
+    // <app_window>：编译期窗口包裹层（不进节点树），其属性定义窗口描述。
+    // 新语法的 <div data-binui-window> 在 NormalizeHtmlWindow 里已经换成 app_window，
+    // 但它通常包在 <body> 里 —— 所以判定"顶层"要允许祖先只有 html/body 这类文档壳。
+    auto isWindowWrapper = [&](size_t idx) {
+        size_t cur = elems[idx].parentIdx;
+        for (int guard = 0; cur < elems.size() && guard < 32; ++guard) {
+            const std::string& t = elems[cur].tag;
+            if (t != "html" && t != "body") return false;
+            cur = elems[cur].parentIdx;
+        }
+        return true;
+    };
     WinDesc wdesc;
     bool hasAppWindow = false;
     for (size_t ci = 0; ci < elems.size(); ci++) {
         const auto& ce = elems[ci];
         if (ce.tag != "app_window") continue;
-        if (ce.parentIdx != SIZE_MAX) continue; // 只认顶层
+        if (!isWindowWrapper(ci)) continue; // 只认文档壳里的包裹层
         hasAppWindow = true;
         auto cst = styleOf(ce, ci);
         wdesc.present = true;

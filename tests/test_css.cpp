@@ -3951,6 +3951,70 @@ int run() {
              inner && panelTitle && inner->parentId == panelTitle->parentId);
     }
 
+    // ---- issue 15 的 M1：新语法 data-component / data-param / 窗口 data-* ----
+    {
+        namespace fs = std::filesystem;
+        const fs::path dir = fs::temp_directory_path() / "binui_test_dc";
+        fs::create_directories(dir);
+        auto writeFile = [&](const std::string& name, const std::string& text) {
+            std::ofstream f(dir / name, std::ios::binary);
+            f << text;
+        };
+        // 组件是**片段**：没有自己的根标签，只给内部结构与内部选择器
+        writeFile("btn.html",
+            "<style>.btn__label{display:block;width:100%;height:100%;text-align:center;"
+            "color:var(--fg,#FFFFFF)}</style>"
+            "<span class=\"btn__label\" data-param=\"label\">按钮</span>");
+        writeFile("host2.html",
+            "<html><head><style>html,body{width:400px;height:300px}</style></head><body>"
+            "<div data-binui-window data-width=\"400\" data-height=\"300\" data-bg=\"#102030\">"
+            "<button id=\"b1\" data-component=\"btn.html\" data-label=\"确定\""
+            " style=\"position:absolute;left:10px;top:10px;width:100px;height:30px\">次</button>"
+            "<button id=\"b2\" data-component=\"btn.html\""
+            " style=\"position:absolute;left:10px;top:60px;width:120px;height:30px\">主按钮</button>"
+            "</div></body></html>");
+
+        auto res = CompileBinUIFileEx((dir / "host2.html").generic_string());
+        BinUIRenderer r;
+        TEST("dc: parses", !res.layout.empty() && r.loadLayout(res.layout.data(), res.layout.size()));
+        const auto nodeOfId2 = [&](const char* name) -> const BinUIRenderer::NodeInfo* {
+            const uint16_t id = r.findNodeByName(name);
+            for (const auto& nd : r.getNodes()) if (nd.id == id) return &nd;
+            return nullptr;
+        };
+        const auto* b1 = nodeOfId2("b1");
+        const auto* b2 = nodeOfId2("b2");
+        TEST("dc: 宿主标签保留（button 语义）", b1 && b1->type == BINUI_BUTTON);
+        TEST("dc: 宿主尺寸仍由宿主 style 给",
+             b1 && std::fabs(b1->width - 100.0f) < 0.5f && std::fabs(b1->height - 30.0f) < 0.5f);
+        TEST("dc: 宿主文本被参数消费（不会重复画）", b1 && b1->text.empty());
+        // 组件内部 span：文本来自 data-label；第二个按钮没有 data-label → 用宿主标签文本
+        const auto* inner1 = [&]() -> const BinUIRenderer::NodeInfo* {
+            for (const auto& nd : r.getNodes())
+                if (b1 && nd.parentId == b1->id && nd.text == "确定") return &nd;
+            return nullptr;
+        }();
+        const auto* inner2 = [&]() -> const BinUIRenderer::NodeInfo* {
+            for (const auto& nd : r.getNodes())
+                if (b2 && nd.parentId == b2->id && nd.text == "主按钮") return &nd;
+            return nullptr;
+        }();
+        TEST("dc: data-label 覆盖组件内部文本", inner1 != nullptr);
+        TEST("dc: 缺省文本取宿主标签里的文本", inner2 != nullptr);
+        TEST("dc: 组件内部元素挂在宿主下（宿主即根）",
+             b1 && b1->parentId == 0 && inner1 && std::fabs(inner1->width - 100.0f) < 0.5f);
+        // 窗口描述来自 data-*（包装层不进节点树）
+        const auto& nodes2 = r.getNodes();
+        TEST("dc: 窗口尺寸来自 data-width/data-height",
+             !nodes2.empty() && std::fabs(nodes2[0].width - 400.0f) < 0.5f &&
+             std::fabs(nodes2[0].height - 300.0f) < 0.5f);
+        TEST("dc: 窗口底色来自 data-bg", r.windowDesc().bgColor == 0xFF102030u);
+        int badWarn = 0;
+        for (const auto& w : res.warnings)
+            if (w.find("data-component") != std::string::npos) badWarn++;
+        TEST("dc: 正常样例零告警", badWarn == 0);
+    }
+
     // ---- issue 15 的 M1：CSS 自定义属性 var(--x, fallback) 在编译期展开 ----
     {
         auto res = CompileBinUIEx(
