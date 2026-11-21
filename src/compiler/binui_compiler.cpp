@@ -5104,47 +5104,91 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
     };
 
     // ============================================================
-    // 字号级联（CSS 的 font-size 继承）
+    // 文字级联（font-size / font-weight / text-align 三条 CSS 继承属性）
     // ------------------------------------------------------------
-    // binUI 以前**没有级联**：没写 font-size 的元素一律用标签默认值（14），于是
-    // `body { font-size:13px }` 对子元素完全无效 —— 而 font-size 是 CSS 里最典型的继承属性。
-    // 实测：同一个探针页 binUI 的字是 14px、浏览器 24px（墨迹高度差 9px）。
+    // binUI 以前**没有级联**：没写就一律用标签默认值。实测三条都不继承 ——
+    //   · font-size：`body { font-size:24px }` 时子元素仍 14px（墨迹 14px vs 浏览器 23px）；
+    //   · font-weight：父级 `font-weight:700` 时子元素仍是常规粗细（墨迹像素 399 vs 612）；
+    //   · text-align：父级 `text-align:center` 时子元素文字还在左边（x=11 vs 浏览器 x=178）。
     //
-    // 规则（对齐 CSS，同时保住标签自带字号）：
-    //   1. 本元素写了 font-size → 用它的（em 相对**父级**字号，和 CSS 一致）；
-    //   2. 没写 → 继承父元素解析后的字号；
-    //   3. 父子都没有 → 标签默认值（h1~h6/small 这类"标签自带字号"直接用标签默认，
-    //      相当于 CSS 的 UA 样式表，不参与继承）。
+    // 规则（对齐 CSS，同时保住标签自带样式 = UA 样式表）：
+    //   1. 本元素写了就用本元素的（`em` 相对**父级**字号；`font-weight` 归一化成 4/7）；
+    //   2. 没写就继承父元素解析后的值；
+    //   3. 父子都没有才用标签默认（h1~h6/b/strong/th 粗、button 居中、其余 14px/左对齐）。
     // 一次前序遍历即可（ParseElements 保证父元素下标更小）。
-    std::unordered_map<size_t, float> resolvedFont;
+    struct ResolvedText {
+        float   fs     = 14.0f;
+        uint8_t weight = 4;   // 4 = 常规，7 = 粗体（与 paint.weight 同口径）
+        uint8_t align  = 0;   // 0 = 左，1 = 中，2 = 右（与 BINUI_TEXT_CENTER/RIGHT 同位）
+    };
+    std::unordered_map<size_t, ResolvedText> resolvedText;
     {
         auto hasOwnTagSize = [](const std::string& t) {
             return t == "h1" || t == "h2" || t == "h3" || t == "h4" || t == "h5" ||
                    t == "h6" || t == "small";
         };
+        auto tagBold = [](const std::string& t) {
+            return t == "h1" || t == "h2" || t == "h3" || t == "h4" || t == "h5" ||
+                   t == "h6" || t == "b"  || t == "strong" || t == "th";
+        };
         for (size_t fi = 0; fi < elems.size(); fi++) {
             const HNode& e = elems[fi];
             auto st = styleOf(e, fi);
-            const std::string fsv = pick(e.attrs, st, "size", "font-size", "");
-            float parentFs = -1.0f;
+            const ResolvedText* par = nullptr;
             if (e.parentIdx != SIZE_MAX) {
-                auto pit = resolvedFont.find(e.parentIdx);
-                if (pit != resolvedFont.end()) parentFs = pit->second;
+                auto pit = resolvedText.find(e.parentIdx);
+                if (pit != resolvedText.end()) par = &pit->second;
             }
-            float fs;
+            ResolvedText rt;
+            // ---- 字号 ----
+            const std::string fsv = pick(e.attrs, st, "size", "font-size", "");
             if (!fsv.empty()) {
-                const float base = (parentFs > 0.0f) ? parentFs : DefaultFontSizeOf(e.tag);
+                const float base = par ? par->fs : DefaultFontSizeOf(e.tag);
                 LenCtx fsCtx{ base, curCtx.rootFont, curCtx.viewW, curCtx.viewH };
                 auto fp = ParseLenPct(fsv, base, fsCtx, "font-size");
-                fs = (fp.ok && fp.value > 0.0f) ? fp.value : base;
+                rt.fs = (fp.ok && fp.value > 0.0f) ? fp.value : base;
             } else if (hasOwnTagSize(e.tag)) {
-                fs = DefaultFontSizeOf(e.tag);
-            } else if (parentFs > 0.0f) {
-                fs = parentFs;
+                rt.fs = DefaultFontSizeOf(e.tag);
             } else {
-                fs = DefaultFontSizeOf(e.tag);
+                rt.fs = par ? par->fs : DefaultFontSizeOf(e.tag);
             }
-            resolvedFont[fi] = fs;
+            // ---- 字重 ----
+            const std::string fw = lowerStr(pick(e.attrs, st, "weight", "font-weight", ""));
+            if (!fw.empty() && fw != "normal") {
+                uint8_t w8 = 4;
+                if (fw == "bold" || fw == "bolder" || fw == "700") {
+                    w8 = 7;
+                } else if (fw == "lighter" || fw == "400") {
+                    w8 = 4;
+                } else {
+                    try {
+                        w8 = (std::stoi(fw) >= 600) ? 7 : 4;
+                    } catch (...) {
+                        w8 = 4;
+                    }
+                }
+                rt.weight = w8;
+            } else if (fw == "normal" || fw == "400") {
+                rt.weight = 4;
+            } else if (tagBold(e.tag)) {
+                rt.weight = 7;
+            } else {
+                rt.weight = par ? par->weight : 4;
+            }
+            // ---- 对齐 ----
+            const std::string ta = lowerStr(pick(e.attrs, st, "align", "text-align", ""));
+            if (ta == "center") {
+                rt.align = 1;
+            } else if (ta == "right" || ta == "end") {
+                rt.align = 2;
+            } else if (ta == "left" || ta == "start") {
+                rt.align = 0;
+            } else if (e.tag == "button") {
+                rt.align = 1;          // 按钮的 UA 默认居中（浏览器如此）
+            } else {
+                rt.align = par ? par->align : 0;
+            }
+            resolvedText[fi] = rt;
         }
     }
 
@@ -5226,10 +5270,10 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             auto st = styleOf(e, k);
             const uint8_t ktype = tagToType(e.tag);
 
-            // 子项字号（本项 em 的换算基准）：走字号级联表（含 CSS 继承）
+            // 子项字号（本项 em 的换算基准）：走文字级联表（含 CSS 继承）
             {
-                auto rf = resolvedFont.find(k);
-                curCtx.fontSize = (rf != resolvedFont.end()) ? rf->second
+                auto rf = resolvedText.find(k);
+                curCtx.fontSize = (rf != resolvedText.end()) ? rf->second.fs
                                                              : DefaultFontSizeOf(e.tag);
             }
 
@@ -7274,11 +7318,11 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             }
         }
 
-        // 本元素字号：走字号级联表（含 CSS 继承；em 相对父级字号）
+        // 本元素字号：走文字级联表（含 CSS 继承；em 相对父级字号）
         float nodeFontSize = 14.0f;
         {
-            auto rf = resolvedFont.find(ei);
-            nodeFontSize = (rf != resolvedFont.end()) ? rf->second : DefaultFontSizeOf(e.tag);
+            auto rf = resolvedText.find(ei);
+            nodeFontSize = (rf != resolvedText.end()) ? rf->second.fs : DefaultFontSizeOf(e.tag);
             curCtx.fontSize = nodeFontSize;
         }
 
@@ -7682,15 +7726,14 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             n.flags |= BINUI_SCROLLABLE;
             if (!clipOnly) n.flags |= BINUI_INTERACTIVE;
         }
-        // text-align：借 flags 的两个空闲位编码（不新增节点字段，旧布局两位为 0 = 左对齐）
+        // text-align：借 flags 的两个空闲位编码（不新增节点字段，旧布局两位为 0 = 左对齐）。
+        // 值来自文字级联表：自己没写就继承父级（CSS 里 text-align 是继承属性）；按钮的
+        // 居中仍然优先（标签默认，见级联表里的 button 分支）。
         {
-            std::string ta = lowerStr(pick(e.attrs, style, "align", "text-align", ""));
-            if (ta == "center") n.flags |= BINUI_TEXT_CENTER;
-            else if (ta == "right" || ta == "end") n.flags |= BINUI_TEXT_RIGHT;
-            // <button> 的 UA 默认值是居中（浏览器如此）。后端以前把按钮文字写死居中，
-            // 所以这份"默认"一直没人写；现在后端改成读 flags 了，必须在这里补上，
-            // 否则所有没写 text-align 的按钮会突然变左对齐（演示全都要改观感）。
-            else if (type == BINUI_BUTTON && ta.empty()) n.flags |= BINUI_TEXT_CENTER;
+            auto rti = resolvedText.find(ei);
+            const uint8_t tAlign = (rti != resolvedText.end()) ? rti->second.align : 0;
+            if (tAlign == 1) n.flags |= BINUI_TEXT_CENTER;
+            else if (tAlign == 2) n.flags |= BINUI_TEXT_RIGHT;
         }
 
         // 嵌套 <svg>：它的 x/y/width/height 是**父用户坐标**，而普通元素的 left/top 是容器像素。
@@ -7790,20 +7833,10 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
 
         // 字重 / 行高 / 文字装饰
         {
-            std::string fw = lowerStr(pick(e.attrs, style, "weight", "font-weight", ""));
-            if (!fw.empty() && fw != "normal" && fw != "400") {
-                uint8_t w8 = 4;   // 归一化成"百位"：4 = 常规，7 = 粗体
-                if (fw == "bold" || fw == "bolder" || fw == "700") w8 = 7;
-                else {
-                    try {
-                        const int num = std::stoi(fw);
-                        w8 = (num >= 600) ? 7 : 4;
-                    } catch (...) {
-                        Warn("CSS font-weight: 无法解析 \"" + fw + "\"，按 normal 处理");
-                    }
-                }
-                if (w8 != 4) { paint.weight = w8; pflags |= PAINT_WEIGHT; }
-            }
+            // 字重来自文字级联表：自己没写就继承父级（CSS 里 font-weight 是继承属性）
+            auto rti = resolvedText.find(ei);
+            const uint8_t w8 = (rti != resolvedText.end()) ? rti->second.weight : 4;
+            if (w8 != 4) { paint.weight = w8; pflags |= PAINT_WEIGHT; }
             std::string lhv = TrimCopy(pick(e.attrs, style, "line-height", "line-height", ""));
             if (!lhv.empty() && lowerStr(lhv) != "normal") {
                 int pct = 0;
