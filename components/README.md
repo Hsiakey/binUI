@@ -16,7 +16,7 @@
 渲染成图：
 
 ```sh
-build-mingw/bin/offscreen_render components/preview.html docs/img/std-components.png
+build-mingw/bin/bin2d_shot components/preview.html docs/img/std-components.png
 ```
 
 `src` 按**宿主 UI 文件所在目录**解析，所以从 `examples/<demo>/main.html` 引用就是
