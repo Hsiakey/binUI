@@ -152,6 +152,11 @@ def css_fix(block):
 
 
 def subst(text, params):
+    # 布尔属性（`data-binui-window`、`hidden`、`disabled` 这类没有值）在 HTMLParser 里
+    # attr 值是 None —— 直接 re.sub 会 TypeError。合法 HTML 语法里这种属性很常见
+    # （issue 15 的窗口根就是 `<div data-binui-window ...>`），按空串处理。
+    if text is None:
+        return ""
     def repl(m):
         body = m.group(1)
         if "=" in body:

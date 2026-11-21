@@ -27,7 +27,7 @@
 
 | ID | 事项 | 来源 | 验收 | 估 | 结果 |
 |---|---|---|---|---|---|
-| B1 | **M0 语法定稿 + 双跑样例**：`button` 组件用新语法重写（`var()` / `data-component` / `data-param` / `px`），同一份文件浏览器能看、`binui_compile` 能编 | 15 §6 M0 | 同一份 `button.html` 两处都成立；差异清单固化成 §5 表 | 2–3 天 | |
+| B1 | **M0 语法定稿 + 双跑样例**：`button` 组件用新语法重写（`var()` / `data-component` / `data-param` / `px`），同一份文件浏览器能看、`binui_compile` 能编 | 15 §6 M0 | 同一份 `button.html` 两处都成立；差异清单固化成 §5 表 | 2–3 天 | **完成 · 0.38.7**（`docs/spec/valid-html/`；§2.1 契约八条 + §5 实测列 + §7 探针） |
 | B2 | **M1 编译器接线**：`var(--name, fallback)` 解析、`data-component` 内联（复用 `<use>` 管线）、`data-param` 文本覆盖、窗口 `data-*`、legacy 告警（`--strict-html` 拒收） | 15 §3 | 新语法样例编出的 `.bui` 与旧语法**像素完全一致**（`pixels-bin2d` 0 容差） | 3–5 天 | |
 | B3 | M2 `binui dev`（静态服务 + 监听 + SSE）+ `binui-preview.js` + 组件独立视图（居中 / 1x~8x / 盒边界 / 像素放大） | 15 §4 | 改一行保存 → 浏览器 2 秒内刷新且布局变化可见；单组件 4× 能看清 1px 描边 | 1–2 周 | 依赖 B2 |
 | B4 | M3 codemod：`{{}}`→`var()`/`data-param`、`<use>`→`data-component`、补 `px` | 15 §6 M3 | 存量 `examples/` + `components/` 全量迁移，逐页过 `pixels-bin2d` 像素不变 | 3–5 天 | 依赖 B2 绿 |

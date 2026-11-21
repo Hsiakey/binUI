@@ -5,6 +5,39 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.7] - 2026-11-21 【格式 v34 不变】
+
+**合法 HTML 语法定稿（issue 15 的 M0）**：一份源码，浏览器直接打开可读、`binui_compile`
+编得出 `.bui`、`bin2d_shot` 出得了图。语法见 issue 15 §2.1「组件契约」八条，样例在
+`docs/spec/valid-html/{main,button}.html`（组件文件是**片段，不写自己的根标签**；宿主元素
+即组件根；参数用 `data-*` + `var(--name, fallback)`；长度一律带 `px`；窗口用
+`<div data-binui-window data-*>`）。
+
+今天就能成立的部分：合法 HTML 结构、`px`、`data-*`（静默忽略）。**还差 `var()`** ——
+实测编译器对 `width:var(--w,120px)` 告警两次（`width：` + `长度：`）且**回退到 0px 而不是
+fallback 的 120px**，颜色位置（`color:var(--fg,#FFFFFF)`）同样不认；`data-binui-window`
+的 `data-*` 今天完全不读，780×600 实际来自 `<html>/<body>` 的 CSS 兜底。四条都归 M1。
+
+issue 15 §5「布局语义对齐」补了逐条实测（同一台机器、两端口径的对拍数字）：
+
+| 项 | 实测 |
+|---|---|
+| `box-sizing` | binUI 恒 border-box 且**忽略**作者写的值；不注入时 100 vs **124** 宽（蓝面 2.08×） |
+| 文字度量 | 同字体 13px：宽差 **4px**、基线低 **3px**、120px 宽中文段 **4 行 vs 3 行** |
+| 阴影 | `0 8px 24px rgba(0,0,0,.35)` 盒下 8px 最暗 binUI **R=165** vs 浏览器 **R=201**（更浓 36/255） |
+| `%` 高度 / flex 分配 / z-index / 圆角·渐变 | 语义一致（flex 只差余数舍入 ±1px，渐变最大单通道 9/255） |
+| `overflow` | **修正旧结论**：binUI 默认**不**按祖先矩形裁剪，只有 `overflow:hidden/auto/scroll` 才裁 —— 所以"预览要给定位元素补 `overflow:hidden`"那条对策是错的，已删 |
+
+样例放在 `docs/spec/`（规格样例，**不在 `examples/` 的 `check_examples` 扫描范围内**），
+因此门禁保持全绿；M1 让 `var()` 归零后再搬进 `examples/`。**不给 `check_examples` 加告警
+白名单** —— 为一个尚未支持的语法开口子，后面的告警就都能藏进去。
+
+顺手修 `tools/binui_preview.py` 对新语法的崩溃：布尔属性（`<div data-binui-window>` 这种
+没有值的）在 HTMLParser 里 attr 为 `None`，`re.sub` 直接 `TypeError`。
+
+门禁：`make all` 零警告、`check_examples examples` 16 页 0 问题、`make test` PASSED、
+`make partial` 4/4 `diff=0`、`make pixels-bin2d` 0 容差（绘制路径没动）。
+
 ## [0.38.6] - 2026-11-21 【格式 v34 不变】
 
 **结构查看器（issue 14 的 P1）**：把 renderer 排完之后的**真布局**导成 JSON，再合成一个

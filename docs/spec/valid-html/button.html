@@ -1,0 +1,33 @@
+<!--
+  button.html —— B1/M0 新语法组件：**只给内部结构与样式，不自带根元素**。
+
+  约定（docs/issues/15-valid-html-language.md §2 关键决定）：
+    · 组件文件是一个 HTML **片段**，没有 <html>/<body>/<button> 这类"根标签"；
+    · **宿主元素即组件根**：位置 / 尺寸 / 底色 / 字号由宿主自己的 style 与 --var 给，
+      组件不描述"我是多大的盒子"；
+    · 本文件只提供：① 内部子结构 ② 只作用于内部的选择器（不碰宿主）。
+
+  浏览器：直接打开是一个片段（能解析、能渲染，但没有盒子 —— 盒子由宿主给）。
+  宿主页 examples/valid-html/main.html 用 <button data-component="button.html"> 实例化；
+  浏览器侧由 binui-preview.js（M2）把本文件注入宿主，binUI 侧由编译器做同一件事（M1）。
+
+  参数：
+    label  文案。默认值 = **宿主标签里的文本**（浏览器直接可见），宿主 data-label="…" 覆盖。
+    --w / --h / --bg / --r / --fs  由宿主的 style 声明，组件内部可引用。
+-->
+<style>
+    /* 内部结构：一行居中文字，铺满宿主的内容盒（盒子的尺寸归宿主管） */
+    .btn__label {
+        display: block;
+        width: 100%;
+        height: 100%;
+        line-height: 1.35;
+        text-align: center;
+        color: var(--fg, #FFFFFF);
+        pointer-events: none;
+    }
+</style>
+
+<!-- 内部结构。文本默认值同时写在宿主标签里，两处都可见；binUI 编译期以宿主文本为
+     label 的默认值，宿主给了 data-label 时用宿主的。 -->
+<span class="btn__label" data-param="label">按钮</span>

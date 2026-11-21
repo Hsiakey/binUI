@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>B1 · 合法 HTML 双跑样例</title>
+<style>
+    /* 页面底板。html/body 的宽高是 M0 的临时桥梁：
+       binUI 今天还不读 <div data-binui-window> 的 data-*，但它**会**读 <html>/<body>
+       的 width/height（CSS 或属性）来定根尺寸 —— 于是两边都得到 780×600。 */
+    html, body {
+        margin: 0;
+        padding: 0;
+        width: 780px;
+        height: 600px;
+        background: #F4F7FC;
+        font-family: "Microsoft YaHei UI", "Segoe UI", sans-serif;
+        font-size: 13px;
+        color: #1F2A37;
+    }
+    [data-binui-window] {
+        position: absolute;
+        left: 0;
+        top: 0;
+        width: 780px;
+        height: 600px;
+        background: #F4F7FC;
+        box-sizing: border-box;
+    }
+
+    .title { position: absolute; left: 20px; top: 20px; width: 420px; height: 24px;
+             font-size: 15px; font-weight: 700; color: #1F2A37; }
+    .hint  { position: absolute; left: 20px; top: 44px; width: 640px; height: 16px;
+             font-size: 11px; color: #66768C; }
+    .cap   { position: absolute; left: 20px; width: 560px; height: 14px;
+             font-size: 10px; color: #94A3B8; }
+
+    /* 宿主元素（= 组件根）的外观：由宿主页给，组件文件只给内部结构。
+       --w 是参数：浏览器用它定宽；binUI 今天还不认 var()（见 §7 实测）。 */
+    .btn {
+        background: #3E8BFF;
+        border: 0;
+        border-radius: 10px;
+        color: #FFFFFF;
+        font-size: 13px;
+        padding: 0;
+        overflow: hidden;
+    }
+    .btn:hover  { background: #5DA0FF; }
+    .btn:active { background: #2F79E8; }
+</style>
+</head>
+<body>
+
+<!-- 窗口描述（M1 的契约）：binUI 从 data-* 读 width/height/bg。
+     今天编译器忽略 data-*，用上面 html/body 的 CSS 兜底。 -->
+<div data-binui-window data-width="780" data-height="600" data-bg="#F4F7FC">
+
+    <span class="title">B1 / M0 · 合法 HTML 双跑样例</span>
+    <span class="hint">同一份源码：浏览器直接打开可读 · binui_compile 编出 .bui · bin2d_shot 出像素</span>
+
+    <!-- ── 第一组：目标语法。宽度走 var(--w,120px)，参数默认值即 fallback ── -->
+    <span class="cap" style="top:108px">① var(--w,120px)：浏览器 = 120px；binUI 今天 = 0px（M1 补齐）</span>
+
+    <button class="btn" data-component="button.html" data-param="label"
+            style="position:absolute;left:20px;top:128px;width:var(--w,120px);height:38px">主按钮</button>
+
+    <button class="btn" data-component="button.html" data-param="label" data-label="确定"
+            style="position:absolute;left:152px;top:128px;width:var(--w,120px);height:38px">次按钮</button>
+
+    <!-- ── 第二组：M0 像素参照。同一组件、同一文案、同一几何，只把宽度写成字面 px。
+           这组是 M1 的验收基准：M1 让第一组出来后，两组的 bin2d_shot 必须逐像素相同。 ── -->
+    <span class="cap" style="top:184px">② 字面 px（M0 可编译的等价值）：M1 的像素参照</span>
+
+    <button class="btn" data-component="button.html" data-param="label"
+            style="position:absolute;left:20px;top:204px;width:120px;height:38px">主按钮</button>
+
+    <button class="btn" data-component="button.html" data-param="label" data-label="确定"
+            style="position:absolute;left:152px;top:204px;width:120px;height:38px">次按钮</button>
+
+</div>
+
+</body>
+</html>
