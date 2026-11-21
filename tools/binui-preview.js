@@ -314,18 +314,21 @@
   // 按钮的图标跑到了标题栏左上角）。这里给"有绝对定位子元素、自己却静态"的父级补
   // position:relative —— 对 binUI 是无操作，对浏览器是把语义拉回同一套。
   function shimAbsContainingBlock() {
-    var all = document.querySelectorAll('body *');
+    // 只在"源码自己的盒"里做：组件宿主 / 窗口包裹层，避开 dev 页自己搭的工具栏与舞台
+    var scopes = document.querySelectorAll('[data-component],[data-binui-window]');
     var touched = 0;
-    for (var i = 0; i < all.length; i++) {
-      var el = all[i];
-      if (el.closest('[data-binui-preview-ui]')) continue;
-      var cs = getComputedStyle(el);
-      if (cs.position !== 'absolute' && cs.position !== 'fixed') continue;
-      var p = el.parentElement;
-      if (!p || p === document.body || p === document.documentElement) continue;
-      if (getComputedStyle(p).position !== 'static') continue;
-      p.style.position = 'relative';
-      touched++;
+    for (var s = 0; s < scopes.length; s++) {
+      var all = scopes[s].querySelectorAll('*');
+      for (var i = 0; i < all.length; i++) {
+        var el = all[i];
+        var cs = getComputedStyle(el);
+        if (cs.position !== 'absolute' && cs.position !== 'fixed') continue;
+        var p = el.parentElement;
+        if (!p || p === document.body || p === document.documentElement) continue;
+        if (getComputedStyle(p).position !== 'static') continue;
+        p.style.position = 'relative';
+        touched++;
+      }
     }
     state.absShim = touched;
     return touched;
@@ -460,7 +463,7 @@
 
   // ---------------------------------------------------------------- 组件独立视图
   // /__binui/c/<相对路径>?zoom=4&grid=1&host=titlebar&w=780&h=45&flex=1&text=…&<参数>=…
-  var RESERVED = { zoom: 1, grid: 1, box: 1, host: 1, w: 1, h: 1, flex: 1, text: 1, bg: 1 };
+  var RESERVED = { zoom: 1, grid: 1, box: 1, host: 1, w: 1, h: 1, flex: 1, text: 1, bg: 1, 'class': 1 };
 
   function flag(q, name) {
     if (!q.has(name)) return false;
@@ -534,6 +537,7 @@
     if (flag(q, 'flex')) { host.style.display = 'flex'; host.style.alignItems = 'center'; }
     if (q.get('gap')) host.style.gap = toLen(q.get('gap'));
     if (q.get('bg')) host.style.background = q.get('bg');
+    if (q.get('class')) host.className = q.get('class');   // 组件皮肤类（宿主那条 class）
     if (q.get('text')) host.textContent = q.get('text');
     q.forEach(function (v, k) {
       if (RESERVED[k]) return;
