@@ -43,7 +43,7 @@
   var DEFAULT_LINE_HEIGHT = 1.35;
 
   var state = {
-    ok: true, done: false, hosts: 0, expanded: 0, styles: 0, absShim: 0,
+    ok: true, done: false, hosts: 0, expanded: 0, styles: 0, absShim: 0, borderNoFlow: 0,
     warnings: [], errors: [],
     components: []                        // 展开过的组件（root 相对路径，去重）
   };
@@ -334,6 +334,34 @@
     return touched;
   }
 
+  // ---------------------------------------------------------------- 语义补齐
+  // 边框：binUI 的 border **画在内侧、不参与布局**（include/binui_format.h 里写的设计），
+  // 而 CSS 的 border 要占内容空间 —— 带 padding 的盒子里绝对定位子元素实测差 4px，不带 padding 差 1px，
+  // % 宽和 flex 主轴也跟着差。预览这里把 border 换成 inset 阴影，让浏览器按 binUI 的盒子规则算。
+  // 实测：换成 inset 阴影后 appshow 差异 6.47%→5.71%，但另外 6 个页面反而变差（inset 的 AA 不如真边框），
+  // 净收益≈0 —— 所以**默认不做**，只在 ?border=noflow 时启用（做对照实验用）。
+  function borderNoFlow() {
+    if (!/(?:^|[?&])border=noflow\b/.test(location.search)) return 0;
+    var all = document.body.getElementsByTagName('*');
+    var n = 0;
+    for (var i = 0; i < all.length; i++) {
+      var el = all[i], cs = getComputedStyle(el);
+      var w = parseFloat(cs.borderTopWidth) || 0;
+      if (!w) continue;
+      var sh = [];
+      ['Top', 'Right', 'Bottom', 'Left'].forEach(function (side) {
+        var bw = parseFloat(cs['border' + side + 'Width']) || 0;
+        if (bw > 0) sh.push('inset ' + (side === 'Top' ? '0 ' + bw : side === 'Bottom' ? '0 -' + bw
+          : side === 'Left' ? bw + ' 0' : '-' + bw + ' 0') + ' 0 ' + cs['border' + side + 'Color']);
+      });
+      if (sh.length) el.style.boxShadow = sh.join(',') + (cs.boxShadow && cs.boxShadow !== 'none' ? ',' + cs.boxShadow : '');
+      el.style.borderWidth = '0';
+      n++;
+    }
+    state.borderNoFlow = n;
+    return n;
+  }
+
   // ---------------------------------------------------------------- 窗口 / 未知标签
   function applyWindows() {
     var wins = document.querySelectorAll('[data-binui-window]');
@@ -384,7 +412,27 @@
   }
 
   // ---------------------------------------------------------------- 调试
-  // ?debug=1：把宿主/子元素的盒（位置/尺寸/display/position）写成 <pre>，headless 用 --dump-dom 读
+  // ?layout=1：把每个元素的盒按 JSON 写进 <pre id="binui-layout">（相对视口/窗口左上角），
+  // 用来和 binUI 的 `draw_bench --dump-nodes` 逐元素比几何 —— 像素比说不出"哪条属性不对"，这个能。
+  function dumpLayout() {
+    if (!/(?:^|[?&])layout\b/.test(location.search)) return;
+    var els = document.body.getElementsByTagName('*');
+    var out = [];
+    for (var i = 0; i < els.length; i++) {
+      var el = els[i];
+      if (el.closest('[data-binui-preview-ui]')) continue;
+      var r = el.getBoundingClientRect();
+      out.push({ id: el.id || ('#' + i), tag: el.localName, cls: String(el.className || ''),
+                 x: +r.left.toFixed(2), y: +r.top.toFixed(2),
+                 w: +r.width.toFixed(2), h: +r.height.toFixed(2) });
+    }
+    var pre = document.createElement('pre');
+    pre.id = 'binui-layout';
+    pre.style.cssText = 'position:fixed;left:-9999px;top:0';
+    pre.textContent = JSON.stringify(out);
+    document.body.appendChild(pre);
+  }
+
   function dumpRects() {
     if (!/(?:^|[?&])debug\b/.test(location.search)) return;
     setTimeout(drawRects, 600);   // 等过渡跑完，读到的是最终值
@@ -421,7 +469,9 @@
     applyWindows();
     applyUnknownTags();
     shimAbsContainingBlock();
+    borderNoFlow();
     dumpRects();
+    dumpLayout();
     requestAnimationFrame(function () {
       requestAnimationFrame(function () {
         document.documentElement.removeAttribute('data-binui-preview-boot');

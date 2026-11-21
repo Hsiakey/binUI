@@ -162,6 +162,42 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 剩下的差**全部**落在四类：文字度量（宽差 ~4 px / 基线低 ~3 px / 换行 ±1 行）、阴影浓度
 （binUI 深 36/255）、1px 抗锯齿、flex 余数分配（±1 px/项）—— 就是 §5 表里那几条，M4 逐个收敛。
 
+### 布局属性对齐实测（0.38.13）：`tools/binui_layout.py` + `make layout-parity`
+
+像素口径说不出"哪条属性不对"，所以另开一条口径：两端各导一份**几何表**逐元素比 x/y/w/h。
+binUI 侧用 `draw_bench --dump-nodes`，浏览器侧由 `binui-preview.js?layout=1` 把所有元素的盒
+写成 JSON（headless `--dump-dom` 抓回）。探针页 `tests/layout-probe.html` 只放盒子不放文字，
+每个盒子都有 id 一一对应。
+
+| 实测项 | 结果 |
+|---|---|
+| flex 余数（185px 内 3×`flex:1` → 56.333…） | binUI 56.33 / 56.33 / 56.33，浏览器同 → **±0.01px** |
+| flex 权重（1/1/2）、固定宽 + `flex:1` | 完全一致 |
+| 百分比宽（33.33% / 66.67%）、百分比高（50% of 101） | 完全一致 |
+| `min-width` 压住 flex 收缩、`gap`、`justify-content:space-between` | 完全一致 |
+| 列方向 `flex-direction:column` + `flex:1` ×3 | 一致（33.67/33.67/33.67） |
+| 半像素定位（`left:10.5px`）、交叉轴 `align-items:center` | 完全一致（186.5 / 191.5） |
+| `box-sizing` + `padding` | 一致（binUI 恒 border-box） |
+| **探针汇总** | 39 个盒子里 33 个偏差 **≤0.1px**，超差 0 个 → `make layout-parity` 退出码 0 |
+
+真实页面（同一把尺子，`python tools/binui_layout.py examples/appshow/main.html`）：
+
+| 页面 | 有 id 的元素 | 偏差分布 | 结论 |
+|---|---|---|---|
+| `buttonshow` | 6 | 全部 ≤1px | 布局干净；60 个无 id 节点里 56 个几何精确对上 |
+| `appshow` | 189 | 44 个 ≤1px、127 个 ≤2px、1 个 ≤8px | 剩下的都在**文字撑开的盒**上（`btn-sub` Δy +5.62 = 文字基线差），不是布局属性 |
+| `flexshow` | 27 | 23 个 >8px（`body`/`main` 两张卡 Δy +15 / Δh −85） | **真结构差**，待查（`%` 高链 + auto 高） |
+
+**四条已知语义差异**（探针里 id 以 `known-` 开头，门禁只报告、不算失败）：
+
+| # | 差异 | 实测 | 处理 |
+|---|---|---|---|
+| 1 | **`border` 不参与布局**（画在内侧，`include/binui_format.h` 写明的设计） | 带 `padding` 的盒子里绝对定位子元素差 **4px**，不带 padding 差 1px；`%` 宽、flex 主轴也跟着差 | 保留（改成 CSS 语义要 per-side 内缩 → 格式改动）。预览里试过把 border 换成 inset 阴影：appshow 6.47%→5.71%，但另外 6 个页面反而变差 → **净收益≈0，不做**，`?border=noflow` 留作对照开关 |
+| 2 | `margin-left/right:auto` 不支持 | 差 280px（不居中） | 规范写明：居中用 flex 或算好 left |
+| 3 | 静态元素也吃 `left/top` | binUI 按坐标摆，浏览器当静态元素忽略 | binUI 更宽松，不修；规范写明"要定位就写 `position:absolute`" |
+| 4 | `flex:1` 项带 padding+border 时分配基准不同 | binUI 外框等分 60/60，浏览器内容盒等分 65/55 | 规范写明：flex 项别带 padding/border（或接受 ±5px） |
+
+
 ## 5. 布局语义对齐（深水区，决定成败）
 
 语法迁移是表层；**"浏览器里看到的就是 binUI 出图的样子"** 才是这个方向的真正成本。已知差异清单：

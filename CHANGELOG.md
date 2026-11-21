@@ -5,6 +5,39 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.13] - 2026-11-21 【格式 v34 不变】
+
+**布局属性对齐：先量，再决定改不改。** 像素口径（上一版报的 6.47%~27%）只会说"差多少"，
+说不出"哪条属性不对"，所以加了另一条口径 —— 两端各导一份几何表，逐元素比 x/y/w/h。
+
+1. **`tools/binui_layout.py`（新增）**：binUI 侧取 `draw_bench --dump-nodes` 的节点盒，
+   浏览器侧由 `binui-preview.js?layout=1` 把所有元素的盒写成 JSON（headless `--dump-dom` 抓回），
+   按元素 id 一一对应（没 id 的按几何贪心匹配）。起临时静态服务复用 `binui_dev` 的 `/file/` 路由，
+   不需要手工起服务。输出逐元素偏差 + 偏差分布 + 已知差异段；退出码 0/1/2。
+2. **`tests/layout-probe.html`（新增探针页）**：只放盒子不放文字（把文字度量这条差异源排除），
+   13 组用例覆盖 flex 余数 / 权重 / 固定+增长 / 百分比宽高 / min-width / gap / space-between /
+   列方向 / 半像素定位 / 交叉轴居中 / padding / 边框盒。每个盒子都有 id。
+3. **`make layout-parity`**：门禁。探针 39 个盒子里 **33 个偏差 ≤0.1px、超差 0 个**。
+
+**结论（数据说话）**：布局属性本身**已经对齐** —— flex 余数分配（185px 内 3×`flex:1` 两端都是
+56.33）、权重、百分比、min/max、gap、space-between、列方向、半像素定位、交叉轴居中，全部
+**±0.01px**（剩下的 0.01 是 float32 vs LayoutUnit 的舍入）。真实页面的偏差集中在**文字撑开的盒**
+（appshow 189 个带 id 的元素里 127 个 ≤2px，最大的是文字基线差 +5.62）与**四条已知语义差异**：
+
+| 差异 | 实测 | 处理 |
+|---|---|---|
+| `border` 不参与布局（画在内侧，format 里写明的设计） | 带 padding 的盒子里绝对定位子元素差 **4px**，不带 padding 差 1px | 保留。预览试过 border→inset 阴影：appshow 6.47%→5.71%，但另外 6 页反而变差，净收益≈0；`?border=noflow` 留作对照 |
+| `margin:auto` 不支持 | 不居中，差 280px | 写进规范 |
+| 静态元素也吃 `left/top` | binUI 摆、浏览器忽略 | 写进规范（要定位就写 `position:absolute`） |
+| `flex:1` 项带 padding+border | binUI 外框等分 60/60，浏览器内容盒等分 65/55 | 写进规范（flex 项别带 padding/border） |
+
+**另外查出一处真结构差**（下一步就查它）：`flexshow` 里 `body`/`main`/两张卡
+Δy +15 / Δh −85 —— 不是文字，是 `%` 高度链 + auto 高的算法分叉。
+
+门禁：`make all` 零警告 · `make test` PASSED · `make partial` 4×diff=0 · `pixels-bin2d` 0 容差 ·
+`check_examples` 18 页 0 问题 · `make layout-parity` 0 超差。
+
+
 ## [0.38.12] - 2026-11-21 【格式 v34 不变】
 
 **M2：浏览器侧运行时 `binui-preview.js` + `binui dev` 三栏**（issue 15）。不碰编译器与格式，

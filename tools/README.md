@@ -65,6 +65,24 @@ make tools && build-mingw/bin/check_examples.exe examples
 展开完成时派发 `binui:preview` 事件（headless 抓图等它）。**像素权威仍是 `bin2d_shot`**：
 它是"写法在标准 HTML 里成立不成立"的尺子。详见 [docs/dev-server.md](../docs/dev-server.md)。
 
+## binui_layout.py —— 布局属性对齐门禁（binUI 盒 vs 浏览器盒）
+
+像素口径说"差多少"，这个说"**哪条属性不对**"：两端各导一份几何表，逐元素比 x/y/w/h。
+
+```bash
+python tools/binui_layout.py tests/layout-probe.html      # 门禁（探针页，每个盒子都有 id）
+python tools/binui_layout.py examples/appshow/main.html   # 真实页面（没 id 的按几何贪心匹配）
+python tools/binui_layout.py examples/flexshow/main.html --tolerance 1.0 --json out/layout.json
+```
+
+binUI 侧 = `draw_bench --dump-nodes` 的节点盒；浏览器侧 = 页面里 `binui-preview.js?layout=1`
+把所有元素的盒写成 JSON，用 Edge headless `--dump-dom` 抓回（工具自己起临时静态服务，复用
+`binui_dev` 的 `/file/` 路由，不需要手工开服务）。退出码 0 = 全在容差内，1 = 有超差，2 = 环境问题。
+
+id 以 `known-` 开头的是**已知语义差异**（border 不参与布局 / `margin:auto` / 静态元素吃 `left/top` /
+`flex:1` 项带 padding），只报告不算失败 —— 清单和实测数字见
+[docs/issues/15 §4 末](../docs/issues/15-valid-html-language.md)。`make layout-parity` 就是跑探针。
+
 ## gl_shot —— 用 GL 后端把真实布局渲染成 PNG
 
 把 UI 源文件真正编译 + 布局 + **用 GL 后端（隐藏窗口 + 离屏 FBO）**画出来存成 PNG，

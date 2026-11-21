@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>布局属性对齐探针</title>
+<style>
+  /* 只放盒子、不放文字：把"文字度量"这条差异源排除掉，只看布局属性本身。
+     每个盒子都有唯一 id —— tools/binui_layout.py 靠 id 把两端一一对应上。
+     坐标、尺寸都是整数或明确的小数，谁算错了立刻看得见。 */
+  .box  { background:#1E5AA8; position:absolute; }
+  .row  { display:flex; position:absolute; background:#0E2A4A; }
+  .col  { display:flex; flex-direction:column; position:absolute; background:#0E2A4A; }
+  .cell { background:#3E8BFF; }
+  .pad  { background:#3E8BFF; border:1px solid #000000; }
+</style>
+</head>
+<body>
+<div data-binui-window data-width="600" data-height="400" data-bg="#FFFFFF">
+
+  <!-- 1) flex:1 ×3，容器 185、gap 8 → 每项 (185-16)/3 = 56.333…（测余数怎么分） -->
+  <div id="c1" class="row" style="left:0px;top:0px;width:185px;height:20px;gap:8px">
+    <div id="c1a" class="cell" style="flex:1;height:20px"></div>
+    <div id="c1b" class="cell" style="flex:1;height:20px"></div>
+    <div id="c1c" class="cell" style="flex:1;height:20px"></div>
+  </div>
+
+  <!-- 2) flex 1 / 1 / 2，容器 100 -->
+  <div id="c2" class="row" style="left:0px;top:30px;width:100px;height:20px">
+    <div id="c2a" class="cell" style="flex:1;height:20px"></div>
+    <div id="c2b" class="cell" style="flex:1;height:20px"></div>
+    <div id="c2c" class="cell" style="flex:2;height:20px"></div>
+  </div>
+
+  <!-- 3) 固定 37 + flex:1 填满 120 -->
+  <div id="c3" class="row" style="left:0px;top:60px;width:120px;height:20px">
+    <div id="c3a" class="cell" style="width:37px;height:20px"></div>
+    <div id="c3b" class="cell" style="flex:1;height:20px"></div>
+  </div>
+
+  <!-- 4) 百分比宽：33.33% + 66.67% of 100 -->
+  <div id="c4" class="row" style="left:0px;top:90px;width:100px;height:20px">
+    <div id="c4a" class="cell" style="width:33.33%;height:20px"></div>
+    <div id="c4b" class="cell" style="width:66.67%;height:20px"></div>
+  </div>
+
+  <!-- 5) 边框盒：width 100 + padding 10 + border 1（binUI 的 border 不参与布局，见 docs/issues/15 §4） -->
+  <div id="c5" class="pad" style="position:absolute;left:220px;top:0px;width:100px;height:40px;padding:10px"></div>
+
+  <!-- 6) min-width 压住 flex 收缩：容器 100，两项各 flex:1 且 min-width 70 -->
+  <div id="c6" class="row" style="left:220px;top:60px;width:100px;height:20px">
+    <div id="c6a" class="cell" style="flex:1;min-width:70px;height:20px"></div>
+    <div id="c6b" class="cell" style="flex:1;min-width:70px;height:20px"></div>
+  </div>
+
+  <!-- 7) justify-content:space-between，容器 201、两项各 40 -->
+  <div id="c7" class="row" style="left:220px;top:90px;width:201px;height:20px;justify-content:space-between">
+    <div id="c7a" class="cell" style="width:40px;height:20px"></div>
+    <div id="c7b" class="cell" style="width:40px;height:20px"></div>
+  </div>
+
+  <!-- 8) 绝对定位落在半像素上（两端都不该四舍五入） -->
+  <div id="c8" class="box" style="left:0px;top:130px;width:40px;height:20px"></div>
+  <div id="c8a" class="box" style="left:10.5px;top:130.5px;width:10px;height:10px;background:#FF8A65"></div>
+
+  <!-- 9) 百分比高：50% of 101（父高由父自己的 style 定死） -->
+  <div id="c9" class="box" style="left:220px;top:130px;width:40px;height:101px"></div>
+  <div id="c9a" class="cell" style="position:absolute;left:220px;top:130px;width:40px;height:50%"></div>
+
+  <!-- 10) 列方向 flex:1 ×3，容器高 101 -->
+  <div id="c10" class="col" style="left:300px;top:0px;width:30px;height:101px">
+    <div id="c10a" class="cell" style="flex:1;width:30px"></div>
+    <div id="c10b" class="cell" style="flex:1;width:30px"></div>
+    <div id="c10c" class="cell" style="flex:1;width:30px"></div>
+  </div>
+
+  <!-- 11) 百分比宽 + padding + border -->
+  <div id="c11" class="pad" style="position:absolute;left:300px;top:130px;width:50%;height:30px;padding:6px"></div>
+
+  <!-- 12) align-items:center 在交叉轴上的落点（容器高 33、子项高 20） -->
+  <div id="c12" class="row" style="left:0px;top:180px;width:200px;height:33px;align-items:center">
+    <div id="c12a" class="cell" style="width:40px;height:20px"></div>
+    <div id="c12b" class="cell" style="flex:1;height:10px"></div>
+  </div>
+
+  <!-- ===== 下面是**已知语义差异**（id 以 known- 开头）：门禁只报告、不算失败 ===== -->
+
+  <!-- A) flex:1 的项带 padding+border：binUI 按外框等分（60/60），
+          浏览器按内容盒等分（带 padding 的那项外框 65、另一项 55）。 -->
+  <div id="known-flexpad-row" class="row" style="left:220px;top:220px;width:120px;height:20px">
+    <div id="known-flexpad-a" class="pad" style="flex:1;height:20px;padding:4px"></div>
+    <div id="known-flexpad-b" class="cell" style="flex:1;height:20px"></div>
+  </div>
+
+  <!-- B) margin-left/right:auto：binUI 不支持（不居中），浏览器会居中。 -->
+  <div id="known-marginauto" class="cell" style="position:absolute;left:0px;top:260px;width:600px;height:20px;background:#0E2A4A">
+    <div id="known-marginauto-child" class="cell" style="width:40px;height:20px;margin-left:auto;margin-right:auto"></div>
+  </div>
+
+  <!-- C) 没有 position 也写 left/top：binUI 照样按坐标摆，浏览器当静态元素（left/top 无效）。 -->
+  <div id="known-staticpos" class="cell" style="left:420px;top:300px;width:40px;height:20px"></div>
+
+
+</div>
+</body>
+</html>

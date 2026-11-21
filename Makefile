@@ -637,6 +637,18 @@ pixels-bin2d-update: tools
 	    echo "updated baseline: $(PIXEL2D_GOLD)/$$c.png"; \
 	done
 
+# 布局属性对齐门禁（2026-11-21）：binUI 的节点盒 vs 浏览器元素盒，逐元素比 x/y/w/h。
+# 探针 tests/layout-probe.html 每个盒子都有 id，两端一一对应；id 以 known- 开头的是
+# 已知语义差异（border 不参与布局 / margin auto / static 元素也吃 left-top），只报告不算失败。
+# 需要 msedge.exe；没有浏览器时跳过（不阻塞其它门禁）。
+.PHONY: layout-parity
+layout-parity: tools
+	@if [ -z "$$(command -v python || command -v python3)" ]; then \
+	    echo "[layout-parity] 跳过：没有 python"; exit 0; fi
+	@PY=$$(command -v python || command -v python3); \
+	"$$PY" tools/binui_layout.py tests/layout-probe.html || exit 1
+	@echo "[layout-parity] OK (known deviations: docs/issues/15 section 4)"
+
 # =============================================
 # bin2d **GPU 执行体**的像素回归（2026-11-20）：binUI → bin2d → binGPU
 #
