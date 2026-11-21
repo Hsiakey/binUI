@@ -1,9 +1,9 @@
 # 15 - 源码成为合法 HTML：把"浏览器预览"变成语言契约
 
-**状态**：**M0 / M1 / M3 完成（2026-11-21，0.38.7 ~ 0.38.11）** —— 存量布局已全量迁移，
-**源码可以直接用浏览器打开**（截图见 §6 的 M3 行）。M2 的浏览器侧运行时（`binui-preview.js`
-展开 `data-component`、组件独立视图）与 M4 的语义对齐迭代未开工；M5 收尾两种非 HTML 写法
-（属性插值、`<use … external>`）。
+**状态**：**M0 / M1 / M2 / M3 完成（2026-11-21，0.38.7 ~ 0.38.12）** —— 存量布局已全量迁移，
+**源码可以直接用浏览器打开**（截图见 §6 的 M3 行）；浏览器侧运行时 `binui-preview.js` 与组件
+独立视图已落地（§4 末，截图 `docs/img/browser-components.png`、`browser-component-4x.png`）。
+M4 的语义对齐迭代（逐页落差已量化）与 M5 收尾两种非 HTML 写法（属性插值、`<use … external>`）未开工。
 
 **类型**：语言 / 工具链 / DX · **严重度**：高（决定"写 UI 是不是像写网页"）
 **影响面**：编译器（`binui_compiler.cpp`）、全部存量布局（`examples/`、`components/`、`docs/mockups/`）、
@@ -123,6 +123,45 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 前者是 `binui dev` 里点一下就有；后者在工具栏上是一个 `像素` 按钮（调一次 `bin2d_shot` 再放大）。
 两条都留着，因为它们回答不同问题："看起来对不对" vs "像素对不对"。
 
+### M2 已实现（0.38.12）：`tools/binui-preview.js` + `binui dev` 三栏
+
+| 东西 | 落在哪 | 说明 |
+|---|---|---|
+| 展开 `data-component` | `tools/binui-preview.js` | 参数规则与编译器**同一套**（宿主属性名 + 去 `data-` 前缀名 → `{{x}}` / `{{x=默认}}`；`data-param` 取宿主 `data-x`，没给用宿主文本，只消费一次）；片段顶层元素插到**宿主原有子元素之前**；片段 `<style>` 并入 `<head>`；`img/video` 相对路径按组件目录解析；深度 8 层 + 循环引用跳过告警 |
+| `--var` | 浏览器原生 | 迁移已经把参数写成 `var(--x, 默认)` + 宿主 `--x:`，不需要脚本 |
+| 基础样式 | 同上 | 默认字体链（Segoe UI / 微软雅黑 / Symbol / Emoji）、字号 14、**行高 1.35×**、`box-sizing:border-box`、UA 清零（`:where()` 零特异性）、`button` 居中 |
+| 窗口几何 | 同上 | `data-binui-window` 的 `data-width/height/bg` → 内联宽高底色（标准 HTML 里 `data-*` 是惰性的） |
+| 语义补齐 | 同上 | 见下三条 |
+| 独立视图 | `/__binui/c/<路径>?zoom=4&grid=1` | 棋盘格 + 居中 + 1x/2x/4x/8x + 盒边界 + 尺寸读数，`+ - 0 g` 键盘，状态写回 URL；宿主标签/尺寸用 `?host=titlebar&w=780&h=45&flex=1`，参数直接给 `?title=…&iconw=22px`（同时写 `data-*` 和 `--name`，等于手写一行宿主 `style`） |
+| 静态镜像 | `/file/<相对路径>` | 仓库当静态站；HTML 自动注入脚本（`?raw=1` 关掉注入）。`fetch` 组件必须走 HTTP，`file://` 下被 CORS 拦 |
+| 调试 | `?debug=1` | 把宿主与子元素的盒（位置/尺寸/display/position/bg）写进 `<pre id="binui-cdebug">`，headless `--dump-dom` 直接读；`?noreload=1` 关掉 SSE（否则 `--virtual-time-budget` 永远等不到 idle） |
+
+**三条语义补齐**（都是实测出来的真差异，不是推测）：
+
+| 差异 | 现象（实测） | 预览怎么补 | 长期怎么办 |
+|---|---|---|---|
+| `position:absolute` 的包含块 | binUI 一律相对**父元素**；浏览器往上找定位祖先 → 标题栏三颗按钮的图标跑到标题栏左上角 | 给"有绝对定位子元素、自己却静态"的父级补 `position:relative`（对 binUI 无操作） | **写进规范**：绝对定位子元素的父级要显式 `position:relative`，或者干脆别依赖父级定位 |
+| 没有 inline 排版 | binUI 每个元素都是块级盒（`display` 只有 `none`/`flex`）；`<span>` 在浏览器里 inline，`height` 失效、三行内容挤成一行叠在标题上 | 把 `span/a/b/em/…` 等行内标签拉成块级 | 同一套写法在两端都成立，**不需要改源码**；想写行内混排本来就不是 binUI 的能力 |
+| 首次展开的过渡 | 组件样式后插进 `<head>`，CSS 过渡把初始渲染从透明动画到目标色；binUI 首帧就是终值 | 展开期间 `transition:none`，两帧后恢复 | 预览侧行为，不改语义 |
+
+**实测落差（同一页，浏览器截图 vs `bin2d_shot`，逐像素阈值 8）**：
+
+| 页面 | 尺寸 | 不同像素 | 备注 |
+|---|---|---|---|
+| `cubedemo` | 900×640 | **3.95%** | 元素少、纯色块最多 |
+| `components/preview.html` | 780×600 | **6.05%** | 11 个标准组件同屏（`docs/img/browser-components.png`） |
+| `appshow` | 1280×800 | **6.47%** | 四卡片 + 弹窗 + 提示条（`docs/img/browser-appshow.png`） |
+| `texturedemo` | 900×640 | 7.51% | |
+| `svgdemo` | 960×560 | 8.90% | SVG 光栅化差 |
+| `buttonshow` | 1020×684 | 10.49% | 文字最多，居中文字左右各偏 1~3 px |
+| `animshow` | 1000×900 | 11.03% | 有动画首帧 |
+| `fontshow` | 900×760 | 11.27% | 字形本身 |
+| `features` | 900×932 | 12.31% | 组件最多 |
+| `flexshow` | 1100×720 | 27.04% | 百分比/flex 分配 + 大量换行文本，误差叠得最多 |
+
+剩下的差**全部**落在四类：文字度量（宽差 ~4 px / 基线低 ~3 px / 换行 ±1 行）、阴影浓度
+（binUI 深 36/255）、1px 抗锯齿、flex 余数分配（±1 px/项）—— 就是 §5 表里那几条，M4 逐个收敛。
+
 ## 5. 布局语义对齐（深水区，决定成败）
 
 语法迁移是表层；**"浏览器里看到的就是 binUI 出图的样子"** 才是这个方向的真正成本。已知差异清单：
@@ -146,6 +185,9 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 | 裁剪 / `overflow` | **（修正）binUI 默认不按祖先矩形裁剪**，只有 `overflow:hidden/auto/scroll` 才裁 | 预览**不需要**给定位元素加 `overflow:hidden`（原对策是错的）；作者要裁剪就显式写 `overflow` | `overflow:hidden` 的 100×40 容器里塞 200×100 子块：被裁到 x=119（两端一致）；不写 `overflow` 的对照容器，子块溢出到盒外——binUI **8,431 px**、浏览器 **8,540 px** 落在容器外，两端都**不裁** |
 | `z-index` / 层叠 | binUI 按树遍历 + 数值排序 | 只用 `z-index` 数值，不依赖 stacking context 细节 | 两个重叠盒 `z-index:1/2`：重叠点采样两端都是 **#00FFFF**（z=2 的在上）→ 数值语义一致；差在 binUI 无 stacking context（父 `z-index` 不建立新层叠上下文） |
 | 阴影 / 渐变 / 圆角 | binUI 按 CSS 子集实现 | 浏览器原生更准；以浏览器为"看起来"的参照，像素仍以 binUI 为准 | 圆角 20px：角点 (160,240) 两端都是纯白（弧外）。`to right` 渐变三点 binUI **#59A4F6/#49B2D4/#39BDAF** vs 浏览器 **#5DA1FE/#48B2D3/#34C1A7**（最大单通道差 **9/255**）。`box-shadow:0 8px 24px rgba(0,0,0,.35)`：盒下 8px 处最暗 binUI **R=165** vs 浏览器 **R=201** → **binUI 阴影更浓（差 36/255）**，这是目前视觉上最明显的一条 |
+| 绝对定位的包含块 | binUI **没有包含块链**：`position:absolute` 一律相对父元素 | 浏览器要往上找定位祖先 → 标题栏三颗按钮的图标跑到标题栏左上角 | 预览运行时给"有绝对定位子元素、自己却静态"的父级补 `position:relative`（对 binUI 无操作）；**规范上要求父级显式 `position:relative`**。实测补齐后三颗图标全部归位（M2） |
+| 行内排版 | binUI 每个元素都是块级盒，`display` 只有 `none` / `flex` 两个开关，**没有 inline 布局** | 浏览器里 `<span>` 是 inline：`height` 失效、并排文字挤成一行 | 预览把 `span/a/b/…` 拉成块级。实测 panel 组件的三行内容从不重叠（M2）。反过来也说明：**别指望行内混排** |
+| 首次渲染的过渡 | 首帧就是目标值 | 组件样式后插进 `<head>` 时 CSS 过渡会从透明动画到目标色 | 预览在展开期间 `transition:none`，两帧后恢复（M2）。作者不需要处理 |
 
 **结论**：七条里 4 条**语义一致**（`%`、flex 分配规则、z-index 数值、圆角/渐变），3 条**有实质差异**
 （box-sizing 未定义时差 24px、文字宽 4px/基线 3px/换行 ±1 行、阴影浓度 36/255）。
@@ -165,6 +207,7 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 | — | **M1 完成（0.38.8 + 0.38.9）**：`var()`（0.38.8）、`data-component` 内联 / `data-param` 文本覆盖 / 窗口 `data-*`（0.38.9）。`test_css` 共 17 项新断言；样例两组 `diffpx=0 max=0`；`check_examples examples` 18 页 0 问题。legacy 语法仍在（打告警）→ 归 M5 | | |
 | — | **M1 第一步已落地（0.38.8）**：`var(--name, fallback)` 编译期展开（长度 + 颜色；祖先继承 + 自身覆盖 + 未定义无 fallback 时丢声明并告警一次）。验收：`test_css` 7 项新断言；分组对照 `diffpx=0 max=0`；样例 0 告警 | | |
 | M2 | `binui dev` + `binui-preview.js` + 热刷新 + **组件独立视图（居中 / 1x~8x / 盒边界 / 像素放大）** | 改一行保存 → 浏览器 2 秒内刷新且布局变化可见；单组件能 4× 看清 1px 描边 | 1~2 周 |
+| — | **M2 完成（0.38.12）**：`tools/binui-preview.js`（展开 `data-component` / 并入片段 `<style>` / 窗口 `data-*` / 基础样式）+ `binui dev` 三栏（结构 · PNG · **浏览器同一份源码**）+ 独立视图 `/__binui/c/<路径>?zoom=8&grid=1`（4× 看 1px 描边就是它）+ `/file/**` 静态镜像 + SSE 热刷新。**三条语义补齐**（绝对定位包含块、inline→块级、首次展开的过渡）与逐页落差表见 §4 末。剩：`像素放大` 按钮（要按组件造一个临时宿主页跑 `bin2d_shot`）归 M4 | | |
 | M3 | codemod：`{{}}`→`var()`/`data-param`、`<use>`→`data-component`、补 `px` | 存量 `examples/` + `components/` 全量迁移后像素不变 | 3~5 天 |
 | — | **M3 完成（0.38.10 + 0.38.11）**：`tools/binui_migrate*.py` 三步 —— ① 老 `<use>` 的展开结果写回源码（19 组件摘根 / 69 处 / 29 文件，10 页 **0 差异**）；② 片段里的参数占位转 `var()` + `data-param`；③ 无单位长度补 `px`（25 文件）+ 窗口壳拍平（10 页）。**源码可直接用 Edge 打开**：`docs/img/browser-buttonshow.png`、`docs/img/browser-features.png`。剩：属性插值 14 处（`id`/`class`）与 `<use … external>`，归 M5 | | |
 | M4 | 语义对齐迭代（§5 表逐条）+ `binui parity` 门禁 | 示例页差异率收敛到"文字换行以内" | 1~2 月，持续 |

@@ -31,7 +31,7 @@ import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 # ------------------------------------------------------------------ 路径
 
@@ -43,6 +43,7 @@ OUT_DIR = os.path.join(ROOT, "out", "dev")
 BIN2D_SHOT = os.path.join(BIN_DIR, "bin2d_shot.exe")
 DRAW_BENCH = os.path.join(BIN_DIR, "draw_bench.exe")
 NODES_PY = os.path.join(TOOLS_DIR, "binui_nodes.py")
+PREVIEW_JS = os.path.join(TOOLS_DIR, "binui-preview.js")
 
 # 组件引用：<use src="..."> / data-component="..."；样式脚本：<link href> / <script src>
 RE_USE = re.compile(r"""<\s*use\b[^>]*?\bsrc\s*=\s*["']([^"']+)["']""", re.I)
@@ -258,6 +259,85 @@ class Builder:
         return True, self.status
 
 
+# ------------------------------------------------------------------ 浏览器镜像
+#
+# /file/<相对路径> 把仓库当静态站直接喂给浏览器（**源码本身**），并在 HTML 里注入
+# tools/binui-preview.js —— 组件内部结构由它在浏览器里展开（M2）。这样"看布局"有两份：
+# 左边 PNG 是 binUI 的真实像素（权威），右边是浏览器对同一份源码的解释（写法校验）。
+#
+# /__binui/c/<相对路径>?zoom=4&grid=1 是单个组件的独立视图（棋盘格 + 居中 + 缩放）。
+
+MIME = {
+    ".html": "text/html; charset=utf-8", ".htm": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8", ".js": "text/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8", ".svg": "image/svg+xml",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+    ".gif": "image/gif", ".webp": "image/webp", ".ico": "image/x-icon",
+    ".woff2": "font/woff2", ".woff": "font/woff", ".ttf": "font/ttf",
+    ".mp4": "video/mp4", ".webm": "video/webm",
+    ".txt": "text/plain; charset=utf-8",
+}
+
+PREVIEW_TAG = '<script src="/__binui/preview.js" data-binui-dev></script>'
+
+COMPONENT_SHELL = """<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8">
+<title>binui dev · 组件独立视图</title>
+</head><body>
+<script src="/__binui/preview.js" data-binui-dev data-binui-standalone></script>
+</body></html>
+"""
+
+# 组件文件解析顺序（与编译器的 ProbeAsset 同口径：无扩展名时依次探测）
+COMPONENT_SUFFIXES = ("", ".html", ".xml", ".bum.html", ".bum.xml", ".bui.html", ".bui.xml")
+
+
+def inject_preview(html_text):
+    """把 preview.js 的 <script> 塞进 </body> 之前（没有 body 就追加到末尾）。"""
+    if PREVIEW_TAG in html_text or "data-binui-preview-off" in html_text:
+        return html_text
+    low = html_text.lower()
+    at = low.rfind("</body>")
+    if at < 0:
+        at = low.rfind("</html>")
+    if at < 0:
+        return html_text + "\n" + PREVIEW_TAG + "\n"
+    return html_text[:at] + PREVIEW_TAG + "\n" + html_text[at:]
+
+
+def safe_path(rel):
+    """相对路径 → ROOT 下的绝对路径；越界（.. 爬出仓库）返回 None。"""
+    rel = unquote(rel).replace("\\", "/").lstrip("/")
+    if not rel:
+        return None
+    p = os.path.normpath(os.path.join(ROOT, rel))
+    if p != ROOT and not p.startswith(ROOT + os.sep):
+        return None
+    return p
+
+
+def resolve_component(src):
+    """组件引用 → (相对路径, 源码文本, 错误文本)。二进制 .bum 不支持（新语法只认源码）。"""
+    path = urlparse(src).path if "://" in (src or "") else (src or "")
+    if path.startswith("/file/"):
+        path = path[len("/file/"):]
+    base = safe_path(path)
+    if not base:
+        return None, None, "组件路径不合法：%s" % (src or "")
+    for suffix in COMPONENT_SUFFIXES:
+        cand = base + suffix
+        if not os.path.isfile(cand):
+            continue
+        if cand.lower().endswith((".bum", ".bui")):
+            return None, None, "组件是二进制布局（%s），预览需要 .bum.html 源码" % os.path.basename(cand)
+        try:
+            with open(cand, "r", encoding="utf-8", errors="replace") as f:
+                return os.path.relpath(cand, ROOT).replace("\\", "/"), f.read(), None
+        except OSError as exc:
+            return None, None, "读不到组件文件：%s" % exc
+    return None, None, "读不到组件文件：%s（.bum / .bum.html / .bum.xml 都不存在）" % path
+
+
 # ------------------------------------------------------------------ SSE 广播
 
 class EventHub:
@@ -341,6 +421,7 @@ PAGE_TMPL = """<!doctype html>
   var dot = document.getElementById('dot'), st = document.getElementById('st'),
       beat = document.getElementById('beat'), err = document.getElementById('err');
   var shot = document.getElementById('shot'), view = document.getElementById('view');
+  var browser = document.getElementById('browser');
   var n = 0;
   function bust(u) {{ return u + (u.indexOf('?') < 0 ? '?' : '&') + 't=' + Date.now(); }}
   function showErr(msg) {{
@@ -351,9 +432,11 @@ PAGE_TMPL = """<!doctype html>
     n++;
     if (view) view.src = bust('/view');
     if (shot) shot.src = bust('/shot.png');
+    if (browser) browser.src = bust(browser.dataset.base || '/');
     beat.textContent = '第 ' + n + ' 次刷新 · ' + new Date().toLocaleTimeString() + (why ? ' · ' + why : '');
   }}
   var es = new EventSource('/events');
+  if (/[?&]noreload\b/.test(location.search)) {{ es.close(); st.textContent = 'noreload：不连 SSE'; }}
   es.onopen = function () {{ dot.className = ''; st.textContent = '已连接，改源码保存即刷新'; }};
   es.onerror = function () {{
     dot.className = 'off'; st.textContent = 'SSE 断开，自动重连中…';
@@ -377,13 +460,20 @@ PAGE_TMPL = """<!doctype html>
 </body></html>
 """
 
-PANES_BOTH = """  <div class="pane" style="flex:0 0 46%">
+PANES_BOTH = """  <div class="pane" style="flex:0 0 26%">
     <div class="h">结构查看器（draw_bench --dump-nodes → binui_nodes）</div>
     <div class="body"><iframe id="view" src="/view"></iframe></div>
   </div>
   <div class="pane" style="flex:1; border-left:1px solid var(--line)">
-    <div class="h">bin2d_shot 真实渲染（PNG）</div>
+    <div class="h">bin2d_shot 真实渲染（像素权威）</div>
     <div class="body"><img id="shot" src="/shot.png" alt="shot"></div>
+  </div>
+  <div class="pane" style="flex:1; border-left:1px solid var(--line)">
+    <div class="h">浏览器（源码本身 + binui-preview.js）
+      <a id="srcopen" href="/file/{page_rel}" target="_blank">新窗口</a>
+      <a id="rawopen" href="/file/{page_rel}?raw=1" target="_blank">无注入</a></div>
+    <div class="body"><iframe id="browser" src="/file/{page_rel}"
+                              data-base="/file/{page_rel}"></iframe></div>
   </div>"""
 
 PANES_SHOT_ONLY = """  <div class="pane" style="flex:1">
@@ -459,6 +549,24 @@ class Handler(BaseHTTPRequestHandler):
             with open(self.builder.png, "rb") as f:
                 data = f.read()
             self._send(200, data, "image/png")
+        elif path == "/__binui/preview.js":
+            if not os.path.isfile(PREVIEW_JS):
+                self._send(404, "缺少 tools/binui-preview.js", "text/plain; charset=utf-8")
+                return
+            with open(PREVIEW_JS, "rb") as f:
+                data = f.read()
+            self._send(200, data, "text/javascript; charset=utf-8")
+        elif path == "/__binui/component":
+            q = parse_qs(parts.query)
+            rel, text, err = resolve_component((q.get("src") or [""])[0])
+            payload = json.dumps({"ok": err is None, "path": rel, "text": text, "error": err},
+                                 ensure_ascii=False)
+            self._send(200, payload, "application/json; charset=utf-8")
+        elif path.startswith("/__binui/c/"):
+            self._send(200, COMPONENT_SHELL)
+        elif path.startswith("/file/"):
+            q = parse_qs(parts.query)
+            self._serve_file(path[len("/file/"):], raw=bool(q.get("raw")))
         elif path == "/api/rebuild":
             ok, status = self.builder.ensure(force=True)
             if ok:
@@ -472,6 +580,7 @@ class Handler(BaseHTTPRequestHandler):
         elif path == "/api/state":
             payload = json.dumps({"ok": self.builder.ok, "status": self.builder.status,
                                   "builds": self.builder.builds, "clients": hub_count(),
+                                  "page": self.page_rel(), "components": self.component_list(),
                                   "uptime": round(time.time() - self.started_at, 1)},
                                  ensure_ascii=False)
             self._send(200, payload, "application/json; charset=utf-8")
@@ -483,9 +592,37 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.do_GET()
 
+    def page_rel(self):
+        return os.path.relpath(self.page, ROOT).replace("\\", "/")
+
+    def component_list(self):
+        """页面用到的组件（带 .bum.html / .bum.xml 后缀的那些）—— 给独立视图做入口。"""
+        out = []
+        for p in collect_watch_paths(self.page):
+            if p.lower().endswith((".bum.html", ".bum.xml")):
+                out.append(os.path.relpath(p, ROOT).replace("\\", "/"))
+        return out
+
+    def _serve_file(self, rel, raw=False):
+        """/file/<相对路径>：把仓库当静态站喂给浏览器；HTML 里注入 preview.js。"""
+        p = safe_path(rel)
+        if not p or not os.path.isfile(p):
+            self._send(404, "not found: /file/" + rel, "text/plain; charset=utf-8")
+            return
+        ext = os.path.splitext(p)[1].lower()
+        try:
+            with open(p, "rb") as f:
+                data = f.read()
+        except OSError as exc:
+            self._send(500, "读不到文件：%s" % exc, "text/plain; charset=utf-8")
+            return
+        if ext in (".html", ".htm") and not raw:
+            data = inject_preview(data.decode("utf-8", "replace")).encode("utf-8")
+        self._send(200, data, MIME.get(ext, "application/octet-stream"))
+
     def _page(self):
         title = os.path.relpath(self.page, ROOT).replace("\\", "/")
-        panes = PANES_SHOT_ONLY if self.shot_only else PANES_BOTH
+        panes = PANES_SHOT_ONLY if self.shot_only else PANES_BOTH.format(page_rel=self.page_rel())
         return PAGE_TMPL.format(title=title, panes="", panes_html=panes,
                                 status=self.builder.status.replace('"', "&quot;"))
 

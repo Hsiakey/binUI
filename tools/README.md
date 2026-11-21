@@ -46,6 +46,25 @@ make tools && build-mingw/bin/check_examples.exe examples
 # 输出：OK/WARN/FAIL + 末尾 "N 个示例 UI 检查完毕，M 处问题"
 ```
 
+## binui-preview.js —— 浏览器侧的组件运行时（不是构建产物）
+
+`binui dev` 会把它注入到 `/file/<页面>` 的 HTML 里，让**浏览器直接读源码**时也能看到组件内部
+（标准 HTML 没有 include）。它只做四件事：展开 `data-component`（参数规则与编译器同一套）、
+把片段 `<style>` 并进 `<head>`、把 `data-binui-window` 的 `data-*` 当窗口几何、注入与 binUI
+对齐的基础样式（字体链 / 行高 1.35× / `box-sizing:border-box` / UA 清零）。外加三条语义补齐：
+绝对定位以父元素为包含块、行内标签拉成块级、展开期间关掉过渡。
+
+手动引入也行（**必须 HTTP**，`file://` 下 fetch 被 CORS 拦）：
+
+```html
+<script src="/__binui/preview.js" data-binui-dev></script>
+```
+
+`data-binui-dev` = 打开 SSE 热刷新；`data-binui-standalone` = 走组件独立视图。
+`window.__binuiPreview` 暴露 `state` / `expandAll()` / `mount(el, {src, params, text})`，
+展开完成时派发 `binui:preview` 事件（headless 抓图等它）。**像素权威仍是 `bin2d_shot`**：
+它是"写法在标准 HTML 里成立不成立"的尺子。详见 [docs/dev-server.md](../docs/dev-server.md)。
+
 ## gl_shot —— 用 GL 后端把真实布局渲染成 PNG
 
 把 UI 源文件真正编译 + 布局 + **用 GL 后端（隐藏窗口 + 离屏 FBO）**画出来存成 PNG，

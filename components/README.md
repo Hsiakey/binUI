@@ -1,14 +1,33 @@
 # components/ —— binUI 标准组件库
 
 一批**与具体界面无关**的通用组件，全部用 HTML 标签 + CSS 写成，不含任何 C++ 代码。
-在布局里用 `<use src="路径/xxx.bum.html" .../>` 引用，编译期内联成一个普通节点树
-（运行期零开销、零依赖）。
+在布局里用 `data-component="路径/xxx.bum.html"` 引用，编译期内联成一个普通节点树
+（运行期零开销、零依赖）。**宿主元素就是组件的根元素**，组件文件本身是个片段（不写根标签）。
 
 ```html
-<use src="../../components/titlebar.bum.html" x="0" y="0" w="960" z="100"
-     icon="◆" iconw="22" title="我的应用" sub="按 ESC 退出"
-     idmin="btnMin" idmax="btnMax" idclose="btnClose"/>
+<titlebar class="bui-tb"
+          style="position:absolute;left:0px;top:0px;width:960px;height:45px;
+                 display:flex;align-items:center;gap:6px;
+                 --icon:◆;--iconw:22px;--title:我的应用;--sub:按 ESC 退出"
+          data-component="../../components/titlebar.bum.html"
+          ui_scale="fixed" data-icon="◆" data-iconw="22"
+          data-title="我的应用" data-sub="按 ESC 退出"
+          data-idmin="btnMin" data-idmax="btnMax" data-idclose="btnClose"></titlebar>
 ```
+
+> 旧写法 `<use src="…" x="…" y="…">` 仍然能编（`{{}}` / 无单位长度同理），但会走 legacy 路径，
+> M5 会删掉；新写的布局只用上面这一套。
+
+## 浏览器里单独看一个组件
+
+```sh
+python tools/binui_dev.py components/preview.html      # 三栏：结构 / bin2d_shot / 浏览器
+# 单个组件：4× 看 1px 描边
+http://127.0.0.1:8765/__binui/c/components/titlebar.bum.html?host=titlebar&flex=1&w=780&h=45&zoom=4&grid=1
+```
+
+`?host=` 是宿主的标签，其余键都是组件参数（长度带单位，如 `iconw=22px`）。详见
+[../docs/dev-server.md](../docs/dev-server.md)。
 
 ![全部组件](../docs/img/std-components.png)
 
