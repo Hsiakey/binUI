@@ -5,6 +5,28 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.14] - 2026-11-21 【格式 v34 不变】
+
+**修掉最大的一处差异：flex 项的"自动最小尺寸"。** 上一版量化到 `flexshow` 的
+`body`/`main`/两张卡 Δy +15 / Δh −85，查下去是 CSS 的 flex 项默认
+`min-width/min-height:auto`（= min-content）：内容撑不下时，兄弟项被 `flex-shrink` 压扁、
+自己溢出。实测**标题栏 45px 被压到 30、`#body` 撑到 760 溢出窗口 70px**。
+binUI 没有这套规则（`flex:1` 就是吃掉剩余空间），所以两者分道扬镳。
+
+预览侧用零特异性的 `min-width:0;min-height:0` 把它关掉（作者自己写的 `min-width` 照样赢），
+**`flexshow` 的像素差异 27.04% → 6.30%**，其余 8 页数字不变（说明只影响这套语义本身）。
+
+顺带用 `binui_layout.py` 又挖出两条真差异，都记在 issue 15 §4 的已知差异表里：
+
+| 差异 | 实测 | 下一步 |
+|---|---|---|
+| **`margin` 只在流式布局生效** | 绝对定位元素与 flex 项上的 margin 被忽略：探针 5 个用例全中（`margin-left:30` → 差 30px）；`flexshow` 的 `#chart` `margin-top:10` 就是那 10px | 待修：flex 项要进 `binui_flex::Item` + 编译器/渲染器两个调用方；绝对定位要把 margin 加到坐标上。**18 个像素基线页 0 处 margin → 不动机线** |
+| **`font-size` 不继承**（编译器注释写明"没有 CSS 级联"） | `body{font-size:24px}`：binUI 子元素仍 14px（墨迹 14px 高），浏览器 24px（墨迹 23px 高）；颜色却继承 | 待修：三处字号解析点插入级联 |
+
+门禁：`make test` PASSED · `pixels-bin2d` 0 容差 · `check_examples` 18 页 0 问题 ·
+`make layout-parity` 0 超差（工具同时加了 `?layout=1` 的计算样式字段，便于定位 flex/min/max）。
+
+
 ## [0.38.13] - 2026-11-21 【格式 v34 不变】
 
 **布局属性对齐：先量，再决定改不改。** 像素口径（上一版报的 6.47%~27%）只会说"差多少"，

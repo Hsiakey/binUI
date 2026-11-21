@@ -103,6 +103,11 @@
       'appearance:none;-webkit-appearance:none;text-align:inherit;line-height:inherit}',
     ':where([data-binui-preview] button,[data-binui-preview] input[type=button],' +
       '[data-binui-preview] input[type=submit]){cursor:default;text-align:center}',
+    /* flex 项的"自动最小尺寸"：CSS 里 flex 项默认 min-width/min-height = auto，
+       内容撑不下时会被 min-content 顶大、兄弟项被 flex-shrink 压扁（实测 flexshow：标题栏
+       45px 被压到 30、body 撑到 760 溢出窗口）。binUI 没有这套"自动最小尺寸"，
+       flex:1 就是把剩余空间吃掉 —— 零特异性显式写 0，作者自己写的 min-width 照样赢。 */
+    ':where([data-binui-preview] *){min-width:0;min-height:0}',
     /* binUI 没有 inline 排版：每个元素都是一个块级盒（只有 display:none / flex 两个开关）。
        <span>/<b>/<a> 这类行内标签在浏览器里要拉成块，否则并排的文字会挤成一行互相重叠 ——
        实测：panel 组件的三行内容全叠在同一行上。 */
@@ -421,10 +426,12 @@
     for (var i = 0; i < els.length; i++) {
       var el = els[i];
       if (el.closest('[data-binui-preview-ui]')) continue;
-      var r = el.getBoundingClientRect();
+      var r = el.getBoundingClientRect(), cs = getComputedStyle(el);
       out.push({ id: el.id || ('#' + i), tag: el.localName, cls: String(el.className || ''),
                  x: +r.left.toFixed(2), y: +r.top.toFixed(2),
-                 w: +r.width.toFixed(2), h: +r.height.toFixed(2) });
+                 w: +r.width.toFixed(2), h: +r.height.toFixed(2),
+                 disp: cs.display, flex: cs.flex, minH: cs.minHeight, hgt: cs.height,
+                 box: cs.boxSizing });
     }
     var pre = document.createElement('pre');
     pre.id = 'binui-layout';

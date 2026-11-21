@@ -143,8 +143,9 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 | `position:absolute` 的包含块 | binUI 一律相对**父元素**；浏览器往上找定位祖先 → 标题栏三颗按钮的图标跑到标题栏左上角 | 给"有绝对定位子元素、自己却静态"的父级补 `position:relative`（对 binUI 无操作） | **写进规范**：绝对定位子元素的父级要显式 `position:relative`，或者干脆别依赖父级定位 |
 | 没有 inline 排版 | binUI 每个元素都是块级盒（`display` 只有 `none`/`flex`）；`<span>` 在浏览器里 inline，`height` 失效、三行内容挤成一行叠在标题上 | 把 `span/a/b/em/…` 等行内标签拉成块级 | 同一套写法在两端都成立，**不需要改源码**；想写行内混排本来就不是 binUI 的能力 |
 | 首次展开的过渡 | 组件样式后插进 `<head>`，CSS 过渡把初始渲染从透明动画到目标色；binUI 首帧就是终值 | 展开期间 `transition:none`，两帧后恢复 | 预览侧行为，不改语义 |
+| **flex 项的自动最小尺寸** | CSS 里 flex 项默认 `min-width/min-height:auto` = min-content：内容撑不下时会把兄弟项 `flex-shrink` 压扁、自己溢出（实测 `flexshow`：标题栏 45px 被压到 **30**、`#body` 撑到 **760** 溢出窗口 70px） | 零特异性 `min-width:0;min-height:0` 覆盖（作者自己写的 `min-width` 照样赢）—— binUI 没有这套规则，`flex:1` 就是吃掉剩余空间 | 预览侧行为；**这一条把 flexshow 的像素差异从 27.04% 打到 6.30%** |
 
-**实测落差（同一页，浏览器截图 vs `bin2d_shot`，逐像素阈值 8）**：
+**实测落差（同一页，浏览器截图 vs `bin2d_shot`，逐像素阈值 8；0.38.14 已把 flexshow 从 27% 打到 6.3%）**：
 
 | 页面 | 尺寸 | 不同像素 | 备注 |
 |---|---|---|---|
@@ -157,7 +158,7 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 | `animshow` | 1000×900 | 11.03% | 有动画首帧 |
 | `fontshow` | 900×760 | 11.27% | 字形本身 |
 | `features` | 900×932 | 12.31% | 组件最多 |
-| `flexshow` | 1100×720 | 27.04% | 百分比/flex 分配 + 大量换行文本，误差叠得最多 |
+| `flexshow` | 1100×720 | **6.30%** | 原 27.04%：flex 项的自动最小尺寸（见上表最后一行）修掉后回到同一档 |
 
 剩下的差**全部**落在四类：文字度量（宽差 ~4 px / 基线低 ~3 px / 换行 ±1 行）、阴影浓度
 （binUI 深 36/255）、1px 抗锯齿、flex 余数分配（±1 px/项）—— 就是 §5 表里那几条，M4 逐个收敛。
@@ -196,6 +197,8 @@ binUI 侧用 `draw_bench --dump-nodes`，浏览器侧由 `binui-preview.js?layou
 | 2 | `margin-left/right:auto` 不支持 | 差 280px（不居中） | 规范写明：居中用 flex 或算好 left |
 | 3 | 静态元素也吃 `left/top` | binUI 按坐标摆，浏览器当静态元素忽略 | binUI 更宽松，不修；规范写明"要定位就写 `position:absolute`" |
 | 4 | `flex:1` 项带 padding+border 时分配基准不同 | binUI 外框等分 60/60，浏览器内容盒等分 65/55 | 规范写明：flex 项别带 padding/border（或接受 ±5px） |
+| 5 | **`margin` 只在流式布局生效** | 绝对定位元素与 flex 项上的 `margin` 被忽略：探针 5 个用例全中（`margin-left:30` → 差 30px；`margin:8/0/0/12` → 差 12/8）；`examples/flexshow` 的 `#chart` `margin-top:10` 就是那 10px 偏差 | **待修**：flex 项要进 `binui_flex::Item` + 两个调用方（编译器 + 渲染器），绝对定位要把 margin 加到坐标上。18 个像素基线页 **0 处 margin** → 不动机线 |
+| 6 | **`font-size` 不继承**（编译器注释写明"没有 CSS 级联"） | `body{font-size:24px}`：binUI 子元素仍是 14px（墨迹 14px 高），浏览器 24px（墨迹 23px 高）。颜色却会继承 | **待修**：插入级联（三处字号解析点）。会影响所有"没写 font-size、靠 body 定字号"的元素 |
 
 
 ## 5. 布局语义对齐（深水区，决定成败）
