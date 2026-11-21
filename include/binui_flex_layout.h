@@ -63,6 +63,12 @@ struct Item {
     float minCross = -1.0f, maxCross = -1.0f; // -1 = 无约束
     float grow    = 0.0f;   // 主轴剩余空间按权重分
     float shrink  = 1.0f;   // 主轴溢出时按 shrink×basis 加权收缩（CSS 默认 1）
+    // 外边距（CSS margin 在 flex 里照样占位）：主轴两端 + 交叉轴两端，由调用方按 row/column
+    // 把物理的 ml/mr/mt/mb 映射过来。basis/cross 都是**边框盒**尺寸，外边距在它外面。
+    float mMainStart = 0.0f;
+    float mMainEnd   = 0.0f;
+    float mCrossStart = 0.0f;
+    float mCrossEnd   = 0.0f;
     uint8_t alignSelf = AL_AUTO;
     uint8_t order     = 0;
     // 交叉轴拉伸：尺寸取"整行交叉轴长度"（align-self:stretch / align-items:stretch，
@@ -125,12 +131,13 @@ inline float Layout(const Cfg& cfg, const Item* items, size_t n, Rect* out) {
         float used = 0.0f;
         for (size_t k = 0; k < n; k++) {
             const float m = main[seq[k]];
-            if (k > s && used + cfg.gap + m > cfg.mainLen + 0.01f) {
+            const float mm = items[seq[k]].mMainStart + items[seq[k]].mMainEnd;
+            if (k > s && used + cfg.gap + m + mm > cfg.mainLen + 0.01f) {
                 ls.push_back(s); le.push_back(k);
                 s = k;
-                used = m;
+                used = m + mm;
             } else {
-                used += (k > s ? cfg.gap : 0.0f) + m;
+                used += (k > s ? cfg.gap : 0.0f) + m + mm;
             }
         }
         ls.push_back(s); le.push_back(n);
@@ -143,7 +150,8 @@ inline float Layout(const Cfg& cfg, const Item* items, size_t n, Rect* out) {
         const size_t cnt = e - s;
         const float gaps = (cnt > 1 ? static_cast<float>(cnt - 1) : 0.0f) * cfg.gap;
         float used = gaps;
-        for (size_t k = s; k < e; k++) used += main[seq[k]];
+        for (size_t k = s; k < e; k++)
+            used += main[seq[k]] + items[seq[k]].mMainStart + items[seq[k]].mMainEnd;
 
         const float free = cfg.mainLen - used;
         if (free > 0.0f) {
@@ -175,8 +183,10 @@ inline float Layout(const Cfg& cfg, const Item* items, size_t n, Rect* out) {
             float m = ClampSpan(main[seq[k]], items[seq[k]].minMain, items[seq[k]].maxMain);
             if (m < 0.0f) m = 0.0f;
             main[seq[k]] = m;
-            lineMain[li] += m;
-            lineCross[li] = std::max(lineCross[li], cross[seq[k]]);
+            lineMain[li] += m + items[seq[k]].mMainStart + items[seq[k]].mMainEnd;
+            lineCross[li] = std::max(lineCross[li],
+                                     cross[seq[k]] + items[seq[k]].mCrossStart +
+                                         items[seq[k]].mCrossEnd);
         }
         lineMain[li] += gaps;
     }
@@ -244,27 +254,31 @@ inline float Layout(const Cfg& cfg, const Item* items, size_t n, Rect* out) {
             const Item& it = items[idx];
 
             const uint8_t align = (it.alignSelf != AL_AUTO) ? it.alignSelf : cfg.align;
+            // 交叉轴可用长度 = 整行长度减去自己的上下外边距（CSS：对齐发生在**外边距盒**上）
+            const float crossAvail = std::max(0.0f, lineCS - it.mCrossStart - it.mCrossEnd);
             float cr = cross[idx];
-            if (it.stretch && align == AL_STRETCH) cr = std::max(cr, lineCS);
+            if (it.stretch && align == AL_STRETCH) cr = std::max(cr, crossAvail);
             cr = ClampSpan(cr, it.minCross, it.maxCross);
             if (cr < 0.0f) cr = 0.0f;
 
             float off = 0.0f;
-            if (align == AL_CENTER) off = (lineCS - cr) * 0.5f;
-            else if (align == AL_END) off = lineCS - cr;
+            if (align == AL_CENTER) off = (crossAvail - cr) * 0.5f;
+            else if (align == AL_END) off = crossAvail - cr;
+            off += it.mCrossStart;
 
+            const float mx = pos + it.mMainStart;
             if (cfg.row) {
-                out[idx].x = pos;
+                out[idx].x = mx;
                 out[idx].y = cy + off;
                 out[idx].w = main[idx];
                 out[idx].h = cr;
             } else {
                 out[idx].x = cy + off;
-                out[idx].y = pos;
+                out[idx].y = mx;
                 out[idx].w = cr;
                 out[idx].h = main[idx];
             }
-            pos += main[idx] + cfg.gap + gap2;
+            pos += it.mMainStart + main[idx] + it.mMainEnd + cfg.gap + gap2;
         }
         cy += lineCS + cfg.gap + crossGap;
     }

@@ -158,7 +158,7 @@ binui_compile main.html -o main.bui   # 同一份文件，编出发布用二进�
 | `animshow` | 1000×900 | 11.03% | 有动画首帧 |
 | `fontshow` | 900×760 | 11.27% | 字形本身 |
 | `features` | 900×932 | 12.31% | 组件最多 |
-| `flexshow` | 1100×720 | **6.30%** | 原 27.04%：flex 项的自动最小尺寸（见上表最后一行）修掉后回到同一档 |
+| `flexshow` | 1100×720 | **5.77%** | 原 27.04%：flex 项自动最小尺寸（预览侧）+ margin 在 flex/绝对定位上生效（引擎侧）两条修完 |
 
 剩下的差**全部**落在四类：文字度量（宽差 ~4 px / 基线低 ~3 px / 换行 ±1 行）、阴影浓度
 （binUI 深 36/255）、1px 抗锯齿、flex 余数分配（±1 px/项）—— 就是 §5 表里那几条，M4 逐个收敛。
@@ -179,7 +179,7 @@ binUI 侧用 `draw_bench --dump-nodes`，浏览器侧由 `binui-preview.js?layou
 | 列方向 `flex-direction:column` + `flex:1` ×3 | 一致（33.67/33.67/33.67） |
 | 半像素定位（`left:10.5px`）、交叉轴 `align-items:center` | 完全一致（186.5 / 191.5） |
 | `box-sizing` + `padding` | 一致（binUI 恒 border-box） |
-| **探针汇总** | 39 个盒子里 33 个偏差 **≤0.1px**，超差 0 个 → `make layout-parity` 退出码 0 |
+| margin（绝对定位 / flex 行 / flex 列 / 四值简写） | 0.38.15 前全错（差 10~30px），修后 10/10 **0 偏差** | | `make layout-parity` 退出码 0 |
 
 真实页面（同一把尺子，`python tools/binui_layout.py examples/appshow/main.html`）：
 
@@ -197,7 +197,7 @@ binUI 侧用 `draw_bench --dump-nodes`，浏览器侧由 `binui-preview.js?layou
 | 2 | `margin-left/right:auto` 不支持 | 差 280px（不居中） | 规范写明：居中用 flex 或算好 left |
 | 3 | 静态元素也吃 `left/top` | binUI 按坐标摆，浏览器当静态元素忽略 | binUI 更宽松，不修；规范写明"要定位就写 `position:absolute`" |
 | 4 | `flex:1` 项带 padding+border 时分配基准不同 | binUI 外框等分 60/60，浏览器内容盒等分 65/55 | 规范写明：flex 项别带 padding/border（或接受 ±5px） |
-| 5 | **`margin` 只在流式布局生效** | 绝对定位元素与 flex 项上的 `margin` 被忽略：探针 5 个用例全中（`margin-left:30` → 差 30px；`margin:8/0/0/12` → 差 12/8）；`examples/flexshow` 的 `#chart` `margin-top:10` 就是那 10px 偏差 | **待修**：flex 项要进 `binui_flex::Item` + 两个调用方（编译器 + 渲染器），绝对定位要把 margin 加到坐标上。18 个像素基线页 **0 处 margin** → 不动机线 |
+| 5 | ~~`margin` 只在流式布局生效~~ **已修（0.38.15）** | 修前：绝对定位元素与 flex 项上的 `margin` 全被忽略（探针 10 个用例全错，`margin-left:30` 差 30px） | 修法：`binui_flex::Item` 加 `mMainStart/mMainEnd/mCrossStart/mCrossEnd`（行/列由调用方映射），打包、换行、`flex-grow` 余量、交叉轴对齐、stretch 全部按**外边距盒**算；绝对定位把 `margin` 加到坐标上（`left` 量的到外边距）。编译器 + 渲染器两个调用方同步。**修后 10/10 用例 0 偏差，flexshow 像素差异 6.30% → 5.77%，18 页像素基线 0 变化**（asset 页 0 处 margin） |
 | 6 | **`font-size` 不继承**（编译器注释写明"没有 CSS 级联"） | `body{font-size:24px}`：binUI 子元素仍是 14px（墨迹 14px 高），浏览器 24px（墨迹 23px 高）。颜色却会继承 | **待修**：插入级联（三处字号解析点）。会影响所有"没写 font-size、靠 body 定字号"的元素 |
 
 

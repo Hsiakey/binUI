@@ -5342,6 +5342,41 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             it.grow     = grow;
             it.shrink   = shrink;
 
+            // 外边距：CSS 的 margin 在 flex 里照样占位（以前 binUI 只在流式布局用 margin，
+            // 实测 flex 项上的 margin-left:30 / margin-top:10 全被忽略 → 与浏览器整块错位）
+            {
+                float mv[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+                if (auto mi = st.find("margin"); mi != st.end()) {
+                    const auto toks = splitCssTokens(mi->second);
+                    if (toks.size() == 1) {
+                        mv[0] = mv[1] = mv[2] = mv[3] = parseLen(toks[0], 0);
+                    } else if (toks.size() == 2) {
+                        mv[0] = mv[2] = parseLen(toks[0], 0);
+                        mv[1] = mv[3] = parseLen(toks[1], 0);
+                    } else if (toks.size() == 3) {
+                        mv[0] = parseLen(toks[0], 0);
+                        mv[1] = mv[3] = parseLen(toks[1], 0);
+                        mv[2] = parseLen(toks[2], 0);
+                    } else if (toks.size() >= 4) {
+                        mv[0] = parseLen(toks[0], 0); mv[1] = parseLen(toks[1], 0);
+                        mv[2] = parseLen(toks[2], 0); mv[3] = parseLen(toks[3], 0);
+                    }
+                }
+                for (int sdx = 0; sdx < 4; sdx++) {
+                    static const char* kLong[4] = { "margin-top", "margin-right",
+                                                    "margin-bottom", "margin-left" };
+                    if (auto li2 = st.find(kLong[sdx]); li2 != st.end())
+                        mv[sdx] = parseLen(li2->second, 0);
+                }
+                if (row) {
+                    it.mMainStart = mv[3]; it.mMainEnd = mv[1];
+                    it.mCrossStart = mv[0]; it.mCrossEnd = mv[2];
+                } else {
+                    it.mMainStart = mv[0]; it.mMainEnd = mv[2];
+                    it.mCrossStart = mv[3]; it.mCrossEnd = mv[1];
+                }
+            }
+
             // align-self / order
             uint8_t alignSelf = 0xFF;
             if (auto lt = st.find("align-self"); lt != st.end()) {
@@ -7477,9 +7512,10 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             }
         }
 
-        // margin 仅在流式布局中生效
+        // margin：流式布局用它推进流光标；绝对定位/flex 项的 margin 也要收（CSS 里处处生效）。
+        // 以前这里只在"没有 top"时解析，于是绝对定位元素与 flex 项上的 margin 被整个丢掉。
         float mt = 0, mr = 0, mb = 0, ml = 0;
-        if (!hasY) {
+        {
             auto m = parseBox(style, "margin",
                               "margin-top", "margin-right", "margin-bottom", "margin-left", 0);
             mt = m[0]; mr = m[1]; mb = m[2]; ml = m[3];
@@ -7530,21 +7566,21 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             if (effMnW >= 0 && w < effMnW) w = effMnW;
             if (effMxW >= 0 && w > effMxW) w = effMxW;
             if (useRight) {
-                // v30：x = 含定位盒右边 − 偏移 − 自身宽（与渲染器重排同一个式子）
+                // v30：x = 含定位盒右边 − 偏移 − 自身宽 − margin-right（与渲染器重排同一个式子）
                 const float r = (pctR >= 0) ? pctR * cb.contentW : rightPx;
-                x = cb.ox + cb.contentW - r - w;
+                x = cb.ox + cb.contentW - r - w - mr;
                 lx = x - cb.ox;
             } else if (hasX) {
-                x = cb.ox + lx;
+                x = cb.ox + lx + ml;   // CSS：left 量的到外边距，边框盒要再让开 margin-left
             } else {
                 x = cb.ox + ml;
             }
             if (useBottom) {
                 const float b = (pctB >= 0) ? pctB * pcContentH : bottomPx;
-                y = cb.oy + pcContentH - b - lh;
+                y = cb.oy + pcContentH - b - lh - mb;
                 ly = y - cb.oy;
             } else if (hasY) {
-                y = cb.oy + ly;
+                y = cb.oy + ly + mt;
             } else {
                 y = pc.oy + pc.cursorY + mt;
                 pc.cursorY += mt + lh + mb;

@@ -5,6 +5,32 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.15] - 2026-11-21 【格式 v34 不变】
+
+**`margin` 在 flex 项和绝对定位元素上生效了**（issue 15 §4 已知差异第 5 条）。
+
+以前 binUI 只把 `margin` 用于流式布局：flex 项上的 `margin-left:30`、绝对定位元素上的
+`margin:8/0/0/12` 全被无声丢掉 —— 同一个探针页 10 个用例全错，差 10~30px。
+
+- `include/binui_flex_layout.h`：`Item` 新增 `mMainStart/mMainEnd/mCrossStart/mCrossEnd`
+  （行/列由调用方按 row/column 映射物理 `ml/mr/mt/mb`）。分行打包、`flex-grow` 余量、
+  `justify-content`、交叉轴 `align-items/stretch` 全部按**外边距盒**算 —— 对齐发生在
+  外边距盒上，和 CSS 一致。
+- 编译器（`binui_compiler.cpp`）：flex 子项解析 1/2/3/4 值简写 + 四条长属性；绝对定位的
+  `left/top/right/bottom` 现在都把 margin 让开（`left` 量到外边距，边框盒再挪 `margin-left`）；
+  margin 解析不再受"有没有 top"限制。
+- 渲染器（`binui_renderer.cpp`）：`relayoutSubtree` 的 flex 段从 spec 里的 `ml/mr/mt/mb` 填同样四个
+  字段 —— 编译期和运行期重排口径一致（窗口 resize 不会跳）。
+
+**验收**：margin 探针 **10/10 用例 0 偏差**（绝对定位、flex 行、flex 列、四值简写、贴右）；
+`tests/layout-probe.html` 加了 4 组 margin 用例，`make layout-parity` 现在 **50 个盒子 44 个
+≤0.1px、超差 0**；`flexshow` 像素差异 **6.30% → 5.77%**；
+**18 个像素基线页 0 变化**（asset 页 0 处 margin，所以这次不动机线）。
+
+门禁：`make all` 零警告 · `make test` PASSED · `make partial` 4×diff=0 · `pixels-bin2d` 0 容差 ·
+`check_examples` 18 页 0 问题 · `make layout-parity` 0 超差。
+
+
 ## [0.38.14] - 2026-11-21 【格式 v34 不变】
 
 **修掉最大的一处差异：flex 项的"自动最小尺寸"。** 上一版量化到 `flexshow` 的

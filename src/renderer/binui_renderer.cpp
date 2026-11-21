@@ -1622,6 +1622,14 @@ void BinUIRenderer::relayoutFrom(size_t startIdx) {
                 it.shrink    = ks->flexShrink;
                 it.alignSelf = ks->alignSelf;
                 it.order     = ks->flexOrder;
+                // 外边距（编译器已经把物理 ml/mr/mt/mb 写进 spec，这里按 row/column 映射到主轴/交叉轴）
+                if (row) {
+                    it.mMainStart = ks->ml; it.mMainEnd = ks->mr;
+                    it.mCrossStart = ks->mt; it.mCrossEnd = ks->mb;
+                } else {
+                    it.mMainStart = ks->mt; it.mMainEnd = ks->mb;
+                    it.mCrossStart = ks->ml; it.mCrossEnd = ks->mr;
+                }
                 // 交叉轴拉伸：作者写了 stretch，或者 column 里压根没写宽度（既有行为）
                 it.stretch = (ks->flags & SPEC_CROSS_AUTO) &&
                              (ks->alignSelf == binui_flex::AL_STRETCH ||
