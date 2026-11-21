@@ -5103,6 +5103,51 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
         bool    content   = false;  // 主轴基准是内容估算
     };
 
+    // ============================================================
+    // 字号级联（CSS 的 font-size 继承）
+    // ------------------------------------------------------------
+    // binUI 以前**没有级联**：没写 font-size 的元素一律用标签默认值（14），于是
+    // `body { font-size:13px }` 对子元素完全无效 —— 而 font-size 是 CSS 里最典型的继承属性。
+    // 实测：同一个探针页 binUI 的字是 14px、浏览器 24px（墨迹高度差 9px）。
+    //
+    // 规则（对齐 CSS，同时保住标签自带字号）：
+    //   1. 本元素写了 font-size → 用它的（em 相对**父级**字号，和 CSS 一致）；
+    //   2. 没写 → 继承父元素解析后的字号；
+    //   3. 父子都没有 → 标签默认值（h1~h6/small 这类"标签自带字号"直接用标签默认，
+    //      相当于 CSS 的 UA 样式表，不参与继承）。
+    // 一次前序遍历即可（ParseElements 保证父元素下标更小）。
+    std::unordered_map<size_t, float> resolvedFont;
+    {
+        auto hasOwnTagSize = [](const std::string& t) {
+            return t == "h1" || t == "h2" || t == "h3" || t == "h4" || t == "h5" ||
+                   t == "h6" || t == "small";
+        };
+        for (size_t fi = 0; fi < elems.size(); fi++) {
+            const HNode& e = elems[fi];
+            auto st = styleOf(e, fi);
+            const std::string fsv = pick(e.attrs, st, "size", "font-size", "");
+            float parentFs = -1.0f;
+            if (e.parentIdx != SIZE_MAX) {
+                auto pit = resolvedFont.find(e.parentIdx);
+                if (pit != resolvedFont.end()) parentFs = pit->second;
+            }
+            float fs;
+            if (!fsv.empty()) {
+                const float base = (parentFs > 0.0f) ? parentFs : DefaultFontSizeOf(e.tag);
+                LenCtx fsCtx{ base, curCtx.rootFont, curCtx.viewW, curCtx.viewH };
+                auto fp = ParseLenPct(fsv, base, fsCtx, "font-size");
+                fs = (fp.ok && fp.value > 0.0f) ? fp.value : base;
+            } else if (hasOwnTagSize(e.tag)) {
+                fs = DefaultFontSizeOf(e.tag);
+            } else if (parentFs > 0.0f) {
+                fs = parentFs;
+            } else {
+                fs = DefaultFontSizeOf(e.tag);
+            }
+            resolvedFont[fi] = fs;
+        }
+    }
+
     // flex 布局（编译期）：容器内容盒 (ox,oy,cw,ch)，子项坐标相对内容盒写入 out。
     // 算法本身在 include/binui_flex_layout.h —— 运行期重排用的是同一份，别在这里另写一遍。
     // 返回容器内容盒所需的**交叉轴长度**（容器没声明高度/宽度时拿它撑开自己）。
@@ -5181,16 +5226,11 @@ std::vector<uint8_t> CompileHTML(const std::string& html, std::vector<std::strin
             auto st = styleOf(e, k);
             const uint8_t ktype = tagToType(e.tag);
 
-            // 子项字号（本项 em 的换算基准）
+            // 子项字号（本项 em 的换算基准）：走字号级联表（含 CSS 继承）
             {
-                const float dfltFs = DefaultFontSizeOf(e.tag);
-                std::string fsv = pick(e.attrs, st, "size", "font-size", "");
-                curCtx.fontSize = dfltFs;
-                if (!fsv.empty()) {
-                    LenCtx fsCtx{ dfltFs, curCtx.rootFont, curCtx.viewW, curCtx.viewH };
-                    auto fp = ParseLenPct(fsv, dfltFs, fsCtx, "font-size");
-                    if (fp.ok && fp.value > 0) curCtx.fontSize = fp.value;
-                }
+                auto rf = resolvedFont.find(k);
+                curCtx.fontSize = (rf != resolvedFont.end()) ? rf->second
+                                                             : DefaultFontSizeOf(e.tag);
             }
 
             std::string sw = pick(e.attrs, st, "w", "width", "");
@@ -7234,18 +7274,11 @@ auto shapeOf = [&](const HNode& ce, PathShape& cs, float tol = 0.1f) -> bool {
             }
         }
 
-        // 先确定本元素字号：width/height/margin/padding 里写的 em 以此为基准
-        // （没有 CSS 级联，em 取元素自身字号；font-size 自身写 em 时按默认字号近似）
+        // 本元素字号：走字号级联表（含 CSS 继承；em 相对父级字号）
         float nodeFontSize = 14.0f;
         {
-            const float dfltFs = DefaultFontSizeOf(e.tag);
-            std::string fsv = pick(e.attrs, style, "size", "font-size", "");
-            nodeFontSize = dfltFs;
-            if (!fsv.empty()) {
-                LenCtx fsCtx{ dfltFs, curCtx.rootFont, curCtx.viewW, curCtx.viewH };
-                auto fp = ParseLenPct(fsv, dfltFs, fsCtx, "font-size");
-                if (fp.ok && fp.value > 0) nodeFontSize = fp.value;
-            }
+            auto rf = resolvedFont.find(ei);
+            nodeFontSize = (rf != resolvedFont.end()) ? rf->second : DefaultFontSizeOf(e.tag);
             curCtx.fontSize = nodeFontSize;
         }
 

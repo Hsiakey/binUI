@@ -198,7 +198,7 @@ binUI 侧用 `draw_bench --dump-nodes`，浏览器侧由 `binui-preview.js?layou
 | 3 | 静态元素也吃 `left/top` | binUI 按坐标摆，浏览器当静态元素忽略 | binUI 更宽松，不修；规范写明"要定位就写 `position:absolute`" |
 | 4 | `flex:1` 项带 padding+border 时分配基准不同 | binUI 外框等分 60/60，浏览器内容盒等分 65/55 | 规范写明：flex 项别带 padding/border（或接受 ±5px） |
 | 5 | ~~`margin` 只在流式布局生效~~ **已修（0.38.15）** | 修前：绝对定位元素与 flex 项上的 `margin` 全被忽略（探针 10 个用例全错，`margin-left:30` 差 30px） | 修法：`binui_flex::Item` 加 `mMainStart/mMainEnd/mCrossStart/mCrossEnd`（行/列由调用方映射），打包、换行、`flex-grow` 余量、交叉轴对齐、stretch 全部按**外边距盒**算；绝对定位把 `margin` 加到坐标上（`left` 量的到外边距）。编译器 + 渲染器两个调用方同步。**修后 10/10 用例 0 偏差，flexshow 像素差异 6.30% → 5.77%，18 页像素基线 0 变化**（asset 页 0 处 margin） |
-| 6 | **`font-size` 不继承**（编译器注释写明"没有 CSS 级联"） | `body{font-size:24px}`：binUI 子元素仍是 14px（墨迹 14px 高），浏览器 24px（墨迹 23px 高）。颜色却会继承 | **待修**：插入级联（三处字号解析点）。会影响所有"没写 font-size、靠 body 定字号"的元素 |
+| 6 | ~~`font-size` 不继承~~ **已修（0.38.16）** | 修前：`body{font-size:24px}` 时 binUI 子元素仍是 14px（墨迹 14px 高），浏览器 24px（墨迹 23px 高）；颜色却会继承。原因：编译器**没有级联**，没写 font-size 就一律用标签默认 14 | 修法：加一次前序遍历算"解析后字号"（写了用自己、没写继承父级、父子都没有才用标签默认；`h1~h6`/`small` 保留标签自带字号，相当于 UA 样式表；`em` 的字号相对**父级**）。三处字号解析点（flex 子项 / 节点布局 / 绘制字号）全部改走这张表。修后墨迹高度 23px vs 浏览器 23px；**18 页像素基线 0 变化、9 个示例页 0 变化**（现有布局都显式写了字号，这条修的是将来的坑） |
 
 
 ## 5. 布局语义对齐（深水区，决定成败）
