@@ -5,6 +5,40 @@
 与语义化版本不是一回事——**格式号只在二进制布局变化时递增**。
 
 
+## [0.38.6] - 2026-11-21 【格式 v34 不变】
+
+**结构查看器（issue 14 的 P1）**：把 renderer 排完之后的**真布局**导成 JSON，再合成一个
+自包含 HTML，在 `bin2d_shot` 的截图上叠盒框 —— 回答的是"**这个盒子为什么不在那**"，
+不是"看起来像不像"。
+
+```sh
+build-mingw\bin\draw_bench.exe examples\buttonshow\main.html --dump-nodes out\nodes\buttonshow.json
+build-mingw\bin\bin2d_shot.exe examples\buttonshow\main.html out\nodes\buttonshow.png
+python tools\binui_nodes.py out\nodes\buttonshow.json out\nodes\buttonshow.png -o out\nodes\buttonshow.html
+```
+
+三条改动：
+
+- `tools/draw_bench.cpp`：新增 `--dump-nodes <out.json>`。导出时机在 loadLayout / 组件
+  mount / scrollTo / setText 之后，所以导的就是这一帧的布局；字段 = id、父、type、flags、
+  盒、z、圆角/内边距/字号、颜色、名字、文本、可见性（自身 + 有效）、scrollable、absolute、
+  clipOnly、**裁剪祖先链**、`contentW/contentH`。**不重算任何布局** —— 全部读
+  `getNodes()` / `clippingAncestors()` / `contentWidth/Height()`。
+- `include/binui_renderer.h` + `src/renderer/binui_renderer.cpp`：新增 `nodeNameOf(id)`。
+  `NodeInfo` 不带名字（名字在独立的名称表里，只有 `findNodeByName` 这个反向入口），
+  查看器需要 id→名字，否则树上只能看到 id。
+- `tools/binui_nodes.py`：JSON + PNG → 单文件 HTML（都内联成 base64，`file://` 直开）。
+  左树（缩进 / 类型 / `#名字` / 盒 / 坐标，可按类型·名字·宽高过滤，可只列显示中），右侧
+  截图叠盒框；黄=选中、青=祖先、红=裁剪祖先、灰虚线=display:none；点图命中最深节点；
+  `#sel=36&all=1` 深链可分享现场。
+
+实测（`examples/appshow`，308 节点）：`#36` 视口 `y=60 h=676`、内容高 `2704`，
+`#110` 的 `y=1496` 因此不在窗口内；`x=1288` 往后的节点属于右侧子页面。这些是浏览器
+镜像页看不出来、而这里一眼就是数字的东西。
+
+门禁：`make all` 零警告、`make test` PASSED、`make partial` 4/4 `diff=0`、
+`make pixels-bin2d` 0 容差（**画面一个像素都没动**：导出与查看都不在绘制路径上）。
+
 ## [0.38.5] - 2026-11-21 【格式 v34 不变】
 
 **把 `binui_bin2d.o` 并进 `libbinui.a`**：交付从"1 个库 + 1 个后端对象 + 3 个依赖"变成

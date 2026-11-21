@@ -1134,6 +1134,12 @@ uint16_t BinUIRenderer::findNodeByName(const std::string& name) const {
     return (it == nameToId_.end()) ? 0 : it->second;
 }
 
+std::string BinUIRenderer::nodeNameOf(uint16_t nodeId) const {
+    for (const auto& kv : nameToId_)
+        if (kv.second == nodeId) return kv.first;
+    return std::string();
+}
+
 uint16_t BinUIRenderer::addNode(uint16_t parentId, uint8_t type,
                                 float x, float y, float w, float h,
                                 uint32_t color, uint16_t radius, uint16_t fontSize) {

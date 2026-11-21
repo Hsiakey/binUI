@@ -19,7 +19,7 @@
 | ID | 事项 | 来源 | 验收 | 估 | 结果 |
 |---|---|---|---|---|---|
 | A1 | 镜像生成器收成正式工具：`binui_preview`（输出 `out/preview/`、`--stage` 单组件视图、批量跑 `examples/*`） | 14 §5 轮1 | `components/preview.html` + 3 个示例页各出一组"镜像/真渲染"对照，肉眼可读；工具在 `tools/` 内自洽（`python tools/binui_preview.py --help`） | 0.5–1 天 | |
-| A2 | **P1 结构导出 + 布局叠层 viewer**：`binui_compile --dump-nodes` 出 JSON（id/父/class/盒/裁剪/display:none/滚动内容高），单页 viewer 左树右图叠加盒框 | 14 §3 P1 | 能回答"这个盒子为什么不在那"：点树高亮盒、悬停给计算值；JSON 与引擎实际布局同源（不是猜的） | 2–3 天 | |
+| A2 | **P1 结构导出 + 布局叠层 viewer**：`draw_bench --dump-nodes` 出 JSON（id/父/type/盒/裁剪祖先/display:none/滚动内容高），单页 viewer 左树右图叠加盒框 | 14 §3 P1 | 能回答"这个盒子为什么不在那"：点树高亮盒、悬停给计算值；JSON 与引擎实际布局同源（不是猜的） | 2–3 天 | **完成 · 0.38.6**（`draw_bench --dump-nodes` + `tools/binui_nodes.py`，见 issue 14 §3） |
 | A3 | 热重载：改源码 → 浏览器自动刷新（SSE） | 14 §5 轮3 | 保存后 2 秒内刷新，A1/A2 都受益 | 0.5–1 天 | |
 | A4 | P2 wasm 真渲染（编译+布局+CPU 光栅进 wasm，canvas 出图） | 14 §3 P2 | 同机同字体下浏览器画面与 `bin2d_shot` 一致 | 2–4 周 | 后置到 A1–A3 之后 |
 

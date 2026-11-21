@@ -366,6 +366,10 @@ public:
     void removeNode(uint16_t nodeId); // 隐藏（不可见），节点保留供复用
     // 按 HTML id / XML name 属性查找节点（编译器输出名称表；未找到返回 0）
     uint16_t findNodeByName(const std::string& name) const;
+    // 名称表反查：nodeId -> HTML id / XML name（没名字返回空串）。
+    // getNodes() 的 NodeInfo 不带名字（名字在独立的名称表里），结构查看器（--dump-nodes）
+    // 与调试输出都需要这一项，否则树上只能看到 id。
+    std::string nodeNameOf(uint16_t nodeId) const;
 
     // 有效可见性：节点自身及其所有祖先都必须可见
     bool isNodeVisible(uint16_t nodeId) const;

@@ -13,6 +13,7 @@
 // 用法:
 //   draw_bench <ui文件>|--default [--frames N] [--warm N] [--clip l,t,w,h]
 //              [--scrollTo y] [--hover x,y] [--text id=text] [--hash] [--json]
+//              [--dump-nodes <out.json>]
 #include <cstdio>
 #include <cstring>
 #include <cstdlib>
@@ -250,12 +251,99 @@ double NowUs() {
     return duration<double, std::micro>(steady_clock::now().time_since_epoch()).count();
 }
 
+// ---------------------------------------------------------------- 结构导出
+//
+// `--dump-nodes <out.json>`：把**运行时真布局**导成 JSON，给结构查看器用
+// （docs/issues/14-browser-preview-dx.md 的 P1）。
+//
+// 为什么在 draw_bench 而不是 binui_compile：编译期产物里只有规格段，盒是运行时
+// 由 renderer 排出来的（字体测宽、百分比、flex、滚动都在这一步）。想回答
+// "这个盒子为什么不在那"，导的必须是排完之后的值 —— 所以这里读 getNodes()，
+// 不自己重算任何布局。
+std::string JsonEscape(const std::string& s) {
+    std::string o;
+    o.reserve(s.size() + 8);
+    for (unsigned char c : s) {
+        switch (c) {
+            case '"':  o += "\\\""; break;
+            case '\\': o += "\\\\"; break;
+            case '\n': o += "\\n";  break;
+            case '\r': o += "\\r";  break;
+            case '\t': o += "\\t";  break;
+            default:
+                if (c < 0x20) {
+                    char buf[8];
+                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
+                    o += buf;
+                } else {
+                    o += static_cast<char>(c);
+                }
+        }
+    }
+    return o;
+}
+
+const char* kNodeTypeNames[] = {"root", "label", "image", "button", "input",
+                                "list", "line", "svg", "canvas", "video", "path"};
+
+bool WriteNodesJson(const char* path, BinUIRenderer& r, const std::string& uiName) {
+    const auto& nodes = r.getNodes();
+    if (nodes.empty()) return false;
+    std::FILE* f = std::fopen(path, "wb");
+    if (!f) return false;
+    std::fprintf(f, "{\n  \"ui\": \"%s\",\n", JsonEscape(uiName).c_str());
+    std::fprintf(f, "  \"window\": { \"w\": %.0f, \"h\": %.0f },\n",
+                 static_cast<double>(nodes[0].width), static_cast<double>(nodes[0].height));
+    std::fprintf(f, "  \"version\": %u,\n", static_cast<unsigned>(BINUI_VERSION));
+    std::fprintf(f, "  \"nodes\": [\n");
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        const auto& n = nodes[i];
+        std::vector<uint16_t> clips;
+        r.clippingAncestors(n.id, clips);
+        const bool selfVisible = (n.flags & BINUI_VISIBLE) != 0;
+        const bool shown = r.isNodeVisible(n.id);
+        const bool scrollable = (n.flags & BINUI_SCROLLABLE) != 0;
+        const char* typeName = (n.type < sizeof(kNodeTypeNames) / sizeof(kNodeTypeNames[0]))
+                                   ? kNodeTypeNames[n.type] : "?";
+        std::fprintf(f,
+                     "    { \"id\": %u, \"parent\": %u, \"type\": \"%s\", \"typeId\": %u,"
+                     " \"flags\": %u, \"x\": %.2f, \"y\": %.2f, \"w\": %.2f, \"h\": %.2f,"
+                     " \"z\": %d, \"radius\": %u, \"padding\": %u, \"fontSize\": %u,"
+                     " \"imageIndex\": %u, \"color\": \"%08X\", \"name\": \"%s\","
+                     " \"text\": \"%s\", \"visible\": %s, \"shown\": %s,"
+                     " \"scrollable\": %s, \"absolute\": %s, \"clipOnly\": %s,"
+                     " \"clips\": [",
+                     static_cast<unsigned>(n.id), static_cast<unsigned>(n.parentId), typeName,
+                     static_cast<unsigned>(n.type), static_cast<unsigned>(n.flags),
+                     static_cast<double>(n.x), static_cast<double>(n.y),
+                     static_cast<double>(n.width), static_cast<double>(n.height),
+                     static_cast<int>(n.zIndex), static_cast<unsigned>(n.radius),
+                     static_cast<unsigned>(n.padding), static_cast<unsigned>(n.fontSize),
+                     static_cast<unsigned>(n.imageIndex), static_cast<unsigned>(n.color),
+                     JsonEscape(r.nodeNameOf(n.id)).c_str(), JsonEscape(n.text).c_str(),
+                     selfVisible ? "true" : "false", shown ? "true" : "false",
+                     scrollable ? "true" : "false",
+                     ((n.flags & BINUI_ABSOLUTE) != 0) ? "true" : "false",
+                     r.isClipOnly(n.id) ? "true" : "false");
+        for (size_t k = 0; k < clips.size(); ++k)
+            std::fprintf(f, "%s%u", k ? ", " : "", static_cast<unsigned>(clips[k]));
+        std::fprintf(f, "], \"contentW\": %.2f, \"contentH\": %.2f }%s\n",
+                     static_cast<double>(r.contentWidth(n.id)),
+                     static_cast<double>(scrollable ? r.contentHeight(n.id) : 0.0f),
+                     (i + 1 == nodes.size()) ? "" : ",");
+    }
+    std::fprintf(f, "  ]\n}\n");
+    std::fclose(f);
+    return true;
+}
+
 } // namespace
 
 int main(int argc, char** argv) {
     if (argc < 2) {
         std::printf("usage: draw_bench <ui file>|--default [--frames N] [--warm N] [--clip l,t,w,h]\n"
-                    "                  [--scrollTo y] [--hover x,y] [--text id=text] [--hash] [--json]\n");
+                    "                  [--scrollTo y] [--hover x,y] [--text id=text] [--hash] [--json]\n"
+                    "                  [--dump-nodes <out.json>]\n");
         return 1;
     }
     const bool useDefault = (std::string(argv[1]) == "--default");
@@ -265,6 +353,7 @@ int main(int argc, char** argv) {
     float hoverX = -1.0f, hoverY = 0.0f;
     std::vector<std::pair<uint16_t, std::string>> texts;
     bool hashMode = false, json = false;
+    std::string dumpNodesPath;
 
     for (int i = 2; i < argc; i++) {
         const std::string a = argv[i];
@@ -284,6 +373,7 @@ int main(int argc, char** argv) {
                                    spec.substr(eq + 1));
         } else if (a == "--hash") hashMode = true;
         else if (a == "--json") json = true;
+        else if (a == "--dump-nodes" && i + 1 < argc) dumpNodesPath = argv[++i];
         else if (a.rfind("--", 0) == 0) {
             std::printf("unknown option: %s\n", a.c_str());
             return 1;
@@ -323,6 +413,14 @@ int main(int argc, char** argv) {
     }
     for (const auto& kv : texts) r.setText(kv.first, kv.second);
     if (hoverX >= 0) { r.setHover(hoverX, hoverY); r.stepAnimations(); }
+
+    // 结构导出：在排完、滚完、改过文本之后取，导出的就是这一帧的布局
+    if (!dumpNodesPath.empty()) {
+        if (WriteNodesJson(dumpNodesPath.c_str(), r, useDefault ? "--default" : argv[1]))
+            std::fprintf(stderr, "[bench] 节点导出 -> %s\n", dumpNodesPath.c_str());
+        else
+            std::fprintf(stderr, "[bench] 节点导出失败: %s\n", dumpNodesPath.c_str());
+    }
 
     CountGfx g;
     g.w_ = W;

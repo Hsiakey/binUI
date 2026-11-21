@@ -1,8 +1,8 @@
 # 14 - 写起来像网页、却看不了网页：浏览器预览与结构查看的缺口
 
-**状态**：**P0 原型已跑通**（`tools/binui_preview.py`），P1/P2 未做，待定优先级。
+**状态**：**P0 原型已跑通、P1 已落地**（`tools/binui_preview.py`、`draw_bench --dump-nodes` + `tools/binui_nodes.py`），P2 未做，待定优先级。
 **类型**：开发者体验（DX） · **严重度**：中高（不是正确性问题，但决定"写 UI 这件事顺不顺"）
-**影响面**：所有写 `.bum.html` / `main.html` 的人；与运行时零关系（镜像页不参与渲染）。
+**影响面**：所有写 `.bum.html` / `main.html` 的人；与运行时零关系（镜像页/查看器都不参与渲染）。
 
 > 一句话：**源码是 binUI 的编译期布局语言，不是 HTML，浏览器直接打开必然散架**；
 > 但"写完立刻在浏览器里看结构、看盒子、看大致布局"是可达的，分三层做：
@@ -27,7 +27,7 @@
 | # | 想看到什么 | 能做到的技术 | 状态 |
 |---|---|---|---|
 | ① | **大致视觉**：这块在不在、什么颜色、差不多多大 | 源码 → 浏览器镜像页（展开组件、替参数、补单位） | **P0 原型已跑通** |
-| ② | **结构与盒子**：节点树、父子、每个盒的 x/y/w/h、谁裁谁 | 真实布局引擎导出 JSON + 单页 viewer（树 + 叠层高亮） | 未做，性价比最高 |
+| ② | **结构与盒子**：节点树、父子、每个盒的 x/y/w/h、谁裁谁 | 真实布局引擎导出 JSON + 单页 viewer（树 + 叠层高亮） | **P1 已落地**（`draw_bench --dump-nodes` + `tools/binui_nodes.py`） |
 | ③ | **像素级**：真渲染、真字体、真的 AA | 把布局+光栅编成 wasm，在浏览器里跑 canvas | 未做，中期目标 |
 
 ## 3. 三条路
@@ -59,18 +59,40 @@
 对不对"，是 `binui dev`（[15](15-valid-html-language.md) M2）里那条 `/__binui/component/…`
 路由的原型。
 
-### P1 结构导出 + 布局叠层（推荐下一步）
+### P1 结构导出 + 布局叠层（**已落地，2026-11-21**）
 
 编译/布局之后，渲染器手里已经有：节点表（id / 父 / class / 名称 / 标志位）、计算后的盒
-（x/y/w/h）、无效矩形、裁剪矩形。导出成一份 JSON（`binui_compile --dump-nodes` 或
-`draw_bench --json --nodes`），再配一个单文件 viewer：
+（x/y/w/h）、裁剪祖先链、滚动内容高。现在把这份**运行时真布局**导出来，配一个单页 viewer：
 
-- 左：树（缩进 + 标签 + `#id` + 盒尺寸）；
-- 右：页面截图（`bin2d_shot` 出的 PNG）上叠加每个节点的盒框，点树高亮盒，悬停显示计算值；
-- 附带：哪个节点被裁剪、哪个节点 `display:none`、滚动容器与内容高。
+```sh
+# 1) 导出（读的是 renderer 排完之后的 getNodes()，不重算任何布局）
+build-mingw\bin\draw_bench.exe examples\buttonshow\main.html --dump-nodes out\nodes\buttonshow.json
+# 2) 出图（像素仍是 bin2d_shot 权威）
+build-mingw\bin\bin2d_shot.exe examples\buttonshow\main.html out\nodes\buttonshow.png
+# 3) 合成自包含 HTML（JSON 与 PNG 内联成 base64，file:// 直接开，不用起服务）
+python tools\binui_nodes.py out\nodes\buttonshow.json out\nodes\buttonshow.png -o out\nodes\buttonshow.html
+```
 
-这条最值得做：**它回答的是"布局对不对"，而不是"看起来像不像"**，且数据来自真实引擎，
-不会出现"浏览器里对、binUI 里错"。工作量估 2–3 天（导出 ~200 行 + viewer 单页）。
+viewer 提供的东西：
+
+- 左：树（缩进 + 类型 + `#名字` 或 `#id` + 盒尺寸 + 坐标），可按类型/名字/宽高过滤；
+- 右：`bin2d_shot` 的 PNG 上叠每个节点的盒框，点树高亮盒、悬停显示计算值、点图命中最深节点；
+- 颜色约定：黄=选中、青=祖先、红=裁剪祖先、灰虚线=display:none；
+- 附带：`scrollable` 节点显示「滚动内容 2116 × 2704（可视 1058 × 676）」这类读数，
+  这正是"这个盒子为什么不在那"的答案；
+- 深链 `#sel=36&all=1` 可分享"看这个盒子"的现场。
+
+![结构查看器 · buttonshow](../img/nodes-viewer-buttonshow.png)
+
+![结构查看器 · appshow（选中滚动容器 #36）](../img/nodes-viewer-appshow.png)
+
+数据来源的一个具体例子（`examples/appshow`，308 节点）：`#36` 视口 `y=60 h=676` 而内容高
+`2704`，所以 `#110` 这类节点 `y=1496` 在窗口外；`x=1288` 往后的节点属于右侧子页面 ——
+这些在浏览器镜像页里看不出来，在结构查看器里是明摆着的数字。
+
+这条最值得做的理由仍然成立：**它回答的是"布局对不对"，而不是"看起来像不像"**，且数据来自
+真实引擎，不会出现"浏览器里对、binUI 里错"。实现约 150 行导出 + 1 个自包含 viewer
+（`--dump-nodes` 在 `tools/draw_bench.cpp`，viewer 生成器是 `tools/binui_nodes.py`）。
 
 ### P2 wasm 真渲染（中期）
 
@@ -95,7 +117,7 @@
 | 轮次 | 做什么 | 验收 |
 |---|---|---|
 | 1 | P0 镜像生成器收成正式工具（`binui_preview`，输出到 `out/preview/`） | `components/preview.html` 与 `examples/*` 各一组截图，肉眼可读 |
-| 2 | P1 结构导出 + 布局叠层 viewer | 能回答"这个盒子为什么不在那" |
+| 2 | ~~P1 结构导出 + 布局叠层 viewer~~ **已完成** | 能回答"这个盒子为什么不在那" —— `draw_bench --dump-nodes` + `tools/binui_nodes.py` |
 | 3 | 热重载（P0/P1 都受益：改源码 → 浏览器自动刷新） | 保存即刷新，无需重跑命令 |
 | 4 | P2 wasm 真渲染 | 浏览器里像素与 `bin2d_shot` 一致（同机同字体） |
 
